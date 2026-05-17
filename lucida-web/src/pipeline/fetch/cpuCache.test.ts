@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mock debugLog so the rate-limited log assertions in the
-// "characterization gaps" describe block can spy on it. Other tests
-// don't trigger backpressure / eviction-burst paths under normal
-// fixtures, so the mock is a no-op for them.
 vi.mock("../../debug/logging.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
   return { ...actual, debugLog: vi.fn() };
@@ -108,10 +104,6 @@ function createMockContentSource(): MockContentSource {
       });
     },
 
-    // No-op: the cache doesn't drive `handleBinary` — only the bridge
-    // does, and these tests don't exercise the bridge path. The mock
-    // implements the method to satisfy the `ContentSource` interface
-    // post Slice 11.
     handleBinary(_key: string, _data: ArrayBuffer): void {},
 
     resolve(compositeKey: string, bytes?: ArrayBuffer, dataType?: string) {
@@ -171,8 +163,6 @@ function makePlan(
   activeSet?: ActiveSetEntry[],
   epochs?: Partial<SceneEpochs>,
 ): RequestPlan {
-  // ActiveSetEntry is a discriminated union; the default fixture
-  // builds a single FieldEntry.
   const resolvedActiveSet: ActiveSetEntry[] = activeSet ?? [{
     kind: "field",
     entityId: "entity-1",
@@ -199,8 +189,6 @@ function makePlan(
       ...epochs,
     },
     stats: emptyPlanStats(),
-    // nextState mirrors what plan() returns —
-    // `previousActiveSet: activeSet` for the v1 single-field state.
     nextState: { previousActiveSet: resolvedActiveSet },
   };
 }
@@ -841,20 +829,8 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Adaptive eviction tests migrated to interactionMode.test.ts (Slice 3).
-  // The detector is now a pure unit; exercising it through the cache no
-  // longer adds coverage. Integration of the tier-order consequence
-  // lives at the EvictionPolicy seam (planned for Slice 5).
-  // =========================================================================
-
-  // =========================================================================
   // Minimap lane routing (ADR 0023)
   // =========================================================================
-  //
-  // Minimap chunks land in the overview cache (most-protected eviction
-  // tier) so they survive memory pressure that would clear the main
-  // cache. Combined with the planner emitting minimap at priority 0
-  // (highest), the effect is "fetched first, evicted last."
 
   describe("minimap lane routing", () => {
     it("routes lane: \"minimap\" chunks to the overview cache", async () => {
@@ -1009,26 +985,17 @@ describe("CpuCache", () => {
       expect(tel.lastError).toContain("404");
     });
 
-    it("'no wire format registered' classifies as permanent — no retry (Slice 8 #602 bug fix)", async () => {
-      // Pre-Slice-8 regression: the cache catch block matched
-      // `err.message.includes("404") || err.message.includes("malformed")`
-      // to decide permanent vs. transient. "No wire format registered
-      // for image X" matched neither, so the cache wasted a retry on
-      // a setup bug. With typed FetchError + classifyFetchError, the
-      // source's `kind: "permanent"` flows through to the cache and
-      // dispatches via the policy.
-      //
-      // End-to-end via ProxiedContentSource (the source that raises
-      // this error) — exercises the full fetch path, not just the
-      // classifier.
+    it("'no wire format registered' classifies as permanent — no retry", async () => {
+      // End-to-end via ProxiedContentSource so the full fetch path is
+      // exercised, not just the classifier.
       vi.useFakeTimers();
       try {
         const sentMessages: string[] = [];
         const realSource = new ProxiedContentSource(
           (json) => sentMessages.push(json),
         );
-        // Intentionally do NOT call registerImage("image-1") so
-        // `fetch` rejects with the typed permanent FetchError.
+        // Without registerImage, `fetch` rejects with the typed
+        // permanent FetchError.
         const decode = createSyncDecode();
         const cache = new CpuCache(realSource, decode);
 
@@ -1042,15 +1009,11 @@ describe("CpuCache", () => {
         await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS * 4);
 
         // No additional chunk_request frames went out — the cache did
-        // not retry. (Pre-Slice-8 the cache would have queued one
-        // retry, but the bug above also meant ProxiedContentSource
-        // would have rejected the retry synchronously again, so this
-        // assertion would have caught two synchronous rejections.)
+        // not retry.
         const afterFetches = sentMessages.length;
         expect(afterFetches).toBe(beforeFetches);
 
-        // Telemetry attributes the failure to the permanent bucket,
-        // not transient — the load-bearing reclassification.
+        // Telemetry attributes the failure to the permanent bucket.
         const tel = cache.telemetry();
         expect(tel.failedChunks.permanent).toBe(1);
         expect(tel.failedChunks.transient).toBe(0);
@@ -1303,9 +1266,7 @@ describe("CpuCache", () => {
       // No new network fetch.
       expect(source.fetchProxyCount).toBe(fetchesBefore);
 
-      // Cache-hit submit() is a no-op for proxies (mirrors the chunk
-      // path). The orchestrator resends evicted proxies via
-      // `getCachedProxy`, so `submit()` doesn't need to push to ready.
+      // Orchestrator resends evicted proxies via `getCachedProxy`.
       const replays = cache.drain(Infinity);
       expect(replays).toHaveLength(0);
     });
@@ -1424,23 +1385,19 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Characterization gaps surfaced by the dechaos pre-refactor pass.
-  // Pin behaviour as it stands today; the upcoming refactor (PRD #592)
-  // preserves these contracts unless a slice explicitly fixes them.
+  // Subtle behaviours: race orderings, telemetry shape, eviction-burst log.
   // =========================================================================
 
-  describe("characterization gaps (pre-refactor)", () => {
+  describe("subtle behaviours", () => {
     beforeEach(() => {
       vi.mocked(debugLog).mockClear();
     });
 
     it("cancelled-during-decode: chunk still lands in cache and ready[]", async () => {
-      // Race per dechaos pass 5: a fetch resolves *before* cancelDataset,
-      // but the queued decode microtask runs *after* it. The cache-insert
-      // and ready-push paths run unconditionally (no inFlight check), so
-      // the chunk lands in both. The orchestrator's wanted-set filter
-      // handles the stale delivery downstream — this test pins the
-      // behaviour rather than asserts it as a defect.
+      // Race: fetch resolves before cancelDataset; the queued decode
+      // microtask runs after. Cache-insert + ready-push are
+      // unconditional, so the chunk lands in both. The orchestrator's
+      // wanted-set filter handles the stale delivery downstream.
       const { cache, source } = createTestCache();
       const req = makeRequest({ x: 0, y: 0, z: 0 });
       cache.submit(makePlan([req]));
@@ -1470,7 +1427,6 @@ describe("CpuCache", () => {
     it("pendingOldestAgeMs: telemetry reports the age of the oldest pending enqueue", async () => {
       vi.useFakeTimers();
       try {
-        // Constrain concurrency so a request stays pending.
         const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
         const r1 = makeRequest({ x: 0 });
         const r2 = makeRequest({ x: 1 });
@@ -1493,9 +1449,7 @@ describe("CpuCache", () => {
     it("backpressure log fires at most once per second under sustained queue depth", () => {
       vi.useFakeTimers();
       try {
-        // The gate is `now - lastAt >= 1000`. lastAt starts at 0, so
-        // performance.now() must be ≥ 1000 for the first emit. Fake
-        // timers give us a deterministic clock.
+        // BurstLogger gate is `now - lastAt >= 1000`; lastAt starts at 0.
         vi.advanceTimersByTime(2000);
 
         const { cache } = createTestCache({
@@ -1531,8 +1485,6 @@ describe("CpuCache", () => {
     });
 
     it("eviction-burst log fires when ≥16 entries evict in one pass", async () => {
-      // Tight budget + many tiny entries forces a single insert to
-      // evict 16+ neighbours.
       const { cache, source } = createTestCache({
         mainBudgetBytes: 16,
         maxConcurrentFetches: 100,
@@ -1567,20 +1519,15 @@ describe("CpuCache", () => {
       expect(removedArg).toBeGreaterThanOrEqual(16);
     });
 
-    it("imageWireFormats cleared on dataset removal (Slice 4 #598 fix)", async () => {
-      // Construct a ProxiedContentSource directly — the leak fix lives
-      // on it, not on the cache. Register an image, drop the dataset
-      // via unregisterDataset, then assert the next fetch rejects with
-      // the unregistered-image error (proves the registration entry
-      // was deleted).
+    it("imageWireFormats cleared on dataset removal", async () => {
+      // The leak fix lives on ProxiedContentSource, not the cache.
       const sentMessages: string[] = [];
       const source = new ProxiedContentSource(
         (json) => sentMessages.push(json),
       );
       source.registerImage("image-leak", { Raw: { data_type: "uint16" } });
 
-      // Sanity check: a fetch on the registered image dispatches a
-      // request (the wire-format lookup succeeds).
+      // Sanity check: registered image dispatches a request.
       const ctrlBefore = new AbortController();
       const before = source.fetch(
         { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
@@ -1602,13 +1549,9 @@ describe("CpuCache", () => {
       ).rejects.toThrow(/No wire format registered for image image-leak/);
     });
 
-    it("telemetry shape regression — locks the CacheTelemetry surface for slices 5-10", async () => {
-      // After a known sequence (one submit + flush + drain), the
-      // CacheTelemetry shape must match this reference. Subsequent
-      // slices touch counters, eviction, stores, and scheduler — a
-      // shape regression would surface here immediately. Numeric
-      // values are normalized via expect.any(Number) where they
-      // depend on wall-clock or running averages.
+    it("telemetry shape regression — locks the CacheTelemetry surface", async () => {
+      // Pinned shape after `submit + flush + drain`; values that depend
+      // on wall-clock or running averages use expect.any(Number).
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
       cache.submit(makePlan([makeRequest()]));
@@ -1663,10 +1606,7 @@ describe("CpuCache", () => {
         },
       });
 
-      // A few load-bearing values from the known-input sequence — one
-      // submit + a non-cached fetch + drain leaves a single
-      // active-detail entry of 64 bytes. Hit rate is 0 because the
-      // first submit was a miss.
+      // Load-bearing values from the known-input sequence.
       expect(tel.hitRate).toBe(0);
       expect(tel.tierResidency.activeDetail.count).toBe(1);
       expect(tel.tierResidency.activeDetail.bytes).toBe(64);
@@ -1675,5 +1615,4 @@ describe("CpuCache", () => {
   });
 });
 
-// Re-export for use in error handling tests with fake timers
 import { TRANSIENT_RETRY_DELAY_MS } from "./cpuCache.ts";

@@ -1,25 +1,7 @@
 /**
- * Planning domain — public barrel.
- *
- * This module is a re-export only — no type/function/const definitions
- * of its own. The planning core lives in sibling files:
- *
- *   - `./types.ts`   — every interface and type alias
- *   - `./modes.ts`   — promotion-mode decision logic
- *   - `./chunks.ts`  — chunk enumeration and culling primitives
- *   - `./emit.ts`    — lane emission helpers + priority computation
- *   - `./plan.ts`    — top-level `plan()` function
- *   - `./config.ts`  — tunables and default values
- *   - `./synthetic.ts` — test fixtures
- *
- * Every external consumer (orchestrator, cpuCache, debug derivation,
- * tests, …) imports from this barrel so the public surface is stable
- * across the file split. See ADR 0029.
+ * Planning domain — public barrel. See ADR 0029.
+ * Core lives in sibling files; this module is re-exports only.
  */
-
-// ---------------------------------------------------------------------------
-// Types and the empty-stats factory.
-// ---------------------------------------------------------------------------
 
 export {
   emptyPlanStats,
@@ -49,10 +31,6 @@ export {
   type WellSnapshot,
 } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// Mode-decision helpers.
-// ---------------------------------------------------------------------------
-
 export {
   assignModes,
   buildPrevModeByWell,
@@ -60,10 +38,6 @@ export {
   degradeForCatalog,
   groupByWell,
 } from "./modes.ts";
-
-// ---------------------------------------------------------------------------
-// Chunk enumeration and culling primitives.
-// ---------------------------------------------------------------------------
 
 export {
   chunkKey,
@@ -73,10 +47,6 @@ export {
   iterateChunksAtLodRange,
 } from "./chunks.ts";
 
-// ---------------------------------------------------------------------------
-// Lane emission helpers.
-// ---------------------------------------------------------------------------
-
 export {
   emitDetailLane,
   emitMinimapLane,
@@ -84,15 +54,7 @@ export {
   emitPrefetchLane,
 } from "./emit.ts";
 
-// ---------------------------------------------------------------------------
-// Top-level planner.
-// ---------------------------------------------------------------------------
-
 export { plan } from "./plan.ts";
-
-// ---------------------------------------------------------------------------
-// Tunables (configurable defaults).
-// ---------------------------------------------------------------------------
 
 export {
   DEFAULT_PLANNING_CONFIG,
@@ -111,10 +73,6 @@ export {
   mergeConfig,
   type PlanningConfig,
 } from "./config.ts";
-
-// ---------------------------------------------------------------------------
-// Synthetic test helpers.
-// ---------------------------------------------------------------------------
 
 export {
   createSyntheticEntity,

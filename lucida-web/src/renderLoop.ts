@@ -31,7 +31,7 @@ export class RenderLoop {
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
 
-  // --- debug instrumentation (gated on the "render" category) ---
+  // Debug instrumentation (gated on the "render" category).
   // Per-(kind,source) emit throttling for `render_loop.dirty_set`. A
   // burst of identical calls within DIRTY_EMIT_INTERVAL_MS collapses to
   // one log + a `suppressedSince` count.
@@ -57,12 +57,10 @@ export class RenderLoop {
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
   /**
-   * Upload coordinator (Slice 10 of PRD #607). Owns delivery tracking,
-   * telemetry, cold/hot-state emission, drain/resend dispatch, and
-   * worker feedback. Constructed alongside the Orchestrator so
-   * `client.onChunksEvicted` / `client.onWantedSetDelta` callbacks wire
-   * directly here (the orchestrator no longer carries the
-   * upload-feedback handlers).
+   * Upload coordinator. Owns delivery tracking, telemetry, cold/hot-
+   * state emission, drain/resend dispatch, and worker feedback.
+   * Constructed alongside the Orchestrator so `client.onChunksEvicted`
+   * / `client.onWantedSetDelta` callbacks wire directly here.
    */
   private uploader = new Uploader();
   private orchestrator = new Orchestrator(this.uploader);
@@ -216,9 +214,9 @@ export class RenderLoop {
   }
 
   /**
-   * Handle multi-channel mode transitions. When switching from multi-channel
-   * to single-channel (or vice versa), clean up resources keyed with the
-   * old naming convention so they don't leak on the worker.
+   * On multi-channel ↔ single-channel transitions, clear members whose
+   * key shape (composite `:chN` vs plain) no longer matches the new mode,
+   * so they don't leak on the worker.
    */
   private handleMultiChannelTransition(): void {
     const mc = this.session.scene!.multi_channel();

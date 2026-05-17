@@ -31,7 +31,7 @@
 //! The MVP exposes a `priority: u8` parameter on [`ProxyGenerator::request`]
 //! for API stability but **does not yet order requests by priority**. The
 //! tokio `Semaphore` provides bounded concurrency in FIFO order. A real
-//! priority scheduler is a follow-up — see PRD #397 S5.
+//! priority scheduler is a future enhancement.
 //!
 //! [`generate_proxy`]: lucida_proxy::generate_proxy
 

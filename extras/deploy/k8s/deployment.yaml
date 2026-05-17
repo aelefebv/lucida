@@ -56,8 +56,8 @@ spec:
         - name: lucida
           # Replace with your registry path + tag. The upstream image
           # is published per release-please by .github/workflows/release.yml
-          # (PRD #486 slice 7) — adopters generally re-tag into their
-          # own registry for promotion control.
+          # — adopters generally re-tag into their own registry for
+          # promotion control.
           image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>
           imagePullPolicy: IfNotPresent
           ports:

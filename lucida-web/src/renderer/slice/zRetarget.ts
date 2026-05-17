@@ -2,10 +2,6 @@
  * Slice Z retargeting — pure helper that maps full-resolution Z to a
  * per-entity chunk-Z target.
  *
- * Extracted from `sliceHandlers.ts` in Slice 7. Slice mode walks every
- * frame, every chunk upload, and every remap, so this is hot enough to
- * keep as its own tiny module.
- *
  * `staleSliceKeys` lives on the `SliceAtlasState` and is managed
  * inline in `slice/atlas.ts` (`getOrCreateSlicePool` populates it on Z
  * change) and in `slice/upload.ts` (`handleSliceChunkData` consumes

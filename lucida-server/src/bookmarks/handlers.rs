@@ -6,11 +6,11 @@
 //! emit `bookmarks.no_principal_in_extensions` and 500 to surface it
 //! rather than silently 401'ing on a missing extension.
 //!
-//! Permission boundary (PRD #454, ADR-0015):
+//! Permission boundary (ADR-0015):
 //!
 //! - GET (single + list) — every authenticated principal can read every
 //!   bookmark. Cross-user discovery is the headline feature; "Mine only"
-//!   filtering is a slice-3 sidebar concern, not a server-side gate.
+//!   filtering is a client-side sidebar concern, not a server-side gate.
 //! - POST — server overwrites `created_by` / `created_by_name` from the
 //!   principal. The body type [`CreateRequest`] doesn't even surface
 //!   those fields, so a misbehaving client can't spoof them.
@@ -38,15 +38,15 @@ use super::store::{Bookmark, BookmarkStore, StoreError};
 use crate::UnicastRoutes;
 use crate::session::Session;
 
-/// Hard cap on the human-friendly bookmark name (PRD §"Validation").
-/// Counts UTF-8 chars (`.chars().count()`), not bytes — so 200 emoji
-/// bookmark names still fit.
+/// Hard cap on the human-friendly bookmark name. Counts UTF-8 chars
+/// (`.chars().count()`), not bytes — so 200 emoji bookmark names still
+/// fit.
 pub const MAX_NAME_CHARS: usize = 200;
 
 /// State carried by every bookmark handler. Holds the store + the
-/// session/unicast plumbing the slice-4 broadcast helper needs to
-/// reach connected clients. The principal arrives via request
-/// extensions, not state.
+/// session/unicast plumbing the broadcast helper needs to reach
+/// connected clients. The principal arrives via request extensions,
+/// not state.
 ///
 /// The session and unicast handles are optional so test wiring that
 /// only exercises the REST layer can pass `None` and skip the broadcast
@@ -90,9 +90,8 @@ fn parse_dataset_params(raw: Option<&str>) -> Vec<String> {
 
 /// POST request body. Notice the missing `created_by` /
 /// `created_by_name` — the principal supplies them; the wire format
-/// can't override them. Slice 3's web client doesn't ever send them,
-/// but this defends against future clients (or curl smoke tests) that
-/// might.
+/// can't override them. The web client doesn't send them, but this
+/// defends against curl smoke tests or future clients that might.
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
     pub name: String,
@@ -195,13 +194,12 @@ pub async fn create_bookmark(
         .await
     {
         Ok(b) => {
-            // Slice 4 (PRD #454 issue #477): live cross-peer sidebar
-            // updates. Best-effort — broadcast errors are logged inside
-            // the helper, never propagated to the HTTP response.
+            // Live cross-peer sidebar updates. Best-effort — broadcast
+            // errors are logged inside the helper, never propagated to
+            // the HTTP response.
             broadcast_after_mutation(&state, &b.id, BookmarkAction::Created, &b.datasets).await;
 
-            // Per #475 acceptance: 201 + Location header pointing at the
-            // newly-minted resource.
+            // 201 + Location header pointing at the newly-minted resource.
             let location = format!("/api/bookmarks/{}", b.id);
             (
                 StatusCode::CREATED,
@@ -317,10 +315,6 @@ async fn broadcast_after_mutation(
         "bookmarks.broadcast.complete",
     );
 }
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
 
 fn validate_name(raw: &str) -> Result<String, Box<Response>> {
     let trimmed = raw.trim();
@@ -455,8 +449,6 @@ mod tests {
         })
     }
 
-    // -- 401-ish wiring + auth gate --------------------------------------
-
     /// Without an attached principal, every handler 500s — that's a
     /// wiring bug surface. The middleware (if mounted) would have 401'd
     /// long before this; the integration test below exercises that.
@@ -481,8 +473,6 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
-
-    // -- POST -------------------------------------------------------------
 
     #[tokio::test]
     async fn create_returns_201_with_principal_derived_creator() {
@@ -626,8 +616,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
     }
 
-    // -- GET (list + single) ---------------------------------------------
-
     #[tokio::test]
     async fn get_single_404s_on_missing() {
         let store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
@@ -745,8 +733,6 @@ mod tests {
         assert_eq!(names, ["a", "c"].into_iter().collect());
     }
 
-    // -- PATCH ------------------------------------------------------------
-
     #[tokio::test]
     async fn patch_owner_succeeds() {
         let store = Arc::new(MemoryBookmarkStore::new());
@@ -836,8 +822,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    // -- DELETE -----------------------------------------------------------
-
     #[tokio::test]
     async fn delete_owner_succeeds() {
         let store = Arc::new(MemoryBookmarkStore::new());
@@ -914,8 +898,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    // -- parse_dataset_params ---------------------------------------------
-
     #[test]
     fn parse_dataset_params_handles_repeats() {
         assert_eq!(
@@ -947,16 +929,13 @@ mod tests {
         assert!(parse_dataset_params(Some("dataset=")).is_empty());
     }
 
-    // -- 401 via real auth middleware ------------------------------------
-
     /// Mount the actual auth middleware (no cookie ⇒ 401) over the
-    /// bookmarks router and assert every endpoint is gated. Slice 2's
-    /// acceptance: "no-auth requests return 401".
+    /// bookmarks router and assert every endpoint is gated.
     ///
-    /// PRD #527 made `build_extractor` AuthMode-aware (Disabled →
-    /// stub, Google → cookie); this test wants the cookie extractor's
-    /// 401 behaviour, so it constructs `SessionCookieExtractor`
-    /// directly rather than going through the picker.
+    /// `build_extractor` is AuthMode-aware (Disabled → stub, Google →
+    /// cookie); this test wants the cookie extractor's 401 behaviour,
+    /// so it constructs `SessionCookieExtractor` directly rather than
+    /// going through the picker.
     #[tokio::test]
     async fn endpoints_401_without_auth_under_real_middleware() {
         use crate::auth::middleware::{SharedExtractor, auth_middleware};

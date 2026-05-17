@@ -1,6 +1,6 @@
-//! End-to-end startup tests for `AuthConfig::from_env` (slice 7,
-//! issue #462). We spawn the actual `lucida-server` binary with various
-//! `LUCIDA_*` env-var combinations and assert it either:
+//! End-to-end startup tests for `AuthConfig::from_env`. We spawn the
+//! actual `lucida-server` binary with various `LUCIDA_*` env-var
+//! combinations and assert it either:
 //!
 //! - boots and starts listening (we close the listener as soon as we
 //!   see the bind succeed via a short port-poll), or
@@ -166,10 +166,6 @@ fn drain(stream: &mut std::process::ChildStderr) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-// ---------------------------------------------------------------------
-// Success paths
-// ---------------------------------------------------------------------
-
 #[test]
 fn loopback_default_starts_with_disabled_auth() {
     let port = pick_loopback_port();
@@ -213,10 +209,6 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
         "warning banner missing AUTH DISABLED line; got=\n{stderr}",
     );
 }
-
-// ---------------------------------------------------------------------
-// Fail-fast paths
-// ---------------------------------------------------------------------
 
 #[test]
 fn explicit_disabled_non_loopback_without_insecure_fails() {

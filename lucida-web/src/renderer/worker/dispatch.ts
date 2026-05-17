@@ -2,9 +2,6 @@
  * Worker message dispatcher: route a single {@link MainToWorkerMessage}
  * to the appropriate per-mode handler.
  *
- * Extracted from the `self.onmessage` switch in `gpu.worker.ts` (Slice 9)
- * so the entry point shrinks to a thin event listener.
- *
  * Cases `init` and `destroy` are handled in the entry point itself —
  * the former assembles the {@link WorkerCtx} (so we don't have one yet),
  * the latter shuts the worker down. Everything else flows through this
@@ -166,10 +163,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       }
       ctx.state.currentEntityMetasByDataset.delete(msg.datasetId);
 
-      // Slice 8: clear member-id routing for entries owned by this
-      // dataset so dropped layers don't keep stale memberToDataset /
-      // memberToPool entries around. Previously these maps grew
-      // monotonically across the worker's lifetime (#632 leak).
+      // Clear member-id routing for entries owned by this dataset so
+      // dropped layers don't keep stale memberToDataset / memberToPool
+      // entries around (these maps would otherwise grow monotonically
+      // across the worker's lifetime).
       for (const [memberId, dsId] of ctx.state.memberToDataset) {
         if (dsId === msg.datasetId) {
           ctx.state.memberToDataset.delete(memberId);

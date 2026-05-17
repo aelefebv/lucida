@@ -3,11 +3,8 @@
  * `"level/t/c/z/y/x"` chunk key and the `"memberId|chunkKey"` composite
  * slot key used by the shared atlas pools.
  *
- * Lifted from `volumeHandlers.ts` (dechaos render Pass 5 Contract Issue
- * 4: pool/key encoding scattered across modules). Centralising the
- * format here means every site that builds or parses a composite key
- * goes through the same helper, and any future shape change has one
- * place to update.
+ * Every site that builds or parses a composite key routes through this
+ * helper so any future shape change has one place to update.
  *
  * No GPU coupling, no module state — safe to import from worker code,
  * wanted-set computation, and tests.

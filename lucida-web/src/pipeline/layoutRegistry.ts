@@ -51,8 +51,8 @@ export class LayoutRegistry {
 
   /**
    * Register a derived layout with WASM and broadcast it. Idempotent on
-   * `spec.id` thanks to Rust dedupe (issue #425) — re-registering with the
-   * same id is a no-op for `available_layouts`, but the local `specsByDataset`
+   * `spec.id` thanks to Rust dedupe — re-registering with the same id
+   * is a no-op for `available_layouts`, but the local `specsByDataset`
    * mirror updates so the latest spec content wins.
    */
   register(datasetId: string, spec: LayoutSpec, sendCommand: (json: string) => void): void {

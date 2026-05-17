@@ -29,10 +29,6 @@ export const DEFAULT_CHANNEL_COLORMAPS: readonly string[] = [
   "cyan",
 ] as const;
 
-// ---------------------------------------------------------------------------
-// Scientific colormap sample points (normalised 0-1 RGB)
-// ---------------------------------------------------------------------------
-
 type RGB = [number, number, number];
 
 const VIRIDIS_SAMPLES: RGB[] = [
@@ -118,10 +114,6 @@ const TURBO_SAMPLES: RGB[] = [
   [0.659, 0.024, 0.082],
 ];
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function clamp(v: number): number {
   return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
 }
@@ -149,10 +141,6 @@ function interpolateSamples(samples: RGB[]): Uint8Array {
   }
   return data;
 }
-
-// ---------------------------------------------------------------------------
-// Generator table
-// ---------------------------------------------------------------------------
 
 type ColormapGenerator = () => Uint8Array;
 
@@ -251,10 +239,6 @@ const GENERATORS: Record<string, ColormapGenerator> = {
   magma: () => interpolateSamples(MAGMA_SAMPLES),
   turbo: () => interpolateSamples(TURBO_SAMPLES),
 };
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 const cache = new Map<string, Uint8Array>();
 

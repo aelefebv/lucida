@@ -13,11 +13,10 @@
 //!
 //! ## Auth
 //!
-//! Slice 6 (PRD #455 §"Permission model") replaces the slice-pre-auth
-//! `LUCIDA_ADMIN_TOKEN` Bearer check with the auth-middleware path:
-//! the request must carry a valid session cookie (or the admin route
-//! 401s through the middleware), and the resulting `AuthPrincipal`
-//! must have `is_admin: true` (or [`AdminRequired`](crate::auth::AdminRequired)
+//! Admin routes go through the auth-middleware path: the request must
+//! carry a valid session cookie (or the admin route 401s through the
+//! middleware), and the resulting `AuthPrincipal` must have
+//! `is_admin: true` (or [`AdminRequired`](crate::auth::AdminRequired)
 //! 403s with `{"error":"forbidden"}`). Admin status itself is derived
 //! per-request from `LUCIDA_ADMIN_EMAILS`; if the env var is unset
 //! the route 403s for everyone.
@@ -25,7 +24,7 @@
 //! ## URL hash scheme
 //!
 //! The on-disk layout — `{cache_dir}/{url_hash hex}/{entity_id}/{kind}/...`
-//! — is owned by `proxy::ProxyCache` (see S4). We use
+//! — is owned by `proxy::ProxyCache`. We use
 //! [`crate::handler::dataset_url_hash16`] to compute the same 16-byte
 //! BLAKE3-prefix hash that the cache uses for its per-dataset directory
 //! name, formatted as 32 lowercase hex chars.
@@ -144,10 +143,6 @@ fn hex16(bytes: &[u8; 16]) -> String {
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// HTTP admin endpoint
-// ---------------------------------------------------------------------------
 
 /// Query parameters for `POST /admin/clear-proxy-cache`.
 #[derive(Debug, Deserialize)]

@@ -1,12 +1,6 @@
 /**
- * Per-image manifest index for fast O(1) lookup during chunk dispatch.
- *
- * Built once per `deliverToWorker` tick from `ctx.datasets`. Replaces
- * the per-chunk O(D × I) scan that the old `sendDeliveryToWorker`
- * helper did when resolving manifest + image spec + level meta.
- *
- * See Pass 1 Risk C, Pass 2 Seam D, Pass 6 Item 7 of the dechaos
- * upload scan for the rationale.
+ * Per-image manifest index. Built once per `deliverToWorker` tick from
+ * `ctx.datasets` so chunk dispatch is O(1) per chunk instead of O(D×I).
  */
 
 import type {
@@ -23,13 +17,8 @@ export interface ManifestEntry {
 }
 
 /**
- * Build a per-image index from the per-dataset manifests for fast
- * O(1) lookup during chunk dispatch. Eliminates the O(D × I) per-chunk
- * manifest scan that `sendDeliveryToWorker` used to do.
- *
  * If two datasets contain images sharing an image_id (not expected in
- * practice), last-writer-wins — same behaviour as the previous linear
- * scan, which also returned the first matching dataset.
+ * practice), last-writer-wins.
  */
 export function buildManifestByImage(
   datasets: Map<string, DatasetEntry>,

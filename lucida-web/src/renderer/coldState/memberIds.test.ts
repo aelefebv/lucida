@@ -3,21 +3,19 @@
  *
  * Locks the memberId construction matrix for the canonical helper
  * (descriptorBuffer.memberIdForColdEntry) plus the canonical iteration
- * (iterateColdMembers). After Slice 2, every site in gpu.worker.ts and
- * wantedSet.ts routes through this helper rather than rebuilding the
- * memberId inline, so the matrix below pins what those call sites now
- * produce by construction.
+ * (iterateColdMembers). Every site in gpu.worker.ts and wantedSet.ts
+ * routes through this helper rather than rebuilding the memberId
+ * inline, so the matrix below pins what those call sites produce by
+ * construction.
  *
- * The bug the helper guards against: well-as-proxy entries used to
- * carry `imageId === ""` as a sentinel (Slice 11 promoted that to a
- * `kind: "well-as-proxy"` discriminator on the union; `imageId` is now
- * absent on that variant). Inline `${entry.imageId}:ch${channel}`
- * reconstruction would have produced ":ch5" for multi-channel
- * well-as-proxy entries — a key with no entity prefix. Today masked
- * because well-as-proxy entries have empty `levels[]` and the
- * volume/slice pool loops short-circuit at the targetLevel lookup.
- * But the bad key would still get *registered* in memberToPool if any
- * caller bypassed the helper.
+ * The bug the helper guards against: well-as-proxy entries on the
+ * discriminated union have no `imageId`; inline
+ * `${entry.imageId}:ch${channel}` reconstruction would produce ":ch5"
+ * for multi-channel well-as-proxy entries — a key with no entity
+ * prefix. Today masked because well-as-proxy entries have empty
+ * `levels[]` and the volume/slice pool loops short-circuit at the
+ * targetLevel lookup. But the bad key would still get *registered* in
+ * memberToPool if any caller bypassed the helper.
  */
 
 import { describe, it, expect } from "vitest";
@@ -107,9 +105,8 @@ function makeCold(activeSet: ColdStateActiveEntry[], visibleChannels: number[] =
 }
 
 // ---------------------------------------------------------------------------
-// Construction matrix — locks the four corner cases that gpu.worker.ts and
-// wantedSet.ts call sites previously hand-rolled (and got subtly wrong for
-// the well-as-proxy variants).
+// Construction matrix — locks the four corner cases callers must agree on
+// (well-as-proxy is the easy one to get wrong).
 // ---------------------------------------------------------------------------
 
 describe("Suite D — memberIdForColdEntry matrix", () => {
@@ -124,12 +121,9 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   });
 
   it("single-channel well-as-proxy → entityId (NOT empty string)", () => {
-    // Regression: well-as-proxy entries used to carry imageId === "".
-    // Slice 11 promoted that to a `kind` discriminator, so the helper
-    // routes via `entry.kind === "well-as-proxy"` instead of the
-    // empty-string sentinel. The old inline `entry.imageId`
-    // construction in memberToPool / wantedSet would have produced ""
-    // here. The helper resolves to entityId.
+    // Regression: the helper routes via `entry.kind === "well-as-proxy"`
+    // and resolves to `entityId`. Inline `entry.imageId` construction
+    // in memberToPool / wantedSet would have produced "" here.
     const e = makeEntry({ entityId: "wellA", imageId: "", mode: "well-as-proxy" });
     expect(memberIdForColdEntry(e, 0, false)).toBe("wellA");
     expect(memberIdForColdEntry(e, 0, false)).not.toBe("");
@@ -146,9 +140,9 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   });
 
   it("memberIdForColdEntry narrows the union via `entry.kind`", () => {
-    // Slice 11: both variants of the discriminated union must produce
-    // their respective memberId without TypeScript or runtime needing
-    // to inspect `imageId === ""`. This test asserts both arms of the
+    // Both variants of the discriminated union must produce their
+    // respective memberId without TypeScript or runtime needing to
+    // inspect `imageId === ""`. This test asserts both arms of the
     // union round-trip through the helper correctly.
     const field = makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "fields-with-detail" });
     const well = makeEntry({ entityId: "well-b", imageId: "", mode: "well-as-proxy" });
@@ -189,14 +183,12 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Slice 8 cleanup invariant — removeLayerResources clears member-id
-// routing for entries owned by the removed dataset.
-//
-// Pre-Slice 8: memberToDataset / memberToPool grew monotonically over
-// the worker's lifetime; dataset removal left dangling entries that
-// could collide if a memberId ever recurred. Slice 8 fixes this in the
-// dispatcher (case "removeLayerResources") and exposes RendererState as
-// a unit-testable surface so we can lock the cleanup contract here.
+// removeLayerResources cleanup invariant — clears member-id routing
+// for entries owned by the removed dataset. Without this, memberToDataset
+// / memberToPool grow monotonically over the worker's lifetime and
+// dataset removal leaves dangling entries that could collide if a
+// memberId ever recurred. RendererState is exposed as a unit-testable
+// surface so the cleanup contract is pinned here.
 //
 // We assert against the cleanup contract directly rather than driving
 // the worker message loop: the contract is "every memberToDataset /
@@ -230,7 +222,7 @@ function removeMemberRoutingForDataset(state: RendererState, datasetId: string):
   }
 }
 
-describe("Suite D — removeLayerResources cleanup (Slice 8)", () => {
+describe("Suite D — removeLayerResources cleanup", () => {
   it("removeLayerResources clears memberToDataset / memberToPool entries for the dataset", () => {
     const state = createInitialState();
     // Two datasets share the worker. Seed routing for each.

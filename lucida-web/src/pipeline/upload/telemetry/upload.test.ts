@@ -282,9 +282,9 @@ describe("UploadTelemetry — shape regression", () => {
   /**
    * Run a known sequence of recordEvent + publish calls and assert the
    * produced `UploadRollingStats` shape (every key, in order) matches
-   * the expected snapshot. This is the safety net for Slice 9: if the
-   * extracted module starts dropping or renaming a field, this test
-   * catches it before downstream consumers (the debug panel) break.
+   * the expected snapshot. Safety net: if the module starts dropping or
+   * renaming a field, this test catches it before downstream consumers
+   * (the debug panel) break.
    */
   it("preserves the full UploadRollingStats key set", () => {
     const tel = new UploadTelemetry();

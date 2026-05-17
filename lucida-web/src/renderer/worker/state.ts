@@ -1,22 +1,17 @@
 /**
- * Worker-side renderer state.
- *
- * Bundles every per-session Map / counter / pointer that previously
- * lived as module-level state across `gpu.worker.ts`,
- * `volume/atlas.ts`, `volume/eviction.ts`, `slice/atlas.ts`, and
- * `slice/eviction.ts`. Owned by the worker dispatcher and threaded
- * through {@link WorkerCtx.state}; handlers read/write
- * `ctx.state.<field>` instead of reaching for module globals.
+ * Worker-side renderer state — every per-session Map / counter / pointer
+ * the worker dispatcher owns. Threaded through {@link WorkerCtx.state};
+ * handlers read/write `ctx.state.<field>` rather than reaching for
+ * module globals.
  *
  * Renderer-class singletons (slice/volume/cursor/compositor renderers)
  * and persistent GPU resources (LUT cache, offscreen pool, dummy
- * textures) intentionally stay at module scope in `gpu.worker.ts` —
- * Slice 9 owns the cleanup for those.
+ * textures) intentionally stay at module scope in `gpu.worker.ts`.
  *
- * Created in the `case "init"` handler by {@link createInitialState}
- * and torn down by the dispatcher's `case "destroy"` path (the GPU
- * resources held by atlas / descriptor / proxy pools are destroyed
- * separately via the existing per-mode `destroyAll*Resources` helpers).
+ * Created in `case "init"` by {@link createInitialState}; torn down by
+ * `case "destroy"`. GPU resources held by atlas / descriptor / proxy
+ * pools are destroyed separately via the per-mode `destroyAll*Resources`
+ * helpers.
  */
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";

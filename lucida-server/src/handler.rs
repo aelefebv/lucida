@@ -325,7 +325,7 @@ pub async fn handle_client(
                     continue;
                 }
 
-                // Try as AssetMessage (S5: proxy asset request).
+                // Try as AssetMessage (proxy asset request).
                 if let Ok(asset_msg) = serde_json::from_str::<AssetMessage>(&json) {
                     match asset_msg {
                         AssetMessage::AssetRequest {
@@ -421,7 +421,7 @@ pub async fn handle_client(
 /// server lifetime — so that:
 ///   * the same URL opened multiple times within a session shares one
 ///     `ServerBinding` (and therefore one cache, one import);
-///   * the proxy cache layout (S3, S4) can key on the URL hash and survive
+///   * the proxy cache layout can key on the URL hash and survive
 ///     restarts.
 ///
 /// Uses the first 8 bytes of a BLAKE3 hash of the URL.
@@ -544,7 +544,7 @@ async fn handle_open_remote_dataset(
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
 
-    // S5: build the initial proxy availability catalog by enumerating
+    // Build the initial proxy availability catalog by enumerating
     // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
     // and bare Images advertise FieldProxy3D (the proxy generator falls
     // back to FieldProxy semantics for non-Well entities — see
@@ -585,7 +585,7 @@ async fn handle_open_remote_dataset(
         },
     };
 
-    // S4: per-dataset proxy infrastructure. Cache root is keyed by the
+    // Per-dataset proxy infrastructure. Cache root is keyed by the
     // 16-byte URL hash so a single shared `cache_dir` can host many
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
@@ -664,7 +664,7 @@ async fn handle_open_remote_dataset(
         "open_remote_dataset.broadcast_sent"
     );
 
-    // S5: kick off background generation for the initial (T=0, C=0) view
+    // Kick off background generation for the initial (T=0, C=0) view
     // of every advertised entity at the lowest priority. Errors are logged
     // but do not propagate — the open succeeds either way, and downstream
     // requests will surface the failure with their own error path.
@@ -713,8 +713,8 @@ fn parse_level_from_chunk_key(key: &str) -> u32 {
 
 /// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
 /// (`"{level}/t/c/z/y/x"`). Returns `(0, 0)` if the key is malformed —
-/// downstream slice math then yields the canonical prefix, matching
-/// pre-PRD-#451 behavior on legacy paths.
+/// downstream slice math then yields the canonical prefix, which is the
+/// safe fallback for legacy paths.
 fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
     let mut parts = key.split('/');
     let _level = parts.next();
@@ -733,7 +733,7 @@ fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
 /// from `chunk_key` and reduced to intra-chunk indices via
 /// `wire_value % chunk_shape[axis]`; the resulting `(offset, size)` from
 /// [`ChunkByteLayout::slice_range`] picks the requested timepoint/channel
-/// out of the decompressed on-disk chunk (PRD #447 + #451).
+/// out of the decompressed on-disk chunk.
 ///
 /// A `None` `level_info` (unknown image or level — e.g. older snapshot)
 /// falls back to no-compression-no-slicing so legacy datasets keep
@@ -807,9 +807,8 @@ async fn serve_chunk_from_store(
     // Pick out the requested (t, c) slice from the decompressed on-disk
     // chunk. For canonical 5D / chunk_size 1 datasets, slice_range returns
     // (0, canonical_byte_size) and this is equivalent to the old prefix
-    // truncate. For chunk_size > 1 on t/c (PRD #451) or pinned-axis
-    // bundling (PRD #447), the offset/size pick out exactly one
-    // timepoint/channel's bytes.
+    // truncate. For chunk_size > 1 on t/c or pinned-axis bundling, the
+    // offset/size pick out exactly one timepoint/channel's bytes.
     let (wire_t, wire_c) = parse_t_c_from_chunk_key(chunk_key);
     let (offset, size) = level_info.chunk_byte_layout.slice_range(wire_t, wire_c);
     if size > 0

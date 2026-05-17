@@ -1,25 +1,8 @@
 /**
- * Upload-phase telemetry collaborator.
- *
- * Replaces the cluster of ~9 upload-telemetry fields and the three
- * private helpers (`recordUploadEvent`, `publishUploadStats`,
- * `maybeLogUploadAnomalies`) that previously lived directly on
- * `Orchestrator`. See Seam H of the dechaos boundary scan and Item 11
- * of the composability scan.
- *
- * The class owns:
- *   - A rolling 1s ring buffer of upload events (drain + resend).
- *   - A rolling 1s ring buffer of per-tick aggregates.
- *   - A bounded p50/p95 size sample buffer.
- *   - Cumulative byte / upload counters.
- *   - Three sustained-anomaly detectors driven by the shared helpers
- *     in `sustained.ts`.
- *
- * The `Orchestrator` calls `recordEvent(now, bytes, isResend)` per
- * upload and `publish(now, tickStats)` at the end of each
- * `deliverToWorker` invocation. The publish call aggregates, derives
- * `UploadRollingStats`, fires any sustained-anomaly logs, and writes
- * to `debugStats.upload`.
+ * Upload-phase telemetry. Owns rolling 1s ring buffers (events +
+ * per-tick aggregates), a bounded size sketch, cumulative counters, and
+ * three sustained-anomaly detectors. `publish` aggregates, derives
+ * `UploadRollingStats`, fires anomaly logs, and writes to `debugStats.upload`.
  */
 
 import {
@@ -64,16 +47,13 @@ interface EventEntry {
 }
 
 export class UploadTelemetry {
-  /** Rolling 1s window of per-upload events. */
   private uploadEvents: EventEntry[] = [];
-  /** Rolling 1s window of per-tick aggregates. */
   private uploadTickWindow: TickWindowEntry[] = [];
-  /** Bounded sample buffer for p50/p95 upload size. FIFO. */
+  /** FIFO sample buffer for p50/p95 upload size. */
   private uploadSizeSamples: number[] = [];
   private uploadTotalBytes = 0;
   private uploadTotalUploads = 0;
 
-  // Three sustained-anomaly detectors (Slice 9a helpers).
   private readonly budgetExhaustedDetector = new ConsecutiveTickDetector({
     threshold: UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
     rateLimitMs: UPLOAD_LOG_RATE_LIMIT_MS,
@@ -93,10 +73,6 @@ export class UploadTelemetry {
       debugLog("orch", "upload.drain_waste", payload as Record<string, unknown>),
   });
 
-  /**
-   * Record one upload (drain-path or resend-path) into the event ring
-   * buffer + size sample buffer + cumulative totals.
-   */
   recordEvent(now: number, bytes: number, isResend: boolean): void {
     this.uploadEvents.push({ at: now, bytes, isResend });
     this.uploadSizeSamples.push(bytes);
@@ -107,14 +83,7 @@ export class UploadTelemetry {
     this.uploadTotalUploads += 1;
   }
 
-  /**
-   * Aggregate the current tick's stats into the rolling window, derive
-   * rolling stats, fire any sustained-anomaly logs, and publish to
-   * `debugStats.upload`. Replaces `Orchestrator.publishUploadStats` +
-   * `Orchestrator.maybeLogUploadAnomalies`.
-   *
-   * Called once at the end of each `deliverToWorker` invocation.
-   */
+  /** Called once at the end of each `deliverToWorker` invocation. */
   publish(now: number, stats: UploadTickStats): void {
     const skipped =
       stats.skippedPrefetch +
@@ -150,7 +119,6 @@ export class UploadTelemetry {
       this.uploadTickWindow.shift();
     }
 
-    // Single-pass aggregate over event ring.
     let bytesInWindow = 0;
     let uploadsInWindow = 0;
     let resendUploads = 0;
@@ -160,7 +128,6 @@ export class UploadTelemetry {
       if (e.isResend) resendUploads += 1;
     }
 
-    // Single-pass aggregate over tick ring.
     let drainedInWindow = 0;
     let drainedChunksInWindow = 0;
     let skippedInWindow = 0;
@@ -188,9 +155,8 @@ export class UploadTelemetry {
       skippedAlreadySent: winSkippedAlreadySent,
       skippedNoMeta: winSkippedNoMeta,
     };
-    // Upload-bound counts: chunks that were *meant* to upload to the
-    // main GPU atlas. Excludes prefetch (cache-only), overview (minimap
-    // path), and proxies (separate atlas + always-uploads).
+    // Upload-bound = chunks meant for the main GPU atlas. Excludes
+    // prefetch (cache-only), overview (minimap), and proxies (separate atlas).
     const drainedUploadBoundInWindow =
       drainedChunksInWindow - winSkippedPrefetch - winSkippedOverview;
     const skippedUploadBoundInWindow =
@@ -205,8 +171,7 @@ export class UploadTelemetry {
     }
 
     const rolling: UploadRollingStats = {
-      // Window is exactly UPLOAD_WINDOW_MS = 1000 ms, so bytes-in-window
-      // equals bytes-per-sec by construction.
+      // UPLOAD_WINDOW_MS = 1000ms, so bytes-in-window = bytes-per-sec.
       bytesPerSec: bytesInWindow,
       uploadsPerSec: uploadsInWindow,
       resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
@@ -238,20 +203,12 @@ export class UploadTelemetry {
   }
 
   /**
-   * Three sustained-anomaly detectors:
-   *
-   * 1. `upload.budget_exhausted_sustained` — N consecutive ticks where
-   *    `budgetExhausted=true`. Indicates the CPU→GPU pipe is saturated;
-   *    upload work is being deferred to subsequent ticks.
-   * 2. `upload.resend_storm` — most uploads come from the resend pass,
-   *    sustained > 2s. Worker is evicting faster than fresh decodes
-   *    can fill; usually pool capacity vs working set mismatch.
-   * 3. `upload.drain_waste` — most drained chunks are filtered out,
-   *    sustained > 2s. Decode pool is burning cycles on chunks the GPU
-   *    no longer wants — often a planning/wanted-set sync issue.
-   *
-   * Each detector collapses to a single `detector.tick(...)` call via
-   * the Slice 9a helpers.
+   * Detectors:
+   * 1. `upload.budget_exhausted_sustained` — CPU→GPU pipe saturated.
+   * 2. `upload.resend_storm` — worker evicting faster than decodes fill
+   *    (pool capacity vs working set mismatch).
+   * 3. `upload.drain_waste` — decoded chunks unwanted by GPU
+   *    (planning / wanted-set sync issue).
    */
   private runAnomalyDetectors(
     now: number,
@@ -271,7 +228,6 @@ export class UploadTelemetry {
       };
     },
   ): void {
-    // 1. Sustained budget exhaustion — counter-based detector.
     this.budgetExhaustedDetector.tick(
       now,
       stats.budgetExhausted,
@@ -282,7 +238,6 @@ export class UploadTelemetry {
       }),
     );
 
-    // 2. Resend storm — timestamp-based detector.
     const resendCondition =
       !Number.isNaN(rolling.resendRatio) &&
       rolling.resendRatio > UPLOAD_RESEND_RATIO_THRESHOLD;
@@ -292,23 +247,18 @@ export class UploadTelemetry {
       sustainedMs: Math.round(sustainedMs),
     }));
 
-    // 3. Drain waste — timestamp-based detector.
     const drainCondition =
       !Number.isNaN(rolling.filterRatio) &&
       rolling.filterRatio > UPLOAD_FILTER_RATIO_THRESHOLD;
     this.drainWasteDetector.tick(now, drainCondition, (sustainedMs) => ({
-      // filterRatio is upload-bound: skipped non-prefetch /
-      // (drained chunks − prefetch − overview). High = real
-      // planning / wanted-set sync issue.
       filterRatio: rolling.filterRatio,
       drainedUploadBoundInWindow: window.drainedUploadBoundInWindow,
       skippedUploadBoundInWindow: window.skippedUploadBoundInWindow,
       skippedWrongLod: window.byCause.skippedWrongLod,
       skippedAlreadySent: window.byCause.skippedAlreadySent,
       skippedNoMeta: window.byCause.skippedNoMeta,
-      // Informational — prefetch/overview decode load doesn't count
-      // toward the ratio, but it's useful context for "was the decode
-      // pool busy this window?".
+      // Informational — prefetch/overview don't count toward the ratio
+      // but are useful "was the decode pool busy?" context.
       skippedPrefetch: window.byCause.skippedPrefetch,
       skippedOverview: window.byCause.skippedOverview,
       sustainedMs: Math.round(sustainedMs),

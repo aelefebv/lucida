@@ -1,4 +1,4 @@
-//! PRD #451 end-to-end: open a synthesized OME-Zarr where all 5 channels
+//! End-to-end test: open a synthesized OME-Zarr where all 5 channels
 //! live in one on-disk chunk (`chunk_shape[c] = 5`), resolve each
 //! channel's wire chunk key to the same on-disk path, decompress, and
 //! verify the per-channel slice picks out the correct bytes.
@@ -213,9 +213,9 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// PRD #451 eligibility: a non-prefix axis order with both a kept axis
-/// (z) and an indexed axis (c) carrying chunk_size > 1 should be
-/// rejected at import time with a clear error naming the offending axis.
+/// A non-prefix axis order with both a kept axis (z) and an indexed
+/// axis (c) carrying chunk_size > 1 should be rejected at import time
+/// with a clear error naming the offending axis.
 #[tokio::test]
 async fn rejects_canonical_indexed_after_kept_canonical() {
     let dir = temp_dir("non_prefix_t_z_c_y_x");

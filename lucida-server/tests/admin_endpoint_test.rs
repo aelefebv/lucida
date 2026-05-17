@@ -1,9 +1,8 @@
 //! HTTP-level tests for `POST /admin/clear-proxy-cache`.
 //!
-//! Slice 6 (PRD #455): the endpoint is now gated by the auth middleware
-//! + the `AdminRequired` extractor. There's no env-var token check
-//!   anymore — admin-ness is derived from the principal's email against
-//!   the `LUCIDA_ADMIN_EMAILS`-seeded set on `AuthConfig`.
+//! The endpoint is gated by the auth middleware + the `AdminRequired`
+//! extractor. Admin-ness is derived from the principal's email against
+//! the `LUCIDA_ADMIN_EMAILS`-seeded set on `AuthConfig`.
 //!
 //! Cases covered:
 //!   - No session cookie → 401 (auth middleware rejects).
@@ -11,7 +10,7 @@
 //!   - Session cookie for an admin email → 200, cache cleared.
 //!   - Same, with `?dataset=URL` → 200, only that subdir cleared.
 //!   - Empty admin set → admin email lookup misses → 403 (the
-//!     "no admin configured" path; matches PRD §"Admin role bootstrap").
+//!     "no admin configured" path).
 //!
 //! The router is built from the same auth-middleware + extractor pieces
 //! `main.rs` wires, but with a `MemorySessionStore` instead of SQLite.
@@ -58,10 +57,10 @@ fn build_router(
     config.admin_emails = admin_emails;
     let config = Arc::new(config);
 
-    // Cookie extractor explicitly: PRD #527 made `build_extractor`
-    // pick the stub for `Disabled` mode, but this test exercises the
-    // cookie path's per-request `is_admin` derivation off the
-    // `admin_emails` set, so we wire the cookie extractor directly.
+    // Cookie extractor explicitly: `build_extractor` picks the stub
+    // for `Disabled` mode, but this test exercises the cookie path's
+    // per-request `is_admin` derivation off the `admin_emails` set, so
+    // we wire the cookie extractor directly.
     let extractor: Arc<dyn lucida_server::auth::PrincipalExtractor> =
         Arc::new(SessionCookieExtractor::new(
             Arc::clone(&config),
@@ -258,9 +257,8 @@ async fn returns_200_and_clears_only_specified_dataset() {
     assert!(dir_b.exists(), "B should be untouched");
 }
 
-/// Integration test from the slice 6 acceptance criteria: a dev-login
-/// session for `dev@local`, with `dev@local` in the admin set, can hit
-/// the admin endpoint.
+/// Integration test: a dev-login session for `dev@local`, with
+/// `dev@local` in the admin set, can hit the admin endpoint.
 #[tokio::test]
 async fn dev_local_session_with_dev_local_admin_allowlist_succeeds() {
     let tmp = tempfile::tempdir().unwrap();

@@ -303,7 +303,7 @@ export function DebugOverlays({
         };
       };
 
-      // ---- Well badges ----
+      // Well badges
       if (enabled.wellModes && plans) {
         const out: WellBadge[] = [];
         for (const [dsId, plan] of plans) {
@@ -400,7 +400,7 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // ---- Chunk grid for every visible field-mode entry ----
+      // Chunk grid for every visible field-mode entry.
       // (well-as-proxy entries don't iterate chunks — they're served by
       // a single proxy asset.)
       if (enabled.chunkGrid && plans && cpuCache) {

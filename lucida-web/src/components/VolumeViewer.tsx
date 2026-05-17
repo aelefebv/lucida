@@ -59,7 +59,6 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   const isFlyMode = cameraMode === "fly";
 
-  // Fly camera input hook
   // Inline the markInteractiveDirty wrapper here (instead of reusing the
   // shared `markInteractiveDirty` above) so the dirty_set log carries a
   // fly-specific source. Fly-camera ticks every animation frame, so this
@@ -104,7 +103,6 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     };
   }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Mark dirty on remote document updates
   useEffect(() => {
     loopRef.current?.markInteractiveDirty();
   }, [remoteDocumentVersion]);
@@ -139,10 +137,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       if (fPressed && !fWasPressed) {
         const currentMode = scene.camera_mode();
         if (currentMode === "fly") {
-          // Switch back to arcball
           scene.set_mode_arcball();
         } else if (currentMode === "arcball") {
-          // Switch to fly, then set base speed from volume diagonal
           scene.set_mode_fly();
           const BASE_SPEED_FACTOR = 0.3;
           const diagonal = scene.volume_diagonal();
@@ -185,7 +181,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   }, []);
   useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
 
-  // --- Arcball input handling ---
+  // Arcball input handling
   const [dragging, setDragging] = useState(false);
   const shiftDragRef = useRef(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -233,7 +229,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     scheduleFullRes();
   }, [scheduleFullRes]);
 
-  // --- Fly input handling ---
+  // Fly input handling
   const onFlyPointerDown = useCallback(
     (e: PointerEvent) => {
       canvas.setPointerCapture(e.pointerId);
@@ -244,7 +240,6 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   const onFlyPointerMove = useCallback(
     (e: PointerEvent) => {
-      // Broadcast cursor
       const rect = canvas.getBoundingClientRect();
       const nx = (e.clientX - rect.left) / canvas.clientWidth;
       const ny = (e.clientY - rect.top) / canvas.clientHeight;
@@ -298,12 +293,10 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   const onWheel = isFlyMode ? onFlyWheel : onArcballWheel;
 
-  // Select handler set based on camera mode
   const onPointerDown = isFlyMode ? onFlyPointerDown : onArcballPointerDown;
   const onPointerMove = isFlyMode ? onFlyPointerMove : onArcballPointerMove;
   const onPointerUp = isFlyMode ? onFlyPointerUp : onArcballPointerUp;
 
-  // Attach event handlers to the shared canvas
   useEffect(() => {
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);

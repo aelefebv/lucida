@@ -10,7 +10,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - **`crates/`** — one article per Cargo workspace member. Crate boundaries are durable; these articles describe what each crate owns.
 - **`subsystems/`** — web-internal modules and cross-cutting concepts (chunk pipeline, GPU residency, etc.). These live inside `lucida-web/src/` (or span `lucida-web` + `lucida-server` like the chunk pipeline) and are runtime-architecture concepts, not crates.
 
-`[[wiki-link]]` resolution is by basename, so `[[lucida-core]]` and `[[chunk-pipeline]]` continue to work unqualified after the split.
+`[[wiki-link]]` resolution is by basename, so `[[lucida-core]]` and `[[chunk-pipeline]]` work unqualified.
 
 ## Crates (`crates/`)
 

@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
 
-/** Plate metadata extracted from DatasetKind::Plate. */
 export interface PlateKind {
   rows: string[];
   columns: string[];
@@ -9,7 +8,6 @@ export interface PlateKind {
   has_stage_positions: boolean;
 }
 
-/** A positioned member for the plate grid. */
 interface PlacedMember {
   id: string;
   position: [number, number];

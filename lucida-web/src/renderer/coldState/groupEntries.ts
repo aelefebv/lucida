@@ -1,16 +1,12 @@
 /**
  * Partition a cold state's active set into per-(channel, chunkDims) pool
  * groups. Pure function — no GPU side effects, no state mutation.
- *
- * Extracted from `gpu.worker.ts` cold-state handler (volume branch
- * ~lines 547-582, slice branch ~lines 636-667). The two branches were
- * near-duplicates that differ only in chunk-dim arity (3D vs 2D) and the
- * shape of the captured `chunkDims` tuple; this collapses them into one
- * function parameterized by `mode`.
+ * Parameterised by `mode` so the same logic serves 3D (volume) and 2D
+ * (slice) callers; only chunk-dim arity differs.
  *
  * Skips entries whose `targetLod` is not in `entry.levels[]` — that
  * covers `well-as-proxy` entries (which carry `levels: []` because they
- * have no chunks to upload). Those entries still get registered in
+ * have no chunks to upload). Those still get registered in
  * `memberToDataset` via {@link iterateColdMembers} in the orchestrator;
  * they just don't appear here because there's no chunk pool to put them
  * in.

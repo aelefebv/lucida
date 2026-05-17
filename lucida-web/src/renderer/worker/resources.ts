@@ -1,27 +1,19 @@
 /**
- * Worker-process GPU resource caches.
+ * Worker-process GPU resource caches: LUT texture cache, offscreen
+ * target pool, and 1×1 / 1×1×1 dummy textures bound when no real
+ * texture is available.
  *
- * Owns the per-device singletons that the dispatcher used to keep as
- * module globals in `gpu.worker.ts`: LUT texture cache, offscreen target
- * pool, and 1×1 / 1×1×1 dummy textures bound when no real texture is
- * available.
+ * Module-scoped (not on {@link RendererState}) because they belong to
+ * the worker process itself — per-device, not per-session.
+ * `RendererState` is for per-session/per-dataset state that resets on
+ * `destroy`.
  *
- * These intentionally stay at module scope (not on {@link RendererState})
- * because they belong to the worker process itself — they're per-device,
- * not per-session. `RendererState` is for per-session/per-dataset state
- * that resets on `destroy`.
- *
- * Per-renderer dummies (the private `dummyTexture` /
- * `dummyIndirectionBuffer` / `dummyProxyTexture` fields inside
- * `SliceRenderer` and `VolumeRenderer`) and per-atlas dummies
- * (`dummyIndirectionBuf` in `volume/atlas.ts`, `dummySliceIndirectionBuf`
- * in `slice/atlas.ts`) stay where they are — they're tightly coupled to
- * the bind-group construction in the renderer classes / the atlas pool
- * lifecycle in the per-mode files. Consolidating them into this module
- * would either require threading new accessors through every
- * `setAtlas` / `setProxyTextures` call site or reaching back from per-mode
- * files into the worker; both expand the scope of Slice 9 without buying
- * clarity. Tracked for a follow-up if a second motivator appears.
+ * Per-renderer dummies (`dummyTexture` / `dummyIndirectionBuffer` /
+ * `dummyProxyTexture` inside `SliceRenderer` and `VolumeRenderer`) and
+ * per-atlas dummies (`dummyIndirectionBuf` in `volume/atlas.ts`,
+ * `dummySliceIndirectionBuf` in `slice/atlas.ts`) stay where they are —
+ * they're tightly coupled to bind-group construction and atlas-pool
+ * lifecycle in those modules.
  */
 
 import { createOffscreenTarget } from "../gpuContext.ts";
@@ -41,7 +33,7 @@ export function getOrCreateLUT(device: GPUDevice, name: string): GPUTexture {
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
   // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
   device.queue.writeTexture({ texture: tex }, data as Uint8Array<ArrayBuffer>, { bytesPerRow: 256 * 4 }, [256, 1]);
   lutCache.set(name, tex);
   return tex;

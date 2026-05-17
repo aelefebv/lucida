@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-05-13
+modified: 2026-05-16
 ---
 
 # lucida-server
 
-Tokio + Axum WebSocket relay. Brokers multi-client sessions, sequences shared document commands, broadcasts presence, opens datasets via [[lucida-store]], serves chunks from a `CachedStore`, and (S4+) generates and serves on-demand proxy assets via [[lucida-proxy]]. Per [[decisions/0020-single-image-with-servedir]] it also serves the SPA bundle directly via `tower-http::ServeDir`, so the production deploy unit can be a single container image and a developer's local `:9876` can render the app without an extra reverse proxy.
+Tokio + Axum WebSocket relay. Brokers multi-client sessions, sequences shared document commands, broadcasts presence, opens datasets via [[lucida-store]], serves chunks from a `CachedStore`, and generates and serves on-demand proxy assets via [[lucida-proxy]]. Per [[decisions/0020-single-image-with-servedir]] it also serves the SPA bundle directly via `tower-http::ServeDir`, so the production deploy unit can be a single container image and a developer's local `:9876` can render the app without an extra reverse proxy.
 
 ## Why a relay, not a peer-mesh
 
@@ -50,7 +50,7 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 
 - **Open-dataset is async-spawned**, not awaited inline. The handler returns immediately; a background task does the import and broadcasts when ready. A second open of the same URL during the first import races on the binding map; `handle_open_remote_dataset` re-checks the binding presence under the lock and rebroadcasts the canonical event if it lost the race. See `handler.rs:594-619`.
 - **Proxy cache directories are keyed by 16-byte URL hash**, not `DatasetId`. The hash is the same BLAKE3 prefix used for `DatasetId` so the two stay in lockstep — see the comment on `dataset_url_hash16`.
-- **Pre-generation on dataset open is best-effort.** S5 spawns a background task to pre-build `(T=0, C=0)` proxies for every advertised entity. Failures are logged and dropped — the open succeeds either way; client-side fetches will surface the failure on their own path.
+- **Pre-generation on dataset open is best-effort.** A background task pre-builds `(T=0, C=0)` proxies for every advertised entity. Failures are logged and dropped — the open succeeds either way; client-side fetches will surface the failure on their own path.
 - **Storage compression is detected from the codec chain** at level 0 only and assumed uniform across levels. If a dataset uses different compression at different LODs, this assumption breaks silently.
 - **Persistent state lives in SQLite** (`lucida.db` + `.db-shm` + `.db-wal`). Holds login sessions and pending OAuth states ([[auth]]); bookmarks + their indexed dataset side-table ([[saved-views]]). `LUCIDA_DB_PATH` configures the path; default is CWD-relative — set to an absolute path in production. See [[gotchas/oss-config-defaults]].
 - **`PRAGMA foreign_keys` is per-connection.** SQLite cascades only fire when this PRAGMA is on, and sqlx doesn't enable it by default per pool connection. The bookmarks store does explicit two-table delete inside a transaction (belt-and-braces); the FK in the migration is documentation more than enforcement. Same caveat applies to any future SQLite-backed feature.

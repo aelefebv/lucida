@@ -13,15 +13,15 @@ import type { ChunkRequest, ProxyRequest } from "../planning/index.ts";
 import type { ColdStateMessage, MissingProxy } from "../../renderer/workerProtocol.ts";
 import type { DeliveryTracker } from "./delivery/tracker.ts";
 
-// Upload-side describes migrated out of `orchestrator.test.ts` as part
-// of Slice 10 (PRD #607). The Uploader owns delivery tracking, cold/hot
-// state emission, drain/resend dispatch, and worker feedback; the
-// Orchestrator drives `planAndFetch` and hands per-dataset results into
-// the Uploader. Tests that exercise the upload-only surface use a
-// standalone `Uploader`; tests that exercise the planner → uploader
-// integration (cold-state display state, viewHotState emission,
-// multi-dataset upload, cold-state lifecycle) construct both and rely
-// on the orchestrator to wire the per-dataset calls through.
+// Upload-side describes for the `Uploader` surface. The Uploader owns
+// delivery tracking, cold/hot state emission, drain/resend dispatch,
+// and worker feedback; the Orchestrator drives `planAndFetch` and hands
+// per-dataset results into the Uploader. Tests that exercise the
+// upload-only surface use a standalone `Uploader`; tests that exercise
+// the planner → uploader integration (cold-state display state,
+// viewHotState emission, multi-dataset upload, cold-state lifecycle)
+// construct both and rely on the orchestrator to wire the per-dataset
+// calls through.
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(): AssetCatalog {
@@ -696,11 +696,9 @@ describe("viewHotState emission", () => {
 // 4. Chunk delivery (drain pass)
 // ===========================================================================
 //
-// Pre-refactor characterization tests (Slice 1 of PRD #607). The drain
-// pass + dispatch + resend pass + LOD/lane filters were the largest blind
-// spot in upload-phase coverage; these tests pinned the contracts before
-// the Seam B/F extractions landed. Migrated from `orchestrator.test.ts`
-// to live alongside the Uploader in Slice 10.
+// The drain pass + dispatch + resend pass + LOD/lane filters were the
+// largest blind spot in upload-phase coverage; these tests pin the
+// contracts so the dispatch/drain extractions stay honest.
 
 describe("chunk delivery (drain pass)", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
@@ -1173,20 +1171,16 @@ describe("handleChunksEvicted", () => {
 // 6. Multi-dataset upload characterization
 // ===========================================================================
 //
-// Pin the verified bugs from Pass 5 of the dechaos scan
-// (`05-contract-scan.md`):
+// Pin two historical bugs so regressions can't sneak back in:
 //
 //   - `_lastFilteredRequests` was a flat `ChunkRequest[]` overwritten
 //     per-dataset → the resend pass only saw the LAST dataset's
 //     requests after a multi-dataset rebuild. Same shape for
-//     `_lastProxyRequests`.
+//     `_lastProxyRequests`. The Uploader now keeps both as per-dataset
+//     maps (`lastFilteredRequests` / `lastProxyRequests`).
 //   - `deliverySentToWorker.clear()` ran once per per-dataset step
-//     inside `planAndFetch`, effectively clearing everything early on.
-//
-// Slice 4 (#613) fixed the per-dataset maps. Slice 10 (Uploader) moved
-// the per-dataset state to the Uploader's `lastFilteredRequests` /
-// `lastProxyRequests`; the previously `it.fails(...)` regressions are
-// now `it(...)` and pass against the shipped fix.
+//     inside `planAndFetch`, effectively clearing everything early on;
+//     the tracker reset is now hoisted to once-per-tick.
 
 describe("multi-dataset upload characterization", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
@@ -1254,12 +1248,12 @@ describe("multi-dataset upload characterization", () => {
     } as unknown as TickContext;
   }
 
-  // Fixed in Slice 4 (#613). `lastFilteredRequests` is a
-  // `Map<datasetId, ChunkRequest[]>`, so a multi-dataset rebuild
-  // preserves every dataset's requests rather than the last-processed
-  // one's. The resend pass in `deliverToWorker` iterates every entry.
+  // `lastFilteredRequests` is a `Map<datasetId, ChunkRequest[]>`, so a
+  // multi-dataset rebuild preserves every dataset's requests rather
+  // than the last-processed one's. The resend pass in `deliverToWorker`
+  // iterates every entry.
   it(
-    "fixed in Slice 4 #613: lastFilteredRequests keeps both datasets' requests",
+    "lastFilteredRequests keeps both datasets' requests across a multi-dataset rebuild",
     () => {
       const uploader = new Uploader();
       const orch = new Orchestrator(uploader);
@@ -1285,7 +1279,7 @@ describe("multi-dataset upload characterization", () => {
   );
 
   it(
-    "fixed in Slice 4 #613: lastProxyRequests keeps both datasets' proxies",
+    "lastProxyRequests keeps both datasets' proxies across a multi-dataset rebuild",
     () => {
       // Today's fixtures don't produce any actual proxy requests
       // (visible_entities only has field-0 in both datasets and the
@@ -1308,11 +1302,9 @@ describe("multi-dataset upload characterization", () => {
   );
 
   it("tracker.wasChunkSent returns false after a fresh multi-dataset rebuild (clear-all behavior)", async () => {
-    // Pre-Slice-4 the per-dataset loop called `deliverySentToWorker.clear()`
-    // once per dataset (effectively all-or-nothing). Post-Slice-5 a single
-    // `deliveryTracker.onColdStateRebuild()` call at the top of the
-    // rebuild path consolidates the reset — same observable result.
-    // Post-Slice-10 the call moves to `uploader.onPlanRebuildStart()`.
+    // A single `uploader.onPlanRebuildStart()` at the top of the
+    // rebuild path consolidates the chunk-tracker reset across every
+    // dataset in the rebuild.
     const uploader = new Uploader();
     const orch = new Orchestrator(uploader);
     const tracker = (uploader as unknown as {
@@ -1363,14 +1355,12 @@ describe("cold-state lifecycle invariant", () => {
   });
 
   it("after sendColdState, tracker.wasChunkSent returns false for previously-sent keys", async () => {
-    // Invariant: every cold-state rebuild calls
-    // `deliveryTracker.onColdStateRebuild()`, which clears the sent /
-    // rejected / wid → entity maps in one shot. Without this the worker
-    // would build a fresh atlas while the orchestrator believed it had
-    // already supplied chunks — atlas would stay empty for stale keys.
-    //
-    // Post-Slice-10 the call is hoisted to `uploader.onPlanRebuildStart()`
-    // at the top of the rebuild path. This test guards against regressions.
+    // Invariant: `uploader.onPlanRebuildStart()` at the top of every
+    // rebuild path calls `deliveryTracker.onColdStateRebuild()`, which
+    // clears the sent / rejected / wid → entity maps in one shot.
+    // Without this the worker would build a fresh atlas while the
+    // orchestrator believed chunks were already supplied — atlas would
+    // stay empty for stale keys.
     const uploader = new Uploader();
     const orch = new Orchestrator(uploader);
     // Seed: pretend a previous tick delivered a chunk for "img-0".

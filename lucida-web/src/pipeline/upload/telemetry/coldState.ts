@@ -1,23 +1,7 @@
 /**
- * Cold-state telemetry collaborator.
- *
- * Replaces the cluster of ~10 cold-state-telemetry fields and the four
- * private helpers (`recordColdStateHit`, `recordColdStateRebuild`,
- * `pruneColdStateWindow`, `maybeLogColdStateChurn`, `publishColdStateDebug`)
- * that previously lived directly on `Orchestrator`. See Seam H of the
- * dechaos boundary scan and Item 10 of the composability scan.
- *
- * The class owns:
- *   - A rolling 1s ring buffer of hit/rebuild events.
- *   - Cumulative hit / rebuild counters + per-epoch cause attribution.
- *   - A bounded p50/p95 rebuild-duration sample buffer.
- *   - A sustained-non-view-churn detector driven by the shared helper
- *     in `sustained.ts`.
- *
- * The `Orchestrator` calls `recordHit(now)` on each cache-hit tick,
- * `recordRebuild(now, causes, durationMs)` on each rebuild tick, and
- * reads the latest snapshot via `publish()` to attach to
- * `debugStats.orch.coldState`.
+ * Cold-state rebuild telemetry. Owns a rolling 1s ring buffer of
+ * hit/rebuild events, cumulative + windowed counters, per-epoch cause
+ * attribution, a p50/p95 duration sketch, and a non-view-churn detector.
  */
 
 import {
@@ -46,18 +30,12 @@ export type ColdStateCauseKey =
 interface ColdStateEvent {
   at: number;
   kind: "hit" | "rebuild";
-  /** Empty for hits and for the very first rebuild (no prior epochs to diff). */
+  /** Empty for hits and the very first rebuild (no prior epochs to diff). */
   causes: ColdStateCauseKey[];
-  /** Wall-clock duration of the rebuild path; undefined for hits. */
   durationMs?: number;
 }
 
 export class ColdStateTelemetry {
-  /**
-   * Rolling 1s window of cold-state events. Each tick of `planAndFetch`
-   * appends one entry (either a hit or a rebuild); entries older than
-   * `COLD_STATE_WINDOW_MS` are pruned on every `record*` call.
-   */
   private coldStateEvents: ColdStateEvent[] = [];
   private coldStateRebuildCount = 0;
   private coldStateHitCount = 0;
@@ -68,21 +46,16 @@ export class ColdStateTelemetry {
     selection: 0,
     asset: 0,
   };
-  /** Bounded sample buffer for p50/p95 rebuild duration. FIFO. */
+  /** FIFO sample buffer for p50/p95 rebuild duration. */
   private coldStateRebuildDurations: number[] = [];
   private coldStateLastRebuildAt = 0;
   private coldStateLastRebuildMs: number | null = null;
-  /**
-   * Cached `ColdStateDebug` snapshot. Recomputed on every `record*`
-   * call so `publish()` is a cheap return.
-   */
+  /** Recomputed on every `record*` call so `publish()` is a cheap return. */
   private coldStateDebug: ColdStateDebug = emptyColdStateDebug();
 
   /**
-   * Sustained-non-view-churn detector. Camera motion legitimately bumps
-   * `view` at high rates, so non-view causes are what trigger this.
-   * The condition is "non-view rebuilds in the last 1s > threshold"; the
-   * payload reports the dominant cause + per-cause counts.
+   * Non-view churn detector. Camera motion legitimately bumps `view` at
+   * high rates, so only non-view causes can trigger it.
    */
   private readonly churnDetector = new SustainedCondition({
     sustainMs: COLD_STATE_CHURN_SUSTAIN_MS,
@@ -91,7 +64,7 @@ export class ColdStateTelemetry {
       debugLog("orch", "cold_state.churn", payload as Record<string, unknown>),
   });
 
-  /** Record a cache-hit tick (planAndFetch took the epoch fast-path). */
+  /** Called when planAndFetch took the epoch fast-path. */
   recordHit(now: number): void {
     this.coldStateHitCount++;
     this.coldStateEvents.push({ at: now, kind: "hit", causes: [] });
@@ -99,7 +72,6 @@ export class ColdStateTelemetry {
     this.refreshSnapshot();
   }
 
-  /** Record a rebuild tick with cause attribution + wall-clock duration. */
   recordRebuild(
     now: number,
     causes: ColdStateCauseKey[],
@@ -119,20 +91,11 @@ export class ColdStateTelemetry {
     this.refreshSnapshot();
   }
 
-  /**
-   * Build (and return the latest) cold-state debug snapshot. The
-   * underlying snapshot is recomputed on every `record*` call, so this
-   * is a constant-time return.
-   *
-   * Used by `Orchestrator.planAndFetch` to attach to
-   * `debugStats.orch.coldState` in both the cache-hit and rebuild
-   * branches.
-   */
+  /** O(1) — the underlying snapshot is recomputed on every `record*`. */
   publish(): ColdStateDebug {
     return this.coldStateDebug;
   }
 
-  /** Prune events older than the rolling window. */
   private pruneWindow(now: number): void {
     const cutoff = now - COLD_STATE_WINDOW_MS;
     while (
@@ -143,12 +106,6 @@ export class ColdStateTelemetry {
     }
   }
 
-  /**
-   * Sustained-non-view-churn detector. View-epoch churn is expected
-   * during camera motion; any *other* epoch sustaining above the
-   * threshold fires one rate-limited `cold_state.churn` log line with
-   * the dominant cause.
-   */
   private checkChurn(now: number): void {
     let nonViewRebuilds = 0;
     const causeCounts: Record<string, number> = {};
@@ -177,7 +134,6 @@ export class ColdStateTelemetry {
     });
   }
 
-  /** Recompute the cached debug snapshot from the rolling window. */
   private refreshSnapshot(): void {
     let rebuilds = 0;
     let hits = 0;

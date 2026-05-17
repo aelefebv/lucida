@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 //
-// Tests for the slice-4 UnauthLanding component (issue #460).
-// The component bounces an unauthed SPA-mounted tree to /auth/start
-// with the captured `pathname + search` and (de-leading-`#`) hash.
+// Tests for the UnauthLanding component, which bounces an unauthed
+// SPA-mounted tree to /auth/start with the captured `pathname + search`
+// and (de-leading-`#`) hash.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";

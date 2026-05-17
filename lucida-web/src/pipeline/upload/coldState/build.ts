@@ -1,17 +1,6 @@
 /**
- * Cold-state message builder.
- *
- * `buildColdState` is the end-to-end pure function that maps the planner's
- * per-dataset output (`activeSet`, `entities`, matrices, settings) into
- * the `ColdStateMessage` the GPU worker consumes. The build is mock-free:
- * the `Orchestrator.sendColdState` wrapper is responsible for the side
- * effect (posting the message + clearing the chunk delivery tracker on
- * rebuild — the latter is hoisted to once-per-tick in Slice 5).
- *
- * `buildColdActiveEntry` collapses the three near-identical
- * `well-as-proxy` / `invisible` / `field` variant literals from the
- * pre-refactor `sendColdState` body into one branching function with one
- * shared computation block (levels, parentWellId, matrices). Slice 6d.
+ * Pure end-to-end cold-state message builder. `Uploader.sendColdState`
+ * wraps this and owns the side effect (post the message).
  */
 import { Axis } from "../../../axes.ts";
 import type { LevelGeometry } from "../../../manifestTypes.ts";
@@ -32,14 +21,9 @@ import { identityMatrix } from "./identity.ts";
 import { buildDisplayStateByChannel } from "./displayState.ts";
 
 /**
- * Map an `ActiveSetEntry` (a discriminated union from the planner) into
- * a flat `ColdStateActiveEntry` (the worker's shape). The shared block
- * — levels, parentWellId, model + inverse matrices, displayStateByChannel
- * — is computed once; per-variant fields (mode, targetLod, proxyKind,
- * etc.) layer on top.
- *
- * Pure. The matrices map and the displayStateByChannel record are
- * passed in by the outer builder (per-tick caches).
+ * Map an `ActiveSetEntry` (discriminated union from the planner) into a
+ * flat `ColdStateActiveEntry` (worker's shape). Pure; per-tick caches
+ * (matrices, displayState) are passed in by the outer builder.
  */
 export function buildColdActiveEntry(
   entry: ActiveSetEntry,
@@ -69,12 +53,8 @@ export function buildColdActiveEntry(
   const parentWellId =
     entity?.kind === "Field" ? entity.parentId : null;
 
-  // Precomputed model matrices. For field entries, sourced from
-  // `scene.member_model_matrix`; for `well-as-proxy` entries, from
-  // `synthesizeWellRosterEntry`'s AABB. Falls back to identity for
-  // entries without a roster match (defensive — descriptor entries
-  // for missing roster members would render at the unit cube, which
-  // is a clear visual failure rather than a silent off-screen one).
+  // Identity fallback is defensive: a missing roster match renders at
+  // the unit cube — a clear visual failure, not a silent off-screen one.
   const matrices = matricesByEntity.get(entry.entityId);
   const modelMatrix = matrices?.model ?? identityMatrix();
   const invModelMatrix = matrices?.inv ?? identityMatrix();
@@ -90,10 +70,8 @@ export function buildColdActiveEntry(
       proxyKind: "WellProxy3D",
       proxyAvailable: true,
       wellProxyAvailable: true,
-      // Wells have no parent well; the `parentWellId` we computed above
-      // is unconditionally `null` for the Well snapshot branch, but
-      // pin it here so the type checker can narrow `kind: "well-as-proxy"`
-      // without re-deriving it.
+      // Pinned here (vs reusing the computed value above) so the type
+      // checker narrows `kind: "well-as-proxy"` without re-deriving.
       parentWellId: null,
       modelMatrix,
       invModelMatrix,
@@ -108,10 +86,8 @@ export function buildColdActiveEntry(
       targetLod: entry.coarsestLod,
       detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
       levels,
-      // Invisibles are mode-less in the planner — surface them to
-      // the worker as `fields-with-detail` (the legacy encoding)
-      // so the wanted-set rules don't ask for proxies for an
-      // entity that won't render this tick.
+      // Invisibles surface as `fields-with-detail` so the wanted-set
+      // rules don't ask for proxies for an entity that won't render.
       mode: "fields-with-detail",
       proxyKind: undefined,
       proxyAvailable: false,
@@ -142,14 +118,9 @@ export function buildColdActiveEntry(
 }
 
 /**
- * End-to-end pure builder for a cold-state message. The orchestrator's
- * `sendColdState` shrinks to: build, post, return. All inputs come from
- * the planner output + per-tick caches (matricesByEntity from
- * {@link buildRoster}; dsSettings from the scene settings cache).
- *
- * Per-tick invariant: every call corresponds to a worker atlas rebuild;
- * the orchestrator's chunk delivery tracker is cleared once per tick
- * before any `buildColdState` call (Slice 5, `deliveryTracker.onColdStateRebuild`).
+ * Pure end-to-end builder. Per-tick invariant: every call corresponds
+ * to a worker atlas rebuild; the chunk delivery tracker is cleared once
+ * per tick via `Uploader.onPlanRebuildStart` before the first call.
  */
 export function buildColdState(args: {
   datasetId: string;

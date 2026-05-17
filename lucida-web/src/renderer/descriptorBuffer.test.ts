@@ -111,9 +111,8 @@ function defaultDisplayState(): ColdStateActiveEntry["displayStateByChannel"][nu
  * Test-fixture helper. Mode-driven branching keeps existing call sites
  * unchanged: pass `mode: "well-as-proxy"` (with `imageId: ""`) to get
  * the well-as-proxy variant; anything else returns a `kind: "field"`
- * entry. Slice 11 added the `kind` discriminator on
- * `ColdStateActiveEntry`; this helper hides the variant construction
- * so test fixtures don't have to.
+ * entry. Hides the discriminated-union construction so test fixtures
+ * don't have to know about it.
  */
 type MakeEntryOpts = Partial<Omit<ColdStateActiveEntry, "kind">> & {
   entityId: string;

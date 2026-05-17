@@ -1,5 +1,3 @@
-//! Integration test for slice 4 of PRD #486 (issue #490).
-//!
 //! Cheap insurance against a future refactor accidentally gating the
 //! kubelet probes behind auth: builds the full app router with the auth
 //! middleware actually applied, then asserts that `GET /healthz` and
@@ -30,10 +28,9 @@ use lucida_server::health;
 /// the public half) used in production.
 ///
 /// We use the cookie extractor explicitly (not `build_extractor`,
-/// which after PRD #527 picks the stub for the test config's
-/// `Disabled` mode) so the protected stub route would actually 401 if
-/// somebody accidentally merged the health router into the protected
-/// half.
+/// which picks the stub for the test config's `Disabled` mode) so the
+/// protected stub route would actually 401 if somebody accidentally
+/// merged the health router into the protected half.
 async fn build_app() -> Router {
     let session_store: Arc<dyn LoginSessionStore> = Arc::new(MemorySessionStore::new());
     let config = Arc::new(AuthConfig::for_tests());

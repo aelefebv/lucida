@@ -1,10 +1,4 @@
-/**
- * Unit tests for {@link WorkerFeedback}. The handlers were previously
- * methods on `Orchestrator`; these tests cover the extracted module at
- * the unit-of-extraction level. Higher-level coverage of the same
- * effects (against the full orchestrator) lives in the Slice 1
- * characterization tests.
- */
+/** Tests {@link WorkerFeedback} directly against `DeliveryTracker`. */
 
 import { describe, it, expect, vi } from "vitest";
 import type { CpuCache } from "../../fetch/index.ts";

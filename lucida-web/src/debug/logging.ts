@@ -67,10 +67,6 @@ export function debugLog(category: DebugCategory, event: string, data: Record<st
   console.log(`[${category}] ${event}`, data);
 }
 
-// ---------------------------------------------------------------------------
-// Overlay toggles (separate registry from log categories)
-// ---------------------------------------------------------------------------
-//
 // Overlays are visual debug layers drawn over the canvas, not log channels.
 // Kept parallel to the category system on purpose: same shape (toggle +
 // listener), different semantics (no console output, no WASM push-down,
@@ -107,7 +103,6 @@ export function setOverlayEnabled(name: DebugOverlay, enabled: boolean): void {
 
 const overlayListeners = new Set<() => void>();
 
-/** Subscribe to overlay-toggle changes. Returns an unsubscribe function. */
 export function onOverlaysChanged(fn: () => void): () => void {
   overlayListeners.add(fn);
   return () => {

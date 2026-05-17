@@ -1,8 +1,8 @@
 //! `PendingAuthStore` trait + the row type it returns.
 //!
-//! Slice 4 (PRD #455) introduces the in-flight OAuth intent table. The
-//! trait mirrors the shape of `LoginSessionStore` so the OAuth handlers
-//! can hold `Arc<dyn PendingAuthStore>` and tests can swap an
+//! Backs the in-flight OAuth intent table. The trait mirrors the shape
+//! of `LoginSessionStore` so the OAuth handlers can hold
+//! `Arc<dyn PendingAuthStore>` and tests can swap an
 //! `Arc<MemoryPendingAuthStore>` in without re-implementing surface.
 //!
 //! The single-use `consume` method is the load-bearing operation: it
@@ -58,9 +58,8 @@ pub trait PendingAuthStore: Send + Sync + 'static {
     ) -> Result<Option<PendingAuth>, PendingAuthStoreError>;
 
     /// Bulk-delete every row whose `created_at` is `< older_than`.
-    /// Returns the number of rows deleted. The actual sweep schedule
-    /// lands in slice 8; the trait carries the method now so the
-    /// SQLite implementation gets exercised in tests.
+    /// Returns the number of rows deleted. Called from the periodic
+    /// cleanup sweep.
     async fn delete_expired(&self, older_than: DateTime<Utc>)
     -> Result<u64, PendingAuthStoreError>;
 }

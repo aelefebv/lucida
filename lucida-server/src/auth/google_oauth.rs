@@ -51,8 +51,9 @@ pub const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 /// What the handler layer pulls out of a verified ID token. Mirrors
 /// the subset of Google ID-token claims we actually consume — anything
 /// else from Google (`sub`, `aud`, `iat`) is checked-and-discarded by
-/// the validator. `email_verified` is captured here so slice 5's
-/// rejection branch has a place to read from.
+/// the validator. `email_verified` is captured here so the
+/// unverified-rejection branch in the callback handler has a place to
+/// read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedClaims {
     pub email: String,
@@ -65,12 +66,11 @@ pub struct VerifiedClaims {
 /// Failure modes from the OAuth client. Distinguished so the handler
 /// can pick the right `auth.signin.error.*` event name and HTTP status.
 ///
-/// Slice 8 adds `Network` for the cases where reqwest itself fails
-/// (DNS, TCP, TLS) reaching Google's token endpoint or JWKS endpoint.
-/// Previously these were rolled into `CodeExchange` / `JwksFetch`, which
-/// made the operator log line read "code exchange failed: dns error" —
-/// useful but blurred two distinct dashboards (Google rejected our code
-/// vs we couldn't reach Google at all).
+/// `Network` covers cases where reqwest itself fails (DNS, TCP, TLS)
+/// reaching Google's token endpoint or JWKS endpoint. Rolling these
+/// into `CodeExchange` / `JwksFetch` would blur two distinct
+/// dashboards (Google rejected our code vs we couldn't reach Google
+/// at all).
 #[derive(Debug, Error)]
 pub enum OAuthError {
     #[error("token endpoint exchange failed: {0}")]
@@ -163,8 +163,7 @@ pub struct GoogleOAuthClient {
 impl GoogleOAuthClient {
     /// Build the client and prime the JWKS cache. We fail-fast when the
     /// initial fetch fails — the server should not boot in a state
-    /// where every sign-in attempt is destined to 500. Slice 4
-    /// acceptance: "if it fails, server should fail fast."
+    /// where every sign-in attempt is destined to 500.
     pub async fn new(config: Arc<GoogleOAuthConfig>) -> Result<Self, OAuthError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -185,9 +184,9 @@ impl GoogleOAuthClient {
     /// state token in `pending_auth` first; this helper just emits the
     /// URL the redirect goes to.
     ///
-    /// Per PRD #455: scope = `openid email profile`, response_type =
-    /// `code`. We omit `access_type=offline` deliberately (no refresh
-    /// tokens in v1 — see ADR-0016 §"Why no refresh tokens in v1").
+    /// Scope = `openid email profile`, response_type = `code`. We omit
+    /// `access_type=offline` deliberately (no refresh tokens in v1 —
+    /// see ADR-0016 §"Why no refresh tokens in v1").
     ///
     /// `prompt` is `Some(Prompt::SelectAccount)` only on the post-logout
     /// re-sign-in path (`/auth/start` set the `lucida_signed_out` marker

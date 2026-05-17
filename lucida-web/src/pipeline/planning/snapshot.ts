@@ -1,17 +1,9 @@
 /**
  * Snapshot builder — translates live WASM scene state into a
- * {@link PlanningSnapshot}.
- *
- * This module is the single boundary between WASM scene queries
- * (`view_query`, `member_positions`, `visible_region`, `epochs`, `c`,
- * `t`, `z`) and the pure planning core. It honours
- * `wiki/principles/planning.md` §4 (planning is pure) and §5 (WASM
- * owns truth) — every snake_case field returned by WASM is normalised
- * to camelCase here, every fallback is explicit, and the resulting
- * {@link PlanningSnapshot} is the only thing {@link plan} ever sees.
- *
- * The function is pure: it touches no module state, mutates none of
- * its inputs, and produces a fresh {@link PlanningSnapshot} per call.
+ * {@link PlanningSnapshot}. Single boundary between WASM scene queries
+ * and the pure planning core: snake_case normalised to camelCase here,
+ * fallbacks explicit. Pure (no module state, no input mutation).
+ * See `wiki/principles/planning.md` §4 and §5.
  */
 
 import type { WasmScene } from "lucida-core";
@@ -29,15 +21,12 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
 
-// Re-export {@link MinimapChunkCoord} from its canonical home in
-// `./index.ts` so callers that imported it from here keep working.
+// Re-export from canonical home in `./index.ts`.
 export type { MinimapChunkCoord } from "./index.ts";
 
 /**
  * Wire shape of one row in the `view_query` JSON output. Mirrors the
- * Rust `VisibleEntity` struct in `lucida-core/src/scene/view_query.rs`
- * (snake_case). Locally typed so this module has no runtime dependency
- * on the orchestrator's private interfaces.
+ * Rust `VisibleEntity` struct in `lucida-core/src/scene/view_query.rs`.
  */
 interface VisibleEntityRow {
   entity_id: string;

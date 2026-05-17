@@ -47,10 +47,6 @@
  *   48: levelDims         vec3<u32>+pad   (16) — xyz=(X,Y,Z)
  */
 
-// ---------------------------------------------------------------------------
-// Sizes
-// ---------------------------------------------------------------------------
-
 /** Maximum LOD slots packed per entity. Matches `LodInfo[8]` in WGSL. */
 export const DESCRIPTOR_MAX_LODS = 8;
 
@@ -60,21 +56,13 @@ export const DESCRIPTOR_LOD_INFO_SIZE = 64;
 /** Byte offset of the `lods: array<LodInfo, 8>` field within the entry. */
 export const DESCRIPTOR_LODS_OFFSET = 224;
 
-/** Per-entity descriptor size in bytes. */
 export const DESCRIPTOR_ENTRY_SIZE =
   DESCRIPTOR_LODS_OFFSET + DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE;
-
-// ---------------------------------------------------------------------------
-// Sentinels
-// ---------------------------------------------------------------------------
 
 /** Shader-side sentinel for missing pool / slot. Matches `0xFFFFFFFFu`. */
 export const DESCRIPTOR_SENTINEL_INDEX = 0xffffffff;
 
-// ---------------------------------------------------------------------------
 // Top-level field offsets (bytes)
-// ---------------------------------------------------------------------------
-
 export const OFFSET_MODEL_MATRIX = 0;            // mat4x4<f32> (64)
 export const OFFSET_INV_MODEL_MATRIX = 64;       // mat4x4<f32> (64)
 export const OFFSET_CHANNEL_MASK = 128;          // u32
@@ -100,10 +88,7 @@ export const OFFSET_PAD_TAIL1 = 220;             // u32 (pad)
  *  WGSL struct. */
 export const OFFSET_LODS = DESCRIPTOR_LODS_OFFSET;
 
-// ---------------------------------------------------------------------------
 // Per-LOD field offsets within a LodInfo entry (relative to LodInfo start)
-// ---------------------------------------------------------------------------
-
 export const LOD_OFFSET_LEVEL = 0;                // u32
 export const LOD_OFFSET_INDIRECTION_OFFSET = 4;   // u32
 export const LOD_OFFSET_PAD0 = 8;                 // u32 (pad)

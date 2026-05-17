@@ -25,12 +25,10 @@ export const keyBindings = {
 
 export type ActionName = keyof typeof keyBindings;
 
-/** Get the set of all bound key values (for passing to useKeyState). */
 export function getBoundKeys(): Set<string> {
   return new Set(Object.values(keyBindings));
 }
 
-/** Check if an action's key is currently pressed. */
 export function isActionPressed(pressedKeys: Set<string>, action: ActionName): boolean {
   return pressedKeys.has(keyBindings[action]);
 }

@@ -1,10 +1,9 @@
 //! Stable, content-derived DatasetId behavior.
 //!
-//! Verifies the foundation of the Asset Catalog (PRD #397, Slice 1, issue
-//! #398): the DatasetId for a given URL must be stable across server
-//! restarts and across multiple `OpenRemoteDataset` commands, and a
-//! second open of the same URL must reuse the existing `ServerBinding`
-//! rather than re-importing.
+//! The DatasetId for a given URL must be stable across server restarts
+//! and across multiple `OpenRemoteDataset` commands, and a second open
+//! of the same URL must reuse the existing `ServerBinding` rather than
+//! re-importing.
 //!
 //! These are integration tests against the public surface of
 //! `lucida_server`. They cover:
@@ -160,10 +159,6 @@ fn third_open_of_distinct_url_does_not_collide() {
         "URL Y must not collide with URL X's binding"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn in_memory_store() -> Arc<dyn ObjectStore> {
     Arc::new(InMemory::new())

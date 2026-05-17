@@ -3,12 +3,10 @@
  * the per-session {@link RendererState}, and assemble the
  * {@link WorkerCtx} that the dispatcher and per-mode handlers consume.
  *
- * Extracted from the `case "init"` body of `gpu.worker.ts` in Slice 9 so
- * the entry point shrinks to a thin event listener. Renderer-class
- * singletons (slice/volume/cursor/compositor renderers) are held in
- * closures owned by this function — they're per-canvas instances that
- * outlive any single session but stay tied to one {@link WorkerCtx},
- * which is also recreated only on `init`.
+ * Renderer-class singletons (slice/volume/cursor/compositor renderers)
+ * are held in closures owned by this function — they're per-canvas
+ * instances that outlive any single session but stay tied to one
+ * {@link WorkerCtx}, which is also recreated only on `init`.
  *
  * Cached worker-process GPU resources (LUT cache, offscreen pool, dummy
  * textures) live in `worker/resources.ts` as module-level state; this

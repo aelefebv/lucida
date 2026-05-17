@@ -31,7 +31,7 @@ import type {
   ChannelSettings,
 } from "./types.ts";
 
-// --- Public types -------------------------------------------------------
+// Public types
 
 export interface ApplierBridge {
   /** Send `OpenRemoteDataset { url }` over the WebSocket. */
@@ -94,7 +94,7 @@ export type ApplyResultListener = (r: ApplyResult) => void;
  *  C/T/Z back to React state (since the applier writes to WASM only). */
 export type ApplyCompleteListener = (view: SavedView) => void;
 
-// --- Implementation ----------------------------------------------------
+// Implementation
 
 const IDLE_STATE: ApplierState = {
   inProgress: false,
@@ -140,7 +140,7 @@ export class SavedViewApplier {
     this.openTimeoutMs = openTimeoutMs;
   }
 
-  // --- State subscription (used by LoadingViewBanner) -------------------
+  // State subscription (used by LoadingViewBanner)
 
   subscribe(fn: StateListener): () => void {
     this.listeners.add(fn);
@@ -200,13 +200,13 @@ export class SavedViewApplier {
     entry.reject(new Error(error));
   }
 
-  // --- Main entry point -------------------------------------------------
+  // Main entry point
 
   /**
-   * Apply a SavedView to the live scene. Steps 2-10 of the PRD apply flow.
-   * Returns when all in-flight commands are dispatched and the camera has
-   * been imported. Resolves even on partial dataset-open failure (the
-   * loading banner shows the indicator).
+   * Apply a SavedView to the live scene. Returns when all in-flight
+   * commands are dispatched and the camera has been imported. Resolves
+   * even on partial dataset-open failure (the loading banner shows the
+   * indicator).
    */
   async apply(view: SavedView): Promise<void> {
     if (this.state.inProgress) {
@@ -388,7 +388,7 @@ export class SavedViewApplier {
     for (const fn of this.applyResultListeners) fn(result);
   }
 
-  // --- Helpers ----------------------------------------------------------
+  // Helpers
 
   private async openMissing(toOpen: { url: string; id: string }[]): Promise<void> {
     if (toOpen.length === 0) return;
@@ -527,8 +527,7 @@ export class SavedViewApplier {
   }
 }
 
-// --- Out-of-range clamping for view indices ---------------------------
-//
+// Out-of-range clamping for view indices.
 // Exported for tests so the clamp logic can be exercised in isolation
 // without spinning up a WasmScene.
 
@@ -553,12 +552,11 @@ export function clampViewIndices(
       if (shape.length >= 3) {
         // shape returns [Z, Y, X]; t/c are not in volume_shape — but
         // dataset_volume_shape is the only call we have for "max valid
-        // index". Fall back to view.view.t/c as-is for t/c since the
-        // PRD says "clamp out-of-range silently" specifically about
-        // z/t/c — we conservatively clamp z to volume_shape[0] and
-        // pass t/c through (downstream WASM `set_t`/`set_c` accept any
-        // u32; out-of-range there is harmless because rendering will
-        // skip frames we don't have).
+        // index". The clamp contract is "clamp out-of-range silently"
+        // specifically about z/t/c — we conservatively clamp z to
+        // volume_shape[0] and pass t/c through (downstream WASM
+        // `set_t`/`set_c` accept any u32; out-of-range there is
+        // harmless because rendering will skip frames we don't have).
         minZ = Math.min(minZ, shape[0]);
       }
     } catch {

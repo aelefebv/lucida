@@ -13,8 +13,6 @@ use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
 
 use crate::backend::StoreError;
 
-// --- Deserialization types for Zarr v3 Array Metadata ---
-
 /// Intermediate per-level metadata parsed from OME multiscales.
 #[derive(Debug, Clone)]
 pub struct LevelEntry {
@@ -41,8 +39,6 @@ pub struct ChunkGrid {
 pub struct ChunkGridConfig {
     pub chunk_shape: Vec<u64>, // N-dimensional (matches axes count)
 }
-
-// --- Parsing helpers ---
 
 /// Read and parse a zarr.json file from the object store.
 pub(crate) async fn read_zarr_json(

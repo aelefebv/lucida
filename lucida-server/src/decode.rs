@@ -1,14 +1,13 @@
 //! Storage-compression decode helpers.
 //!
-//! Factored out of [`crate::handler::serve_chunk_from_store`] (originally
-//! at handler.rs lines 486-523) so the proxy generator can reuse the
-//! same lz4/zstd/blosc handling.
+//! Shared by [`crate::handler::serve_chunk_from_store`] and the proxy
+//! generator so both paths use the same lz4/zstd/blosc handling.
 //!
-//! The compression *types* live in [`lucida_store::codec`] because that's
-//! where the import-time codec-chain validator runs (PRD #447 Slice 2 /
-//! issue #449). This module owns the actual decompression logic that needs
-//! the `zstd` / `lz4_flex` crate dependencies, which `lucida-store`
-//! deliberately does not pull in.
+//! The compression *types* live in [`lucida_store::codec`] because
+//! that's where the import-time codec-chain validator runs. This module
+//! owns the actual decompression logic that needs the `zstd` /
+//! `lz4_flex` crate dependencies, which `lucida-store` deliberately
+//! does not pull in.
 
 pub mod blosc;
 

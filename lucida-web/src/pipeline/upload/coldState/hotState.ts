@@ -1,16 +1,8 @@
 /**
- * View hot-state builder.
- *
- * Walks the cold-state message's members (via `iterateColdMembers`,
- * the same canonical iteration the worker uses to build the descriptor
- * buffer) and emits one ray-hit-per-member entry. Composite member ids
- * (`imageId:chN`) are deduped — the camera ray hit is per-dataset, not
- * per-channel, so only the first composite per memberId carries it.
- *
- * Pure function — given a cold-state message + ray-hit + epochs +
- * datasetId, returns a `ViewHotStateMessage`. Extracted from
- * `Orchestrator.sendViewHotState` in Slice 6e of PRD #607 to make the
- * build mock-free.
+ * Pure view hot-state builder. Walks the cold-state message via
+ * `iterateColdMembers` (same iteration the worker uses), emitting one
+ * ray-hit per memberId. Composite ids (`imageId:chN`) dedup because the
+ * camera ray hit is per-dataset, not per-channel.
  */
 import type {
   ColdStateMessage,

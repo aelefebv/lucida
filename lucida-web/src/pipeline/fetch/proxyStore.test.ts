@@ -1,13 +1,3 @@
-/**
- * Unit tests for {@link ProxyStore} (Slice 6, `#600`).
- *
- * Exercises the two-level Map shape (datasetId → innerKey →
- * ProxyCacheEntry), dataset-scoped cancel, and policy-driven eviction
- * across datasets. Synthetic-input only — no fetch mock, no cache
- * instance. The existing `cpuCache.test.ts:proxy tier` describe block
- * covers the higher-level integration.
- */
-
 import { describe, it, expect, vi } from "vitest";
 
 import {
@@ -164,7 +154,7 @@ describe("ProxyStore.cancelDataset", () => {
     expect(store.has("ds-A", k0)).toBe(false);
     expect(store.has("ds-A", k1)).toBe(false);
     expect(store.has("ds-B", k0)).toBe(true);
-    // cancelDataset is dataset removal, not eviction.
+    // Dataset removal does not emit eviction records.
     expect(evictions).toEqual([]);
   });
 
@@ -236,8 +226,7 @@ describe("ProxyStore eviction via policy", () => {
       "ds-keep", "k1",
       makeProxyEntry({ bytes: 100, datasetId: "ds-keep", insertedAt: 1 }),
     );
-    // After eviction the inner map for "ds-only" is empty — the store
-    // should have garbage-collected it. We probe via `has`.
+    // Inner map for "ds-only" should have been garbage-collected.
     expect(store.has("ds-only", "k0")).toBe(false);
   });
 
@@ -260,8 +249,7 @@ describe("ProxyStore eviction via policy", () => {
         bytes: 33, datasetId: `ds-${i}`, insertedAt: i,
       }));
     }
-    // The next 100-byte insert needs ~99 bytes of victim space — should
-    // sweep all three pre-existing entries.
+    // The next 100-byte insert sweeps all three.
     store.insert("ds-big", "k", makeProxyEntry({
       bytes: 100, datasetId: "ds-big", insertedAt: 99,
     }));

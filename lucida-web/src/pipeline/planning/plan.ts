@@ -1,12 +1,6 @@
 /**
- * Planning domain — top-level pure planner.
- *
- * Composes promotion, chunk iteration, and three-lane scheduling into a
- * single {@link RequestPlan}. The body is small by design — the actual
- * work lives in {@link assignModes} (mode decisions), the lane emitters
- * in `./emit.ts`, and the chunk-iteration helpers in `./chunks.ts`.
- *
- * See ADR 0029.
+ * Top-level pure planner. Composes promotion + chunk iteration +
+ * three-lane scheduling into a {@link RequestPlan}. See ADR 0029.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -30,28 +24,16 @@ import {
 import { validatePlanningInputs } from "./validate.ts";
 
 /**
- * Top-level pure planning function. Composes promotion, chunk
- * iteration, and three-lane scheduling into a single {@link RequestPlan}.
- *
- * Three-way decomposition:
- *   - `snapshot` — the world this tick (entities, region, selection, …).
- *   - `state` — opaque carry-forward state from the previous tick (the
- *     pointer the caller stored from the previous {@link RequestPlan.nextState}).
- *   - `config` — planning tunables (live-twistable from the debug panel).
+ * Top-level pure planner. `state` is the opaque carry-forward the
+ * caller stored from the previous tick's {@link RequestPlan.nextState}.
  *
  * Postconditions:
  *   - `requests` and `proxyRequests` are sorted ascending by `priority`
- *     (lower value = more urgent).
- *   - All output objects are freshly allocated; the caller may mutate
- *     them. Every request carries `datasetId` stamped from
- *     {@link PlanningSnapshot.datasetId} at emit time (the orchestrator
- *     does not post-`plan()` mutate it).
- *   - `epochs.request` is the input epoch + 1; other epoch fields are
- *     forwarded unchanged so consumers can detect plan freshness.
- *   - `stats` reflects work done in this call only — no carry-forward.
- *   - `nextState` is the opaque carry-forward state for the next tick.
- *     v1: `{ previousActiveSet: activeSet }`. The caller stores it and
- *     hands it back unchanged on the next call.
+ *     (lower = more urgent).
+ *   - Output objects are freshly allocated; the caller may mutate them.
+ *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
+ *   - `epochs.request` = input + 1; other epoch fields forwarded unchanged.
+ *   - `stats` reflects this call only.
  */
 export function plan(
   snapshot: PlanningSnapshot,

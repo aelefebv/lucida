@@ -1,35 +1,14 @@
 /**
- * Planning tunables — typed, parameter-passed.
+ * Planning tunables. `PlanningConfig` is the single value {@link plan}
+ * accepts for policy knobs (principle §4 in `wiki/principles/planning.md`:
+ * planning is pure, knobs are explicit inputs).
  *
- * `PlanningConfig` is the single value {@link plan} accepts as a
- * parameter for every policy knob. This honours principle §4 of
- * `wiki/principles/planning.md` — planning is pure and any state that
- * survives across ticks (or any policy knob the user might twist
- * live) is an explicit input.
- *
- * The default-value literals live in this module (the leaf, to avoid a
- * circular import with `./index.ts`) and are re-exported from
- * `./index.ts` under their historical names (`FAR_THRESHOLD_PX`, etc.)
- * so existing callers and tests keep importing them from the planning
- * entry point. Both the named constants and {@link DEFAULT_PLANNING_CONFIG}
- * share the same underlying numbers, so the two cannot drift.
+ * Defaults live in this leaf module (no `./index.ts` import) so the
+ * barrel can re-export both the named constants and
+ * {@link DEFAULT_PLANNING_CONFIG} without a circular dependency.
  */
 
-// ---------------------------------------------------------------------------
-// Canonical default values
-// ---------------------------------------------------------------------------
-//
-// These constants are the single source of truth for every planning
-// tunable's default. They live in this leaf module (no imports from
-// `./index.ts`) so the planning entry point can import them — and the
-// {@link DEFAULT_PLANNING_CONFIG} that wraps them — without a circular
-// dependency. `./index.ts` re-exports each one under its historical
-// public name (`FAR_THRESHOLD_PX`, etc.).
-
-/**
- * Far threshold (px). Below this, a well promotes to `well-as-proxy`.
- * Replaces the legacy two-tier `PROMOTE_THRESHOLD_PX = 80`; same value.
- */
+/** Far threshold (px). Below this, a well promotes to `well-as-proxy`. */
 export const FAR_THRESHOLD_PX = 80;
 
 /** Medium/Detail threshold (px). Above this, fields use real detail chunks. */
@@ -39,10 +18,9 @@ export const DETAIL_THRESHOLD_PX = 150;
 export const HYSTERESIS_PX = 5;
 
 /**
- * Priority lane offset for the minimap lane (highest urgency in the
- * system). Minimap is its own dedicated lane at offset `0` so the
- * whole-sample spatial context appears within ~1 second of dataset
- * open instead of after every other lane drains. See ADR 0023.
+ * Minimap lane offset — highest urgency, dedicated lane at `0` so
+ * whole-sample spatial context appears within ~1 s of dataset open.
+ * See ADR 0023.
  */
 export const MINIMAP_LANE_OFFSET = 0;
 
@@ -56,10 +34,8 @@ export const PROXY_LANE_OFFSET = 1000;
 export const PREFETCH_LANE_OFFSET = 1500;
 
 /**
- * Priority lane offset for overview requests — the per-entity
- * coarsest pass that backstops the shader's fallback chain. Distinct
- * from {@link MINIMAP_LANE_OFFSET}; this lane is per-entity and
- * lowest urgency in the system.
+ * Overview lane offset — per-entity coarsest pass that backstops the
+ * shader's fallback chain. Lowest urgency.
  */
 export const OVERVIEW_LANE_OFFSET = 2500;
 
@@ -67,33 +43,22 @@ export const OVERVIEW_LANE_OFFSET = 2500;
 export const PREFETCH_DEPTH = 2;
 
 /**
- * Coefficient applied to `(1 - importance)` in the priority formula.
- * Tuned so a one-importance-step gap roughly equals a 50-voxel distance
- * gap — high enough that a focused entity beats a far-but-uniform one.
+ * Coefficient on `(1 - importance)`. Tuned so a one-importance-step gap
+ * roughly equals a 50-voxel distance gap.
  */
 export const IMPORTANCE_WEIGHT = 500;
 
-/**
- * Coefficient applied to chunk distance from the view center in the
- * priority formula. Lower than {@link IMPORTANCE_WEIGHT} so importance
- * dominates within a lane until distances become large.
- */
+/** Coefficient on chunk distance from view center. */
 export const DISTANCE_WEIGHT = 10;
 
 /**
- * Priority bump applied to the parent-well `WellProxy3D` request emitted
- * inside `fields-with-proxy-fallback`. Pushes it below per-field proxy
- * requests so detail + per-field proxy load first; the well proxy is
- * only a coarse fallback while those are in flight.
+ * Bump on the parent-well `WellProxy3D` request inside
+ * `fields-with-proxy-fallback` — pushes it below per-field proxies so
+ * the well proxy is only a coarse fallback while those are in flight.
  */
 export const WELL_PROXY_PRIORITY_BUMP = 100;
 
-/**
- * Per-tick planning tunables, threaded through {@link plan} and the
- * downstream lane / mode functions. Defaults live in
- * {@link DEFAULT_PLANNING_CONFIG} and match the canonical module-level
- * constants exactly.
- */
+/** Per-tick planning tunables threaded through {@link plan}. */
 export interface PlanningConfig {
   // -- mode-decision thresholds ---------------------------------------
   /** Below this projected diagonal (px) a well promotes to `well-as-proxy`. */
@@ -119,26 +84,19 @@ export interface PlanningConfig {
   wellProxyPriorityBump: number;
 
   // -- lane offsets ---------------------------------------------------
-  /**
-   * Priority lane offset for the minimap lane (highest urgency).
-   * See {@link MINIMAP_LANE_OFFSET}.
-   */
+  /** Minimap lane (highest urgency). See {@link MINIMAP_LANE_OFFSET}. */
   minimapLaneOffset: number;
-  /** Priority lane offset for detail requests (visible chunks). */
+  /** Detail requests (visible chunks). */
   detailLaneOffset: number;
-  /** Priority lane offset for proxy requests (well/field proxy fallbacks). */
+  /** Proxy requests (well/field proxy fallbacks). */
   proxyLaneOffset: number;
-  /** Priority lane offset for prefetch (next-timepoint) requests. */
+  /** Prefetch (next-timepoint) requests. */
   prefetchLaneOffset: number;
-  /** Priority lane offset for overview requests (lowest urgency). */
+  /** Overview requests (lowest urgency). */
   overviewLaneOffset: number;
 }
 
-/**
- * Canonical defaults. Values are sourced from the module-level
- * constants in `./index.ts` so this struct cannot silently drift from
- * the historical values.
- */
+/** Canonical defaults. Sourced from the module-level constants so the two cannot drift. */
 export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   farThresholdPx: FAR_THRESHOLD_PX,
   detailThresholdPx: DETAIL_THRESHOLD_PX,
@@ -154,11 +112,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   overviewLaneOffset: OVERVIEW_LANE_OFFSET,
 };
 
-/**
- * Merge a partial config over {@link DEFAULT_PLANNING_CONFIG}, returning
- * a fresh object. Convenience for tests and call sites that only want
- * to override a handful of fields.
- */
+/** Merge a partial config over {@link DEFAULT_PLANNING_CONFIG}; returns a fresh object. */
 export function mergeConfig(partial: Partial<PlanningConfig>): PlanningConfig {
   return { ...DEFAULT_PLANNING_CONFIG, ...partial };
 }

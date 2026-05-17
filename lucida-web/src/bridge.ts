@@ -273,13 +273,11 @@ export class Bridge {
     }
   }
 
-  /** Send a request to open a remote dataset by URL. */
   sendOpenRemoteDataset(url: string) {
     bridgeLog("open_remote_dataset.send", { url }, this.ws?.readyState);
     this.send(JSON.stringify({ type: "open_remote_dataset", url }));
   }
 
-  /** Send a follow request. */
   sendFollow(target: ClientId | null) {
     this.send(JSON.stringify({ type: "follow", target }));
   }

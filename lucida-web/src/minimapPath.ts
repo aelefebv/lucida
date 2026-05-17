@@ -171,7 +171,6 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   return budgetRemaining <= 0;
 }
 
-/** Render the minimap and invoke the overlay callback. */
 export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: number): void {
   if (!state.enabled) return;
 

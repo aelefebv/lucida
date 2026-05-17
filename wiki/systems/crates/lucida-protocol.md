@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-16
 ---
 
 # lucida-protocol
@@ -40,4 +40,4 @@ All four modules are re-exported via `pub use` so consumers do `use lucida_proto
 ## Gotchas
 
 - **Adding a `FetchSource` variant breaks every client.** Clients exhaustively match on the enum to decide how to fetch. Use `#[serde(other)]` carefully — the safer path is to coordinate a versioned rollout.
-- **`AssetCatalogUpdate` is reserved for S5+.** S3-era servers never emit it; the web client's handler may receive empty deltas as a sanity check (no-op). Don't rely on the server to backfill the initial catalog via deltas — the catalog is seeded inside the `DatasetOpened` event.
+- **The initial catalog is seeded inside `DatasetOpened`, not via `AssetCatalogUpdate`.** The web client's handler may receive empty deltas as a sanity check (no-op). Don't rely on the server to backfill the initial catalog via deltas.

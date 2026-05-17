@@ -155,11 +155,11 @@ impl PrincipalExtractor for SessionCookieExtractor {
         })? {
             Some(row) => row,
             None => {
-                // Cookie present, no DB row. PRD #455 §"Audit logging":
-                // dedicated debug event so ops can tell stale cookies
-                // (post-logout, post-sweep) apart from the no-cookie
-                // case. We don't have an email here — we never minted a
-                // session for this id, by definition.
+                // Cookie present, no DB row. Dedicated debug event so
+                // ops can tell stale cookies (post-logout, post-sweep)
+                // apart from the no-cookie case. We don't have an email
+                // here — we never minted a session for this id, by
+                // definition.
                 debug!(
                     ip = %ip,
                     user_agent = %user_agent,
@@ -173,7 +173,7 @@ impl PrincipalExtractor for SessionCookieExtractor {
         match self.classify_session(&row, now) {
             SessionStatus::Active => {}
             SessionStatus::IdleExpired => {
-                // Sweep (slice 8) will eventually drop the row; we don't
+                // Background sweep will eventually drop the row; we don't
                 // bother deleting here to keep the extract path read-only.
                 debug!(
                     email = %row.email,
@@ -205,11 +205,11 @@ impl PrincipalExtractor for SessionCookieExtractor {
             }
         });
 
-        // Slice 6: derive is_admin per-request from the configured
-        // allowlist. Admin status is *not* persisted on the LoginSession
-        // row — promote/demote is a config-change-and-restart, takes
-        // effect on the principal's next request. Both sides lowercased
-        // so casing drift between env var and JWT email never demotes.
+        // Derive is_admin per-request from the configured allowlist.
+        // Admin status is *not* persisted on the LoginSession row —
+        // promote/demote is a config-change-and-restart, takes effect
+        // on the principal's next request. Both sides lowercased so
+        // casing drift between env var and JWT email never demotes.
         let is_admin = self
             .config
             .admin_emails
@@ -227,20 +227,16 @@ impl PrincipalExtractor for SessionCookieExtractor {
 /// `AuthPrincipal` we persist on the new `LoginSession` row at
 /// callback time.
 ///
-/// Slice 4 produced this raw mapping; slice 5 layers the
-/// hosted-domain + `email_verified` checks on top via
-/// [`principal_or_rejection_from_claims`]. This function stays
-/// pure-mapping (no policy) so other call sites that already enforce
-/// policy elsewhere (e.g. the future `GoogleJwtPrincipalExtractor`
-/// path for non-OAuth-callback flows) aren't double-checking.
+/// Pure mapping (no policy). [`principal_or_rejection_from_claims`]
+/// layers hosted-domain + `email_verified` checks on top; other call
+/// sites that already enforce policy elsewhere aren't double-checking.
 ///
 /// `display_name` falls back to the local part of the email when
 /// Google's `name` claim is absent (rare, but happens for accounts
-/// without a populated profile). `is_admin` is left `false` here; the
-/// slice-6 [`principal_or_rejection_from_claims`] caller overlays the
-/// derived value after the policy checks pass. Direct callers that
-/// don't go through that wrapper (none today) would need to apply the
-/// admin lookup themselves.
+/// without a populated profile). `is_admin` is left `false` here;
+/// [`principal_or_rejection_from_claims`] overlays the derived value
+/// after the policy checks pass. Direct callers that don't go through
+/// that wrapper would need to apply the admin lookup themselves.
 pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
     let display_name = claims.name.clone().unwrap_or_else(|| {
         claims
@@ -260,8 +256,7 @@ pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
 
 /// Why a callback rejected an otherwise-valid JWT.
 ///
-/// Slice 5 (PRD #455 §"Hosted-domain validation"). The two variants
-/// map 1:1 to the user-fixable error pages defined in §"Error UX":
+/// The two variants map 1:1 to user-fixable error pages:
 ///
 /// * `Unverified` — Google says `email_verified: false`. User can fix
 ///   this in their Google account settings; we don't accept the email
@@ -287,9 +282,9 @@ pub enum RejectionReason {
     },
 }
 
-/// Apply slice 5's hosted-domain + email-verified policy on top of the
-/// raw mapping. Returns the principal on accept, or a structured
-/// rejection that the handler turns into a `/auth/error` redirect.
+/// Apply the hosted-domain + email-verified policy on top of the raw
+/// mapping. Returns the principal on accept, or a structured rejection
+/// that the handler turns into a `/auth/error` redirect.
 ///
 /// Order matters: `email_verified` is checked first because an
 /// unverified email shouldn't be considered for *any* allow-list
@@ -303,9 +298,9 @@ pub enum RejectionReason {
 /// matches Calico's `calicolabs.com` and any future domain entries
 /// the operator might author with mixed case.
 ///
-/// Slice 6: `admin_emails` (lowercased entries) drives `is_admin` on
-/// the accepted principal — same mechanism the cookie extractor uses,
-/// so callback-minted and cookie-extracted principals can't disagree.
+/// `admin_emails` (lowercased entries) drives `is_admin` on the
+/// accepted principal — same mechanism the cookie extractor uses, so
+/// callback-minted and cookie-extracted principals can't disagree.
 pub fn principal_or_rejection_from_claims(
     claims: &VerifiedClaims,
     allowed: &std::collections::HashSet<String>,
@@ -343,13 +338,11 @@ pub fn principal_or_rejection_from_claims(
 /// `PrincipalExtractor` adapter that runs Google's JWT validator on a
 /// `Bearer` token in the `Authorization` header.
 ///
-/// Slice 4 wires this as the authoritative extractor when
-/// `LUCIDA_AUTH=google`; in practice production relies on the session
-/// cookie path because the callback handler mints a `LoginSession` row
-/// out of the validated claims, so per-request JWT extraction is
-/// optional. Keeping the adapter around lets slice 5+ wire in
-/// integrations that bypass the cookie (CLI, server-to-server) without
-/// re-implementing JWT validation in two places.
+/// In practice production relies on the session-cookie path because
+/// the callback handler mints a `LoginSession` row out of the
+/// validated claims, so per-request JWT extraction is optional.
+/// Keeping the adapter around lets integrations that bypass the cookie
+/// (CLI, server-to-server) reuse the same JWT validation.
 pub struct GoogleJwtPrincipalExtractor {
     google: Arc<GoogleOAuthClient>,
 }
@@ -407,14 +400,14 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// this is the implementation that delivers on that promise. Without
 /// it, the cookie extractor would 401 every request and the SPA's
 /// `UnauthLanding` would bounce into a `/auth/start` that isn't
-/// registered → infinite redirect loop (the regression PRD #527 fixes).
+/// registered → infinite redirect loop.
 ///
 /// `is_admin: true` is intentional: "no auth" means no gating at all,
 /// so admin-only endpoints have to resolve as admin too. The multi-user
 /// trade-off (every browser is the same `dev@local` identity, sharing
 /// one bookmark namespace and unprotected admin endpoints) is the
-/// honest semantic of "no auth" — see PRD #527 §"Solution" item 1 and
-/// the deferred per-browser-anon sketch in `wiki/decisions/deferred.md`.
+/// honest semantic of "no auth" — see the deferred per-browser-anon
+/// sketch in `wiki/decisions/deferred.md`.
 pub struct StubPrincipalExtractor;
 
 #[async_trait]
@@ -448,8 +441,8 @@ pub(crate) mod test_helpers {
     }
 
     /// Like [`make_extractor_with`] but seeds the config's admin set
-    /// with the supplied emails. Slice 6 tests use this to assert
-    /// per-request admin derivation works through the cookie path.
+    /// with the supplied emails. Used to assert per-request admin
+    /// derivation works through the cookie path.
     pub fn make_extractor_with_admins(
         store: Arc<MemorySessionStore>,
         admin_emails: &[&str],
@@ -522,11 +515,11 @@ mod tests {
         let p = ext.extract(&parts).await.unwrap();
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
-        // Slice 6: empty admin set in for_tests() = principal not admin.
+        // Empty admin set in for_tests() = principal not admin.
         assert!(!p.is_admin, "no admin set configured = not admin");
     }
 
-    // -- is_admin derivation in cookie path (slice 6) ---------------------
+    // -- is_admin derivation in cookie path -------------------------------
 
     #[tokio::test]
     async fn cookie_extractor_marks_admin_when_email_in_set() {
@@ -644,7 +637,7 @@ mod tests {
         );
     }
 
-    // -- principal_from_claims (slice 4) ---------------------------------
+    // -- principal_from_claims -------------------------------------------
 
     #[test]
     fn principal_from_claims_uses_name_when_present() {
@@ -675,7 +668,7 @@ mod tests {
         assert_eq!(p.display_name, "noname");
     }
 
-    // -- principal_or_rejection_from_claims (slice 5) --------------------
+    // -- principal_or_rejection_from_claims ------------------------------
 
     use std::collections::HashSet;
 
@@ -683,8 +676,8 @@ mod tests {
         values.iter().map(|s| s.to_string()).collect()
     }
 
-    /// Empty admin set — slice 6 callers pass this whenever the test is
-    /// only exercising slice-5 hosted-domain behavior.
+    /// Empty admin set — callers pass this whenever the test is only
+    /// exercising hosted-domain behavior.
     fn no_admins() -> HashSet<String> {
         HashSet::new()
     }
@@ -800,7 +793,7 @@ mod tests {
         }
     }
 
-    // -- is_admin derivation (slice 6) -----------------------------------
+    // -- is_admin derivation ---------------------------------------------
 
     #[test]
     fn principal_is_admin_when_email_in_admin_set() {

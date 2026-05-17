@@ -1,23 +1,14 @@
 /**
- * Live planning-config store. Singleton holding the active
- * {@link PlanningConfig}, persisted to a single localStorage key with a
- * versioned envelope, with a subscribe API so the orchestrator can
- * invalidate its epoch cache when the user twists a knob.
- *
- * Honours principle §4 of `wiki/principles/planning.md`: planning is
- * pure and any state that survives across ticks (or any policy knob
- * the user might twist live) is an explicit input. The configStore is
- * the explicit-state container for those knobs — `plan()` itself
- * stays a function of `(snapshot, config)`.
+ * Singleton store for the active {@link PlanningConfig}. Persisted to
+ * one localStorage key under a versioned envelope; subscribe API so the
+ * orchestrator can invalidate its epoch cache when the user twists a knob.
  *
  * Persistence schema (`localStorage["lucida.planning.config"]`):
  *
  *     { "schemaVersion": 1, "config": { ...PlanningConfig } }
  *
- * On load, a missing key, an unparseable value, or a `schemaVersion`
- * mismatch falls back to {@link DEFAULT_PLANNING_CONFIG} and logs one
- * line. The merge with defaults tolerates partial configs (older
- * persisted snapshots that pre-date a newly-added field).
+ * Missing/unparseable/version-mismatch falls back to defaults with one
+ * log line; partial configs merge over defaults.
  */
 
 import {
@@ -85,8 +76,7 @@ function hydrateFromStorage(): PlanningConfig {
     );
     return { ...DEFAULT_PLANNING_CONFIG };
   }
-  // mergeConfig fills in any fields the persisted snapshot is missing
-  // (e.g. a new lane offset added in a later release).
+  // mergeConfig fills in fields missing from older persisted snapshots.
   return mergeConfig(parsed.config ?? {});
 }
 
@@ -100,9 +90,8 @@ function persistToStorage(config: PlanningConfig): void {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
   } catch {
-    // localStorage can throw (quota exceeded, private browsing). Swallow:
-    // an in-memory config that just doesn't persist is still better than
-    // a thrown error in the UI.
+    // Swallow: in-memory config that doesn't persist beats a thrown
+    // error in the UI (quota exceeded, private browsing, etc.).
   }
 }
 
@@ -128,9 +117,8 @@ function createStore(): ConfigStore {
   const listeners: Listener[] = [];
 
   const fire = () => {
-    // Snapshot the listener list so a subscriber that unsubscribes (or
-    // adds a new subscriber) inside its own handler doesn't mutate the
-    // live array mid-iteration.
+    // Snapshot the list so subscribe/unsubscribe inside a handler
+    // doesn't mutate it mid-iteration.
     for (const l of [...listeners]) {
       try {
         l();
@@ -159,9 +147,7 @@ function createStore(): ConfigStore {
     reset(field?: keyof PlanningConfig): void {
       if (field === undefined) {
         if (isAllDefaults(state)) {
-          // No-op: would not change observable state and would not need
-          // to fire listeners. Keep the same reference so subscribers
-          // that compare by identity aren't tricked.
+          // Same reference so identity-comparing subscribers aren't tricked.
           clearStorage();
           return;
         }
@@ -197,10 +183,5 @@ function createStore(): ConfigStore {
   };
 }
 
-/**
- * The application-wide planning config. Imported by the orchestrator
- * (read on every full plan tick + subscribed to so config tweaks
- * invalidate the epoch cache) and by the DebugPanel's Config tab
- * (read for rendering, written via `set`/`reset`).
- */
+/** Application-wide planning config singleton. */
 export const configStore: ConfigStore = createStore();

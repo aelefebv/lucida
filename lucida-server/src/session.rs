@@ -59,7 +59,6 @@ impl Session {
         self.seq
     }
 
-    /// Add a client with default presence.
     pub fn add_client(&mut self, id: ClientId) -> PresenceState {
         let presence = PresenceState {
             client_id: id,
@@ -90,7 +89,6 @@ impl Session {
         affected
     }
 
-    /// Update a client's presence state.
     pub fn update_presence(
         &mut self,
         id: ClientId,
@@ -105,14 +103,12 @@ impl Session {
         }
     }
 
-    /// Update a client's cursor position.
     pub fn update_cursor(&mut self, id: ClientId, position: Option<[f64; 2]>) {
         if let Some(presence) = self.clients.get_mut(&id) {
             presence.cursor = position;
         }
     }
 
-    /// Update a client's dataset presence.
     pub fn update_dataset_presence(
         &mut self,
         id: ClientId,

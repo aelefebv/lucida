@@ -70,10 +70,10 @@ export function useBridge({
 }: Params) {
   const sessionRef = useRef<Session | null>(null);
   /** Mirrors `sessionRef.current?.bridge` as React state so consumers
-   *  (slice 4: `useBookmarks` for `bookmark_changed` subscriptions)
-   *  re-run effects when the bridge becomes available. The bridge
-   *  is constructed once inside the wasm-ready effect; we set this
-   *  state immediately after assigning `sessionRef.current`. */
+   *  (e.g. `useBookmarks` for `bookmark_changed` subscriptions) re-run
+   *  effects when the bridge becomes available. The bridge is constructed
+   *  once inside the wasm-ready effect; we set this state immediately
+   *  after assigning `sessionRef.current`. */
   const [bridge, setBridge] = useState<Bridge | null>(null);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
@@ -216,8 +216,8 @@ export function useBridge({
             sessionRef.current?.ensureAssetCatalog()?.applyInitial(cmd.manifest.dataset_id, catalog);
 
             // Auto-register browser-authored derived layouts. RegisterLayout
-            // is idempotent in lucida-core (issue #425), so peers that
-            // already registered the same id don't accumulate duplicates.
+            // is idempotent in lucida-core, so peers that already registered
+            // the same id don't accumulate duplicates.
             const registry = sessionRef.current?.ensureLayoutRegistry();
             if (registry) {
               const sendCmd = (json: string) => sessionRef.current?.bridge.sendCommand(json);

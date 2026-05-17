@@ -3,10 +3,8 @@
  *
  * When a `WellProxy3D` upload lands for a well, every field-mode entity
  * descended from that well needs its `wellProxyHandle` updated so the
- * shader can fall back to the parent's proxy when the field's own detail
- * chunks (and its `FieldProxy3D`, if any) haven't been delivered yet.
- *
- * Extracted from `gpu.worker.ts:handleProxyAssetData` (Slice 5).
+ * shader can fall back to the parent's proxy when the field's own
+ * detail chunks (and its `FieldProxy3D`, if any) haven't arrived.
  */
 
 import type { ProxyHandle } from "../proxyAtlas.ts";

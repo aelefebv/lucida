@@ -64,10 +64,6 @@ pub fn generate_proxy(
     }
 }
 
-// =============================================================================
-// FieldProxy3D
-// =============================================================================
-
 fn downsample_field(
     spec: &ProxySpec,
     content: &DatasetManifest,
@@ -195,10 +191,6 @@ fn box_bounds(oi: u32, out_size: u32, in_size: u32) -> (u32, u32) {
     }
     (lo, hi)
 }
-
-// =============================================================================
-// WellProxy3D
-// =============================================================================
 
 fn aggregate_well(
     spec: &ProxySpec,
@@ -405,10 +397,6 @@ fn find_field_to_well(
         .map(|edge| edge.transform.clone())
         .unwrap_or_else(VoxelTransform::identity)
 }
-
-// =============================================================================
-// Affine math (column-major 4×4)
-// =============================================================================
 
 /// Multiply two column-major 4x4 matrices. Returns `lhs * rhs`.
 fn compose(lhs: &VoxelTransform, rhs: &VoxelTransform) -> VoxelTransform {

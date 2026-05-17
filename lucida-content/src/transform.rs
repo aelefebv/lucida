@@ -12,8 +12,7 @@ use crate::id::EntityId;
 /// [`VoxelTransform`]. The canonical constructor is
 /// [`VoxelTransform::from_voxel_translation_2d`].
 ///
-/// This contract was previously documentation-only; it is now enforced by
-/// the type. See PRD #418.
+/// This contract is enforced by the type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformEdge {
     pub from: EntityId,

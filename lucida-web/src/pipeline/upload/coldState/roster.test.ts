@@ -1,8 +1,6 @@
 /**
- * Unit tests for `buildRoster`.
- *
- * Slice 6c (PRD #607): pure builder that walks the active set once,
- * producing both the per-dataset `MemberRosterEntry[]` and the
+ * Unit tests for `buildRoster` — pure builder that walks the active set
+ * once, producing both the per-dataset `MemberRosterEntry[]` and the
  * entityId-keyed model+inverse matrices map consumed by `buildColdState`.
  *
  * Behaviour under test:

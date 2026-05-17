@@ -1,7 +1,8 @@
-//! PRD #447 Slice 1 end-to-end: open a synthesized 6D OME-Zarr with a
-//! blosc-compressed chunk, resolve the canonical chunk key to the on-disk
-//! path (which has a `0` injected at the pinned `m` position), decompress,
-//! and verify the resulting bytes are the canonical-5D `m=0` slice.
+//! End-to-end test: open a synthesized 6D OME-Zarr with a blosc-
+//! compressed chunk, resolve the canonical chunk key to the on-disk
+//! path (which has a `0` injected at the pinned `m` position),
+//! decompress, and verify the resulting bytes are the canonical-5D
+//! `m=0` slice.
 //!
 //! Fixture is built inline with `serde_json::json!` + `fs::write` (matching
 //! the `lucida-store::import` test pattern). The chunk's blosc bytes are
@@ -185,7 +186,7 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
         "decoded bytes should equal the on-disk byte size before slicing",
     );
 
-    // PRD #451: slice down via slice_range. For pinned-axis-only fixtures
+    // Slice down via slice_range. For pinned-axis-only fixtures
     // (chunk_size 1 on t and c), this is `(0, canonical_byte_size)` —
     // equivalent to the old `bytes.truncate(canonical_byte_size)`.
     let (offset, size) = level_info.chunk_byte_layout.slice_range(0, 0);

@@ -1,9 +1,8 @@
 //! Hourly background sweep of expired session and pending-auth rows.
 //!
-//! Slice 8 (PRD #455 §"Operational hygiene") closes the loop on storage
-//! growth: every hour the task wakes, asks each store to drop rows past
-//! their respective windows, and emits a `auth.session.cleanup` debug
-//! event with the per-table delete counts. Without this, a long-running
+//! Every hour the task wakes, asks each store to drop rows past their
+//! respective windows, and emits a `auth.session.cleanup` debug event
+//! with the per-table delete counts. Without this, a long-running
 //! deployment accumulates dead rows forever (the extractor refuses to
 //! issue a principal for an expired row, so they're invisible to the app
 //! but live forever in the database).
@@ -48,7 +47,7 @@ use super::session_store::LoginSessionStore;
 /// well before the hour-long interval would.
 pub const STARTUP_DELAY: Duration = Duration::from_secs(60);
 
-/// Cadence between sweeps after the warm-up. PRD #455 specifies hourly.
+/// Cadence between sweeps after the warm-up.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Hard upper bound on a `pending_auth` row's lifetime. Pending rows

@@ -275,7 +275,7 @@ export class RenderClient implements UploadClient {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
       // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-      // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+      // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
       const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength) as ArrayBuffer;
       transferList.push(buf);
       return { data: buf, dataType: "uint16", x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };

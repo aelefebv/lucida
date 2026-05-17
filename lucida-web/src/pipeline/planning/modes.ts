@@ -1,16 +1,9 @@
 /**
- * Planning domain — promotion-mode decision logic.
- *
- * Three-tier per-well decision:
- *   - Group fields by parent well (or treat plain Images as singletons).
- *   - For each group, pick a {@link ResolvedMode} from the group's
- *     projected diagonal with hysteresis against the previous active set.
- *   - Catalog-aware degrade: if the chosen mode requires a proxy that
- *     isn't advertised, fall through to the next finer mode.
- *   - Emit one {@link ActiveSetEntry} per well (`well-as-proxy`) or one
- *     per visible field (field modes).
- *
- * See ADR 0029.
+ * Promotion-mode decision logic. Three-tier per-well:
+ * group fields → pick {@link ResolvedMode} by projected diagonal with
+ * hysteresis → catalog-aware degrade if required proxy is missing →
+ * emit one {@link ActiveSetEntry} per well (well-as-proxy) or per
+ * visible field. See ADR 0029.
  */
 
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";

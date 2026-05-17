@@ -1,11 +1,11 @@
 /**
  * Per-dataset entity descriptor buffer.
  *
- * Holds the geometric/LOD/proxy fields the shader used to read out of
- * per-frame uniforms: model matrix + inverse, per-LOD chunk/grid/level
- * dims with indirection offsets, proxy handles (pool index + slot
- * index), proxy slot dims, and per-channel display state
- * (contrast/gamma/opacity/colormapLutIndex/channelMask).
+ * Holds the geometric/LOD/proxy/display fields the shader reads per
+ * sample: model matrix + inverse, per-LOD chunk/grid/level dims with
+ * indirection offsets, proxy handles (pool index + slot index), proxy
+ * slot dims, and per-channel display state (contrast/gamma/opacity/
+ * colormapLutIndex/channelMask).
  *
  * The descriptor lives entirely in worker-side state. Orchestrator and
  * worker converge on entity indices by construction — both walk
@@ -13,11 +13,10 @@
  * (see {@link iterateColdMembers}), so no readback is needed.
  *
  * Display-state changes (contrast slider, colormap dropdown, etc.)
- * bump `epochs.selection` in the WASM scene. The orchestrator detects
- * this via its standard epoch-cache check, re-runs `plan()`, re-emits
- * cold state, and the worker rebuilds the descriptor buffer.
- * Deliberately no separate "descriptorPatch" message — display-state
- * changes flow through the same cold-state seam as everything else.
+ * bump `epochs.selection`. The orchestrator's epoch-cache check re-runs
+ * `plan()`, re-emits cold state, and the worker rebuilds the descriptor
+ * buffer — display-state changes flow through the cold-state seam
+ * rather than a dedicated patch message.
  */
 
 import type {
@@ -108,9 +107,9 @@ export interface EntityDescriptorIndex {
  *   - Single-channel well-as-proxy:   `entry.entityId`
  *   - Multi-channel well-as-proxy:    `${entry.entityId}:ch${channel}`
  *
- * Slice 11 (PRD #622): `ColdStateActiveEntry` is now a discriminated
- * union on `kind`; narrowing through `entry.kind` makes the
- * well-as-proxy variant TS-visible (it has no `imageId`).
+ * `ColdStateActiveEntry` is a discriminated union on `kind`; narrowing
+ * through `entry.kind` makes the well-as-proxy variant TS-visible (it
+ * has no `imageId`).
  */
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,

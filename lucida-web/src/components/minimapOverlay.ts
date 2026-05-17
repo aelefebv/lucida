@@ -3,7 +3,7 @@ import { transformPoint, projectToCanvas } from "./minimapMath.ts";
 import { drawOrientationCube } from "./orientationCube.ts";
 import { drawFrustumIntersection } from "./frustumOverlay.ts";
 
-// --- Bounding box ---
+// Bounding box
 
 const CUBE_EDGES: [number, number][] = [
   [0, 1], [2, 3], [4, 5], [6, 7], // X edges
@@ -41,7 +41,7 @@ function drawBoundingBox(
   ctx.stroke();
 }
 
-// --- Axis arrows ---
+// Axis arrows
 
 function drawAxisArrows(
   ctx: CanvasRenderingContext2D,
@@ -107,7 +107,7 @@ function drawAxisArrows(
   }
 }
 
-// --- Slice plane (volume mode, shows current Z) ---
+// Slice plane (volume mode, shows current Z)
 
 function drawSlicePlane(
   ctx: CanvasRenderingContext2D,
@@ -146,7 +146,7 @@ function drawSlicePlane(
   ctx.stroke();
 }
 
-// --- Slice viewport rectangle ---
+// Slice viewport rectangle
 
 function drawSliceViewportRect(
   ctx: CanvasRenderingContext2D,
@@ -192,7 +192,7 @@ function drawSliceViewportRect(
   ctx.stroke();
 }
 
-// --- Entry point ---
+// Entry point
 
 export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
   const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, currentZ, datasetDims, sliceViewBounds, mainInvViewProj, theta, phi } = data;

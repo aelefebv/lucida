@@ -2,10 +2,8 @@
  * Suite C — chunk-upload eviction policy + multi-member demux.
  *
  * Exercises `handleVolumeChunkData` / `handleSliceChunkData` against
- * mock-device atlases to lock in the behaviors that Slice 6 then
- * preserves while collapsing the duplicated `chunkDistSq` /
- * `findFarthestSlot` / `remapIndirection` implementations into shared
- * kernels.
+ * mock-device atlases via the shared `chunkDistSq` / `findFarthestSlot`
+ * / `remapIndirection` kernels.
  *
  * Invariants pinned:
  *  - Eviction picks the farthest cached chunk from the per-entity ray-hit
@@ -202,10 +200,10 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
   };
 }
 
-// Slice 8 moved every previously-module-level atlas / eviction Map onto
-// `ctx.state` via `RendererState`. Each test creates its own ctx via
-// `makeMockCtx`, so no cross-test cleanup is required. `beforeEach` is
-// retained as a hook surface in case future tests need to re-spy mocks.
+// Every atlas / eviction Map lives on `ctx.state` via `RendererState`.
+// Each test creates its own ctx via `makeMockCtx`, so no cross-test
+// cleanup is required. `beforeEach` is retained as a hook surface in
+// case future tests need to re-spy mocks.
 beforeEach(() => {});
 
 // ---------------------------------------------------------------------------

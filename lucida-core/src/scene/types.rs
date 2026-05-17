@@ -157,7 +157,7 @@ pub struct DocumentState {
     pub active_layout_ids: HashMap<DatasetId, LayoutId>,
     /// Per-dataset asset catalog (proxy availability). Populated via
     /// `DatasetOpened.catalog` on open and incrementally via
-    /// `DocumentCommand::ApplyAssetCatalogDelta`. Empty in S3.
+    /// `DocumentCommand::ApplyAssetCatalogDelta`.
     #[serde(default)]
     pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
 }
@@ -210,7 +210,7 @@ impl DocumentState {
             DocumentCommand::DatasetOpened(event) => {
                 let dataset_id = event.manifest.dataset_id.clone();
                 self.register_dataset(event.manifest);
-                // Seed the catalog from the open event. Empty in S3.
+                // Seed the catalog from the open event.
                 self.asset_catalogs.insert(dataset_id, event.catalog);
             }
             DocumentCommand::RemoveDataset { id } => {

@@ -1,13 +1,7 @@
 /**
- * Planning domain — lane emission helpers and priority computation.
- *
- * Translates active-set entries and minimap-pending coords into
- * {@link ChunkRequest} / {@link ProxyRequest} streams, one per planning
- * lane. The lane offsets and priority weights live on
- * {@link PlanningConfig} so they can be live-tuned. `computePriority`
- * is the shared formula every emitter consumes.
- *
- * See ADR 0029.
+ * Lane emission helpers + priority computation. Translates active-set
+ * entries and minimap-pending coords into {@link ChunkRequest} /
+ * {@link ProxyRequest} streams, one per lane. See ADR 0029.
  */
 
 import { Axis } from "../../axes.ts";
@@ -25,17 +19,10 @@ import type {
   SelectionState,
 } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// computePriority()
-// ---------------------------------------------------------------------------
-
 /**
- * Compute a numeric priority for a chunk request.
- *
- * Lower values = more urgent.  The lane offset separates the lanes
- * (detail < proxy < prefetch < overview), while importance and distance
- * provide intra-lane ordering. Both coefficients live on
- * {@link PlanningConfig} so they can be twisted live.
+ * Numeric priority for a chunk request. Lower = more urgent. Lane
+ * offset separates lanes (detail < proxy < prefetch < overview);
+ * importance and distance order within a lane.
  */
 function computePriority(
   laneOffset: number,
@@ -49,10 +36,6 @@ function computePriority(
     distanceFromCenter * config.distanceWeight
   );
 }
-
-// ---------------------------------------------------------------------------
-// Lane emission helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Minimap lane — its own dedicated highest-priority lane (see ADR
@@ -118,9 +101,8 @@ export function emitDetailLane(
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
     if (entry.kind === "well-as-proxy") {
-      // Single proxy request per visible channel; no chunks.
-      // `imageId: ""` matches the `well-as-proxy` convention from the
-      // pre-discrimination shape — wells have no single owning image.
+      // `imageId: ""` matches the pre-discrimination convention — wells
+      // have no single owning image.
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
           datasetId,
@@ -135,14 +117,12 @@ export function emitDetailLane(
       continue;
     }
 
-    // Invisible entries contribute neither chunks nor proxies.
     if (entry.kind === "invisible") continue;
 
     // Narrowed: entry is FieldEntry below this point.
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
-    // Field-mode entries: emit chunk requests at detail priority.
     const chunks = iterateChunks(
       entity,
       entry,
@@ -163,7 +143,6 @@ export function emitDetailLane(
       allRequests.push(req);
     }
 
-    // Field proxy fallback (per visible channel).
     if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
@@ -178,15 +157,11 @@ export function emitDetailLane(
       }
     }
 
-    // Parent-well proxy (only for proxy-fallback mode, deduped per
-    // (wellId, t, c)). At `fields-with-detail` zoom the chunk path is
-    // expected to keep up — no extra parent fetch.
-    //
-    // Only `FieldSnapshot` carries a `parentId`, so narrow on
-    // `kind === "Field"` first. Field-mode active entries map to
-    // Field entities (image-mode datasets have no parent well to fall
-    // back to), so a non-Field here is a producer invariant violation
-    // we skip silently.
+    // Parent-well proxy (only for proxy-fallback mode; at
+    // `fields-with-detail` zoom the chunk path keeps up). Dedup per
+    // (wellId, t, c). Narrow on `kind === "Field"` because only
+    // `FieldSnapshot` carries a `parentId`; a non-Field here is a
+    // producer invariant violation we skip silently.
     if (
       entry.mode === "fields-with-proxy-fallback" &&
       entry.wellProxyAvailable &&
@@ -227,8 +202,6 @@ export function emitPrefetchLane(
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
-    // Only field entries get prefetch — well-as-proxy needs no chunks
-    // and invisible entries contribute none.
     if (entry.kind !== "field") continue;
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
@@ -309,10 +282,6 @@ export function emitOverviewLane(
   }
 }
 
-// ---------------------------------------------------------------------------
-// chunkDistanceFromCenter()
-// ---------------------------------------------------------------------------
-
 /**
  * Compute distance from a chunk's world-space center to the view center.
  *
@@ -345,7 +314,6 @@ function chunkDistanceFromCenter(
     centerZ = (region.zRangeVox[0] + region.zRangeVox[1]) / 2;
   }
 
-  // Compute chunk world size at this level via the shared helper.
   const level0 = entity.levels[0];
   const geo = entity.levels[req.level];
   let cwX = 1;

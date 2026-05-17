@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 //
-// Component test for ProfileMenu (slice 3, issue #459). Mocks the
-// `useAuthSession` hook so we can drive the principal + signOut from
-// the test without standing up the whole AuthGate provider tree (and
-// the whoami fetch on mount that comes with it).
+// Component test for ProfileMenu. Mocks the `useAuthSession` hook so
+// we can drive the principal + signOut from the test without standing
+// up the whole AuthGate provider tree (and the whoami fetch on mount
+// that comes with it).
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act, render, screen, cleanup, fireEvent } from "@testing-library/react";

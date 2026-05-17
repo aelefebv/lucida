@@ -1,11 +1,8 @@
 /**
  * Proxy asset upload orchestrator.
  *
- * Extracted from `gpu.worker.ts:handleProxyAssetData` (Slice 5). Slice 8
- * promoted every previously-module-level registry onto
- * `WorkerCtx.state`; this function reads + mutates them via
- * `ctx.state.*` directly instead of taking a `ProxyUploadRegistries`
- * parameter. Also reads `ctx.state.currentEpochs` for staleness checks.
+ * Reads + mutates per-worker registries via `ctx.state.*` and uses
+ * `ctx.state.currentEpochs` for staleness checks.
  *
  * Owns the GPU upload path for a delivered proxy asset:
  *
@@ -49,9 +46,7 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
 /**
  * Default capacity per proxy pool. 64 keeps memory modest (a 64³ slot
  * × 64 = 16 MiB per pool at u16) while comfortably covering visible
- * wells/fields in typical plate views. Mirrors the value in
- * `gpu.worker.ts` (intentionally duplicated until Slice 10 centralizes
- * hardware/limit constants).
+ * wells/fields in typical plate views.
  */
 const PROXY_POOL_CAPACITY = 64;
 

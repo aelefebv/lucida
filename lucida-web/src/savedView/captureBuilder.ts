@@ -40,7 +40,7 @@ export interface CaptureInputs {
   urlByDatasetId: UrlByDatasetId;
   /** Per-dataset auto-contrast flag, sourced from
    *  `useDatasetSettings.autoContrastMap`. Optional — omitted when no
-   *  per-dataset preference has been set (slice-1 callers). */
+   *  per-dataset preference has been set. */
   autoContrastByDatasetId?: AutoContrastByDatasetId;
 }
 

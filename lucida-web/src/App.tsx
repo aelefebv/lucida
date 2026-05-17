@@ -71,7 +71,7 @@ function App() {
     onOpenDatasetFailed: (url: string, err: string) => void;
   } | null>(null);
 
-  // --- Domain hooks (order matters: earlier hooks use refs for later hooks' values) ---
+  // Domain hooks (order matters: earlier hooks use refs for later hooks' values).
 
   const dims = useDimensions({
     wasmSceneRef: scene.wasmSceneRef,
@@ -224,7 +224,7 @@ function App() {
     },
   };
 
-  // --- Side-effect hooks ---
+  // Side-effect hooks.
 
   // Expose the orchestrator + cpuCache on `window.__orch` (also aliased
   // as `__lucidaOrch`) so the dev console can call

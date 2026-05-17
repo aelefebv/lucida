@@ -1,10 +1,6 @@
 /**
  * Tests for `computeScissorRect`.
  *
- * Slice 6f (PRD #607) moved this helper from `volumePath.ts` into
- * `pipeline/upload/scissor.ts`. Tests were authored as characterization
- * tests in Slice 1 and migrated alongside the function.
- *
  * Contract under test:
  *   - Project all 8 corners of `[0,1]^3` through `model` then `viewProj`.
  *   - If any corner has `clipW <= 0` (behind camera) → conservative

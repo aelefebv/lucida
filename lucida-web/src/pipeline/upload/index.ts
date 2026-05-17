@@ -1,6 +1,5 @@
 /**
  * Barrel for `pipeline/upload/` — the upload-phase (CPU → GPU hand-off) modules.
- * Populated incrementally across PRD #607's slices.
  */
 
 export {
@@ -61,10 +60,6 @@ export {
   type RunProxyResendPassArgs,
 } from "./delivery/resend.ts";
 
-// Telemetry collaborators (Slice 9 of PRD #607). See `Orchestrator` for
-// wiring; consumers outside the orchestrator don't typically need these
-// directly, but the barrel re-exports them so the upload package has a
-// single import surface.
 export {
   SustainedCondition,
   ConsecutiveTickDetector,
@@ -75,14 +70,8 @@ export {
   type ColdStateCauseKey,
 } from "./telemetry/coldState.ts";
 
-// Uploader (Slice 10 of PRD #607). Owns the upload-phase concerns the
-// pre-refactor Orchestrator god-class also carried alongside planning;
-// see `uploader.ts` JSDoc for the planner → uploader seam.
 export { Uploader } from "./uploader.ts";
 
-// UploadClient interface (Slice 11 of PRD #607). Narrow facet of
-// `RenderClient` that the upload phase consumes; lets dispatch/drain/
-// resend depend on the smaller surface. See `uploadClient.ts` JSDoc.
 export type {
   UploadClient,
   ChunksEvictedHandler,

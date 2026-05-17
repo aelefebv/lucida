@@ -1,10 +1,10 @@
 //! `LoginSessionStore` trait and the row type it returns.
 //!
-//! Slice 2 (PRD #455) introduces persistent login sessions. The trait
-//! is the seam between the cookie-based extractor (which only knows how
-//! to look up by ID) and the storage layer (SQLite in production, an
-//! in-memory map for unit tests). The trait is `async_trait`-annotated
-//! so it's object-safe; the extractor holds `Arc<dyn LoginSessionStore>`.
+//! The trait is the seam between the cookie-based extractor (which
+//! only knows how to look up by ID) and the storage layer (SQLite in
+//! production, an in-memory map for unit tests). The trait is
+//! `async_trait`-annotated so it's object-safe; the extractor holds
+//! `Arc<dyn LoginSessionStore>`.
 //!
 //! See `wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md`
 //! and `wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md`
@@ -22,9 +22,8 @@ use thiserror::Error;
 /// is bumped on every successful lookup.
 ///
 /// `email`, `display_name`, and `picture_url` are denormalized copies
-/// of the identity at session-creation time. Slice 4 lands the OAuth
-/// callback that populates them from Google; for slice 2 the dev-login
-/// endpoint is the only writer.
+/// of the identity at session-creation time. The OAuth callback
+/// populates them from Google.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginSession {
     pub id: String,
@@ -70,13 +69,12 @@ pub trait LoginSessionStore: Send + Sync + 'static {
     /// only ever monotonically increases under normal use.
     async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError>;
 
-    /// Remove a single session by id. Used by the logout flow (slice 3)
-    /// and by tests; idempotent (no error if the row is already gone).
+    /// Remove a single session by id. Used by the logout flow and by
+    /// tests; idempotent (no error if the row is already gone).
     async fn delete(&self, id: &str) -> Result<(), SessionStoreError>;
 
     /// Bulk-delete every session whose `expires_at` is `<= now`.
-    /// Returns the number of rows deleted. The actual sweep schedule
-    /// lands in slice 8; the trait carries the method now so the
-    /// SQLite implementation gets exercised in tests.
+    /// Returns the number of rows deleted. Called from the periodic
+    /// cleanup sweep.
     async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, SessionStoreError>;
 }

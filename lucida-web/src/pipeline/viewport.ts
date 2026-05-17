@@ -1,11 +1,7 @@
 /**
- * Viewport-derived visible-region descriptor consumed by planning and the
- * renderer to clip / cull / sort content. Computed by WASM each tick from
- * the current camera + selection state.
- *
- * Moved from `pipeline/planning/index.ts` per ADR 0028 — the type was
- * always a viewport concept, not a planning concept; it now lives in a
- * file whose name reflects what it is.
+ * Viewport-derived visible-region descriptor. Computed by WASM each tick
+ * from camera + selection; consumed by planning and the renderer for
+ * clip / cull / sort. See ADR 0028.
  */
 export interface VisibleRegion {
   /** [minX, minY, maxX, maxY] in voxel coordinates. */

@@ -16,10 +16,6 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { ProxyHeaderJs } from "./contentSource.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
 export interface CpuCacheConfig {
   mainBudgetBytes: number;
   overviewBudgetBytes: number;
@@ -32,10 +28,6 @@ export interface CpuCacheConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
 }
-
-// ---------------------------------------------------------------------------
-// Lanes + tiers
-// ---------------------------------------------------------------------------
 
 /**
  * Logical lane each request travels on. `minimap` and `overview` share
@@ -52,10 +44,6 @@ export type Lane = "minimap" | "detail" | "prefetch" | "overview";
  */
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
-// ---------------------------------------------------------------------------
-// Ready deliveries
-// ---------------------------------------------------------------------------
-
 /**
  * A delivery from the CPU cache that the orchestrator routes to the GPU
  * worker. The discriminated union covers both regular chunks
@@ -66,7 +54,6 @@ export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 export type ReadyDelivery = ReadyChunkDelivery | ReadyProxyDelivery;
 
 export interface ReadyChunkDelivery {
-  /** Discriminant. */
   kind: "chunk";
   entityId: string;
   imageId: string;
@@ -100,10 +87,6 @@ export interface ReadyProxyDelivery {
   data: ArrayBuffer;
   epochs: SceneEpochs;
 }
-
-// ---------------------------------------------------------------------------
-// Cache entry
-// ---------------------------------------------------------------------------
 
 /**
  * Internal cache entry stored by `ChunkStore` (both main + overview).
@@ -143,10 +126,6 @@ export interface CacheEntry {
    */
   lastSeenTick: number;
 }
-
-// ---------------------------------------------------------------------------
-// Telemetry shapes
-// ---------------------------------------------------------------------------
 
 export interface TierResidencyEntry {
   count: number;

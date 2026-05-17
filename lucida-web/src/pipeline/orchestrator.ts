@@ -1,19 +1,10 @@
 /**
- * Orchestrator — the planner role of what used to be a single 2027-LOC
- * god class. Drives per-tick planning: builds the `PlanningSnapshot`
- * from live WASM scene state, calls `plan()` per dataset, caches the
- * result on the epoch ladder, and routes the output through an
- * {@link Uploader} for cold-state emission and chunk delivery.
+ * Orchestrator — planner role. Builds the `PlanningSnapshot` from live
+ * WASM scene state per tick, calls `plan()` per dataset, caches on the
+ * epoch ladder, and routes output through {@link Uploader} for
+ * cold-state emission and chunk delivery.
  *
- * Upload-side concerns (cold-state assembly, view hot-state, drain /
- * resend / dispatch, delivery tracking, worker feedback, telemetry)
- * live on the {@link Uploader} after Slice 10 of PRD #607. The
- * Orchestrator owns one Uploader per render loop and calls dedicated
- * Uploader methods inline during `planAndFetch` rather than passing a
- * wide "tick bundle" struct (see uploader.ts for the rationale).
- *
- * See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`
- * for the design rationale.
+ * See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`.
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
@@ -38,11 +29,7 @@ import type {
 import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
 
-// Re-export so existing call sites that imported `MinimapChunkCoord`
-// from the orchestrator (e.g. `slicePath.ts`, `volumePath.ts`,
-// `renderLoop.ts`, `minimapPath.ts`) keep working unchanged. The
-// canonical declaration lives in `pipeline/planning/index.ts` since
-// the type is part of the planning snapshot's public shape.
+// Re-export: canonical declaration lives in `pipeline/planning/index.ts`.
 export type { MinimapChunkCoord } from "./planning/index.ts";
 import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
@@ -107,42 +94,24 @@ export interface OrchestratorResult {
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
-// `synthesizeWellRosterEntry` moved to `upload/coldState/roster.ts` in
-// Slice 6b of PRD #607. Re-exported here so existing import sites stay
-// working; new call sites should import directly from
-// `pipeline/upload/coldState/roster.ts` (or via `pipeline/upload/`).
+// Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
 export { synthesizeWellRosterEntry } from "./upload/coldState/roster.ts";
 
 export class Orchestrator {
-  /**
-   * Upload-phase coordinator. Holds delivery tracking, telemetry,
-   * cold/hot-state emission, drain/resend dispatch, and worker feedback.
-   * Constructed externally (by `RenderLoop`) and threaded in so the
-   * upload-side state survives across orchestrator-only lifecycles
-   * (today there's only one Orchestrator per loop, but the split keeps
-   * the seam honest).
-   */
   private readonly uploader: Uploader;
 
   /**
-   * Per-dataset opaque planner carry-forward state. The orchestrator
-   * stores `result.nextState` after each `plan()` call and threads the
-   * matching entry back as the `state` argument on the next tick.
-   *
-   * The seam between the planner and its caller is the
-   * {@link PlanningState} container; future planner state (per-well
-   * stickiness, anticipation hints) extends {@link PlanningState}
-   * without touching the orchestrator.
+   * Per-dataset opaque planner carry-forward state. Stores
+   * `result.nextState` from each `plan()` call and threads it back as
+   * `state` on the next tick.
    */
   private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
   private cachedResult: OrchestratorResult | null = null;
   /**
-   * Snapshot of debug member stats produced during the most recent
-   * non-cache-hit planning run. Replayed onto `debugStats` when an
-   * epoch cache hit returns early; otherwise the panel would show
-   * `Visible: 0 / 0` for every idle tick even though the same N
-   * members are still being rendered. See DebugPanel "Render" tab.
+   * Debug member stats from the most recent non-cache-hit run. Replayed
+   * onto `debugStats` on epoch cache hits so the panel doesn't flash
+   * `Visible: 0 / 0` between idle ticks.
    */
   private cachedDebugMemberSnapshot: {
     visibleMembers: number;
@@ -153,51 +122,23 @@ export class Orchestrator {
   } | null = null;
   private requestEpoch = 0;
   private _lastRequests: ChunkRequest[] = [];
-  /**
-   * Per-dataset snapshot of the most recent visible region. Keyed by
-   * datasetId. Consumed by the `orchDebug` aggregator (which iterates
-   * every dataset). Cleared per-dataset by {@link clearMemberResources}.
-   */
+  /** Per-dataset snapshot of the most recent visible region. Consumed by `orchDebug`. */
   private _lastVisibleRegion = new Map<string, VisibleRegion>();
-  /**
-   * Per-dataset snapshot of the most recent entity list. Keyed by
-   * datasetId. Same shape and lifecycle as {@link _lastVisibleRegion}.
-   */
+  /** Per-dataset snapshot of the most recent entity list. */
   private _lastEntities = new Map<string, EntitySnapshot[]>();
-  /**
-   * Per-dataset cached-key counts. Outer key is datasetId; inner map
-   * is entityId → number of CpuCache-cached chunk keys. Consumed by
-   * the `orchDebug` aggregator.
-   */
+  /** Per-dataset entityId → number of CpuCache-cached chunk keys. */
   private _lastCachedKeyCounts = new Map<string, Map<string, number>>();
-  /**
-   * Per-dataset snapshot of the most recent full `plan()` output. Held so
-   * the DebugPanel "dump" buttons can print all datasets, not just the
-   * last one in iteration order. Cleared per-dataset by
-   * {@link clearMemberResources}.
-   */
+  /** Per-dataset snapshot of the most recent full `plan()` output. */
   private _lastPlanByDataset = new Map<string, RequestPlan>();
 
-  /**
-   * Unsubscribe from the planning configStore. Called from {@link dispose}
-   * so the orchestrator doesn't leak subscriptions in tests that
-   * construct it standalone. The render loop singleton lives for the app
-   * lifetime so `dispose` is rarely needed in production.
-   */
   private configStoreUnsub: () => void;
 
   constructor(uploader: Uploader) {
     this.uploader = uploader;
-    // Subscribe to live planning-config changes. A config tweak doesn't
-    // bump any WASM epoch, so without this hook the orchestrator's
+    // Config tweaks don't bump any WASM epoch, so without this hook the
     // epoch fast-path would keep returning the cached plan and the
     // user's slider would have no visible effect until something else
-    // (camera motion, selection change) invalidated the cache.
-    //
-    // The render loop separately calls `markInteractiveDirty()` from
-    // its own configStore subscription (so a frame is requested
-    // promptly); here we just clear the cache so that frame produces a
-    // fresh plan from the new config values.
+    // invalidated the cache.
     this.configStoreUnsub = configStore.subscribe(() => {
       this.lastEpochs = null;
       this.cachedResult = null;
@@ -232,9 +173,7 @@ export class Orchestrator {
     };
 
     // Diff against last epochs — drives both the cache-hit decision and
-    // the per-epoch cause attribution we publish to coldState telemetry.
-    // The first call sees `lastEpochs == null` and falls through to
-    // rebuild with empty causes (init has no causes to attribute).
+    // per-epoch cause attribution published to coldState telemetry.
     const hasPrior = this.lastEpochs !== null && this.cachedResult !== null;
     let isHit = false;
     const causes: ColdStateCauseKey[] = [];
@@ -268,12 +207,9 @@ export class Orchestrator {
     }
 
     // Cold-state rebuild path. Drop worker-rejection state on both
-    // sides — the camera, active set, or selection has shifted enough
-    // that previously-too-far chunks may now fit. The Uploader's
-    // `onPlanRebuildStart` clears chunk sent / rejected / wid-to-entity
-    // tracking in one shot; the per-dataset loop below re-populates
-    // wid→entity from the new requests via `recordPlanForDataset`. Proxy
-    // tracking survives — worker proxy pools persist across cold state.
+    // sides — camera/active-set/selection has shifted enough that
+    // far-rejected chunks may now fit. Proxy tracking survives —
+    // worker proxy pools persist across cold state.
     this.uploader.onPlanRebuildStart();
     ctx.cpuCache.clearRejected();
 
@@ -281,10 +217,8 @@ export class Orchestrator {
     const settings = getSceneSettings(ctx.scene);
     const multiChannel = ctx.scene.multi_channel();
 
-    // Read the live config once per tick. Holding a single reference keeps
-    // every dataset in this rebuild in sync even if a UI knob fires between
-    // dataset iterations (the subscriber-side cache invalidation will
-    // re-rebuild on the next tick from the new value).
+    // Read once per tick so all datasets in this rebuild see the same
+    // config even if a UI knob fires between dataset iterations.
     const planningConfig = configStore.get();
 
     // Step 3 — Per-dataset loop
@@ -318,10 +252,7 @@ export class Orchestrator {
       if (!built) continue;
       const { snapshot, entities, visibleRegion, selection } = built;
 
-      // 3c. Track per-entity cache occupancy for telemetry. Planning no
-      // longer filters cached chunks (CpuCache.submit() refreshes them
-      // and dedups internally), so _lastFilteredRequests sees every
-      // requested chunk and the re-send loop can find any of them.
+      // 3c. Track per-entity cache occupancy for telemetry.
       const cachedKeyCountsForDataset = new Map<string, number>();
       for (const entity of entities) {
         const cachedKeys = ctx.cpuCache.snapshot().cached.get(entity.entityId);
@@ -329,9 +260,8 @@ export class Orchestrator {
       }
       this._lastCachedKeyCounts.set(dsId, cachedKeyCountsForDataset);
 
-      // 3d. Plan. The opaque carry-forward state travels separately
-      // from the snapshot via {@link PlanningState}; we store the
-      // planner-returned `nextState` for the next tick.
+      // 3d. Plan. Opaque carry-forward state travels via {@link PlanningState};
+      // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? { previousActiveSet: [] };
       const result = plan(snapshot, planningStateForDataset, planningConfig);
@@ -344,12 +274,8 @@ export class Orchestrator {
 
       const entityById = new Map(entities.map(e => [e.entityId, e]));
 
-      // Per-dataset planning debug snapshot (lanes, per-LOD breakdown,
-      // wells-by-mode, focal entity, culling stages, catalog
-      // degradations). Computed before downstream side-effects so the
-      // panel reflects what `plan()` actually produced for this dataset
-      // — not, for example, the post-LOD-filter view used by the upload
-      // path. Cache-hit ticks leave the previous snapshot in place.
+      // Built before downstream side-effects so the panel reflects what
+      // `plan()` produced, not the post-LOD-filter upload-path view.
       if (debugStats.enabled) {
         debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
           dsId, result, entities, entityById, visibleRegion, ctx.cpuCache,
@@ -357,26 +283,14 @@ export class Orchestrator {
         );
       }
 
-      // 3e. Hand off per-dataset planner output to the Uploader. Stashes
-      // per-dataset request snapshots for the resend pass and
-      // pre-populates the tracker's wid → entityId reverse lookup so a
-      // worker eviction report that arrives before any chunk has been
-      // sent can still resolve `cpuCache.markRejected(entityId, ...)`.
+      // 3e. Hand off planner output. Pre-populates the wid → entityId
+      // reverse lookup so a worker eviction that arrives before any
+      // chunk has been sent can still resolve `cpuCache.markRejected`.
       this.uploader.recordPlanForDataset(
         dsId, result.requests, result.proxyRequests, multiChannel,
       );
 
-      // 3f. Build member roster + per-entity matrix map from the active
-      // set in a single walk (Slice 6c, PRD #607). The roster is
-      // consumed by slicePath/volumePath for layer construction; the
-      // matrices map is consumed below by `uploader.sendColdState` so
-      // the worker gets precomputed model matrices baked into descriptor
-      // entries.
-      //
-      // `well-as-proxy` entries are synthesised (their well isn't in
-      // `derived.members`); `invisible` entries are skipped (they don't
-      // render); `field` entries forward `imageId`, `position`, `mode`.
-      // See `buildRoster` for details.
+      // 3f. Build member roster + per-entity matrix map in one walk.
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
         activeSet: result.activeSet,
         entities,
@@ -385,10 +299,8 @@ export class Orchestrator {
       });
       memberRoster.set(dsId, rosterEntries);
 
-      // Send cold state to the worker — drives atlas creation/remap +
-      // wanted-set + descriptor buffer build. Passes dataset settings so
-      // per-channel display state (contrast/gamma/opacity/colormap) gets
-      // baked into descriptor entries.
+      // Drives atlas creation/remap + wanted-set + descriptor buffer
+      // build; dsSettings bakes per-channel display state into descriptors.
       const coldMsg = this.uploader.sendColdState({
         ctx,
         datasetId: dsId,
@@ -400,17 +312,12 @@ export class Orchestrator {
         matricesByEntity,
         dsSettings,
       });
-      // Compute the same memberId → entityIndex map the worker builds
-      // from cold state. Both sides converge by construction because
-      // they walk the same canonical iteration order.
+      // Same memberId → entityIndex map the worker builds from cold
+      // state — both sides converge because they walk the same iteration order.
       entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
 
-      // Emit viewEpoch hot-state with per-entity ray-pick coords. Posted
-      // before subsequent render messages so the worker's
-      // `rayHitPerEntity` is current when chunk-data eviction fires.
-      // Keyed by memberId (imageId or imageId:chN) — same convention
-      // chunk-data uses for `findFarthestSlot` distance lookups. The
-      // Uploader short-circuits when the viewEpoch is unchanged.
+      // Emit before render messages so `rayHitPerEntity` is current
+      // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
       this.uploader.sendViewHotStateIfAdvanced({
         ctx,
         datasetId: dsId,
@@ -418,16 +325,9 @@ export class Orchestrator {
         epochs: currentEpochs,
       });
 
-      // Submit chunk + proxy requests in a single call so they don't
-      // cancel each other. Proxies sit in their own queue inside
-      // CpuCache but share the cancellation contract: if the next
-      // plan omits a request, its in-flight fetch is aborted.
-      //
-      // Minimap requests arrive through `result.requests` with
-      // `lane: "minimap"` and `priority: MINIMAP_LANE_OFFSET` (= 0,
-      // highest priority); the planner stamps `datasetId` on every
-      // emitted request directly, so no orchestrator-side mutation
-      // is needed.
+      // Submit chunks + proxies in a single call so they don't cancel
+      // each other. Cancellation contract: a request omitted by the
+      // next plan has its in-flight fetch aborted.
       ctx.cpuCache.submit({
         requests: result.requests,
         activeSet: result.activeSet,
@@ -448,9 +348,7 @@ export class Orchestrator {
             (a) => a.entityId === entity.entityId,
           );
           // Only field entries carry `targetLod`; well-as-proxy has
-          // no LOD bookkeeping, invisibles report their coarsest LOD
-          // instead. Surface -1 for non-field entries to mirror the
-          // historical "no level selected" sentinel.
+          // no LOD bookkeeping (-1 sentinel), invisibles report coarsest.
           const tl =
             activeEntry?.kind === "field"
               ? activeEntry.targetLod
@@ -479,11 +377,6 @@ export class Orchestrator {
 
     // Step 4 — Orchestrator debug snapshot
     if (debugStats.enabled) {
-      // Aggregate from all per-dataset state (active sets, visible
-      // regions, entity diagnostics, cached-key counts). Multi-dataset
-      // rebuilds previously kept only the last-processed dataset's
-      // snapshot for these fields; #613 made the underlying state
-      // per-dataset, so the aggregator now walks every entry.
       const orchDebug: OrchDebug = {
         activeSet: [],
         laneCount: { detail: 0, prefetch: 0, overview: 0 },
@@ -492,9 +385,7 @@ export class Orchestrator {
         members: [],
         hasMixedLevels: false,
         epochCacheHit: false,
-        // Replaced after `coldStateTelemetry.recordRebuild` below —
-        // placeholder here so the type checks during the in-progress
-        // assembly.
+        // Replaced after `coldStateTelemetry.recordRebuild` below.
         coldState: this.uploader.coldStateTelemetry.publish(),
         visibleRegion: null,
         entityDiag: [],
@@ -515,19 +406,11 @@ export class Orchestrator {
         }
       }
 
-      // Aggregate from all per-dataset plan results
-      // Re-run is wasteful, so we read the planner's carry-forward
-      // state — its `previousActiveSet` field is exactly the active
-      // set produced by the most recent `plan()` call for that dataset.
-      //
-      // ActiveSetEntry is a discriminated union; per-variant fields
-      // are derived from `kind`:
-      //   - well-as-proxy → mode column reads "well-as-proxy",
-      //     LOD columns are zero (no LOD bookkeeping for this variant);
-      //   - field        → mode column reads the field's promotion mode,
-      //     LOD columns come from the field entry;
-      //   - invisible    → mode column reads "invisible", LOD columns
-      //     report the entity's coarsest LOD (the only level it owns).
+      // Aggregate per-dataset active sets from `previousActiveSet`
+      // (the active set produced by the most recent `plan()` call).
+      // ActiveSetEntry is a discriminated union; per-variant LOD columns
+      // are derived from `kind` (well-as-proxy = 0, field reads from entry,
+      // invisible reports coarsest).
       for (const [, state] of this.planningState) {
         for (const entry of state.previousActiveSet) {
           if (entry.kind === "well-as-proxy") {
@@ -577,12 +460,8 @@ export class Orchestrator {
         }));
       }
 
-      // Coordinate diagnostic. OrchDebug exposes a single
-      // `visibleRegion` field; pick the first dataset's region (insertion
-      // order matches dataset iteration in step 3) so it's deterministic
-      // and matches the single-dataset case verbatim. Multi-dataset
-      // consumers wanting every region can read the per-dataset map
-      // directly via the orchestrator (debug surface only).
+      // OrchDebug exposes one `visibleRegion`; pick the first dataset
+      // (insertion order = dataset iteration order in step 3).
       const firstVisibleRegion = this._lastVisibleRegion.values().next().value;
       orchDebug.visibleRegion = firstVisibleRegion
         ? {
@@ -629,10 +508,8 @@ export class Orchestrator {
       };
     }
 
-    // Cold-state telemetry: record this rebuild's cause + duration, then
-    // refresh the snapshot we attached to orchDebug above. Doing this
-    // *after* step 4 means the OrchDebug published this tick reflects
-    // the rebuild we just did.
+    // Record cause + duration after step 4 so the OrchDebug published
+    // this tick reflects this rebuild.
     const tickEnd = performance.now();
     this.uploader.coldStateTelemetry.recordRebuild(
       tickStart, causes, tickEnd - tickStart,
@@ -645,58 +522,33 @@ export class Orchestrator {
   }
 
   /**
-   * Clear planner-side per-dataset state on dataset removal. Drops the
-   * planning-state carry-forward, the debug snapshots, and the entries
-   * keyed under the supplied id in the per-dataset maps. Upload-side
-   * state cleanup is the Uploader's responsibility — the RenderLoop
-   * calls both `orchestrator.clearMemberResources(id)` and
-   * `uploader.clearDataset(id)` during removal.
+   * Clear planner-side per-dataset state on dataset removal. Upload-side
+   * cleanup is the Uploader's responsibility.
    *
-   * The id is ambiguous (it can be a datasetId, an imageId, or a
-   * `${imageId}:ch${c}` composite key). Each `delete` is a no-op when
-   * the id doesn't match its expected shape; the dataset-removal path
-   * sees one explicit datasetId call plus per-member calls, one of
-   * which clears.
+   * The id is ambiguous (datasetId, imageId, or `${imageId}:ch${c}`). The
+   * dataset-removal path sees one explicit datasetId call plus per-member
+   * calls; member-shaped ids are no-ops against the datasetId-keyed maps.
    */
   clearMemberResources(workerMemberId: string): void {
-    // Drop the planning debug entry. Same dataset-vs-member ambiguity:
-    // member ids never match a key in `planning.byDataset`, so the delete
-    // is a no-op for those calls. Dataset removal sees both an explicit
-    // dataset call and per-member calls; one of them clears.
     delete debugStats.planning.byDataset[workerMemberId];
     this._lastPlanByDataset.delete(workerMemberId);
-
-    // Drop per-dataset state added in #613. All keyed by datasetId; for
-    // member-shaped ids these are no-ops, which matches the
-    // best-effort cleanup pattern above.
     this._lastEntities.delete(workerMemberId);
     this._lastVisibleRegion.delete(workerMemberId);
     this._lastCachedKeyCounts.delete(workerMemberId);
-    // Previously absent — without this delete, a dataset removed and
-    // re-added kept its prior `PlanningState` (`previousActiveSet` etc.)
-    // across the gap. See dechaos contract-scan Verified-assumption #3.
+    // Without this delete, a dataset removed and re-added would keep
+    // its prior `PlanningState` (`previousActiveSet` etc.) across the gap.
     this.planningState.delete(workerMemberId);
   }
 
-  /**
-   * Snapshot of the most recent full `plan()` output per dataset. Used
-   * by the DebugPanel "dump" buttons to print categorized request lists.
-   * Returns the live Map — callers must not mutate.
-   */
+  /** Per-dataset snapshot of the most recent `plan()` output. Live Map — do not mutate. */
   getLastPlans(): ReadonlyMap<string, RequestPlan> {
     return this._lastPlanByDataset;
   }
 
   /**
-   * Debug helper for HITL: synthesize a single-proxy `RequestPlan`,
-   * submit it to CpuCache, and rely on the normal subscribe → tick →
-   * `deliverToWorker` path to forward the result to the GPU worker.
-   *
-   * Intended to be called from the dev console, e.g.
-   * `window.__lucidaOrchestrator.requestTestProxy(...)`. App.tsx exposes
-   * the orchestrator on `window` for this purpose.
-   *
-   * Returns immediately — the result lands in the worker asynchronously.
+   * Debug helper: synthesize a single-proxy `RequestPlan` and submit it
+   * to CpuCache. Exposed on `window.__lucidaOrchestrator` by App.tsx for
+   * dev-console invocation.
    */
   requestTestProxy(
     cpuCache: CpuCache,

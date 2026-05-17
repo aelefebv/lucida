@@ -1,9 +1,8 @@
 //! Cookie reading + Set-Cookie building for the session cookie.
 //!
-//! Slice 2 (PRD #455) ships only the session cookie (`lucida_session`
-//! by default). The encoded id is opaque (UUID v4 today; whatever the
-//! store hands us in future). Attribute choices come straight from PRD
-//! #455 §"Cookie attributes":
+//! Ships the session cookie (`lucida_session` by default). The encoded
+//! id is opaque (UUID v4 today; whatever the store hands us in future).
+//! Attribute choices:
 //!
 //! - `HttpOnly` — JS cannot read.
 //! - `Secure` — auto-detected per request scheme; overridable via
@@ -78,8 +77,8 @@ pub fn resolve_secure(mode: SecureCookieMode, request_is_https: bool) -> bool {
 /// request scheme as observed by axum (`parts.uri.scheme_str()`); when
 /// behind a TLS-terminating proxy that strips the scheme, the operator
 /// must set `LUCIDA_COOKIE_SECURE=always` explicitly. We deliberately
-/// do not trust `X-Forwarded-Proto` here — slice 2 keeps the surface
-/// minimal and the operator-override path is the safer default.
+/// do not trust `X-Forwarded-Proto` here — operator-override is the
+/// safer default than auto-trusting a spoofable header.
 pub fn request_is_https(parts: &Parts) -> bool {
     parts
         .uri

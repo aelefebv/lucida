@@ -214,7 +214,7 @@ mod tests {
         );
     }
 
-    // PRD #451: t/c bundling cases.
+    // t/c bundling cases.
 
     #[test]
     fn chunk_key_c_bundled_divides_channel() {

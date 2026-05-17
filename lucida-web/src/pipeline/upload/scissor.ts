@@ -1,18 +1,9 @@
 /**
  * Compute a screen-space scissor rect for a well's `[0,1]^3` unit cube.
  *
- * Project all 8 corners through `model` then `viewProj`, take the
- * 2D AABB, clamp to the canvas, and return integer `[x, y, w, h]`.
- *
- * Returns `[0, 0, canvasW, canvasH]` (conservative full-canvas) when any
- * corner has `clipW <= 0` (behind camera); returns `null` when the
- * clamped rect is degenerate (fully off-screen).
- *
- * Pure function. WebGPU convention: top-left origin, y-down.
- *
- * Moved from `volumePath.ts` in Slice 6f of PRD #607 — lives next to the
- * other cold-state / upload builders so the render-path file stays focused
- * on render orchestration.
+ * Returns full-canvas `[0, 0, canvasW, canvasH]` when any corner has
+ * `clipW <= 0` (behind camera); returns `null` when the clamped rect
+ * is degenerate (fully off-screen). WebGPU: top-left origin, y-down.
  */
 export function computeScissorRect(
   modelMatrix: Float32Array,

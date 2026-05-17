@@ -36,8 +36,6 @@
  * wanted-set re-fetch will pull any victim back if it's still wanted.
  */
 
-// Single source of truth for the proxy kind enum — re-exported here so
-// renderer modules can keep their imports local.
 export type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import { getDeviceLimits } from "./gpuContext.ts";
@@ -47,13 +45,10 @@ export interface ProxyAtlasState {
   texture: GPUTexture;
   /** Composite key `${entityId}|${t}|${c}` → slot index. */
   slots: Map<string, number>;
-  /** Pool of slot indices currently unused (popped at allocation). */
   freeSlots: number[];
-  /** Total number of slots in this atlas. */
   capacity: number;
   /** Voxel dimensions of one slot, `[Z, Y, X]`. */
   slotDims: [number, number, number];
-  /** Proxy kind this pool serves. */
   kind: ProxyKind;
   /** Single channel per pool — multi-channel uses multi-pool. */
   channel: number;
@@ -70,7 +65,6 @@ export interface ProxyHandle {
   slotIndex: number;
 }
 
-/** Build the canonical pool key for a proxy. */
 export function proxyPoolKey(
   datasetId: string,
   kind: ProxyKind,
@@ -81,7 +75,6 @@ export function proxyPoolKey(
   return `${datasetId}|proxy|${kind}|${x}x${y}x${z}|ch${channel}`;
 }
 
-/** Composite slot key per entity / time / channel. */
 export function proxySlotKey(entityId: string, t: number, c: number): string {
   return `${entityId}|${t}|${c}`;
 }
@@ -128,7 +121,6 @@ export function createProxyAtlas(
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 
-  // Stack of available slot indices — pop = allocate, push on free.
   const freeSlots: number[] = [];
   for (let i = cap - 1; i >= 0; i--) freeSlots.push(i);
 
@@ -183,7 +175,7 @@ export function allocateProxySlot(
   return slotIndex;
 }
 
-/** Look up an existing slot. Does NOT touch LRU order. */
+/** Does NOT touch LRU order. */
 export function lookupProxySlot(
   atlas: ProxyAtlasState,
   key: string,
@@ -191,7 +183,6 @@ export function lookupProxySlot(
   return atlas.slots.get(key);
 }
 
-/** Mark `key` as freshly used; moves it to the end of `touchOrder`. */
 export function touchProxySlot(atlas: ProxyAtlasState, key: string): void {
   if (!atlas.slots.has(key)) return;
   moveToEnd(atlas.touchOrder, key);
@@ -208,17 +199,12 @@ export function proxySlotOrigin(
   return [slotIndex * atlas.slotDims[2], 0, 0];
 }
 
-/** Free internal GPU resources. */
 export function destroyProxyAtlas(atlas: ProxyAtlasState): void {
   atlas.texture.destroy();
   atlas.slots.clear();
   atlas.touchOrder.length = 0;
   atlas.freeSlots.length = 0;
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 function moveToEnd(arr: string[], key: string): void {
   const idx = arr.indexOf(key);

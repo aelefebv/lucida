@@ -1,10 +1,6 @@
 /**
  * Tests for the three `proxyKeyFromX` helpers.
  *
- * Pre-refactor (Slice 1 of PRD #607) these were characterization tests
- * exercising the orchestrator's public surface. Slice 2 lifted the
- * helpers to free functions, so the tests now call them directly.
- *
  * Contract:
  *   `${datasetId}|${entityId}|${kindOrProxyKind}|${t}|${c}`
  *

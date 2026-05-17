@@ -115,7 +115,7 @@ impl ProxyGenerator {
         let expected_hash =
             source_content_hash(self.content.as_ref(), &spec.entity_id, spec.t, spec.c);
 
-        // ---- 1. Cache check (sync I/O; cheap on miss). ----
+        // 1. Cache check (sync I/O; cheap on miss).
         match self.cache.get(&spec, &expected_hash) {
             Ok(Some(asset)) => return Ok(Arc::new(asset)),
             Ok(None) => {}
@@ -124,8 +124,8 @@ impl ProxyGenerator {
             }
         }
 
-        // ---- 2. In-flight dedup. Either subscribe to an existing
-        // generation or claim leadership by inserting a fresh sender.
+        // 2. In-flight dedup: subscribe to an existing generation, or
+        // claim leadership by inserting a fresh sender.
         let rx_opt: Option<broadcast::Receiver<BroadcastPayload>> = {
             let mut map = self.in_flight.lock().await;
             if let Some(tx) = map.get(&spec) {

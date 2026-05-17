@@ -35,7 +35,7 @@ use lucida_core::saved_view::SavedView;
 /// `view` is deserialized from `view_json` on read. The wire format is
 /// the same one the URL-hash side of the saved-views feature emits, so
 /// a bookmark created via `POST /api/bookmarks` round-trips through
-/// the same apply-orchestrator slice 3 builds for the `#b=<id>` link.
+/// the same apply-orchestrator the `#b=<id>` link uses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bookmark {
     pub id: String,
@@ -96,23 +96,19 @@ pub trait BookmarkStore: Send + Sync + 'static {
 
     /// Update a bookmark's `name` only. Returns `Ok(None)` when the id
     /// doesn't match. Other fields (creator, datasets, view) are
-    /// immutable in v1 — see PRD #454 §"Mutation".
+    /// immutable in v1.
     async fn patch_name(&self, id: &str, new_name: &str) -> Result<Option<Bookmark>, StoreError>;
 
     /// Delete a bookmark and return the row that was removed. Returns
     /// `Ok(None)` when the id doesn't match. The `bookmark_datasets`
     /// side rows are cascaded via the FK.
     ///
-    /// Slice 4 (PRD #454 issue #477) needs the deleted bookmark's
-    /// `dataset_urls` to scope the `BookmarkChanged { Deleted }`
-    /// broadcast — returning the row from `delete` avoids a separate
-    /// `get` round-trip plus the race window between the two queries.
+    /// The broadcast helper needs the deleted bookmark's `dataset_urls`
+    /// to scope its `BookmarkChanged { Deleted }` fanout, so returning
+    /// the row from `delete` avoids a separate `get` round-trip plus
+    /// the race window between the two queries.
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError>;
 }
-
-// ---------------------------------------------------------------------------
-// SQLite backend
-// ---------------------------------------------------------------------------
 
 /// Production store. Wraps a shared `SqlitePool` (cloned from the auth
 /// session store so all three tables ride the same connection budget).
@@ -381,10 +377,6 @@ fn row_to_bookmark(
     })
 }
 
-// ---------------------------------------------------------------------------
-// In-memory backend
-// ---------------------------------------------------------------------------
-
 /// Test-only in-memory implementation. Lives behind a regular module
 /// (not `cfg(test)`) so integration tests in `tests/` can construct it
 /// without dragging in SQLite. Mutex is uncontended in tests; the
@@ -539,15 +531,10 @@ mod tests {
         SavedView::empty(viewport)
     }
 
-    // -- shared scenarios --------------------------------------------------
-    //
-    // The two backends share the same trait surface; below we exercise
-    // each scenario against both the SQLite store and the in-memory
-    // store. A `#[tokio::test]` that loops over `Vec<Box<dyn BookmarkStore>>`
-    // is awkward (lifetime juggling on the future returned by `create`);
-    // a small `run_against` helper that takes an `impl BookmarkStore` is
-    // cleaner.
-
+    // Each scenario below exercises both the SQLite and in-memory
+    // backends via an `impl BookmarkStore` helper — looping over
+    // `Vec<Box<dyn BookmarkStore>>` is awkward (lifetime juggling on
+    // the future returned by `create`).
     async fn create_get_roundtrip<S: BookmarkStore>(store: &S) {
         let view = sample_view([800, 600]);
         let b = store
@@ -840,8 +827,8 @@ mod tests {
 
     /// The any-overlap SELECT MUST go through `idx_bookmark_datasets_url`
     /// — if the migration ever drops the index, the query degrades to a
-    /// full-table scan and the sidebar's hot path balloons. Slice 2 issue
-    /// #475 calls this out as the index-verification regression guard.
+    /// full-table scan and the sidebar's hot path balloons. Regression
+    /// guard for the index.
     #[tokio::test]
     async fn overlap_query_uses_index_sqlite() {
         let store = fresh_sqlite().await;

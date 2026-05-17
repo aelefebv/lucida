@@ -4,8 +4,6 @@
  * Per layer: resolve member→pool→datasetId, look up descriptor + atlas,
  * compute hasDetail, update per-entity camera UV, resolve proxy
  * textures, bind, draw to offscreen. After the loop: composite + cursor.
- *
- * Extracted from `sliceHandlers.ts` in Slice 7. No behavior change.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";

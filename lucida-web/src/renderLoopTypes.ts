@@ -41,8 +41,8 @@ export const RESIDENCY_RENDER_INTERVAL_MS = 33;
 /** Separate budget for minimap overview uploads (independent from main view). */
 export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
 
-// `MAIN_VIEW_UPLOAD_BUDGET_BYTES` moved to `pipeline/upload/constants.ts`
-// (PRD #607 Slice 2): it's an upload-phase constant, not a render-loop one.
+// `MAIN_VIEW_UPLOAD_BUDGET_BYTES` lives in `pipeline/upload/constants.ts`
+// because it's an upload-phase constant, not a render-loop one.
 
 /** Shared dependency bag passed to all tick functions. */
 export interface TickContext {

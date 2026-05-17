@@ -20,20 +20,10 @@ use lucida_server::session::Session;
 use lucida_server::static_serve;
 use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler};
 
-// ---------------------------------------------------------------------------
-// CLI definition
-//
-// We support two invocation styles for backward compatibility:
-//
-//   lucida-server --data-dir /path                       (legacy, no subcommand)
-//   lucida-server serve --data-dir /path                 (explicit serve)
-//   lucida-server clear-proxy-cache [--dataset URL]      (one-shot admin)
-//
-// When no subcommand is given we treat the top-level args as `serve`'s
-// args. The clap derive macros are invoked with `args_conflicts_with_subcommands`
-// so the legacy form keeps working without ambiguity.
-// ---------------------------------------------------------------------------
-
+// CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
+// treated as `serve`) alongside explicit `serve` / `clear-proxy-cache`
+// subcommands. `args_conflicts_with_subcommands` keeps the legacy form
+// unambiguous.
 #[derive(Parser, Debug)]
 #[command(name = "lucida-server", about = "Lucida collaborative imaging server")]
 #[command(version)] // pulls from Cargo.toml's [package].version at build time
@@ -87,17 +77,9 @@ struct ClearArgs {
     cache_dir: Option<PathBuf>,
 }
 
-// ---------------------------------------------------------------------------
-// Logging-format env var
-//
-// `LUCIDA_LOG_FORMAT={text,json}` (default `text`) switches the
-// tracing-subscriber formatter between the dev-friendly pretty-text
-// output and the production JSON output that log aggregators (Cloud
-// Logging, Loki, ELK, …) consume natively. Unknown values fall back to
-// `Text` so a typo in the deploy manifest doesn't break boot — same
-// posture as `SecureCookieMode::parse` (auth/config.rs:91-101).
-// ---------------------------------------------------------------------------
-
+// LUCIDA_LOG_FORMAT={text,json} (default text) switches between
+// dev-friendly pretty-text and production JSON output. Unknown values
+// fall back to Text so a deploy-manifest typo doesn't break boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogFormat {
     Text,
@@ -116,10 +98,6 @@ impl LogFormat {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
@@ -192,8 +170,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         cache_dir: proxy_cache_dir,
         concurrency: proxy_concurrency,
     };
-    // Slice 8: migrate to tracing per ADR 0012 (operational logs go
-    // through the configured subscriber so RUST_LOG filtering applies).
+    // Operational logs go through the configured tracing subscriber
+    // so RUST_LOG filtering applies (ADR 0012).
     tracing::info!(
         cache_dir = %proxy_config.cache_dir.display(),
         concurrency = proxy_config.concurrency,
@@ -214,19 +192,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         proxy_config,
     };
 
-    // Slice 2 (issue #457) landed the session store + cookie extractor.
-    // Slice 4 (issue #460) layers the Google OAuth flow on top.
-    // Slice 7 (issue #462) consolidates env-var validation here:
-    // `LUCIDA_BIND`, the auto-detect-by-bind auth-mode default, and
-    // the `LUCIDA_INSECURE=1` opt-in for the "disabled + public bind"
-    // combination all live in `AuthConfig::from_env`. Failures are
-    // fatal at startup with a named-variable error message.
+    // Env-var validation lives in `AuthConfig::from_env`: `LUCIDA_BIND`,
+    // the auto-detect-by-bind auth-mode default, and the
+    // `LUCIDA_INSECURE=1` opt-in for the "disabled + public bind"
+    // combination. Failures are fatal at startup with a named-variable
+    // error message.
     let auth_config = match auth::AuthConfig::from_env() {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            // Slice 7 (PRD #455 §"Audit logging") emits this before the
-            // fail-fast exit so ops can grep `auth.startup.config_error`
-            // for "server refused to start because of bad config".
+            // Emit this before the fail-fast exit so ops can grep
+            // `auth.startup.config_error` for "server refused to start
+            // because of bad config".
             tracing::error!(error = %e, "auth.startup.config_error");
             return Err(std::io::Error::other(e.to_string()));
         }
@@ -234,9 +210,9 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
-    // Stable string mode tag (per slice 7 hand-off note): `"google"` /
-    // `"disabled"` lands cleanly in audit pipelines that key off the
-    // exact string rather than the Debug-formatted variant.
+    // Stable string mode tag (`"google"` / `"disabled"`) lands cleanly
+    // in audit pipelines that key off the exact string rather than the
+    // Debug-formatted variant.
     let mode_str = match auth_config.mode {
         auth::AuthMode::Google => "google",
         auth::AuthMode::Disabled => "disabled",
@@ -258,8 +234,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     if auth_config.insecure_acknowledged {
         // Structured audit event so the signal lands in the audit log
         // pipeline alongside the other `auth.*` events, not just the
-        // operator-eyeballed stderr banner. PRD #455 §"Audit logging"
-        // names this event explicitly.
+        // operator-eyeballed stderr banner.
         tracing::warn!(
             bind = %auth_config.bind_addr,
             mode = %mode_str,
@@ -321,18 +296,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::logout).with_state(logout_state),
         );
 
-    // PRD #454 slice 2: server-stored bookmarks. Same SQLite pool the
-    // auth stores ride; the bookmarks router lands on the protected
-    // half so every handler sees an `AuthPrincipal` in extensions.
+    // Server-stored bookmarks share the same SQLite pool as the auth
+    // stores; the bookmarks router lands on the protected half so every
+    // handler sees an `AuthPrincipal` in extensions.
     let bookmark_store = std::sync::Arc::new(bookmarks::SqliteBookmarkStore::new(
         session_store.pool().clone(),
     ));
     let bookmarks_state = bookmarks::handlers::BookmarksState {
         store: bookmark_store as std::sync::Arc<dyn bookmarks::BookmarkStore>,
-        // Slice 4 (PRD #454 issue #477): plumb the live session +
-        // unicast routes so handlers can broadcast `BookmarkChanged`
-        // to clients with overlapping loaded datasets after every
-        // successful CUD operation.
+        // Plumb the live session + unicast routes so handlers can
+        // broadcast `BookmarkChanged` to clients with overlapping
+        // loaded datasets after every successful CUD operation.
         session: Some(Arc::clone(&state.session)),
         unicast_routes: Some(Arc::clone(&state.unicast_routes)),
     };
@@ -372,13 +346,13 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
                 get(auth::handlers::auth_callback).with_state(oauth_state),
             );
     }
-    // PRD #486 slice 4: liveness/readiness probes. Mounted on the
-    // public router half so the kubelet (which presents no session
-    // cookie) can hit them without being 401'd. Always-200 today; the
-    // split between `/healthz` and `/readyz` exists so future drain-on-
-    // shutdown can flip readiness to 503 while liveness stays 200,
-    // letting the LB stop routing without the kubelet restarting the
-    // pod mid-drain. See `lucida-server/src/health.rs`.
+    // Liveness/readiness probes mounted on the public router half so
+    // the kubelet (which presents no session cookie) can hit them
+    // without being 401'd. Always-200 today; the split between
+    // `/healthz` and `/readyz` exists so future drain-on-shutdown can
+    // flip readiness to 503 while liveness stays 200, letting the LB
+    // stop routing without the kubelet restarting the pod mid-drain.
+    // See `lucida-server/src/health.rs`.
     public_auth_router = public_auth_router.merge(health::router());
 
     // ADR-0020: serve the SPA bundle from `LUCIDA_WEB_DIST` (default
@@ -427,11 +401,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(static_serve_router)
         .layer(CorsLayer::permissive());
 
-    // Slice 8: hourly background sweep of expired session + pending-auth
-    // rows. Spawned here (after stores are open, before the listener
-    // accepts connections) so the loop runs for the lifetime of the
-    // process. Holding the JoinHandle keeps the task alive — dropping
-    // the handle would abort the spawned future. Operational logs only
+    // Hourly background sweep of expired session + pending-auth rows.
+    // Spawned here (after stores are open, before the listener accepts
+    // connections) so the loop runs for the lifetime of the process.
+    // Holding the JoinHandle keeps the task alive — dropping the
+    // handle would abort the spawned future. Operational logs only
     // (no PII per row); per-user audit lives in `auth.signin.success`
     // and `auth.logout`.
     let _cleanup_handle = auth::spawn_cleanup(auth::CleanupState {
@@ -450,8 +424,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // `cargo run --bin lucida-server` is friction-free for local dev.
     // Set LUCIDA_BIND=0.0.0.0:9876 (or a deployment-specific interface)
     // to expose on all interfaces; production deployments must do so
-    // explicitly. Pre-slice-7 deployments that relied on the old
-    // hardcoded 0.0.0.0 default need to set LUCIDA_BIND going forward.
+    // explicitly.
     let bind_addr = auth_config.bind_addr;
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
@@ -486,16 +459,6 @@ fn run_clear(args: ClearArgs) -> std::io::Result<()> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// CLI parsing tests
-//
-// These verify that the legacy invocation form
-// `lucida-server --data-dir /path` keeps parsing into a `Serve` command,
-// while the new subcommand forms (`serve`, `clear-proxy-cache`) parse as
-// expected. The handlers themselves (`run_serve`, `run_clear`) are
-// covered by integration tests against the library types.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod cli_tests {

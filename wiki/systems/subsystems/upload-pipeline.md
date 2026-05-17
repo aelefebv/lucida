@@ -7,13 +7,13 @@ modified: 2026-05-16
 
 `lucida-web/src/pipeline/upload/` — the CPU → GPU hand-off half of the [[chunk-pipeline]]. A directory of focused modules with `uploader.ts` as a thin coordinator that fans out to collaborators (a delivery tracker, two parallel telemetry systems, a worker-feedback handler, pure cold-state builders, and a three-pass drain/resend/dispatch pipeline). See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for the directory-layout philosophy and the per-module rationale.
 
-The Uploader is the symmetric downstream counterpart to [[cpu-cache]]: the cache owns bytes coming in from the network, the Uploader owns bytes going out to the GPU worker. After PRD #607 these two halves of the chunk pipeline share a shape (thin coordinator + sibling files + sub-folders for tight clusters), so the pipeline reads as one consistent system rather than two unrelated styles.
+The Uploader is the symmetric downstream counterpart to [[cpu-cache]]: the cache owns bytes coming in from the network, the Uploader owns bytes going out to the GPU worker. Both halves of the chunk pipeline share a shape (thin coordinator + sibling files + sub-folders for tight clusters), so the pipeline reads as one consistent system rather than two unrelated styles.
 
 ## Why split it out
 
 `orchestrator.ts` was a dual-personality god-object: planning (driven by view state, produces request plans) and upload (driven by tick budget, dispatches bytes to the worker) coexisted in one 2027-line class because both touched [[cpu-cache]] and worker IPC during early development. The two roles share almost no state in practice — `lastEpochs`, `requestEpoch`, and `lastViewEpochByDataset` were the only fields read by both — yet every modification required reasoning across both phases.
 
-The split mirrors the fetch/decode refactor (see [[decisions/0032-cpucache-split-into-pipeline-fetch]]) in shape and cadence: a single overgrown file becomes a coordinator plus a directory of small modules, behaviour-preserving except for explicit named bug fixes. Eight passes of dechaos analysis (under `wiki/outputs/dechaos-upload-2026-05-15/`) identified the same kinds of extractable units as the fetch side did — a state tracker, pure builders, telemetry counters, a feedback handler — and the eleven post-refactor modules correspond one-to-one with the seams that pass ranked.
+The split mirrors the fetch/decode refactor (see [[decisions/0032-cpucache-split-into-pipeline-fetch]]) in shape and cadence: a single overgrown file becomes a coordinator plus a directory of small modules, behaviour-preserving except for explicit named bug fixes. The eleven modules correspond one-to-one with the extractable units the fetch side surfaced — a state tracker, pure builders, telemetry counters, a feedback handler.
 
 ## Module layout
 
@@ -31,7 +31,7 @@ The directory's collaborators (each one a focused, separately-testable unit):
 
 ## The Uploader's role per tick
 
-The Orchestrator drives one Uploader per render loop and feeds it through five dedicated planner-seam methods (chosen over a wide "tick bundle" struct so each callsite has a focused signature):
+The Orchestrator drives one Uploader per render loop and feeds it through five dedicated planner-seam methods:
 
 1. **`onPlanRebuildStart()`** — called once per cold-state rebuild tick. Resets chunk-side delivery tracking; hoisted to once-per-tick so multi-dataset rebuilds don't multi-clear an atlas state that is global per worker.
 2. **`sendColdState(...)`** — per dataset on the rebuild path. Builds the cold-state message via the pure builders, posts it to the worker, and snapshots `epochs` for the subsequent `deliverToWorker` call.
@@ -41,15 +41,15 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 
 ## Collaborators
 
-**`DeliveryTracker`** consolidates the four maps the orchestrator used to manage as scattered fields (`deliverySentToWorker`, `deliveryRejectedByWorker`, `widToEntityId`, `proxyDeliveredToWorker`). The implicit lifetime invariants ("clear sent on every cold-state rebuild", "drop rejected on worker eviction") become explicit method contracts. Slice 3 deleted the fifth field, `workerWantedSet`, which was populated from `wantedSetDelta` but never read.
+**`DeliveryTracker`** owns the four delivery-lifecycle maps (`deliverySentToWorker`, `deliveryRejectedByWorker`, `widToEntityId`, `proxyDeliveredToWorker`) as one object with explicit method contracts. The lifetime invariants ("clear sent on every cold-state rebuild", "drop rejected on worker eviction") live on the tracker, not on whichever caller happens to remember them.
 
 **`UploadTelemetry`** and **`ColdStateTelemetry`** are two parallel rolling-window systems. The first owns the per-tick events ring, the p50/p95 size sketch, and three sustained-anomaly detectors (`upload.budget_exhausted_sustained`, `upload.resend_storm`, `upload.drain_waste`). The second owns cold-state cache-hit vs rebuild attribution, per-epoch cause counters, and the sustained-non-view-churn detector. Both share the `SustainedCondition` + `ConsecutiveTickDetector` helpers so the two arms detect anomalies the same way.
 
-**`WorkerFeedback`** owns `handleChunksEvicted` (evicted chunks are re-eligible for upload; skipped chunks land on the tracker's rejected set and forward to `cpuCache.markRejected`) and `handleWantedSetDelta` (post-Slice-3 only the proxy branch is meaningful — chunk entries are intentionally ignored).
+**`WorkerFeedback`** owns `handleChunksEvicted` (evicted chunks are re-eligible for upload; skipped chunks land on the tracker's rejected set and forward to `cpuCache.markRejected`) and `handleWantedSetDelta` (only the proxy branch is meaningful — chunk entries are intentionally ignored).
 
 **Pure cold-state builders** (`buildColdState`, `buildViewHotState`, `buildRoster`, `buildDisplayStateByChannel`, `synthesizeWellRosterEntry`, `identityMatrix`) are side-effect-free functions that take a planner snapshot and return a wire message. Extracting them gave the cold-state assembly its own test surface and unblocked the `sendColdState` wrapper shrinking to a few lines.
 
-**Drain / resend / dispatch** is a three-pass pipeline. The drain pass iterates `cpuCache.drain(budget)` output and runs `classifyDelivery` (rejects unknown widths, wrong-LOD chunks, etc.). The chunk and proxy resend passes walk `lastFilteredRequests` and `lastProxyRequests` and run their respective classifiers. All three passes share the same `manifestByImage` memo built once per tick by `buildManifestByImage` — eliminating the O(D × I) per-chunk dataset scan the pre-refactor `sendDeliveryToWorker` did. Each pass owns its own counter writes onto the shared `currentUploadStats` and stops dispatching when the byte budget is exhausted.
+**Drain / resend / dispatch** is a three-pass pipeline. The drain pass iterates `cpuCache.drain(budget)` output and runs `classifyDelivery` (rejects unknown widths, wrong-LOD chunks, etc.). The chunk and proxy resend passes walk `lastFilteredRequests` and `lastProxyRequests` and run their respective classifiers. All three passes share the same `manifestByImage` memo built once per tick by `buildManifestByImage` — the lookup is O(1) per chunk instead of an O(D × I) per-chunk dataset scan. Each pass owns its own counter writes onto the shared `currentUploadStats` and stops dispatching when the byte budget is exhausted.
 
 ## Interactions
 
@@ -60,8 +60,8 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 
 ## Invariants
 
-- **`onPlanRebuildStart()` runs exactly once per cold-state rebuild tick.** The atlas state is global per worker, so the per-dataset loop's `sendColdState` calls must see a single shared reset rather than per-dataset multi-clears. Pairing cold-state emission with tracker reset is now an explicit invariant (it was implicit and code-order-dependent pre-refactor).
-- **`lastFilteredRequests` and `lastProxyRequests` are per-dataset Maps.** Pre-refactor they were flat `ChunkRequest[]` / `ProxyRequest[]` fields written per-dataset in the planning loop — last-dataset-wins, so the resend pass only resent for the last dataset processed. Slice 4 converted them to `Map<datasetId, …>` so the resend pass iterates every dataset's snapshot.
+- **`onPlanRebuildStart()` runs exactly once per cold-state rebuild tick.** The atlas state is global per worker, so the per-dataset loop's `sendColdState` calls must see a single shared reset rather than per-dataset multi-clears. Pairing cold-state emission with tracker reset is an explicit invariant of the Uploader.
+- **`lastFilteredRequests` and `lastProxyRequests` are per-dataset Maps.** Both are keyed `Map<datasetId, …>` so the resend pass iterates every dataset's snapshot rather than collapsing to whichever dataset was processed last in the planning loop.
 - **`MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 MB` is a soft cap.** `deliverToWorker` may overshoot by up to one chunk's size before setting `budgetExhausted`, since the byte accounting happens after dispatch. The minimap path uses a separate 2 MB budget (still in `renderLoopTypes.ts`).
 - **The slice-vs-volume branch lives only in `dispatchChunk`.** The Uploader reads `viewMode` from `TickContext.mode` and threads it into the dispatch call; the drain and resend passes are mode-agnostic. If you find a second site branching on view mode, it's a leak.
 - **Proxy delivery survives cold state, chunk delivery does not.** Worker proxy pools persist across atlas rebuilds (created lazily, destroyed only on dataset removal), so `proxyDelivered` is cleared per-entry by `clearProxyDelivered` on `wantedSetDelta` — never wholesale at rebuild.
@@ -69,10 +69,10 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 ## Gotchas
 
 - **The Uploader is constructed before the Orchestrator and passed into it.** If anything reaches `Uploader` before the first plan completes, `lastEpochs` falls back to the zero-default `{ content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 }`. Tests must call `planAndFetch` first; production code never hits this branch because the render loop ordering guarantees a plan before any tick.
-- **`workerWantedSet` no longer exists.** Slice 3 deleted the dead field plus the CHUNK_PIPELINE.md drift that documented a non-existent filter against it. If you see references to it in old code, old docs, or your muscle memory, fix them. `deliverToWorker` does NOT filter against any worker-wanted-set today — it filters via `classifyDelivery` on per-tick `targetLevelByImage` instead.
+- **No `workerWantedSet` filter exists.** `deliverToWorker` does NOT filter against any worker-wanted-set — it filters via `classifyDelivery` on per-tick `targetLevelByImage`. If you see references to a `workerWantedSet` filter in old code, old docs, or your muscle memory, fix them.
 - **`getProxyDeliveredKeys()` returns the live `Set` on `DeliveryTracker`.** Used by `uploader.test.ts` for inspection — do not call from production code, and do not mutate the returned set.
 - **`recordPlanForDataset` and `sendColdState` happen on the rebuild path; `deliverToWorker` happens every tick.** On cache-hit ticks the per-dataset snapshots are reused and the resend passes do all the work; the drain pass still runs but the deliveries queue is usually empty. If you change the rebuild gating in `Orchestrator.planAndFetch`, expect resend latency.
 
-## History
+## Design rationale
 
-PRD #607 split `orchestrator.ts` (was 2027 LOC, 36 fields, 20 responsibilities split across a planner role and an upload role) into a planner-only `Orchestrator` (~738 LOC) plus the new `Uploader` (~492 LOC) backed by this `pipeline/upload/` directory. Eleven slices over the refactor; two real bugs surfaced and were fixed mid-refactor (`_lastFilteredRequests` last-dataset-wins in Slice 4; `workerWantedSet` dead state in Slice 3). Mirrors the [[cpu-cache]] refactor from PRD #592 in shape, cadence, and intent. See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for the full design rationale.
+See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for why the upload role was hoisted out of `orchestrator.ts` into its own coordinator, and why the directory layout mirrors the [[cpu-cache]] shape.

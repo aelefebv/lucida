@@ -1,8 +1,7 @@
 /**
- * Unit tests for `buildViewHotState`.
- *
- * Slice 6e (PRD #607): pure builder that mirrors `iterateColdMembers`,
- * fanning the per-dataset ray hit out to every member.
+ * Unit tests for `buildViewHotState` — pure builder that mirrors
+ * `iterateColdMembers`, fanning the per-dataset ray hit out to every
+ * member.
  *
  * Cases:
  *   1. Per-member fan-out — one rayHit entry per cold-state member.
@@ -32,7 +31,7 @@ function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdState
     invModelMatrix: over.invModelMatrix ?? new Float32Array(16),
     displayStateByChannel: over.displayStateByChannel ?? {},
   };
-  // Slice 11: discriminate via `mode` so existing call sites that pass
+  // Discriminate via `mode` so existing call sites that pass
   // `mode: "well-as-proxy"` (with `imageId: ""`) keep working.
   const mode = over.mode ?? "fields-with-detail";
   if (mode === "well-as-proxy") {

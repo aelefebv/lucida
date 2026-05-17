@@ -1,12 +1,12 @@
-//! End-to-end HTTP tests for `AuthMode::Disabled` (PRD #527, slice 1).
+//! End-to-end HTTP tests for `AuthMode::Disabled`.
 //!
 //! Spawn the actual `lucida-server` binary in disabled mode, then drive
-//! it over real HTTP via `reqwest`. The regression these tests close:
-//! before PRD #527 the binary booted fine in disabled mode but every
-//! request 401'd because `build_extractor` always returned the cookie
-//! extractor regardless of `AuthMode`. `auth_config_e2e.rs` only checks
-//! that the binary boots and binds; these tests close the gap by
-//! exercising actual HTTP request/response.
+//! it over real HTTP via `reqwest`. The regression these tests close: if
+//! `build_extractor` returned the cookie extractor regardless of
+//! `AuthMode`, every request would 401 even though the binary booted
+//! fine. `auth_config_e2e.rs` only checks that the binary boots and
+//! binds; these tests close the gap by exercising actual HTTP
+//! request/response.
 //!
 //! Each test:
 //! - Picks a unique loopback (or `0.0.0.0`) port via `pick_loopback_port`.
@@ -180,13 +180,9 @@ async fn assert_whoami_returns_dev_principal(server: &SpawnedServer) {
     );
 }
 
-// ---------------------------------------------------------------------
-// Test 1: loopback default (no LUCIDA_AUTH set) → whoami yields dev
-// principal. THE regression test for PRD #527 — pre-fix this would
-// 401 because the cookie extractor demanded a session cookie no
-// route had minted.
-// ---------------------------------------------------------------------
-
+// Loopback default (no LUCIDA_AUTH set) → whoami yields dev principal.
+// Regression guard: a cookie extractor demanding a session cookie no
+// route minted in disabled mode would 401.
 #[tokio::test]
 async fn loopback_default_whoami_returns_dev_principal() {
     let port = pick_loopback_port();
@@ -195,13 +191,8 @@ async fn loopback_default_whoami_returns_dev_principal() {
     assert_whoami_returns_dev_principal(&server).await;
 }
 
-// ---------------------------------------------------------------------
-// Test 2: explicit LUCIDA_AUTH=disabled + LUCIDA_INSECURE=1 on a
-// non-loopback bind → same behaviour. This is the docker quickstart
-// path (`docker run -e LUCIDA_BIND=0.0.0.0:9876 -e LUCIDA_AUTH=disabled
-// -e LUCIDA_INSECURE=1 …`).
-// ---------------------------------------------------------------------
-
+// Docker quickstart path: explicit LUCIDA_AUTH=disabled +
+// LUCIDA_INSECURE=1 on a non-loopback bind behaves identically.
 #[tokio::test]
 async fn explicit_disabled_non_loopback_with_insecure_whoami_returns_dev_principal() {
     let port = pick_loopback_port();
@@ -216,13 +207,9 @@ async fn explicit_disabled_non_loopback_with_insecure_whoami_returns_dev_princip
     assert_whoami_returns_dev_principal(&server).await;
 }
 
-// ---------------------------------------------------------------------
-// Test 3: GET /api/browse without a cookie → not 401. Verifies that
-// the principal flows through middleware to non-auth handlers in
-// disabled mode. We mount a tempdir as `LUCIDA_DATA_DIR` and ask the
-// handler to list it.
-// ---------------------------------------------------------------------
-
+// GET /api/browse without a cookie must not 401 — verifies the
+// principal flows through middleware to non-auth handlers in disabled
+// mode.
 #[tokio::test]
 async fn browse_works_without_cookie_in_disabled_mode() {
     let port = pick_loopback_port();
@@ -265,20 +252,11 @@ async fn browse_works_without_cookie_in_disabled_mode() {
     );
 }
 
-// ---------------------------------------------------------------------
-// Test 4: POST /auth/dev/login is gone. PRD #527 retired the route in
-// favour of the stub extractor; this is the positive test that the
-// removal stuck.
-//
-// `LUCIDA_WEB_DIST` is pointed at an empty tempdir so the SPA static-
-// serve fallback returns its missing-dist landing (200 + HTML body)
-// for everything that doesn't match a real route. ServeDir would
-// otherwise 405 the POST when a built dist is present, and the
-// regression we want to catch is "dev_login mints a session" — not
-// "POST returns 405-vs-404." So we assert on the meaningful negative:
-// no session cookie set, response body is NOT a JSON principal.
-// ---------------------------------------------------------------------
-
+// POST /auth/dev/login is gone — the route was retired in favour of
+// the stub extractor. `LUCIDA_WEB_DIST` points at an empty tempdir so
+// the SPA fallback returns its missing-dist landing instead of
+// ServeDir's 405; assert on the meaningful negative: no session cookie
+// set, body is NOT a JSON principal.
 #[tokio::test]
 async fn dev_login_route_is_gone_in_disabled_mode() {
     let port = pick_loopback_port();

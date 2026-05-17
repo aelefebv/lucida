@@ -1,4 +1,4 @@
-//! End-to-end happy-path lifecycle for slice 2 of PRD #454 (issue #475).
+//! End-to-end happy-path lifecycle for server-stored bookmarks.
 //!
 //! Stands up the bookmarks router behind the real auth middleware
 //! (driven by a `MemorySessionStore` seeded with a known cookie) and
@@ -43,13 +43,12 @@ const DEV_COOKIE: &str = "dev-cookie";
 /// / `dev-cookie` so tests can switch identities by sending the right
 /// Cookie header.
 ///
-/// Bookmarks tests stay on the cookie path even after PRD #527 retires
-/// the dev-login endpoint, because bookmarks need per-user identity to
-/// exercise the cross-user permission boundary — the disabled-mode
-/// stub extractor's single shared `dev@local` principal can't drive
-/// the alice-vs-bob assertion. So this harness keeps the cookie
-/// extractor explicitly rather than going through the AuthMode-aware
-/// `build_extractor` picker.
+/// Bookmarks tests stay on the cookie path because they need per-user
+/// identity to exercise the cross-user permission boundary — the
+/// disabled-mode stub extractor's single shared `dev@local` principal
+/// can't drive the alice-vs-bob assertion. So this harness keeps the
+/// cookie extractor explicitly rather than going through the
+/// AuthMode-aware `build_extractor` picker.
 async fn build_app() -> Router {
     let session_store = Arc::new(MemorySessionStore::new());
     let now = Utc::now();
@@ -99,9 +98,9 @@ async fn build_app() -> Router {
     let bookmark_store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
     let bookmarks_state = BookmarksState {
         store: bookmark_store,
-        // Slice 4 plumbing: this REST-only test doesn't drive the
-        // broadcast path (no live WebSocket session); leaving these
-        // None makes the handlers no-op the broadcast call.
+        // This REST-only test doesn't drive the broadcast path (no live
+        // WebSocket session); leaving these None makes the handlers
+        // no-op the broadcast call.
         session: None,
         unicast_routes: None,
     };
@@ -311,9 +310,9 @@ async fn full_crud_happy_path_lifecycle() {
 /// Walk through CRUD as the `dev@local` principal. Mirrors what the
 /// curl smoke test would see against a server running in disabled
 /// mode — every request resolves to `dev@local` via the stub
-/// extractor. PRD #527 retired `/auth/dev/login`; this harness uses
-/// the cookie path with a pre-seeded dev session so the bookmarks
-/// permission boundary tests above can stay on the same wiring.
+/// extractor. This harness uses the cookie path with a pre-seeded dev
+/// session so the bookmarks permission boundary tests above can stay
+/// on the same wiring.
 #[tokio::test]
 async fn lifecycle_as_dev_principal() {
     let app = build_app().await;

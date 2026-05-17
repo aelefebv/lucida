@@ -25,12 +25,8 @@ export interface ResizeMessage {
 /**
  * A single chunk payload carried by `sliceChunkData`,
  * `volumeChunkData`, and `minimapUploadOverviewChunksForLayer`. The
- * shape is identical across all three callers (previously two parallel
- * `SliceChunk` / `VolumeChunk` interfaces); folded into one `Chunk`
- * type per the dechaos contract scan (Pass 5 finding: "structurally
- * identical, fold or discriminate"). The `chunks: Chunk[]` array shape
- * on the envelope messages is unchanged — that's a wire-protocol
- * contract change tracked separately (see issue #620 discussion).
+ * shape is identical across all three callers; one `Chunk` type rather
+ * than two parallel `SliceChunk` / `VolumeChunk` interfaces.
  */
 export interface Chunk {
   data: ArrayBuffer;
@@ -47,9 +43,7 @@ export interface SliceChunkDataMessage {
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Previously named `datasetId`; renamed
-   * per dechaos Pass 5 Contract Issue 3 — the field never carried a
-   * dataset id at any call site.
+   * multi-channel composites. Not a dataset id.
    */
   memberId: string;
   chunks: Chunk[];
@@ -137,10 +131,9 @@ export interface VolumeLayerParams {
  * delivery whose epoch is older than the worker's current view of the
  * world).
  *
- * Asymmetry rationale (dechaos Pass 5 Contract Issue 13): re-issuing a
- * render is cheap and the next viewEpoch will fire one anyway; dropping
- * a stale chunk avoids permanently writing wrong-epoch voxels into the
- * atlas.
+ * Asymmetry rationale: re-issuing a render is cheap and the next
+ * viewEpoch will fire one anyway; dropping a stale chunk avoids
+ * permanently writing wrong-epoch voxels into the atlas.
  */
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
@@ -296,7 +289,7 @@ interface ColdStateActiveEntryBase {
    * from `scene.member_model_matrix` for field entries and synthesises
    * it from the well AABB for `well-as-proxy` entries (see
    * `synthesizeWellRosterEntry` in orchestrator.ts). The worker writes
-   * this directly into the descriptor buffer; render messages no longer
+   * this straight into the descriptor buffer; render messages do not
    * carry per-frame model matrices.
    */
   modelMatrix: Float32Array;
@@ -324,16 +317,14 @@ interface ColdStateActiveEntryBase {
  *     worker should serve the proxy alongside the chunks
  *     (`fields-with-proxy-fallback`) or rely on chunks only
  *     (`fields-with-detail`). Invisible entries from the planner also
- *     surface as `field` with `mode: "fields-with-detail"` (the legacy
- *     encoding) so the worker doesn't try to fetch proxies for them.
+ *     surface as `field` with `mode: "fields-with-detail"` so the
+ *     worker doesn't try to fetch proxies for them.
  *   - `kind: "well-as-proxy"` — a synthesised well-level entry with no
  *     backing image; the worker renders the well's proxy directly.
  *     `imageId` is intentionally absent (`?: never`) — use `entityId`
  *     as the routing key throughout the pipeline.
  *
- * Wire bytes are unchanged from the pre-Slice-11 shape: the producer
- * always emitted `mode`; the consumer now also receives `kind`, which
- * lets TypeScript narrow the variant without the `imageId === ""`
+ * `kind` lets TypeScript narrow the variant without the `imageId === ""`
  * sentinel. `mode` is retained for backward compat (logging, debug,
  * existing inspection paths); future work can drop it once every
  * consumer routes through `kind`.
@@ -455,8 +446,7 @@ export interface ChunksEvictedMessage {
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Previously named `datasetId`; renamed
-   * per dechaos Pass 5 Contract Issue 3.
+   * multi-channel composites. Not a dataset id.
    */
   memberId: string;
   /** Chunks removed from the atlas (were present, got evicted by closer chunks). */

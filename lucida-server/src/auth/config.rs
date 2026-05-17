@@ -1,14 +1,12 @@
 //! Auth subsystem runtime configuration.
 //!
-//! Slice 2 (PRD #455) configured the cookie name, the SQLite database
-//! file, the idle timeout, and the hard cap. Slice 4 layers Google
-//! OAuth knobs on top: the `LUCIDA_AUTH` mode selector and the three
-//! Google credentials needed to drive a real sign-in. Slice 7 lands
-//! `LUCIDA_BIND` and the auto-detect-by-bind policy from ADR-0018:
-//! when `LUCIDA_AUTH` is unset, the auth mode is inferred from whether
-//! the bind address is loopback (→ `Disabled`) or public (→ `Google`),
-//! and the dangerous "disabled + non-loopback" combination requires an
-//! explicit `LUCIDA_INSECURE=1` opt-in.
+//! Covers cookie name, SQLite database path, idle timeout, hard cap,
+//! the `LUCIDA_AUTH` mode selector and Google OAuth credentials, the
+//! `LUCIDA_BIND` socket, and the auto-detect-by-bind policy from
+//! ADR-0018: when `LUCIDA_AUTH` is unset, the auth mode is inferred
+//! from whether the bind address is loopback (→ `Disabled`) or public
+//! (→ `Google`), and the dangerous "disabled + non-loopback"
+//! combination requires an explicit `LUCIDA_INSECURE=1` opt-in.
 //!
 //! `from_env_map` is the testable seam: it takes any `Fn(&str) ->
 //! Option<String>` so unit tests can exercise every env-var permutation
@@ -66,10 +64,6 @@ pub const DEFAULT_GOOGLE_ISSUERS: &[&str] = &["https://accounts.google.com", "ac
 /// path (`cargo run --bin lucida-server` → localhost-only, auth off).
 /// Production deployments override via `LUCIDA_BIND=0.0.0.0:9876` (or
 /// the deployment-specific interface).
-///
-/// Behavior change: before slice 7 this binary bound `0.0.0.0:9876`
-/// unconditionally. Existing deployment scripts that relied on the old
-/// default need to set `LUCIDA_BIND` explicitly.
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9876";
 
 /// How the `Secure` cookie attribute is chosen.
@@ -101,16 +95,15 @@ impl SecureCookieMode {
 
 /// Auth backend selector.
 ///
-/// Slice 4 (PRD #455) lands the explicit `Disabled` / `Google` toggle.
-/// Slice 7 (ADR-0018) layers the auto-detect-by-bind-address policy on
-/// top: when `LUCIDA_AUTH` is unset, the mode is inferred from the
-/// bind IP (loopback → `Disabled`, public → `Google`). Explicit
-/// `LUCIDA_AUTH` always wins over the auto-detect.
+/// Explicit `Disabled` / `Google` toggle, plus an
+/// auto-detect-by-bind-address policy (ADR-0018): when `LUCIDA_AUTH`
+/// is unset, the mode is inferred from the bind IP (loopback →
+/// `Disabled`, public → `Google`). Explicit `LUCIDA_AUTH` always wins
+/// over the auto-detect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
-    /// Dev-friendly mode: no OAuth, sessions only via the dev-login
-    /// endpoint. The slice-2 cookie extractor still runs; everything
-    /// just bypasses the new sign-in flow.
+    /// Dev-friendly mode: no OAuth. The cookie extractor still runs;
+    /// everything just bypasses the sign-in flow.
     Disabled,
     /// Production OAuth: /auth/start + /auth/callback wired up against
     /// Google. Requires `LUCIDA_GOOGLE_CLIENT_ID`,
@@ -119,10 +112,10 @@ pub enum AuthMode {
 }
 
 impl AuthMode {
-    /// Parse an explicit `LUCIDA_AUTH` value. Slice 7 tightens this:
-    /// unknown values (e.g. `microsoft`) are now an error, not a silent
-    /// fallthrough to `Disabled` — the latter would mask configuration
-    /// typos that previously left a deploy in the wrong mode.
+    /// Parse an explicit `LUCIDA_AUTH` value. Unknown values
+    /// (e.g. `microsoft`) are an error rather than a silent
+    /// fallthrough to `Disabled`, so configuration typos can't leave
+    /// a deploy in the wrong mode.
     pub fn parse(raw: &str) -> Result<Self, UnknownAuthMode> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "google" => Ok(Self::Google),
@@ -203,32 +196,31 @@ pub struct AuthConfig {
     /// presence-of-required-fields in `from_env` so handlers can
     /// `unwrap()` it without rechecking.
     pub google: Option<GoogleOAuthConfig>,
-    /// Slice 5 (PRD #455 §"Hosted-domain validation"): when non-empty,
-    /// callbacks reject any JWT whose `hd` claim isn't in this set.
-    /// Empty = no restriction (the OSS-permissive default; matches
-    /// "any verified Google email" per user-story 11). Both this set
-    /// and the `hd` claim are lowercased before comparison so casing
-    /// drift in env vars or upstream tokens never silently rejects.
+    /// When non-empty, callbacks reject any JWT whose `hd` claim isn't
+    /// in this set. Empty = no restriction (the OSS-permissive default;
+    /// matches "any verified Google email"). Both this set and the
+    /// `hd` claim are lowercased before comparison so casing drift in
+    /// env vars or upstream tokens never silently rejects.
     pub allowed_hosted_domains: HashSet<String>,
-    /// Slice 6 (PRD #455 §"Admin role bootstrap"): emails granted
-    /// `is_admin: true` at principal-extraction time. Empty = no admins
-    /// (admin-only endpoints return 403 for everyone). Lowercased at
-    /// parse time; the principal email is also lowercased before lookup
-    /// so casing drift never silently demotes. Admin status is derived
-    /// per-request, not persisted on `LoginSession` — promote/demote is
-    /// a config-change-and-restart that takes effect on the next request.
+    /// Emails granted `is_admin: true` at principal-extraction time.
+    /// Empty = no admins (admin-only endpoints return 403 for everyone).
+    /// Lowercased at parse time; the principal email is also lowercased
+    /// before lookup so casing drift never silently demotes. Admin
+    /// status is derived per-request, not persisted on `LoginSession` —
+    /// promote/demote is a config-change-and-restart that takes effect
+    /// on the next request.
     pub admin_emails: HashSet<String>,
-    /// Slice 7 (ADR-0018): the socket the server binds. Default is
-    /// loopback (`127.0.0.1:9876`); production deployments override
-    /// via `LUCIDA_BIND`. The auth mode auto-detect keys off
+    /// The socket the server binds (ADR-0018). Default is loopback
+    /// (`127.0.0.1:9876`); production deployments override via
+    /// `LUCIDA_BIND`. The auth mode auto-detect keys off
     /// `bind_addr.ip().is_loopback()`.
     pub bind_addr: SocketAddr,
-    /// Slice 7 (ADR-0018): explicit acknowledgment that the operator
-    /// is intentionally running with auth disabled on a non-loopback
-    /// bind. Always `false` on the safe paths; `true` only when the
-    /// operator set `LUCIDA_INSECURE=1`. The bool is preserved for
-    /// startup-logging and audit purposes; the validation that it must
-    /// be set has already happened by the time `from_env` returns Ok.
+    /// Explicit acknowledgment that the operator is intentionally
+    /// running with auth disabled on a non-loopback bind (ADR-0018).
+    /// Always `false` on the safe paths; `true` only when the operator
+    /// set `LUCIDA_INSECURE=1`. Preserved for startup-logging and
+    /// audit purposes; the must-be-set validation has already happened
+    /// by the time `from_env` returns Ok.
     pub insecure_acknowledged: bool,
 }
 
@@ -255,9 +247,9 @@ impl AuthConfig {
     {
         let nonempty = |name: &str| read(name).filter(|v| !v.trim().is_empty());
 
-        // ---- bind address ---------------------------------------------------
-        // Parse first so the auto-detect below can branch on it. The
-        // loopback question is the safety hinge for everything else.
+        // Bind address: parse first so auto-detect below can branch on
+        // it. The loopback question is the safety hinge for everything
+        // else.
         let bind_raw = nonempty("LUCIDA_BIND").unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
         let bind_addr: SocketAddr = bind_raw.parse().map_err(|e: std::net::AddrParseError| {
             AuthConfigError::InvalidBindAddr {
@@ -267,7 +259,7 @@ impl AuthConfig {
         })?;
         let bind_is_loopback = bind_addr.ip().is_loopback();
 
-        // ---- auth mode (explicit override > auto-detect) --------------------
+        // Auth mode: explicit override > auto-detect.
         let mode = match nonempty("LUCIDA_AUTH") {
             Some(raw) => AuthMode::parse(&raw)
                 .map_err(|UnknownAuthMode(s)| AuthConfigError::UnknownAuthMode(s))?,
@@ -282,10 +274,9 @@ impl AuthConfig {
             }
         };
 
-        // ---- LUCIDA_INSECURE gate for the dangerous combination -------------
-        // Only relevant when mode == Disabled AND bind is non-loopback.
-        // Both safe paths skip the check; the unsafe path requires the
-        // operator to opt in explicitly (and `main.rs` prints a banner).
+        // LUCIDA_INSECURE gate: only relevant when mode == Disabled AND
+        // bind is non-loopback. Safe paths skip the check; the unsafe
+        // path requires explicit opt-in (and `main.rs` prints a banner).
         let insecure_acknowledged = nonempty("LUCIDA_INSECURE")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
@@ -293,7 +284,7 @@ impl AuthConfig {
             return Err(AuthConfigError::InsecureRequiresOptIn { bind: bind_addr });
         }
 
-        // ---- Google OAuth credentials (only when mode == Google) ------------
+        // Google OAuth credentials, only when mode == Google.
         let google = if mode.is_google() {
             Some(google_from_reader(&nonempty)?)
         } else {
@@ -479,9 +470,9 @@ mod tests {
 
     #[test]
     fn auth_mode_parses_unknown_value_fails() {
-        // Slice 7 (ADR-0018): silent fallthrough was a footgun. The
-        // operator who typed `microsoft` in their deploy script wants
-        // a fail-fast at boot, not a server that quietly disabled auth.
+        // Silent fallthrough was a footgun (ADR-0018). The operator
+        // who typed `microsoft` in their deploy script wants a fail-fast
+        // at boot, not a server that quietly disabled auth.
         let err = AuthMode::parse("microsoft").unwrap_err();
         assert_eq!(err, UnknownAuthMode("microsoft".to_string()));
         let err = AuthMode::parse("").unwrap_err();
@@ -500,7 +491,7 @@ mod tests {
         assert_eq!(g.jwks_uri, "https://mock/certs");
     }
 
-    // -- LUCIDA_ALLOWED_HOSTED_DOMAINS parsing (slice 5) ----------------
+    // -- LUCIDA_ALLOWED_HOSTED_DOMAINS parsing --------------------------
 
     #[test]
     fn allowed_hosted_domains_unset_is_empty_set() {
@@ -542,7 +533,7 @@ mod tests {
         assert!(!set.contains("Calicolabs.COM"), "values are normalized");
     }
 
-    // -- LUCIDA_ADMIN_EMAILS parsing (slice 6) --------------------------
+    // -- LUCIDA_ADMIN_EMAILS parsing ------------------------------------
 
     #[test]
     fn admin_emails_unset_is_empty_set() {
@@ -595,7 +586,7 @@ mod tests {
         assert!(cfg.admin_emails.is_empty(), "tests start with no admins");
     }
 
-    // -- LUCIDA_BIND + auto-detect (slice 7, ADR-0018) ------------------
+    // -- LUCIDA_BIND + auto-detect (ADR-0018) ---------------------------
     //
     // All permutations driven through `from_env_map` so we never touch
     // process-global env vars: tests can run in parallel without
@@ -741,8 +732,6 @@ mod tests {
 
     #[test]
     fn explicit_google_validates_credentials() {
-        // Slice 4 already validated this; verify it still works after
-        // the slice 7 reorganization.
         let err = AuthConfig::from_env_map(reader(&[("LUCIDA_AUTH", "google")]))
             .expect_err("google mode + missing creds should fail");
         assert!(matches!(err, AuthConfigError::MissingClientId));

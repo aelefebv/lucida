@@ -1,17 +1,8 @@
 /**
  * Pool-key helpers — canonical encoding for the chunk + proxy atlas
- * pool keys.
- *
- * Lifted from `gpu.worker.ts` cold-state handler (dechaos render Pass 5
- * Contract Issue 4: chunk-pool key built inline at multiple sites with
- * subtly different separator conventions, and proxy-pool key declared
- * in `proxyAtlas.ts`). This module is the single source of truth for
- * pool-key formatting.
- *
- * Call-site migration is intentionally deferred to Slice 4 of the
- * render refactor — for now this slice declares and tests the helper
- * while the worker keeps its inline format strings (kept visually in
- * sync; future drift is caught by `poolKeys.test.ts`).
+ * pool keys. Single source of truth for pool-key formatting; drift
+ * against the worker's inline format strings is caught by
+ * `poolKeys.test.ts`.
  */
 
 export { proxyPoolKey } from "./proxyAtlas.ts";

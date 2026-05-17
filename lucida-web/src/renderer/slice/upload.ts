@@ -2,8 +2,6 @@
  * Slice chunk upload — staleness check, Z-slice filter, LRU eviction,
  * GPU write, intensity sampling, and per-member post-message demux.
  *
- * Extracted from `sliceHandlers.ts` in Slice 7. No behavior change.
- *
  * Manages `staleSliceKeys` on the atlas (cleared as fresh chunks land
  * for the new target Z). See `slice/zRetarget.ts` for the helper
  * function this module pairs with.

@@ -1,24 +1,8 @@
-/**
- * Unit tests for {@link Scheduler} (Slice 7, `#601`).
- *
- * Synthetic-input only — no cache instance, no fetch mock. The
- * scheduler's contract is: bookkeep a pending queue + an in-flight
- * Map under concurrency + bytes caps, fire `startFn` for each
- * dequeued request, surface backpressure through the optional
- * BurstLogger when a cap is hit.
- *
- * Existing `cpuCache.test.ts` integration tests verify the
- * scheduler's interaction with fetch + decode + cache. These tests
- * pin the scheduler's own contract so a future refactor can verify
- * per-scheduler invariants in isolation.
- */
-
 import { describe, it, expect, vi } from "vitest";
 
 import { Scheduler, type InFlightEntry } from "./scheduler.ts";
 import { BurstLogger } from "./telemetry.ts";
 
-// Mock debugLog so backpressure-log assertions can spy on it.
 vi.mock("../../debug/logging.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
   return { ...actual, debugLog: vi.fn() };
