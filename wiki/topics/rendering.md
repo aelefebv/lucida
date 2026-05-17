@@ -1,6 +1,6 @@
 ---
 created: 2026-05-07
-modified: 2026-05-07
+modified: 2026-05-17
 ---
 
 # Topic: Rendering
@@ -20,7 +20,7 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 - [[cpu-cache]] — sole chunk fetch path; tiered LRU eviction; decode pool dispatch; drain to GPU
 - [[gpu-residency]] — atlases (slice, volume, multi-pool proxy), indirection, descriptor buffer, semantic fallback chain
 - [[worker-protocol]] — typed `postMessage` contract for cold/hot/delta state between main thread and GPU worker
-- [[scene-state-and-epochs]] — typed epoch counters drive the orchestrator's frame fast-path
+- [[scene-state-and-epochs]] — typed epoch counters drive the tick coordinator's frame fast-path
 - [[layout-system]] — registered layouts; placement rebuilds invalidate render dependencies
 - [[multichannel-and-colormaps]] — per-channel state, 15 LUTs, composite key naming
 

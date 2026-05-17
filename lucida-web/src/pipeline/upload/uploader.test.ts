@@ -15,7 +15,7 @@ import type { DeliveryTracker } from "./delivery/tracker.ts";
 
 // Upload-side describes for the `Uploader` surface. The Uploader owns
 // delivery tracking, cold/hot state emission, drain/resend dispatch,
-// and worker feedback; the Orchestrator drives `planAndFetch` and hands
+// and worker feedback; the TickCoordinator drives `planAndFetch` and hands
 // per-dataset results into the Uploader. Tests that exercise the
 // upload-only surface use a standalone `Uploader`; tests that exercise
 // the planner → uploader integration (cold-state display state,
@@ -29,7 +29,7 @@ function createMockAssetCatalog(): AssetCatalog {
 }
 
 // ---------------------------------------------------------------------------
-// Mock factories (shared with orchestrator.test.ts; copied here to keep the
+// Mock factories (shared with tickCoordinator.test.ts; copied here to keep the
 // two test files independent — duplication is intentional, the fixtures
 // rarely change and avoiding a shared helper module keeps the test
 // files self-contained.)
@@ -207,12 +207,12 @@ function createMockContent(): DatasetManifest {
 
 describe("proxy delivery tracking", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let Orchestrator: typeof import("../orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    Orchestrator = (await import("../orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
   });
 
   function makeProxyRequest(
@@ -370,7 +370,7 @@ describe("proxy delivery tracking", () => {
     // is reported via wantedSetDelta; that's the only signal that should
     // clear the tracking.
     const uploader = new Uploader();
-    const orch = new Orchestrator(uploader);
+    const orch = new TickCoordinator(uploader);
 
     const scene = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1 },
@@ -423,12 +423,12 @@ describe("proxy delivery tracking", () => {
 
 describe("cold-state display state", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let Orchestrator: typeof import("../orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    Orchestrator = (await import("../orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
   });
 
   function makeCtxWithSpy(
@@ -449,7 +449,7 @@ describe("cold-state display state", () => {
   }
 
   it("populates displayStateByChannel from per-channel settings on the active channel", () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const scene = createMockScene({
       c: 1,
       allSettings: {
@@ -491,7 +491,7 @@ describe("cold-state display state", () => {
     // explicitly between the two ticks so the second `getSceneSettings`
     // call observes the new contrast value.
     const { bumpSettingsGeneration } = await import("../../tickCommon.ts");
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const sceneA = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1 },
@@ -539,7 +539,7 @@ describe("cold-state display state", () => {
   });
 
   it("multi-channel emits per-channel display state for every visible channel", () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const scene = createMockScene({
       multiChannel: true,
@@ -577,12 +577,12 @@ describe("cold-state display state", () => {
 
 describe("viewHotState emission", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let Orchestrator: typeof import("../orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    Orchestrator = (await import("../orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
   });
 
   function makeCtxWithViewHotSpy(
@@ -603,7 +603,7 @@ describe("viewHotState emission", () => {
   }
 
   it("emits one viewHotState message per dataset on initial plan", () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const scene = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const viewHotSpy = vi.fn();
@@ -617,7 +617,7 @@ describe("viewHotState emission", () => {
   });
 
   it("uses ray hits sourced from scene.ray_hit_local_image", () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const customScene = createMockScene();
     (customScene as unknown as { ray_hit_local_image: () => Float32Array }).ray_hit_local_image =
       () => new Float32Array([0.25, 0.5, 0.75]);
@@ -629,7 +629,7 @@ describe("viewHotState emission", () => {
   });
 
   it("does not re-emit viewHotState when viewEpoch is unchanged across ticks", async () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     const viewHotA = vi.fn();
@@ -648,7 +648,7 @@ describe("viewHotState emission", () => {
   });
 
   it("re-emits viewHotState when viewEpoch advances", () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     const viewHotA = vi.fn();
@@ -663,7 +663,7 @@ describe("viewHotState emission", () => {
   });
 
   it("multi-channel emits one rayHit entry per (member, channel) composite", () => {
-    const orch = new Orchestrator(new Uploader());
+    const orch = new TickCoordinator(new Uploader());
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const scene = createMockScene({
       multiChannel: true,
@@ -1184,12 +1184,12 @@ describe("handleChunksEvicted", () => {
 
 describe("multi-dataset upload characterization", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let Orchestrator: typeof import("../orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    Orchestrator = (await import("../orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
   });
 
   function makeMultiDatasetScene() {
@@ -1256,7 +1256,7 @@ describe("multi-dataset upload characterization", () => {
     "lastFilteredRequests keeps both datasets' requests across a multi-dataset rebuild",
     () => {
       const uploader = new Uploader();
-      const orch = new Orchestrator(uploader);
+      const orch = new TickCoordinator(uploader);
       const scene = makeMultiDatasetScene();
       const datasets = makeTwoDatasetEntries();
       orch.planAndFetch(makeCtx(scene, datasets), new Map());
@@ -1287,7 +1287,7 @@ describe("multi-dataset upload characterization", () => {
       // map shape: both datasets register entries (even when empty),
       // confirming the last-dataset-wins overwrite is gone.
       const uploader = new Uploader();
-      const orch = new Orchestrator(uploader);
+      const orch = new TickCoordinator(uploader);
       const scene = makeMultiDatasetScene();
       const datasets = makeTwoDatasetEntries();
       orch.planAndFetch(makeCtx(scene, datasets), new Map());
@@ -1306,7 +1306,7 @@ describe("multi-dataset upload characterization", () => {
     // rebuild path consolidates the chunk-tracker reset across every
     // dataset in the rebuild.
     const uploader = new Uploader();
-    const orch = new Orchestrator(uploader);
+    const orch = new TickCoordinator(uploader);
     const tracker = (uploader as unknown as {
       deliveryTracker: DeliveryTracker;
     }).deliveryTracker;
@@ -1322,7 +1322,7 @@ describe("multi-dataset upload characterization", () => {
 
   it("per-dataset sendColdState + sendViewHotState: each dataset receives its own message on initial plan", () => {
     const uploader = new Uploader();
-    const orch = new Orchestrator(uploader);
+    const orch = new TickCoordinator(uploader);
     const scene = makeMultiDatasetScene();
     const datasets = makeTwoDatasetEntries();
     const coldSpy = vi.fn();
@@ -1346,12 +1346,12 @@ describe("multi-dataset upload characterization", () => {
 
 describe("cold-state lifecycle invariant", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let Orchestrator: typeof import("../orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
 
   beforeEach(async () => {
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    Orchestrator = (await import("../orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
   });
 
   it("after sendColdState, tracker.wasChunkSent returns false for previously-sent keys", async () => {
@@ -1362,7 +1362,7 @@ describe("cold-state lifecycle invariant", () => {
     // orchestrator believed chunks were already supplied — atlas would
     // stay empty for stale keys.
     const uploader = new Uploader();
-    const orch = new Orchestrator(uploader);
+    const orch = new TickCoordinator(uploader);
     // Seed: pretend a previous tick delivered a chunk for "img-0".
     const tracker = (uploader as unknown as {
       deliveryTracker: DeliveryTracker;

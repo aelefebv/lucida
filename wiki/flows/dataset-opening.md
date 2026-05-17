@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-17
 ---
 
 # Flow: Dataset Opening
@@ -30,7 +30,7 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
      5. `loopRef.current.addDataset(datasetId, manifest)` and flip `interactiveDirty=true`
      6. Pre-allocate `Uint16Array` for the coarsest level
 5. **Next RAF tick** ([[chunk-pipeline]]):
-   1. Orchestrator's `planAndFetch` runs because `interactiveDirty`.
+   1. TickCoordinator's `planAndFetch` runs because `interactiveDirty`.
    2. WASM `view_query(dsId)` returns visible entities with `projected_diagonal_px` and `idealTargetLod`.
    3. [[planning-domain]] decides per-well mode (proxy / fallback / detail), enumerates wanted chunks with priorities.
    4. [[cpu-cache]] `submit(plan)` queues unique requests.
@@ -39,7 +39,7 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
 7. **Client receives binary frame** (`bridge.ts::handleBinary`): routes by key prefix — chunk frames go to `contentSource.fetch` resolvers; proxy frames go to a separate proxy promise table.
 8. **Decode pool** — 3 workers running `decode.worker.ts` decompress (Raw/Lz4/Zstd) into typed arrays.
 9. **Cache insertion** — chunk lands in `cpuCache.ready[]`.
-10. **Drain** (next tick): orchestrator pulls from `ready[]` within the 16 MB upload budget, filters against `workerWantedSet`, posts `sliceChunkData` or `volumeChunkData` to the GPU worker.
+10. **Drain** (next tick): tick coordinator pulls from `ready[]` within the 16 MB upload budget, filters against `workerWantedSet`, posts `sliceChunkData` or `volumeChunkData` to the GPU worker.
 11. **Worker** ([[gpu-residency]]): writes atlas slot, updates indirection buffer, recomputes wanted-set, posts `wantedSetDelta` back to main.
 12. **Render** — slice or volume shader runs, descriptor → indirection → atlas sample → fallback chain → contrast/gamma/LUT → opacity. Pixels.
 

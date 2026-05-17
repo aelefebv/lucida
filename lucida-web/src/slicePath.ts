@@ -6,7 +6,7 @@ import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
-import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
@@ -149,7 +149,7 @@ function uploadAndRenderSlice(
  */
 export function tickSlice(
   ctx: TickContext,
-  orchestrator: Orchestrator,
+  tickCoordinator: TickCoordinator,
   uploader: Uploader,
   sliceZ: number,
   sliceT: number,
@@ -159,7 +159,7 @@ export function tickSlice(
 ): boolean {
   const { scene, canvas } = ctx;
 
-  // Set scene params before orchestrator queries WASM state
+  // Set scene params before tickCoordinator queries WASM state
   scene.set_z(sliceZ);
   scene.set_t(sliceT);
   scene.set_c(sliceC);
@@ -169,7 +169,7 @@ export function tickSlice(
   scene.set_viewport(canvasW, canvasH);
 
   const t0 = debugStats.enabled ? performance.now() : 0;
-  const orchResult = orchestrator.planAndFetch(ctx, minimapPendingFetch);
+  const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!orchResult) return false;
 

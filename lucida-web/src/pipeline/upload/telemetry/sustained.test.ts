@@ -4,7 +4,7 @@ import { SustainedCondition, ConsecutiveTickDetector } from "./sustained.ts";
 // ---------------------------------------------------------------------------
 // SustainedCondition
 //
-// The semantics mirror the existing detector logic in `orchestrator.ts`:
+// The semantics mirror the existing detector logic in `tickCoordinator.ts`:
 //   - First true tick arms the sustain window (no log).
 //   - Subsequent trues only fire once both `sustainMs` has elapsed since
 //     arming AND `rateLimitMs` has elapsed since the previous log

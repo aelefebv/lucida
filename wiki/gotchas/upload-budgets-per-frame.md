@@ -1,13 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-17
 ---
 
 # Upload Budgets Are Per-Frame and Per-Path
 
 ## The footgun
 
-The orchestrator drains decoded chunks to the GPU within a strict per-frame byte budget, separately for the main view and the minimap:
+The tick coordinator drains decoded chunks to the GPU within a strict per-frame byte budget, separately for the main view and the minimap:
 
 - **Main view (slice + volume)**: 16 MB / frame
 - **Minimap**: 2 MB / frame
@@ -32,7 +32,7 @@ If `ready[]` grows monotonically, the budget is too low. If render frame times s
 
 ## Where the constants live
 
-`lucida-web/src/pipeline/orchestrator.ts` has the constants. Look for `MAIN_VIEW_UPLOAD_BUDGET_BYTES` and the minimap equivalent.
+`lucida-web/src/pipeline/tickCoordinator.ts` has the constants. Look for `MAIN_VIEW_UPLOAD_BUDGET_BYTES` and the minimap equivalent.
 
 The minimap budget being separate (and smaller) is intentional: the minimap renders rarely, so it doesn't need to compete with main-view bandwidth.
 

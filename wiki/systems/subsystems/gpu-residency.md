@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-16
+modified: 2026-05-17
 ---
 
 # GPU Residency
@@ -44,7 +44,7 @@ The LRU eviction kernel (`eviction.ts` at the top of `renderer/`) and the indire
 - per-LOD info (shape, indirection offset)
 - proxy slot handles (`fieldProxyPoolIndex`, `fieldProxySlotIndex`, well-proxy equivalents)
 
-Shaders use `entityIndex` to look up its descriptor. The orchestrator and worker share an explicit ordered `(memberId → index)` map so indices match by construction — both sides iterate the same active set in the same order.
+Shaders use `entityIndex` to look up its descriptor. The tick coordinator and worker share an explicit ordered `(memberId → index)` map so indices match by construction — both sides iterate the same active set in the same order.
 
 The byte layout is owned by `renderer/descriptor/layout.ts` as named offset constants (`OFFSET_MODEL_MATRIX`, `OFFSET_FIELD_PROXY_DIMS`, `LOD_OFFSET_CHUNK_DIMS`, etc.). Both writers — the canonical `descriptorBuffer.serializeEntityDescriptor` and the transient `descriptor/transient.serializeTransientDescriptor` (minimap path) — read offsets from that file. `renderer/descriptor/layout.test.ts` parses the `EntityDescriptor` struct from both `slice.wgsl` and `volume.wgsl` and asserts agreement against the TS constants; if the WGSL struct changes without updating `layout.ts` (or vice versa) the lock test fails. See ADR 0035 for the design rationale.
 
@@ -96,7 +96,7 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 
 ## Interactions
 
-- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, `sliceChunkData`, `volumeChunkData`, `proxyAsset` messages over [[worker-protocol]]. The planner-only Orchestrator drives the Uploader.
+- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, `sliceChunkData`, `volumeChunkData`, `proxyAsset` messages over [[worker-protocol]]. The planner-only TickCoordinator drives the Uploader.
 - **Downstream**: the worker presents to the OffscreenCanvas; communicates back via `wantedSetDelta`, `chunksEvicted`, `frameStats`, `intensityRange`.
 
 ## Invariants
@@ -107,7 +107,7 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 - **Descriptor byte offsets live only in `descriptor/layout.ts`.** Both TS writers and both WGSL shaders must agree; `layout.test.ts` enforces this by parsing the shaders at test time.
 - **Atlas slot IDs are pool-local.** A slot ID `42` in pool A is unrelated to slot `42` in pool B. The descriptor's per-LOD info encodes which pool to read.
 - **Indirection writes are batched per frame** — many residency changes coalesce into one mapped buffer write. Don't add a per-chunk write call.
-- **Cold state is rebuilt only when WASM epochs say something changed.** The orchestrator's epoch fast-path skips ~95% of frames, ~5% rebuild. Forcing a rebuild every frame turns a 60fps view into a slideshow.
+- **Cold state is rebuilt only when WASM epochs say something changed.** The tick coordinator's epoch fast-path skips ~95% of frames, ~5% rebuild. Forcing a rebuild every frame turns a 60fps view into a slideshow.
 
 ## Gotchas
 

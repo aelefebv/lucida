@@ -259,7 +259,7 @@ export class CpuCache {
     for (const req of proxyRequests) {
       const key = this.inFlightProxyKey(req);
 
-      // Orchestrator resends evicted proxies via `getCachedProxy`, so
+      // TickCoordinator resends evicted proxies via `getCachedProxy`, so
       // cache hits here are silent.
       if (this.isProxyCached(req)) continue;
 

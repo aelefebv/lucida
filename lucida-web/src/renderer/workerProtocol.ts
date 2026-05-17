@@ -288,7 +288,7 @@ interface ColdStateActiveEntryBase {
    * `[0,1]^3` unit cube to world space. The orchestrator derives this
    * from `scene.member_model_matrix` for field entries and synthesises
    * it from the well AABB for `well-as-proxy` entries (see
-   * `synthesizeWellRosterEntry` in orchestrator.ts). The worker writes
+   * `synthesizeWellRosterEntry` in tickCoordinator.ts). The worker writes
    * this straight into the descriptor buffer; render messages do not
    * carry per-frame model matrices.
    */

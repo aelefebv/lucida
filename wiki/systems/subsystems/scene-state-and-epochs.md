@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-04-19
+modified: 2026-05-17
 ---
 
 # Scene State and Epochs
 
-How the WASM Scene exposes "what changed since you last asked." Owns one of the central performance levers in the codebase: the orchestrator's epoch fast-path skips most frames entirely.
+How the WASM Scene exposes "what changed since you last asked." Owns one of the central performance levers in the codebase: the tick coordinator's epoch fast-path skips most frames entirely.
 
 ## What an epoch is
 
@@ -21,11 +21,11 @@ Every command that mutates the scene bumps exactly the right epoch(s). `Pan` bum
 
 ## Why typed epochs over a single dirty flag
 
-A single dirty bit forces every consumer to do the most expensive work. Typed epochs let the orchestrator say:
+A single dirty bit forces every consumer to do the most expensive work. Typed epochs let the tick coordinator say:
 
 > "Selection changed but view didn't — so I need to rebuild the descriptor buffer, but I can skip the full cold-state rebuild and the wanted-set recomputation."
 
-Concretely, the orchestrator's `planAndFetch` ([[chunk-pipeline]]) starts with an epoch read; if every counter is unchanged, it returns the cached result and the tick is essentially free. Hits ~5% of frames in normal viewing.
+Concretely, the tick coordinator's `planAndFetch` ([[chunk-pipeline]]) starts with an epoch read; if every counter is unchanged, it returns the cached result and the tick is essentially free. Hits ~5% of frames in normal viewing.
 
 The split also lets [[gpu-residency|the worker]] decide independently — it gets the planning epochs in every chunk/proxy delivery and drops anything that's stale relative to its current understanding.
 
@@ -43,7 +43,7 @@ Three layers of "what is the scene right now":
 
 - **Producer**: `Scene::apply` in [[lucida-core]]. Single mutator, single epoch bumper.
 - **Consumers**:
-  - [[chunk-pipeline|orchestrator]] reads epochs every tick to short-circuit; passes them in chunk/proxy deliveries to [[gpu-residency|the worker]] for staleness checks.
+  - [[chunk-pipeline|tick coordinator]] reads epochs every tick to short-circuit; passes them in chunk/proxy deliveries to [[gpu-residency|the worker]] for staleness checks.
   - The web client passes `Scene::apply_command` for every incoming `CommandBroadcast` so all clients converge on the same document state and bump the same epochs.
   - [[lucida-server]] doesn't read epochs directly — it owns its own seq counter for command ordering. Epochs are a renderer concern.
 

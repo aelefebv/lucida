@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-17
 ---
 
 # Worker Eviction Reporting Is Async
@@ -23,7 +23,7 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 2. Worker posts `chunksEvicted { evicted: [K], skipped: [] }` to main thread.
 3. Worker includes `K` in next `wantedSetDelta { missing: [K, ...] }` (if still wanted).
 4. Main thread `chunksEvicted` handler clears `proxyDeliveredToWorker.delete(K)` and `sentSet.delete(K)` so the next drain can re-send.
-5. Next [[chunk-pipeline|tick]]: orchestrator sees `K` in `workerWantedSet` and not in its delivered tracking, includes `K` in the next drain if it's in [[cpu-cache]].
+5. Next [[chunk-pipeline|tick]]: tick coordinator sees `K` in `workerWantedSet` and not in its delivered tracking, includes `K` in the next drain if it's in [[cpu-cache]].
 
 ## What to do
 

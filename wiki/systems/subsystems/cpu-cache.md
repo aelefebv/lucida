@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-16
+modified: 2026-05-17
 ---
 
 # CPU Cache
@@ -41,11 +41,11 @@ Three problems all want to be solved in one place:
 
 Each tick:
 
-1. **Submit** — orchestrator calls `cpuCache.submit(plan)`. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, pushes survivors onto `pendingRequests`.
+1. **Submit** — tick coordinator calls `cpuCache.submit(plan)`. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, pushes survivors onto `pendingRequests`.
 2. **Schedule** — `startChunkFetches` sorts pending by priority and launches up to `maxConcurrentFetches` (≈9) bounded by `maxBytesInFlight` (32 MB).
 3. **Fetch** — `contentSource.fetch(req)` returns binary bytes via the WebSocket bridge; routed by `(level, t, c, z, y, x)` key.
 4. **Decode** — `decodePool.decode(...)` picks a worker from a 3-worker pool, selects codec by wire format (Raw/Lz4/Zstd), returns a typed array.
-5. **Insert + signal** — decoded chunk lands in the cache and on the `ready[]` queue. The orchestrator drains this each tick within the upload budget.
+5. **Insert + signal** — decoded chunk lands in the cache and on the `ready[]` queue. The tick coordinator drains this each tick within the upload budget.
 
 ## Eviction tiers
 
@@ -75,20 +75,20 @@ Both `lastSeenTick` and `priority` are refreshed on every `submit()` for any cac
 
 ## Interactions
 
-- **Upstream**: [[planning-domain]] produces the `RequestPlan` consumed by `submit`. The orchestrator owns the call site (`pipeline/orchestrator.ts`).
+- **Upstream**: [[planning-domain]] produces the `RequestPlan` consumed by `submit`. The tick coordinator owns the call site (`pipeline/tickCoordinator.ts`).
 - **Sideways**: `contentSource.ts` (binary fetch via [[lucida-web|bridge.ts]]) and `decodePool.ts` (3 web workers running `decode.worker.ts`).
-- **Downstream**: the orchestrator's drain loop pulls from `ready[]`, filters against `workerWantedSet`, and posts to the GPU worker via [[worker-protocol]] messages.
+- **Downstream**: the tick coordinator's drain loop pulls from `ready[]`, filters against `workerWantedSet`, and posts to the GPU worker via [[worker-protocol]] messages.
 
 ## Invariants
 
 - **Demotion preserves bytes.** When an entity leaves the active set, its chunks don't drop — they move tier. They evict only under memory pressure, after the cheaper tiers are exhausted.
 - **In-flight dedup is by chunk key.** The same `(level, t, c, z, y, x)` is fetched at most once concurrently regardless of how many requesters want it.
-- **Recently-failed requests are skipped on next submit.** A failed fetch doesn't immediately retry. The orchestrator sees no entry in `ready[]` and the wanted-set carries the request forward; eventually the failure window expires.
-- **Drain is byte-bounded, not count-bounded.** Bigger chunks consume budget faster. The orchestrator passes `MAIN_VIEW_UPLOAD_BUDGET_BYTES` (16 MB on main view, 2 MB on minimap) per tick.
+- **Recently-failed requests are skipped on next submit.** A failed fetch doesn't immediately retry. The tick coordinator sees no entry in `ready[]` and the wanted-set carries the request forward; eventually the failure window expires.
+- **Drain is byte-bounded, not count-bounded.** Bigger chunks consume budget faster. The tick coordinator passes `MAIN_VIEW_UPLOAD_BUDGET_BYTES` (16 MB on main view, 2 MB on minimap) per tick.
 
 ## Gotchas
 
 - **Failure tracking is a window, not a permanent fail-list.** If a request fails repeatedly because the server can't serve it (e.g. a missing chunk), the cache will keep retrying with a backoff. There's no per-request retry budget.
 - **Cache budgets are per-tier, not global.** A dataset with a huge proxy footprint can fill the proxy tier while the detail tier is half-empty; the cache won't redistribute. Tune budgets or the planner if this bites.
-- **Drain order matches decode-completion order within a priority band.** If a high-priority chunk decodes after a lower-priority one in the same band, the lower-priority one drains first. The orchestrator's wanted-set filter still ensures only useful chunks make it across.
-- **`submit` is called before `drain` in the same tick** — the planner can immediately move a freshly-decoded chunk from `ready[]` into the upload path within one frame. If you reorder these in `orchestrator.ts`, expect a one-frame upload latency.
+- **Drain order matches decode-completion order within a priority band.** If a high-priority chunk decodes after a lower-priority one in the same band, the lower-priority one drains first. The tick coordinator's wanted-set filter still ensures only useful chunks make it across.
+- **`submit` is called before `drain` in the same tick** — the planner can immediately move a freshly-decoded chunk from `ready[]` into the upload path within one frame. If you reorder these in `tickCoordinator.ts`, expect a one-frame upload latency.

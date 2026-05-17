@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-17
 ---
 
 # Flow: Chunk Lifecycle
@@ -33,9 +33,9 @@ Frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `b
 
 Decoded chunk inserted into the appropriate tier of [[cpu-cache]] (active-detail / demoted-detail / prefetch / proxy / overview); appended to `ready[]`.
 
-### 6. Orchestrator drain
+### 6. TickCoordinator drain
 
-`orchestrator.ts:869-934` — pulls from `ready[]` until upload budget exhausted (16 MB main view, 2 MB minimap). Filters to chunks still in `workerWantedSet` (don't waste bandwidth on chunks the worker no longer wants).
+`tickCoordinator.ts:869-934` — pulls from `ready[]` until upload budget exhausted (16 MB main view, 2 MB minimap). Filters to chunks still in `workerWantedSet` (don't waste bandwidth on chunks the worker no longer wants).
 
 ### 7. Post to worker
 
@@ -67,7 +67,7 @@ When the worker evicts a slot under memory pressure, it posts `chunksEvicted` (e
 
 - **Network** — fetch failures land in the cache's recently-failed window and are retried later.
 - **Decode** — codec mismatch or corrupt bytes: error logged, no slot allocated; the planner re-enumerates next tick.
-- **Atlas full** — worker evicts LRU; the orchestrator may upload, get evicted, and re-upload in the same tick under pressure (visible as "thrash" in debug stats).
+- **Atlas full** — worker evicts LRU; the tick coordinator may upload, get evicted, and re-upload in the same tick under pressure (visible as "thrash" in debug stats).
 - **Stale upload** — worker's epoch check drops chunks whose planning epoch is older than the worker's current understanding. Debug panel shows these as "skipped."
 
 ## Related

@@ -1,5 +1,5 @@
 /**
- * Orchestrator — planner role. Builds the `PlanningSnapshot` from live
+ * TickCoordinator — planner role. Builds the `PlanningSnapshot` from live
  * WASM scene state per tick, calls `plan()` per dataset, caches on the
  * epoch ladder, and routes output through {@link Uploader} for
  * cold-state emission and chunk delivery.
@@ -78,7 +78,7 @@ export interface MemberRosterEntry {
   dataH?: number;
 }
 
-export interface OrchestratorResult {
+export interface TickCoordinatorResult {
   /** Per-dataset roster of members that need render layers, keyed by dsId. */
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
@@ -97,7 +97,7 @@ export interface OrchestratorResult {
 // Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
 export { synthesizeWellRosterEntry } from "./upload/coldState/roster.ts";
 
-export class Orchestrator {
+export class TickCoordinator {
   private readonly uploader: Uploader;
 
   /**
@@ -107,7 +107,7 @@ export class Orchestrator {
    */
   private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
-  private cachedResult: OrchestratorResult | null = null;
+  private cachedResult: TickCoordinatorResult | null = null;
   /**
    * Debug member stats from the most recent non-cache-hit run. Replayed
    * onto `debugStats` on epoch cache hits so the panel doesn't flash
@@ -153,7 +153,7 @@ export class Orchestrator {
   planAndFetch(
     ctx: TickContext,
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
-  ): OrchestratorResult | null {
+  ): TickCoordinatorResult | null {
     const tickStart = performance.now();
 
     // Step 1 — Epoch check
@@ -375,7 +375,7 @@ export class Orchestrator {
       }
     }
 
-    // Step 4 — Orchestrator debug snapshot
+    // Step 4 — TickCoordinator debug snapshot
     if (debugStats.enabled) {
       const orchDebug: OrchDebug = {
         activeSet: [],
@@ -547,8 +547,8 @@ export class Orchestrator {
 
   /**
    * Debug helper: synthesize a single-proxy `RequestPlan` and submit it
-   * to CpuCache. Exposed on `window.__lucidaOrchestrator` by App.tsx for
-   * dev-console invocation.
+   * to CpuCache. Exposed on `window.__orch.tickCoordinator` by App.tsx
+   * for dev-console invocation.
    */
   requestTestProxy(
     cpuCache: CpuCache,

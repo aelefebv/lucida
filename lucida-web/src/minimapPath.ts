@@ -3,7 +3,7 @@ import { Axis } from "./axes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
-import type { MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;

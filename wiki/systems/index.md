@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-16
+modified: 2026-05-17
 ---
 
 # Systems
@@ -33,7 +33,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[upload-pipeline]] — `pipeline/upload/` Uploader; cold/hot state emission, drain/resend/dispatch, delivery tracking, worker feedback
 - [[gpu-residency]] — atlases (slice, volume, multi-pool proxy), indirection, descriptor buffer, semantic fallback chain
 - [[worker-protocol]] — typed `postMessage` contract for cold/hot/delta state between main thread and GPU worker
-- [[scene-state-and-epochs]] — typed epoch counters drive the orchestrator's frame fast-path
+- [[scene-state-and-epochs]] — typed epoch counters drive the tick coordinator's frame fast-path
 - [[presence-and-follow-mode]] — peer-to-peer presence, transitive follow chains, throttling
 - [[layout-system]] — registered layouts, `SetActiveLayout`, derived placement rebuilds
 - [[multichannel-and-colormaps]] — per-channel state, 15 LUTs, composite key naming
