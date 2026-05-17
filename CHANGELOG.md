@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0](https://github.com/aelefebv/lucida/compare/v0.3.2...v0.4.0) (2026-05-17)
+
+
+### Features
+
+* **planning:** slice 5 — minimap promotion + lane renumbering ([#559](https://github.com/aelefebv/lucida/issues/559)) ([ba5e794](https://github.com/aelefebv/lucida/commit/ba5e794e3b3c1433cd9a8f8eda431605afcb4181))
+* **planning:** slice 6 — ConfigStore + ConfigTab UI ([#551](https://github.com/aelefebv/lucida/issues/551)) ([#560](https://github.com/aelefebv/lucida/issues/560)) ([ba58823](https://github.com/aelefebv/lucida/commit/ba5882374e7915993bcca16e9bd9d6d5427b0296))
+
+
+### Bug Fixes
+
+* **planning:** drop validatePlanningInputs check 6 (asset-catalog refs) ([#587](https://github.com/aelefebv/lucida/issues/587)) ([2c6138a](https://github.com/aelefebv/lucida/commit/2c6138ad3ff39ef4d0bb09623f0f57fa7a650759))
+* **planning:** drop validatePlanningInputs check 7 (minimapPending keys); audit pass ([#589](https://github.com/aelefebv/lucida/issues/589)) ([fdf7866](https://github.com/aelefebv/lucida/commit/fdf7866bded066b36b241d942ea8d7bca5893bb4))
+* **planning:** validatePlanningInputs check 9 allows Image to back FieldEntry ([#588](https://github.com/aelefebv/lucida/issues/588)) ([57b6cf2](https://github.com/aelefebv/lucida/commit/57b6cf247d5234567f8040bc89d019d998f7b529))
+
+
+### Refactors
+
+* **planning:** coordinate-frame naming — Vox/World/Px suffixes + Axis namespace ([#580](https://github.com/aelefebv/lucida/issues/580)) ([#584](https://github.com/aelefebv/lucida/issues/584)) ([0150827](https://github.com/aelefebv/lucida/commit/01508275044bcb3dec7314de95cd1c63484c3b58))
+* **planning:** discriminated ActiveSetEntry — three variants ([#568](https://github.com/aelefebv/lucida/issues/568)) ([#573](https://github.com/aelefebv/lucida/issues/573)) ([57e3738](https://github.com/aelefebv/lucida/commit/57e373871664ec58cef92fa2de7c10d7412f8a7f)), closes [#563](https://github.com/aelefebv/lucida/issues/563)
+* **planning:** discriminated EntitySnapshot — three variants ([#569](https://github.com/aelefebv/lucida/issues/569)) ([#574](https://github.com/aelefebv/lucida/issues/574)) ([d2429b5](https://github.com/aelefebv/lucida/commit/d2429b5d9e2d01a96e502d4b0a381019a7af0fdd)), closes [#563](https://github.com/aelefebv/lucida/issues/563)
+* **planning:** foundational cleanup + characterization tests ([#546](https://github.com/aelefebv/lucida/issues/546)) ([#553](https://github.com/aelefebv/lucida/issues/553)) ([3cad3f4](https://github.com/aelefebv/lucida/commit/3cad3f465bd07e0376fe1f3bd23d30fb06c671ba))
+* **planning:** introduce PlanningState as the carry-forward seam ([#567](https://github.com/aelefebv/lucida/issues/567)) ([#572](https://github.com/aelefebv/lucida/issues/572)) ([480e6c2](https://github.com/aelefebv/lucida/commit/480e6c278035f9d8879e74ec56c98eef072b5d4b)), closes [#563](https://github.com/aelefebv/lucida/issues/563)
+* **planning:** mechanical contract cleanups (numLevels, parentId, datasetId) ([#565](https://github.com/aelefebv/lucida/issues/565)) ([#570](https://github.com/aelefebv/lucida/issues/570)) ([95e1963](https://github.com/aelefebv/lucida/commit/95e1963ff029a7558ac741140ec90546f11c183c)), closes [#563](https://github.com/aelefebv/lucida/issues/563)
+* **planning:** relocate scene types — SceneEpochs + VisibleRegion ([#566](https://github.com/aelefebv/lucida/issues/566)) ([#571](https://github.com/aelefebv/lucida/issues/571)) ([9c86630](https://github.com/aelefebv/lucida/commit/9c866308f240b59945e44e31910f1d52f4154975)), closes [#563](https://github.com/aelefebv/lucida/issues/563)
+* **planning:** slice 2 — extracts + drop +2 LOD buffer + planning/ directory ([#547](https://github.com/aelefebv/lucida/issues/547)) ([#555](https://github.com/aelefebv/lucida/issues/555)) ([f6ab886](https://github.com/aelefebv/lucida/commit/f6ab886cad7e954dfac819f5f8e55b971205a27d))
+* **planning:** slice 3 — PlanningConfig parameter threaded through plan() ([#548](https://github.com/aelefebv/lucida/issues/548)) ([#557](https://github.com/aelefebv/lucida/issues/557)) ([d592c42](https://github.com/aelefebv/lucida/commit/d592c42bcbfd75ecedbe5148e13d2de8c7cb4532))
+* **planning:** slice 4 — snapshot builder + debug builder extraction ([#549](https://github.com/aelefebv/lucida/issues/549)) ([#558](https://github.com/aelefebv/lucida/issues/558)) ([645d325](https://github.com/aelefebv/lucida/commit/645d325771ff4011975b1c50e1b69ee57a7fc357))
+* **planning:** split index.ts into types/modes/chunks/emit/plan ([#579](https://github.com/aelefebv/lucida/issues/579)) ([#583](https://github.com/aelefebv/lucida/issues/583)) ([166f1f6](https://github.com/aelefebv/lucida/commit/166f1f67af626791d2c1e018471e78d3aa97a82a))
+* **planning:** validatePlanningInputs as dev-mode boundary check ([#581](https://github.com/aelefebv/lucida/issues/581)) ([#585](https://github.com/aelefebv/lucida/issues/585)) ([c878fcd](https://github.com/aelefebv/lucida/commit/c878fcdfda324bc9dd2545089986cf4e4df16ccf))
+
 ## [0.3.2](https://github.com/aelefebv/lucida/compare/v0.3.1...v0.3.2) (2026-05-15)
 
 
