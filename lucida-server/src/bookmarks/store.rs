@@ -110,10 +110,6 @@ pub trait BookmarkStore: Send + Sync + 'static {
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError>;
 }
 
-// ---------------------------------------------------------------------------
-// SQLite backend
-// ---------------------------------------------------------------------------
-
 /// Production store. Wraps a shared `SqlitePool` (cloned from the auth
 /// session store so all three tables ride the same connection budget).
 #[derive(Debug, Clone)]
@@ -381,10 +377,6 @@ fn row_to_bookmark(
     })
 }
 
-// ---------------------------------------------------------------------------
-// In-memory backend
-// ---------------------------------------------------------------------------
-
 /// Test-only in-memory implementation. Lives behind a regular module
 /// (not `cfg(test)`) so integration tests in `tests/` can construct it
 /// without dragging in SQLite. Mutex is uncontended in tests; the
@@ -539,15 +531,10 @@ mod tests {
         SavedView::empty(viewport)
     }
 
-    // -- shared scenarios --------------------------------------------------
-    //
-    // The two backends share the same trait surface; below we exercise
-    // each scenario against both the SQLite store and the in-memory
-    // store. A `#[tokio::test]` that loops over `Vec<Box<dyn BookmarkStore>>`
-    // is awkward (lifetime juggling on the future returned by `create`);
-    // a small `run_against` helper that takes an `impl BookmarkStore` is
-    // cleaner.
-
+    // Each scenario below exercises both the SQLite and in-memory
+    // backends via an `impl BookmarkStore` helper — looping over
+    // `Vec<Box<dyn BookmarkStore>>` is awkward (lifetime juggling on
+    // the future returned by `create`).
     async fn create_get_roundtrip<S: BookmarkStore>(store: &S) {
         let view = sample_view([800, 600]);
         let b = store

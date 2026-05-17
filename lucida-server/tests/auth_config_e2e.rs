@@ -166,10 +166,6 @@ fn drain(stream: &mut std::process::ChildStderr) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-// ---------------------------------------------------------------------
-// Success paths
-// ---------------------------------------------------------------------
-
 #[test]
 fn loopback_default_starts_with_disabled_auth() {
     let port = pick_loopback_port();
@@ -213,10 +209,6 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
         "warning banner missing AUTH DISABLED line; got=\n{stderr}",
     );
 }
-
-// ---------------------------------------------------------------------
-// Fail-fast paths
-// ---------------------------------------------------------------------
 
 #[test]
 fn explicit_disabled_non_loopback_without_insecure_fails() {

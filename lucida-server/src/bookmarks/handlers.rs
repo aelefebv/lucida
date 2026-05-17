@@ -316,10 +316,6 @@ async fn broadcast_after_mutation(
     );
 }
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
 fn validate_name(raw: &str) -> Result<String, Box<Response>> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -453,8 +449,6 @@ mod tests {
         })
     }
 
-    // -- 401-ish wiring + auth gate --------------------------------------
-
     /// Without an attached principal, every handler 500s — that's a
     /// wiring bug surface. The middleware (if mounted) would have 401'd
     /// long before this; the integration test below exercises that.
@@ -479,8 +473,6 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
-
-    // -- POST -------------------------------------------------------------
 
     #[tokio::test]
     async fn create_returns_201_with_principal_derived_creator() {
@@ -624,8 +616,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
     }
 
-    // -- GET (list + single) ---------------------------------------------
-
     #[tokio::test]
     async fn get_single_404s_on_missing() {
         let store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
@@ -743,8 +733,6 @@ mod tests {
         assert_eq!(names, ["a", "c"].into_iter().collect());
     }
 
-    // -- PATCH ------------------------------------------------------------
-
     #[tokio::test]
     async fn patch_owner_succeeds() {
         let store = Arc::new(MemoryBookmarkStore::new());
@@ -834,8 +822,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    // -- DELETE -----------------------------------------------------------
-
     #[tokio::test]
     async fn delete_owner_succeeds() {
         let store = Arc::new(MemoryBookmarkStore::new());
@@ -912,8 +898,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    // -- parse_dataset_params ---------------------------------------------
-
     #[test]
     fn parse_dataset_params_handles_repeats() {
         assert_eq!(
@@ -944,8 +928,6 @@ mod tests {
         assert!(parse_dataset_params(Some("")).is_empty());
         assert!(parse_dataset_params(Some("dataset=")).is_empty());
     }
-
-    // -- 401 via real auth middleware ------------------------------------
 
     /// Mount the actual auth middleware (no cookie ⇒ 401) over the
     /// bookmarks router and assert every endpoint is gated.

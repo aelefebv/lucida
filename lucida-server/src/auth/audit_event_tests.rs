@@ -233,10 +233,6 @@ fn parts_with_cookie(cookie_value: Option<&str>) -> axum::http::request::Parts {
     b.body(()).unwrap().into_parts().0
 }
 
-// ---------------------------------------------------------------------------
-// auth.session.cleanup (this slice)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn cleanup_emits_auth_session_cleanup_event_with_counts() {
     let sessions = Arc::new(MemorySessionStore::new());
@@ -275,10 +271,7 @@ async fn cleanup_emits_auth_session_cleanup_event_with_counts() {
     assert_eq!(evt.field("pending_deleted"), Some("1"));
 }
 
-// ---------------------------------------------------------------------------
 // auth.failure.unknown_session — middleware path: cookie present, no row
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn unknown_session_emits_auth_failure_event() {
     let store = Arc::new(MemorySessionStore::new());
@@ -295,10 +288,7 @@ async fn unknown_session_emits_auth_failure_event() {
     require_event(&events, "auth.failure.unknown_session", Level::DEBUG);
 }
 
-// ---------------------------------------------------------------------------
 // auth.session.expired.idle — extractor finds idle-expired row
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn idle_expired_emits_auth_session_expired_idle() {
     let store = Arc::new(MemorySessionStore::new());
@@ -321,10 +311,7 @@ async fn idle_expired_emits_auth_session_expired_idle() {
     assert_eq!(evt.field("email"), Some("user@x.com"));
 }
 
-// ---------------------------------------------------------------------------
 // auth.session.expired.hard_cap — extractor finds past-expires_at row
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn hard_cap_expired_emits_auth_session_expired_hard_cap() {
     let store = Arc::new(MemorySessionStore::new());
@@ -357,10 +344,7 @@ async fn hard_cap_expired_emits_auth_session_expired_hard_cap() {
     assert_eq!(evt.field("email"), Some("user@x.com"));
 }
 
-// ---------------------------------------------------------------------------
-// auth.startup.insecure_mode — emit pattern matches main.rs branch
-// ---------------------------------------------------------------------------
-
+// auth.startup.insecure_mode — emit pattern matches main.rs branch.
 /// We don't run `main.rs` in a unit test; instead we exercise the same
 /// `tracing::warn!` call shape with the same fields and assert the
 /// captured event matches the PRD's schema. If the structured form drifts
@@ -379,10 +363,7 @@ fn insecure_mode_event_fires_at_warn_with_bind_field() {
     assert_eq!(evt.field("mode"), Some("disabled"));
 }
 
-// ---------------------------------------------------------------------------
 // auth.startup.config_error — emitted before fail-fast exit
-// ---------------------------------------------------------------------------
-
 #[test]
 fn config_error_event_fires_at_error() {
     // Mirror the call shape main.rs uses; the from_env error itself
@@ -397,10 +378,7 @@ fn config_error_event_fires_at_error() {
     require_event(&events, "auth.startup.config_error", Level::ERROR);
 }
 
-// ---------------------------------------------------------------------------
 // auth.signin.success — emitted in callback handler; assert call shape
-// ---------------------------------------------------------------------------
-
 #[test]
 fn signin_success_event_fires_at_info_with_email_field() {
     let (events, _) = capture(|| {
@@ -415,10 +393,7 @@ fn signin_success_event_fires_at_info_with_email_field() {
     assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
 }
 
-// ---------------------------------------------------------------------------
 // auth.signin.rejected.hd_mismatch — emitted in callback handler
-// ---------------------------------------------------------------------------
-
 #[test]
 fn hd_mismatch_event_fires_at_warn_with_attempted_fields() {
     let (events, _) = capture(|| {
@@ -434,10 +409,7 @@ fn hd_mismatch_event_fires_at_warn_with_attempted_fields() {
     assert_eq!(evt.field("allowed_domains"), Some("calicolabs.com"));
 }
 
-// ---------------------------------------------------------------------------
 // auth.signin.rejected.unverified — emitted in callback handler
-// ---------------------------------------------------------------------------
-
 #[test]
 fn unverified_event_fires_at_warn_with_attempted_email() {
     let (events, _) = capture(|| {
@@ -450,10 +422,7 @@ fn unverified_event_fires_at_warn_with_attempted_email() {
     assert_eq!(evt.field("attempted_email"), Some("alice@calicolabs.com"));
 }
 
-// ---------------------------------------------------------------------------
 // auth.signin.error.* — four flavors emitted from callback
-// ---------------------------------------------------------------------------
-
 #[test]
 fn signin_error_state_mismatch_event_fires_at_warn() {
     let (events, _) = capture(|| {
@@ -486,10 +455,7 @@ fn signin_error_network_event_fires_at_error() {
     require_event(&events, "auth.signin.error.network", Level::ERROR);
 }
 
-// ---------------------------------------------------------------------------
 // auth.logout — emitted in logout handler
-// ---------------------------------------------------------------------------
-
 #[test]
 fn logout_event_fires_at_info_with_email_field() {
     let (events, _) = capture(|| {

@@ -245,10 +245,6 @@ impl ProxyCache {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Hex-encode a 16-byte hash for use as a cache directory name. Lowercase,
 /// no separators — matches the `dataset_id_for_url` style.
 fn hex16(bytes: &[u8; 16]) -> String {

@@ -16,9 +16,7 @@
 # Distroless was considered and deferred: the slim-Debian variant keeps
 # a shell available for diagnostics in v1.
 
-# =============================================================================
-# Stage 1: rust + wasm-pack
-# =============================================================================
+# Stage 1: rust + wasm-pack.
 # The workspace is on edition = "2024" (every member's Cargo.toml). 2024
 # requires Rust >= 1.85; transitive deps (time@0.3.47, ...) need 1.88+;
 # CI uses dtolnay/rust-toolchain@stable which currently resolves to 1.95.
@@ -96,9 +94,7 @@ RUN cargo build --release -p lucida-server
 # `"lucida-core": "file:../lucida-core/pkg"` dependency resolves to.
 RUN cd lucida-core && wasm-pack build --target web --out-dir pkg
 
-# =============================================================================
-# Stage 2: node + pnpm SPA build
-# =============================================================================
+# Stage 2: node + pnpm SPA build.
 # node:22-slim matches CI's `lts/*` (node 22 is the active LTS) and
 # stays close to debian:bookworm-slim so the eventual runtime layer
 # shares a libc family with the build layers.
@@ -124,9 +120,7 @@ WORKDIR /web/lucida-web
 RUN pnpm install --frozen-lockfile
 RUN pnpm run build
 
-# =============================================================================
-# Stage 3: runtime
-# =============================================================================
+# Stage 3: runtime.
 FROM debian:bookworm-slim AS runtime
 
 # Runtime deps: ca-certificates is required for outbound HTTPS to

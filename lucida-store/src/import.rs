@@ -36,10 +36,6 @@ pub async fn import_dataset(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Single image import
-// ---------------------------------------------------------------------------
-
 async fn import_single_image(
     store: &Arc<dyn ObjectStore>,
     id: &str,
@@ -131,10 +127,6 @@ async fn import_single_image(
         binding_seed,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Plate import
-// ---------------------------------------------------------------------------
 
 async fn import_plate(
     store: &Arc<dyn ObjectStore>,
@@ -513,10 +505,6 @@ async fn import_plate(
         binding_seed,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
     match s {

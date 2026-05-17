@@ -52,7 +52,6 @@ struct ImageResolver {
 pub type LevelInfo = LevelBindingInfo;
 
 impl ChunkResolver {
-    /// Build from a ServerBindingSeed.
     pub fn new(seed: &ServerBindingSeed) -> Self {
         let images = seed
             .images

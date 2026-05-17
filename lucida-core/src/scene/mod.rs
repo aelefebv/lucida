@@ -75,8 +75,6 @@ impl Scene {
         }
     }
 
-    // --- Convenience accessors ---
-
     /// Get the volume transform for the first dataset's first image.
     pub fn volume_transform(&self) -> Option<&VolumeTransform> {
         self.derived
@@ -140,7 +138,6 @@ impl Scene {
         self.camera.set_viewport(width, height);
     }
 
-    /// Remove a dataset by id.
     pub fn remove_dataset(&mut self, id: &DatasetId) {
         self.document.remove_dataset(id);
         self.dataset_order.retain(|s| s != id);
@@ -690,7 +687,6 @@ pub fn resolve_layout(
         })
 }
 
-/// Build derived state from a dataset manifest and a resolved layout.
 pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> DatasetDerivedState {
     let active_layout = layout.clone();
 

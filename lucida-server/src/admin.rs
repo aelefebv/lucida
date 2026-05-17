@@ -144,10 +144,6 @@ fn hex16(bytes: &[u8; 16]) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// HTTP admin endpoint
-// ---------------------------------------------------------------------------
-
 /// Query parameters for `POST /admin/clear-proxy-cache`.
 #[derive(Debug, Deserialize)]
 pub struct ClearQuery {

@@ -246,8 +246,6 @@ mod tests {
         }
     }
 
-    // ---- Positive tests ----
-
     #[test]
     fn two_by_three_plate_single_fov() {
         // 2 rows x 3 columns, 1 FOV per well.
@@ -478,8 +476,6 @@ mod tests {
             expected_y
         );
     }
-
-    // ---- Negative tests ----
 
     #[test]
     fn missing_field_index_error() {

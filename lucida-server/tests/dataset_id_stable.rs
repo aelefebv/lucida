@@ -160,10 +160,6 @@ fn third_open_of_distinct_url_does_not_collide() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn in_memory_store() -> Arc<dyn ObjectStore> {
     Arc::new(InMemory::new())
 }

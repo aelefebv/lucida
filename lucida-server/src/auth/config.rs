@@ -247,9 +247,9 @@ impl AuthConfig {
     {
         let nonempty = |name: &str| read(name).filter(|v| !v.trim().is_empty());
 
-        // ---- bind address ---------------------------------------------------
-        // Parse first so the auto-detect below can branch on it. The
-        // loopback question is the safety hinge for everything else.
+        // Bind address: parse first so auto-detect below can branch on
+        // it. The loopback question is the safety hinge for everything
+        // else.
         let bind_raw = nonempty("LUCIDA_BIND").unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
         let bind_addr: SocketAddr = bind_raw.parse().map_err(|e: std::net::AddrParseError| {
             AuthConfigError::InvalidBindAddr {
@@ -259,7 +259,7 @@ impl AuthConfig {
         })?;
         let bind_is_loopback = bind_addr.ip().is_loopback();
 
-        // ---- auth mode (explicit override > auto-detect) --------------------
+        // Auth mode: explicit override > auto-detect.
         let mode = match nonempty("LUCIDA_AUTH") {
             Some(raw) => AuthMode::parse(&raw)
                 .map_err(|UnknownAuthMode(s)| AuthConfigError::UnknownAuthMode(s))?,
@@ -274,10 +274,9 @@ impl AuthConfig {
             }
         };
 
-        // ---- LUCIDA_INSECURE gate for the dangerous combination -------------
-        // Only relevant when mode == Disabled AND bind is non-loopback.
-        // Both safe paths skip the check; the unsafe path requires the
-        // operator to opt in explicitly (and `main.rs` prints a banner).
+        // LUCIDA_INSECURE gate: only relevant when mode == Disabled AND
+        // bind is non-loopback. Safe paths skip the check; the unsafe
+        // path requires explicit opt-in (and `main.rs` prints a banner).
         let insecure_acknowledged = nonempty("LUCIDA_INSECURE")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
@@ -285,7 +284,7 @@ impl AuthConfig {
             return Err(AuthConfigError::InsecureRequiresOptIn { bind: bind_addr });
         }
 
-        // ---- Google OAuth credentials (only when mode == Google) ------------
+        // Google OAuth credentials, only when mode == Google.
         let google = if mode.is_google() {
             Some(google_from_reader(&nonempty)?)
         } else {

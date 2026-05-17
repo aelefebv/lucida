@@ -20,20 +20,10 @@ use lucida_server::session::Session;
 use lucida_server::static_serve;
 use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler};
 
-// ---------------------------------------------------------------------------
-// CLI definition
-//
-// We support two invocation styles for backward compatibility:
-//
-//   lucida-server --data-dir /path                       (legacy, no subcommand)
-//   lucida-server serve --data-dir /path                 (explicit serve)
-//   lucida-server clear-proxy-cache [--dataset URL]      (one-shot admin)
-//
-// When no subcommand is given we treat the top-level args as `serve`'s
-// args. The clap derive macros are invoked with `args_conflicts_with_subcommands`
-// so the legacy form keeps working without ambiguity.
-// ---------------------------------------------------------------------------
-
+// CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
+// treated as `serve`) alongside explicit `serve` / `clear-proxy-cache`
+// subcommands. `args_conflicts_with_subcommands` keeps the legacy form
+// unambiguous.
 #[derive(Parser, Debug)]
 #[command(name = "lucida-server", about = "Lucida collaborative imaging server")]
 #[command(version)] // pulls from Cargo.toml's [package].version at build time
@@ -87,17 +77,9 @@ struct ClearArgs {
     cache_dir: Option<PathBuf>,
 }
 
-// ---------------------------------------------------------------------------
-// Logging-format env var
-//
-// `LUCIDA_LOG_FORMAT={text,json}` (default `text`) switches the
-// tracing-subscriber formatter between the dev-friendly pretty-text
-// output and the production JSON output that log aggregators (Cloud
-// Logging, Loki, ELK, …) consume natively. Unknown values fall back to
-// `Text` so a typo in the deploy manifest doesn't break boot — same
-// posture as `SecureCookieMode::parse` (auth/config.rs:91-101).
-// ---------------------------------------------------------------------------
-
+// LUCIDA_LOG_FORMAT={text,json} (default text) switches between
+// dev-friendly pretty-text and production JSON output. Unknown values
+// fall back to Text so a deploy-manifest typo doesn't break boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogFormat {
     Text,
@@ -116,10 +98,6 @@ impl LogFormat {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
@@ -481,16 +459,6 @@ fn run_clear(args: ClearArgs) -> std::io::Result<()> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// CLI parsing tests
-//
-// These verify that the legacy invocation form
-// `lucida-server --data-dir /path` keeps parsing into a `Serve` command,
-// while the new subcommand forms (`serve`, `clear-proxy-cache`) parse as
-// expected. The handlers themselves (`run_serve`, `run_clear`) are
-// covered by integration tests against the library types.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod cli_tests {

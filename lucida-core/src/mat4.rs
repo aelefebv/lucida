@@ -1,4 +1,4 @@
-// --- Column-major mat4/vec3 helpers (f64 internally) ---
+//! Column-major mat4/vec3 helpers (f64 internally).
 
 pub(crate) fn perspective(fov_y: f64, aspect: f64, near: f64, far: f64) -> [f64; 16] {
     let f = 1.0 / (fov_y / 2.0).tan();

@@ -202,10 +202,6 @@ mod tests {
         json!({"name": "bytes", "configuration": {"endian": "little"}})
     }
 
-    // ---------------------------------------------------------------------
-    // Accept matrix
-    // ---------------------------------------------------------------------
-
     #[test]
     fn accepts_bytes_only_as_none() {
         let chain = vec![bytes_little()];
@@ -310,11 +306,8 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Reject matrix — each test asserts the message contains the verbatim
-    // offending value so the operator can find it in their metadata.
-    // ---------------------------------------------------------------------
-
+    // Reject matrix: each test asserts the error message contains the
+    // verbatim offending value so the operator can grep their metadata.
     #[test]
     fn rejects_empty_chain() {
         let err = parse_codec_chain(&[]).unwrap_err();

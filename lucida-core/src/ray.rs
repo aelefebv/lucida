@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::{EntityId, ImageId};
 
-/// A ray in 3D space.
 #[derive(Debug, Clone)]
 pub struct Ray {
     pub origin: [f64; 3],

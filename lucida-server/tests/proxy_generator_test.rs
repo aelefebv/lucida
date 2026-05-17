@@ -224,9 +224,6 @@ async fn second_call_after_completion_uses_cache() {
     assert_eq!(after_first, after_second, "cache hit should skip store");
 }
 
-// ---------------------------------------------------------------------------
-// Priority test: deferred. The generator accepts a `priority: u8` parameter
-// for API stability, but it does not currently order requests by priority.
-// The semaphore awakes waiters in FIFO order; a real priority scheduler is
-// follow-up work. See `proxy/generator.rs` module docs.
-// ---------------------------------------------------------------------------
+// Priority scheduling test deferred: the generator accepts `priority`
+// for API stability but the semaphore awakes waiters in FIFO order.
+// See `proxy/generator.rs` module docs.
