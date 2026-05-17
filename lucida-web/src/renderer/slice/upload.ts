@@ -27,9 +27,9 @@ export function handleSliceChunkData(
   const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    const skippedKeys = msg.chunks.map(c => c.key);
-    if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
+    const requeueKeys = msg.chunks.map(c => c.key);
+    if (requeueKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", memberId, keys: requeueKeys, skipped: [] });
     }
     return;
   }
@@ -66,9 +66,17 @@ export function handleSliceChunkData(
   let intensityChanged = false;
   const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
   const evictedKeys: string[] = [];
+  const requeueKeys: string[] = [];
+  const requeueKeySet = new Set<string>();
 
   for (const chunk of msg.chunks) {
-    if (chunk.z !== targetChunkZ) continue;
+    if (chunk.z !== targetChunkZ) {
+      if (!requeueKeySet.has(chunk.key)) {
+        requeueKeySet.add(chunk.key);
+        requeueKeys.push(chunk.key);
+      }
+      continue;
+    }
     const compositeKey = makeCompositeKey(memberId, chunk.key);
 
     const existingSlot = atlas.slots.get(compositeKey);
@@ -134,13 +142,14 @@ export function handleSliceChunkData(
   // Report evicted/skipped, demuxed by member
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
+    if (requeueKeySet.has(chunk.key)) continue;
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (!atlas.slots.has(compositeKey)) {
       skippedKeys.push(chunk.key);
     }
   }
 
-  if (evictedKeys.length > 0 || skippedKeys.length > 0) {
+  if (evictedKeys.length > 0 || requeueKeys.length > 0 || skippedKeys.length > 0) {
     const evictedByMember = new Map<string, string[]>();
     for (const ck of evictedKeys) {
       const parsed = parseCompositeKey(ck);
@@ -151,6 +160,9 @@ export function handleSliceChunkData(
     }
     for (const [evMember, evKeys] of evictedByMember) {
       ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [] });
+    }
+    if (requeueKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", memberId, keys: requeueKeys, skipped: [] });
     }
     if (skippedKeys.length > 0) {
       ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
