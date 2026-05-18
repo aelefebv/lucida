@@ -8,14 +8,18 @@ import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
 import type { RendererState } from "./worker/state.ts";
 
 /**
- * Per-entity proxy descriptor — handles into the GPU proxy atlases.
- * Owned by gpu.worker.ts and exposed to render handlers through
- * `WorkerCtx.lookupProxyDescriptor` so they can bind the right proxy
- * textures + pass slot info to the shader.
+ * Proxy descriptor for one `(entity, t, c)` tuple — handles into the
+ * GPU proxy atlases. Proxy pools are channel-scoped, so a single entity
+ * can have several live descriptors at once during multi-channel and
+ * time scrubbing.
  */
 export interface EntityProxyDescriptor {
   fieldProxyHandle: ProxyHandle | null;
   wellProxyHandle: ProxyHandle | null;
+}
+
+export function proxyDescriptorKey(entityId: string, t: number, c: number): string {
+  return `${entityId}|${t}|${c}`;
 }
 
 export interface WorkerCtx {
@@ -39,11 +43,10 @@ export interface WorkerCtx {
   /** Recompute and post wanted-set delta after eviction. */
   postWantedSet(): void;
   /**
-   * Look up the proxy descriptor for an entity. Returns null if no
-   * proxy has been uploaded yet for the entity (handlers should fall
-   * back to the chunk-only render path).
+   * Look up the proxy descriptor for an entity/time/channel. Returns
+   * null if no proxy has been uploaded yet for that tuple.
    */
-  lookupProxyDescriptor(entityId: string): EntityProxyDescriptor | null;
+  lookupProxyDescriptor(entityId: string, t: number, c: number): EntityProxyDescriptor | null;
   /**
    * Resolve a proxy pool for the given dataset by its pool key
    * (`proxyPoolKey()`). Returns null if no such pool. Handlers use this

@@ -43,7 +43,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 };
 
 import { handleProxyUpload } from "./upload.ts";
-import type { WorkerCtx } from "../workerContext.ts";
+import {
+  proxyDescriptorKey,
+  type WorkerCtx,
+} from "../workerContext.ts";
 import type { ProxyAssetDataMessage } from "../workerProtocol.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { allocateProxySlot, proxySlotKey } from "../proxyAtlas.ts";
@@ -173,7 +176,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(pool.slots.get(compositeKey)).toBe(0);
 
     // Descriptor populated for the entity (field gets fieldProxyHandle).
-    const desc = ctx.state.proxyDescriptorsByEntity.get("fieldA");
+    const desc = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0));
     expect(desc).toBeDefined();
     expect(desc!.fieldProxyHandle).not.toBeNull();
     expect(desc!.fieldProxyHandle!.slotIndex).toBe(0);
@@ -258,12 +261,12 @@ describe("Suite B — handleProxyUpload", () => {
       ctx,
       makeMsg({ entityId: "wellA", kind: "WellProxy3D" }),
     );
-    const wellDesc = ctx.state.proxyDescriptorsByEntity.get("wellA");
+    const wellDesc = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("wellA", 0, 0));
     expect(wellDesc!.wellProxyHandle).not.toBeNull();
     const sharedHandle = wellDesc!.wellProxyHandle!;
 
-    const descA = ctx.state.proxyDescriptorsByEntity.get("fieldA");
-    const descB = ctx.state.proxyDescriptorsByEntity.get("fieldB");
+    const descA = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0));
+    const descB = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldB", 0, 0));
     expect(descA!.wellProxyHandle).toBe(sharedHandle);
     expect(descB!.wellProxyHandle).toBe(sharedHandle);
     // Children's fieldProxyHandle stays null (not affected by well upload).
@@ -287,9 +290,9 @@ describe("Suite B — handleProxyUpload", () => {
     );
     // Only fieldA in descriptors.
     expect(ctx.state.proxyDescriptorsByEntity.size).toBe(1);
-    expect(ctx.state.proxyDescriptorsByEntity.get("fieldA")!.fieldProxyHandle).not.toBeNull();
+    expect(ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle).not.toBeNull();
     // fieldOther was not touched.
-    expect(ctx.state.proxyDescriptorsByEntity.has("fieldOther")).toBe(false);
+    expect(ctx.state.proxyDescriptorsByEntity.has(proxyDescriptorKey("fieldOther", 0, 0))).toBe(false);
   });
 
   // -------------------------------------------------------------------------

@@ -35,6 +35,7 @@ import {
   getDummyTexture,
   getOrCreateLUT,
 } from "./resources.ts";
+import { proxyDescriptorKey } from "../workerContext.ts";
 
 /**
  * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
@@ -112,8 +113,8 @@ export async function bootstrapWorker(
     getOrCreateLUT: (name) => getOrCreateLUT(device, name),
     post,
     postWantedSet,
-    lookupProxyDescriptor(entityId: string) {
-      return state.proxyDescriptorsByEntity.get(entityId) ?? null;
+    lookupProxyDescriptor(entityId: string, t: number, c: number) {
+      return state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c)) ?? null;
     },
     lookupProxyPool(datasetId: string, poolKey: string) {
       const dsPools = state.proxyPoolsByDataset.get(datasetId);

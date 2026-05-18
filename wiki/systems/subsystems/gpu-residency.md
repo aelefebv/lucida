@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-18
 ---
 
 # GPU Residency
@@ -74,7 +74,7 @@ The chain runs **inside the volume ray-march loop** as well, so a ray that cross
 
 ## Proxy lifecycle
 
-`proxy/upload.ts` handles a `proxyAsset` message: validates the asset, allocates a slot in the right `(datasetId, kind, slotDims, channel)` pool, writes the u16 voxel buffer, and updates the descriptor handle pair on `state.proxyDescriptorsByEntity`.
+`proxy/upload.ts` handles a `proxyAsset` message: validates the asset, allocates a slot in the right `(datasetId, kind, slotDims, channel)` pool, writes the u16 voxel buffer, and updates the descriptor handle pair on `state.proxyDescriptorsByEntity`, keyed by `(entityId, t, c)` so multichannel/time scrubs cannot overwrite another channel's fallback.
 
 `proxy/propagate.ts` is the well→fields fan-out: when a `WellProxy3D` lands for a well, every child field whose descriptor references that well gets its `wellProxyPoolIndex` / `wellProxySlotIndex` updated. The fan-out reads `state.wellToFields` (built per cold state) so each upload is O(children) instead of O(all-entities).
 

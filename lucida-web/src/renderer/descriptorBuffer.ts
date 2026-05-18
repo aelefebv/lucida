@@ -24,7 +24,10 @@ import type {
   ColdStateActiveEntry,
   ColdStateDisplayState,
 } from "./workerProtocol.ts";
-import type { EntityProxyDescriptor } from "./workerContext.ts";
+import {
+  proxyDescriptorKey,
+  type EntityProxyDescriptor,
+} from "./workerContext.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import {
@@ -93,6 +96,8 @@ export interface EntityDescriptorIndex {
   colormapLutIndices: Map<string, number>;
   /** memberId → colormap name. Drives per-draw LUT texture binding. */
   colormapNameByMember: Map<string, string>;
+  /** memberId → proxy descriptor for the cold state's current `(t,c)`. */
+  proxyDescriptorByMember: Map<string, EntityProxyDescriptor>;
 }
 
 /**
@@ -179,6 +184,7 @@ export function buildDescriptorBuffer(
   const proxyPoolsByIndex: ProxyAtlasState[] = [];
   const colormapLutIndices = new Map<string, number>();
   const colormapNameByMember = new Map<string, string>();
+  const proxyDescriptorByMember = new Map<string, EntityProxyDescriptor>();
   const dsPools = proxyPoolsByDataset.get(cold.datasetId) ?? null;
 
   // Pass 1: assign entity + pool + colormap indices in canonical order
@@ -209,7 +215,10 @@ export function buildDescriptorBuffer(
     const ds = displayStateForChannel(entry, channel);
     colormapNameByMember.set(memberId, ds.colormapName);
     recordColormap(ds.colormapName);
-    const desc = proxyDescriptorsByEntity.get(entry.entityId);
+    const desc = proxyDescriptorsByEntity.get(
+      proxyDescriptorKey(entry.entityId, cold.currentT, channel),
+    );
+    if (desc) proxyDescriptorByMember.set(memberId, desc);
     if (desc?.fieldProxyHandle) recordPool(desc.fieldProxyHandle.poolKey);
     if (desc?.wellProxyHandle) recordPool(desc.wellProxyHandle.poolKey);
   }
@@ -234,6 +243,7 @@ export function buildDescriptorBuffer(
       proxyPoolIndexByKey,
       proxyPoolsByIndex,
       colormapLutIndices,
+      proxyDescriptorKey(entry.entityId, cold.currentT, channel),
     );
   }
 
@@ -251,6 +261,7 @@ export function buildDescriptorBuffer(
     entityCount,
     colormapLutIndices,
     colormapNameByMember,
+    proxyDescriptorByMember,
   };
 }
 
@@ -261,6 +272,7 @@ export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
   idx.proxyPoolsByIndex.length = 0;
   idx.colormapLutIndices.clear();
   idx.colormapNameByMember.clear();
+  idx.proxyDescriptorByMember.clear();
 }
 
 /**
@@ -312,6 +324,7 @@ export function serializeEntityDescriptor(
   proxyPoolIndexByKey: Map<string, number>,
   proxyPoolsByIndex: ProxyAtlasState[],
   colormapLutIndices: Map<string, number>,
+  proxyKey: string | null = null,
 ): void {
   const f32 = new Float32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
   const u32 = new Uint32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
@@ -321,7 +334,7 @@ export function serializeEntityDescriptor(
 
   // Resolve proxy handles to (poolIndex, slotIndex, dims). Sentinels for
   // any missing handle.
-  const desc = proxyDescriptorsByEntity.get(entry.entityId);
+  const desc = proxyDescriptorsByEntity.get(proxyKey ?? entry.entityId);
   let fieldPoolIdx = DESCRIPTOR_SENTINEL_INDEX;
   let fieldSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
   let fieldDims: [number, number, number] = [1, 1, 1];

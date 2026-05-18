@@ -25,7 +25,10 @@
  * the worker dispatcher.
  */
 
-import type { WorkerCtx } from "../workerContext.ts";
+import {
+  proxyDescriptorKey,
+  type WorkerCtx,
+} from "../workerContext.ts";
 import type { ProxyAssetDataMessage } from "../workerProtocol.ts";
 import type {
   ProxyAtlasState,
@@ -69,11 +72,14 @@ export interface ProxyUploadOutcome {
 function getOrCreateProxyDescriptor(
   proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>,
   entityId: string,
+  t: number,
+  c: number,
 ): EntityProxyDescriptor {
-  let d = proxyDescriptorsByEntity.get(entityId);
+  const key = proxyDescriptorKey(entityId, t, c);
+  let d = proxyDescriptorsByEntity.get(key);
   if (!d) {
     d = { fieldProxyHandle: null, wellProxyHandle: null };
-    proxyDescriptorsByEntity.set(entityId, d);
+    proxyDescriptorsByEntity.set(key, d);
   }
   return d;
 }
@@ -172,6 +178,8 @@ export function handleProxyUpload(
   const desc = getOrCreateProxyDescriptor(
     state.proxyDescriptorsByEntity,
     msg.entityId,
+    msg.t,
+    msg.c,
   );
   if (msg.kind === "FieldProxy3D") {
     desc.fieldProxyHandle = handle;
@@ -182,6 +190,8 @@ export function handleProxyUpload(
     propagateWellProxyToFields(
       handle,
       msg.entityId,
+      msg.t,
+      msg.c,
       state.wellToFields,
       state.proxyDescriptorsByEntity,
     );

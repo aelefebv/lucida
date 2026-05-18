@@ -74,10 +74,9 @@ export function handleSliceRenderMultiPass(
 
     // Resolve proxy texture handles via the descriptor's dense pool
     // array. Slot indices + dims come from the GPU descriptor.
-    const desc = layer.entityId
-      ? ctx.lookupProxyDescriptor(layer.entityId)
-      : null;
+    const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
     let fieldProxyTexture: GPUTexture | null = null;
+    let fieldProxySlotResident = false;
     let wellProxyTexture: GPUTexture | null = null;
     let wellProxySlotResident = false;
 
@@ -86,6 +85,7 @@ export function handleSliceRenderMultiPass(
         const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
         if (poolIdx !== undefined) {
           fieldProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
+          fieldProxySlotResident = true;
         }
       }
       if (desc.wellProxyHandle) {
@@ -98,9 +98,9 @@ export function handleSliceRenderMultiPass(
     }
 
     // Skip when the layer has nothing renderable: no detail chunks AND
-    // no resident well proxy. Entities with detail OR a resident proxy
+    // no resident proxy. Entities with detail OR a resident proxy
     // continue rendering — the unified fallback chain handles the rest.
-    if (!hasDetail && !wellProxySlotResident) continue;
+    if (!hasDetail && !fieldProxySlotResident && !wellProxySlotResident) continue;
 
     renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
 

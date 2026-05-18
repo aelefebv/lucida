@@ -71,6 +71,7 @@ describe("handleVolumeRenderMultiPass", () => {
       entityCount: 2,
       colormapLutIndices: new Map([["gray", 0]]),
       colormapNameByMember: new Map([["img-a", "gray"], ["img-b", "gray"]]),
+      proxyDescriptorByMember: new Map(),
     };
 
     const ctx = {
@@ -125,5 +126,86 @@ describe("handleVolumeRenderMultiPass", () => {
     expect(renderTo.mock.calls[0][3]).toBe(true);
     expect(composite).toHaveBeenCalledTimes(1);
     expect(composite.mock.calls[0][3]).toBe(true);
+  });
+
+  it("renders a layer backed only by a resident field proxy", () => {
+    const device = makeDevice();
+    const renderTo = vi.fn();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const fieldProxyTexture = {} as GPUTexture;
+    const descIndex: EntityDescriptorIndex = {
+      buffer: {} as GPUBuffer,
+      indexByMember: new Map([["img-a:ch1", 0]]),
+      proxyPoolIndexByKey: new Map([["field-proxy-ch1", 0]]),
+      proxyPoolsByIndex: [{
+        texture: fieldProxyTexture,
+        slots: new Map(),
+        freeSlots: [],
+        capacity: 1,
+        slotDims: [8, 16, 32],
+        kind: "FieldProxy3D",
+        channel: 1,
+        touchOrder: [],
+      }],
+      entityCount: 1,
+      colormapLutIndices: new Map([["green", 0]]),
+      colormapNameByMember: new Map([["img-a:ch1", "green"]]),
+      proxyDescriptorByMember: new Map([
+        ["img-a:ch1", {
+          fieldProxyHandle: { poolKey: "field-proxy-ch1", slotIndex: 0 },
+          wellProxyHandle: null,
+        }],
+      ]),
+    };
+
+    const setProxyTextures = vi.fn();
+    const setAtlas = vi.fn();
+    const ctx = {
+      device,
+      context: {
+        canvas: { width: 0, height: 0 },
+        getCurrentTexture: () => ({ createView: () => ({}) }),
+      },
+      state,
+      getVolumeRenderer: () => ({
+        setColormapTexture: vi.fn(),
+        setProxyTextures,
+        setAtlas,
+        setRenderMode: vi.fn(),
+        setMatrices: vi.fn(),
+        setDescriptorBinding: vi.fn(),
+        renderTo,
+      }),
+      getCompositor: () => ({ composite }),
+      getCursorRenderer: () => ({ hasData: () => false }),
+      ensureOffscreenPool: () => [{ createView: () => ({}) }],
+      getOrCreateLUT: () => ({}),
+      lookupEntityDescriptor: () => descIndex,
+      getDummy3DTexture: () => ({}),
+    } as unknown as WorkerCtx;
+
+    handleVolumeRenderMultiPass(
+      ctx,
+      {
+        type: "volumeRenderMultiPass",
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        layers: [
+          { datasetId: "img-a:ch1", entityId: "entity-a", entityIndex: 0, blendMode: "additive", renderMode: "translucent" },
+        ],
+        invViewProj: new Float32Array(16),
+        eye: new Float32Array(3),
+        canvasW: 64,
+        canvasH: 64,
+        fullW: 64,
+        fullH: 64,
+      },
+      () => ({ poolKey: null, datasetId: "ds-0" }),
+    );
+
+    expect(renderTo).toHaveBeenCalledTimes(1);
+    expect(setProxyTextures).toHaveBeenCalledWith(fieldProxyTexture, null);
+    expect(setAtlas.mock.calls[0][3]).toEqual([32, 16, 8]);
+    expect(composite).toHaveBeenCalledTimes(1);
   });
 });

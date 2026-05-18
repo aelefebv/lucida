@@ -71,21 +71,23 @@ export function handleVolumeRenderMultiPass(
 
     // Pool index + slot index live in the descriptor; CPU side only
     // needs the texture handle for binding. Read the pool by walking
-    // the dense `proxyPoolsByIndex` array (resolved via the entity's
-    // CPU-side proxy descriptor mirror).
-    const desc = layer.entityId
-      ? ctx.lookupProxyDescriptor(layer.entityId)
-      : null;
+    // the dense `proxyPoolsByIndex` array (resolved via the member's
+    // time/channel-specific proxy descriptor mirror).
+    const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
     let fieldProxyTexture: GPUTexture | null = null;
+    let fieldProxySlotResident = false;
     let wellProxyTexture: GPUTexture | null = null;
     let wellProxySlotResident = false;
-    let wellSlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
+    let proxySlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
 
     if (desc) {
       if (desc.fieldProxyHandle) {
         const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
         if (poolIdx !== undefined) {
-          fieldProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
+          const pool = descIndex.proxyPoolsByIndex[poolIdx];
+          fieldProxyTexture = pool.texture;
+          fieldProxySlotResident = true;
+          proxySlotDimsForVolumeFallback = pool.slotDims;
         }
       }
       if (desc.wellProxyHandle) {
@@ -94,15 +96,17 @@ export function handleVolumeRenderMultiPass(
           const pool = descIndex.proxyPoolsByIndex[poolIdx];
           wellProxyTexture = pool.texture;
           wellProxySlotResident = true;
-          wellSlotDimsForVolumeFallback = pool.slotDims;
+          if (!fieldProxySlotResident) {
+            proxySlotDimsForVolumeFallback = pool.slotDims;
+          }
         }
       }
     }
 
     // Skip when the layer has nothing renderable: no detail chunks AND
-    // no resident well proxy. Entities with detail OR a resident proxy
+    // no resident proxy. Entities with detail OR a resident proxy
     // continue rendering — the unified fallback chain handles the rest.
-    if (!hasDetail && !wellProxySlotResident) {
+    if (!hasDetail && !fieldProxySlotResident && !wellProxySlotResident) {
       continue;
     }
 
@@ -126,12 +130,12 @@ export function handleVolumeRenderMultiPass(
       // ~3 samples/ray → alpha barely accumulates in translucent
       // compositing → proxy renders dim/desaturated.
       const dummyChunk = ctx.getDummy3DTexture();
-      // wellSlotDimsForVolumeFallback is [Z, Y, X]; setAtlas takes
+      // proxySlotDimsForVolumeFallback is [Z, Y, X]; setAtlas takes
       // volumeDims as [X, Y, Z].
       const proxyVolumeDims: [number, number, number] = [
-        wellSlotDimsForVolumeFallback[2],
-        wellSlotDimsForVolumeFallback[1],
-        wellSlotDimsForVolumeFallback[0],
+        proxySlotDimsForVolumeFallback[2],
+        proxySlotDimsForVolumeFallback[1],
+        proxySlotDimsForVolumeFallback[0],
       ];
       renderer.setAtlas(
         dummyChunk, getDummyIndirection(ctx.device),

@@ -42,7 +42,7 @@ export interface RendererState {
   // ── Proxy + descriptor registries ────────────────────────────────
   /** dataset → poolKey → ProxyAtlasState (proxy GPU residency by `(datasetId, kind, slotDims, channel)`). */
   proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>;
-  /** entityId → field/well proxy handle pair (CPU mirror of GPU descriptor). */
+  /** `${entityId}|${t}|${c}` → field/well proxy handle pair (CPU mirror of GPU descriptor). */
   proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>;
   /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
   descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
