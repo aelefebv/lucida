@@ -79,6 +79,8 @@ async fn import_single_image(
         multiscale: MultiscaleInfo {
             axes,
             levels,
+            coarse_level_index: None,
+            generated_levels: Vec::new(),
             data_type,
             pinned_axes: layout.pinned.clone(),
         },
@@ -425,6 +427,8 @@ async fn import_plate(
                 multiscale: MultiscaleInfo {
                     axes: axes.clone(),
                     levels: levels.clone(),
+                    coarse_level_index: None,
+                    generated_levels: Vec::new(),
                     data_type,
                     pinned_axes: layout.pinned.clone(),
                 },

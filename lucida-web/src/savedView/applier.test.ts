@@ -253,6 +253,57 @@ describe("SavedViewApplier", () => {
     expect(docCmds.find((c) => c.includes("ds-stale"))).toBeUndefined();
   });
 
+  it("applies explicit dataset detail level override", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        detail_level_override: 2,
+      },
+    };
+    await applier.apply(v);
+
+    const detailCall = scene.calls.find((c) => c.includes('"set_dataset_detail_level_override"'));
+    expect(JSON.parse(detailCall!)).toMatchObject({
+      type: "set_dataset_detail_level_override",
+      dataset_id: "ds-a",
+      level: 2,
+    });
+  });
+
+  it("resets missing dataset detail level override to default", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+      },
+    };
+    await applier.apply(v);
+
+    const detailCall = scene.calls.find((c) => c.includes('"set_dataset_detail_level_override"'));
+    expect(JSON.parse(detailCall!)).toMatchObject({
+      type: "set_dataset_detail_level_override",
+      dataset_id: "ds-a",
+      level: null,
+    });
+  });
+
   it("applyInProgress flag is true between start and resolution", async () => {
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl, 1000);

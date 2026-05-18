@@ -174,6 +174,28 @@ describe("SavedView encoder", () => {
       expect(back.dataset_settings["ds-x"]).toEqual(defaultDatasetSettings(2));
     });
 
+    it("explicit detail level override round-trips", async () => {
+      const v = emptySliceView();
+      v.datasets = ["gs://x"];
+      v.dataset_order = ["ds-x"];
+      v.dataset_settings = {
+        "ds-x": { ...defaultDatasetSettings(1), detail_level_override: 2 },
+      };
+      const back = await decode(await encode(v));
+      expect(back.dataset_settings["ds-x"].detail_level_override).toBe(2);
+    });
+
+    it("default null detail override strips as absent", async () => {
+      const v = emptySliceView();
+      v.datasets = ["gs://x"];
+      v.dataset_order = ["ds-x"];
+      v.dataset_settings = {
+        "ds-x": { ...defaultDatasetSettings(1), detail_level_override: null },
+      };
+      const back = await decode(await encode(v));
+      expect(back.dataset_settings["ds-x"].detail_level_override ?? null).toBeNull();
+    });
+
     it("only non-default channel settings survive but indices preserved", async () => {
       const v = emptySliceView();
       v.datasets = ["gs://x"];
