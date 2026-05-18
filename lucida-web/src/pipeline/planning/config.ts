@@ -30,6 +30,9 @@ export const DETAIL_LANE_OFFSET = 500;
 /** Priority lane offset for proxy requests (well/field proxy fallbacks). */
 export const PROXY_LANE_OFFSET = 1000;
 
+/** Default worker-global GPU proxy residency budget: 128 MiB. */
+export const DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES = 128 * 1024 * 1024;
+
 /** Priority lane offset for prefetch (next-timepoint) requests. */
 export const PREFETCH_LANE_OFFSET = 1500;
 
@@ -83,6 +86,10 @@ export interface PlanningConfig {
    */
   wellProxyPriorityBump: number;
 
+  // -- GPU proxy residency -------------------------------------------
+  /** Worker-global GPU proxy residency budget, in bytes. */
+  proxyResidencyBudgetBytes: number;
+
   // -- lane offsets ---------------------------------------------------
   /** Minimap lane (highest urgency). See {@link MINIMAP_LANE_OFFSET}. */
   minimapLaneOffset: number;
@@ -105,6 +112,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
+  proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,

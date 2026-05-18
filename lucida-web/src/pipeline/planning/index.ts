@@ -58,6 +58,7 @@ export { plan } from "./plan.ts";
 
 export {
   DEFAULT_PLANNING_CONFIG,
+  DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   DETAIL_LANE_OFFSET,
   DETAIL_THRESHOLD_PX,
   DISTANCE_WEIGHT,
@@ -73,6 +74,14 @@ export {
   mergeConfig,
   type PlanningConfig,
 } from "./config.ts";
+
+export {
+  planProxyResidency,
+  proxyRequestKey,
+  type ProxyResidencyBundleDecision,
+  type ProxyResidencyPlan,
+  type ProxyResidencyStats,
+} from "./proxyResidency.ts";
 
 export {
   createSyntheticEntity,
