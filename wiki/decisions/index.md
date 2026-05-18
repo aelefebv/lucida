@@ -16,7 +16,7 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0001-document-vs-viewport-split]] — disjoint `DocumentCommand` / `ViewportCommand` enums separate shared/sequenced from local/ephemeral
 - [[decisions/0002-peer-to-peer-follow-mode]] — anyone can follow anyone; server flattens chains into stars
 - [[decisions/0003-gpu-on-dedicated-worker]] — all WebGPU runs in `gpu.worker.ts` via `OffscreenCanvas` transfer
-- [[decisions/0004-multi-pool-atlases]] — proxy atlases keyed by `(dataset, kind, slotDims, channel)` for plate FPS
+- [[decisions/0004-multi-pool-atlases]] — historical proxy atlases keyed by `(dataset, kind, slotDims, channel)` for plate FPS; superseded for the coarse/detail path by ADR 0039
 - [[decisions/0005-three-output-import-model]] — `ImportResult` splits manifest, fetch, binding seed by audience
 - [[decisions/0006-content-source-vs-fetch-source]] — JS-side `ContentSource` wraps wire-side `FetchSource`
 - [[decisions/0007-wasm-scene-as-source-of-truth]] — Scene state lives in WASM; JS is a thin orchestration layer
@@ -51,6 +51,8 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0036-descriptor-byte-layout-ssot-and-wgsl-lock-test]] — `EntityDescriptor` byte layout owned by a single TS file (`renderer/descriptor/layout.ts`) as named offset constants; companion `layout.test.ts` parses the `EntityDescriptor` struct from both `slice.wgsl` and `volume.wgsl` and asserts agreement, failing CI on drift; WGSL codegen explicitly deferred (only two shaders; build cost not justified); generalizable seam for future cross-language byte-shape contracts (PRD #622, Slice 3; 2026-05-16)
 - [[decisions/0037-delivery-state-as-cpucache-sidecar]] — `CpuCache` owns optimistic chunk/proxy sent state via `DeliveryState`; `getDeliverable()` replaces `ready[]` drain plus chunk/proxy resend passes; uploader planner-staging hooks disappear; send order becomes strict priority across deliverables (PRD #640; 2026-05-17)
 - [[decisions/0038-budgeted-proxy-gpu-residency]] — proxy GPU residency becomes a planning-owned, worker-global budgeted desired set over coherent well bundles; worker feedback reports only desired missing proxies; stale/no-longer-desired uploads are dropped; proxy atlases move from X-only slot layout toward grid/3D packing under a 128 MB default budget (PRD #664; 2026-05-18)
+- [[decisions/0039-chunk-only-coarse-detail-residency]] — fallback/residency becomes two canonical chunk tiers (`coarse` and `detail`); detail defaults to source level 0; proxy fallback and well-as-residency-unit behavior are superseded for the new path (PRD #672; 2026-05-18)
+- [[decisions/0040-generated-coarse-as-derived-pyramid-levels]] — coarse points at an existing source level when possible, otherwise at an append-only server-managed derived level served through the normal chunk path with metadata/readiness deltas (PRD #672; 2026-05-18)
 
 ## Deferred — considered but not built yet
 

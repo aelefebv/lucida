@@ -1,9 +1,14 @@
 ---
 created: 2026-05-14
-modified: 2026-05-14
+modified: 2026-05-18
 ---
 
 # Wells Are the Planning Unit on Plates
+
+Status: Superseded for chunk residency/fallback by
+[[decisions/0039-chunk-only-coarse-detail-residency]]. Wells remain layout and
+grouping concepts, but the new coarse/detail path may schedule residency per
+field/image.
 
 ## Decision
 
