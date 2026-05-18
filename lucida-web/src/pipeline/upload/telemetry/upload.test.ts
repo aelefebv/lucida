@@ -61,13 +61,15 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   it("publishes rolling bytesPerSec equal to bytes in the 1s window", () => {
     const tel = new UploadTelemetry();
     tel.recordEvent(10_000, 500, false);
-    tel.recordEvent(10_200, 700, false);
+    tel.recordEvent(10_200, 700, false, "proxy");
     tel.recordEvent(10_400, 800, true);
     tel.publish(10_500, makeTickStats());
     const rolling = debugStats.upload.rolling!;
     // Window = UPLOAD_WINDOW_MS = 1000ms, so bytesInWindow == bytesPerSec.
     expect(rolling.bytesPerSec).toBe(2000);
     expect(rolling.uploadsPerSec).toBe(3);
+    expect(rolling.chunkUploadsPerSec).toBe(2);
+    expect(rolling.proxyUploadsPerSec).toBe(1);
     // 1 of 3 uploads is a resend.
     expect(rolling.resendRatio).toBeCloseTo(1 / 3);
   });
@@ -309,6 +311,8 @@ describe("UploadTelemetry — shape regression", () => {
       [
         "bytesPerSec",
         "uploadsPerSec",
+        "chunkUploadsPerSec",
+        "proxyUploadsPerSec",
         "resendRatio",
         "filterRatio",
         "uploadSizeP50",

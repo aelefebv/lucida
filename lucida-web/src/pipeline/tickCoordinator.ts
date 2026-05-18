@@ -439,6 +439,17 @@ export class TickCoordinator {
         members: [],
         hasMixedLevels: false,
         epochCacheHit: false,
+        proxyResidency: {
+          ...proxyResidency.stats,
+          topDecisions: proxyResidency.decisions.slice(0, 20).map((decision) => ({
+            datasetId: decision.datasetId,
+            wellId: decision.wellId,
+            representation: decision.representation,
+            proxyCount: decision.proxyKeys.length,
+            bytes: decision.bytes,
+            reason: decision.reason,
+          })),
+        },
         // Replaced after `coldStateTelemetry.recordRebuild` below.
         coldState: this.uploader.coldStateTelemetry.publish(),
         visibleRegion: null,

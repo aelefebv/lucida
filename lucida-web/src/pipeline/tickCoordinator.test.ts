@@ -335,7 +335,11 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("submits only budget-admitted proxies while preserving detail requests", () => {
+  it("submits only budget-admitted proxies while preserving detail requests", async () => {
+    const { debugStats } = await import("../debug/debugStats.ts");
+    const previousDebugEnabled = debugStats.enabled;
+    debugStats.enabled = true;
+    debugStats.orch = null;
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -356,13 +360,23 @@ describe("epoch caching", () => {
       },
     ]);
 
-    orch.planAndFetch(ctx, emptyMinimap);
+    try {
+      orch.planAndFetch(ctx, emptyMinimap);
 
-    const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
-    expect(submitted.requests.length).toBeGreaterThan(0);
-    expect(submitted.proxyRequests).toEqual([]);
-    const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-    expect(cold.desiredProxyKeys).toEqual([]);
+      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
+      expect(submitted.requests.length).toBeGreaterThan(0);
+      expect(submitted.proxyRequests).toEqual([]);
+      const cold = coldState.mock.calls[0][0] as ColdStateMessage;
+      expect(cold.desiredProxyKeys).toEqual([]);
+      const orchDebug = debugStats.orch as { proxyResidency?: unknown } | null;
+      expect(orchDebug?.proxyResidency).toMatchObject({
+        desiredProxyCount: 0,
+        skippedProxyCount: 2,
+        admittedBytes: 0,
+      });
+    } finally {
+      debugStats.enabled = previousDebugEnabled;
+    }
   });
 });
 

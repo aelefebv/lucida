@@ -116,9 +116,12 @@ function getOrCreateProxyPool(
     pool = createProxyAtlas(device, kind, slotDims, channel, requestedCapacity);
     dsPools.set(poolKey, pool);
   } else if (pool.requestedCapacity < requestedCapacity) {
+    const evictedCount = pool.slots.size;
     for (const [slotKey, slotIndex] of Array.from(pool.slots)) {
       clearResidentProxyDescriptor(state, poolKey, pool.kind, slotKey, slotIndex);
     }
+    state.proxyStats.evicted += evictedCount;
+    state.proxyStats.evictedPolicy += evictedCount;
     destroyProxyAtlas(pool);
     pool = createProxyAtlas(device, kind, slotDims, channel, requestedCapacity);
     dsPools.set(poolKey, pool);
@@ -140,6 +143,7 @@ export function handleProxyUpload(
   // 0. Staleness — drop if older than the current cold-state epoch.
   if (isStaleDelivery(msg.epochs, state.currentEpochs)) {
     state.proxyStats.dropped++;
+    state.proxyStats.droppedStale++;
     console.log(
       "[proxy.upload] dropped stale",
       msg.entityId,
@@ -152,6 +156,8 @@ export function handleProxyUpload(
   const policy = evaluateProxyDeliveryPolicy(state.currentColdState, msg);
   if (policy.kind !== "accept") {
     state.proxyStats.dropped++;
+    if (policy.kind === "not-desired") state.proxyStats.droppedNotDesired++;
+    else state.proxyStats.droppedStaleRequest++;
     console.log(
       "[proxy.upload] dropped",
       policy.kind,
@@ -204,6 +210,7 @@ export function handleProxyUpload(
   const { slotIndex } = allocation;
   if (allocation.evictedKey !== null) {
     state.proxyStats.evicted++;
+    state.proxyStats.evictedLru++;
     clearResidentProxyDescriptor(
       state,
       poolKey,
@@ -213,7 +220,7 @@ export function handleProxyUpload(
     );
   }
 
-  // 4. Upload to the slot region. Layout is 1-D-along-X.
+  // 4. Upload to the slot region.
   const origin = proxySlotOrigin(pool, slotIndex);
   ctx.device.queue.writeTexture(
     { texture: pool.texture, origin },

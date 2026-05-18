@@ -44,6 +44,7 @@ interface EventEntry {
   at: number;
   bytes: number;
   isResend: boolean;
+  kind: "chunk" | "proxy";
 }
 
 export class UploadTelemetry {
@@ -73,8 +74,13 @@ export class UploadTelemetry {
       debugLog("orch", "upload.drain_waste", payload as Record<string, unknown>),
   });
 
-  recordEvent(now: number, bytes: number, isResend: boolean): void {
-    this.uploadEvents.push({ at: now, bytes, isResend });
+  recordEvent(
+    now: number,
+    bytes: number,
+    isResend: boolean,
+    kind: "chunk" | "proxy" = "chunk",
+  ): void {
+    this.uploadEvents.push({ at: now, bytes, isResend, kind });
     this.uploadSizeSamples.push(bytes);
     if (this.uploadSizeSamples.length > UPLOAD_SIZE_SAMPLES) {
       this.uploadSizeSamples.shift();
@@ -121,10 +127,14 @@ export class UploadTelemetry {
 
     let bytesInWindow = 0;
     let uploadsInWindow = 0;
+    let chunkUploadsInWindow = 0;
+    let proxyUploadsInWindow = 0;
     let resendUploads = 0;
     for (const e of this.uploadEvents) {
       bytesInWindow += e.bytes;
       uploadsInWindow += 1;
+      if (e.kind === "proxy") proxyUploadsInWindow += 1;
+      else chunkUploadsInWindow += 1;
       if (e.isResend) resendUploads += 1;
     }
 
@@ -174,6 +184,8 @@ export class UploadTelemetry {
       // UPLOAD_WINDOW_MS = 1000ms, so bytes-in-window = bytes-per-sec.
       bytesPerSec: bytesInWindow,
       uploadsPerSec: uploadsInWindow,
+      chunkUploadsPerSec: chunkUploadsInWindow,
+      proxyUploadsPerSec: proxyUploadsInWindow,
       resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
       filterRatio:
         drainedUploadBoundInWindow > 0

@@ -84,7 +84,9 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   }
 
   if (msg.desiredProxyKeys !== undefined) {
-    reconcileProxyResidency(state, msg.datasetId, msg.desiredProxyKeys);
+    const evicted = reconcileProxyResidency(state, msg.datasetId, msg.desiredProxyKeys);
+    state.proxyStats.evicted += evicted;
+    state.proxyStats.evictedPolicy += evicted;
   }
 
   // 2. Register member→dataset mappings for every (entry, channel)

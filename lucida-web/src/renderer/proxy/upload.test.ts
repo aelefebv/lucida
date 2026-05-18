@@ -475,6 +475,36 @@ describe("Suite B — handleProxyUpload", () => {
     ).not.toBeNull();
   });
 
+  it("does not evict while uploading a desired set larger than the old X-only 16-slot limit", () => {
+    const desiredKeys = Array.from(
+      { length: 40 },
+      (_, i) => `ds1|field-${i}|FieldProxy3D|0|0`,
+    );
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: desiredKeys,
+      epochs: makeEpochs({ request: 1 }),
+    });
+
+    for (let i = 0; i < desiredKeys.length; i++) {
+      handleProxyUpload(
+        ctx,
+        makeMsg({
+          entityId: `field-${i}`,
+          kind: "FieldProxy3D",
+          dims: [1, 128, 128],
+          epochs: makeEpochs({ request: 1 }),
+        }),
+      );
+    }
+
+    const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
+    expect(pool.capacity).toBe(40);
+    expect(pool.slots.size).toBe(40);
+    expect(ctx.state.proxyStats.evicted).toBe(0);
+    expect(ctx.state.proxyStats.evictedLru).toBe(0);
+    expect(ctx.state.proxyStats.uploaded).toBe(40);
+  });
+
   it("desired upload from stale request epoch → dropped and requests a wanted-set refresh", () => {
     ctx.state.currentColdState = makeColdState({
       desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],

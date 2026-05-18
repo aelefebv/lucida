@@ -66,8 +66,17 @@ export interface RendererState {
   currentColdState: ColdStateMessage | null;
 
   // ── Devtools counter (worker-side HITL) ──────────────────────────
-  /** Proxy upload counters exposed via `self.__lucidaProxyStats`. */
-  proxyStats: { uploaded: number; dropped: number; evicted: number };
+  /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
+  proxyStats: {
+    uploaded: number;
+    dropped: number;
+    evicted: number;
+    droppedStale: number;
+    droppedNotDesired: number;
+    droppedStaleRequest: number;
+    evictedLru: number;
+    evictedPolicy: number;
+  };
 }
 
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
@@ -87,6 +96,15 @@ export function createInitialState(): RendererState {
     cameraUVPerEntity: new Map(),
     currentEpochs: null,
     currentColdState: null,
-    proxyStats: { uploaded: 0, dropped: 0, evicted: 0 },
+    proxyStats: {
+      uploaded: 0,
+      dropped: 0,
+      evicted: 0,
+      droppedStale: 0,
+      droppedNotDesired: 0,
+      droppedStaleRequest: 0,
+      evictedLru: 0,
+      evictedPolicy: 0,
+    },
   };
 }
