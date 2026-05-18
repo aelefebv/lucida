@@ -42,12 +42,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
   RENDER_ATTACHMENT: 0x10,
 };
 
+import { reconcileProxyResidency } from "./residency.ts";
 import { handleProxyUpload } from "./upload.ts";
 import {
   proxyDescriptorKey,
   type WorkerCtx,
 } from "../workerContext.ts";
-import type { ProxyAssetDataMessage } from "../workerProtocol.ts";
+import type { ColdStateMessage, ProxyAssetDataMessage } from "../workerProtocol.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { allocateProxySlot, proxySlotKey } from "../proxyAtlas.ts";
 import { createInitialState } from "../worker/state.ts";
@@ -139,6 +140,30 @@ function makeMsg(
     dims,
     dataType: "u16",
     data,
+  };
+}
+
+function makeColdState(
+  opts?: Partial<ColdStateMessage>,
+): ColdStateMessage {
+  return {
+    type: "coldState",
+    epochs: opts?.epochs ?? makeEpochs(),
+    datasetId: opts?.datasetId ?? "ds1",
+    currentT: opts?.currentT ?? 0,
+    currentZ: opts?.currentZ ?? 0,
+    multiChannel: opts?.multiChannel ?? false,
+    visibleChannels: opts?.visibleChannels ?? [0],
+    visibleRegion: opts?.visibleRegion ?? {
+      xyBoundsVox: [0, 0, 128, 128],
+      zRangeVox: [0, 8],
+      effectiveZoom: 1,
+      sortCenterVox: null,
+      frustumPlanes: null,
+    },
+    desiredProxyKeys: opts?.desiredProxyKeys,
+    activeSet: opts?.activeSet ?? [],
+    viewMode: opts?.viewMode ?? "volume",
   };
 }
 
@@ -249,6 +274,9 @@ describe("Suite B — handleProxyUpload", () => {
     expect(ctx.state.proxyStats.evicted).toBe(1);
     expect(pool.slots.has(proxySlotKey("fieldA", 0, 0))).toBe(false);
     expect(pool.slots.get(proxySlotKey("fieldZ", 0, 0))).toBe(fieldASlot);
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle,
+    ).toBeNull();
     expect(outcome).toEqual({ rebuildDescriptor: true, wantedSetChanged: true });
   });
 
@@ -275,6 +303,31 @@ describe("Suite B — handleProxyUpload", () => {
     // Well's own fieldProxyHandle stays null too.
     expect(wellDesc!.fieldProxyHandle).toBeNull();
     expect(outcome.rebuildDescriptor).toBe(true);
+  });
+
+  it("desired-set reconciliation releases resident well proxy and clears fanned-out handles", () => {
+    ctx.state.wellToFields.set("wellA", new Set(["fieldA", "fieldB"]));
+    handleProxyUpload(
+      ctx,
+      makeMsg({ entityId: "wellA", kind: "WellProxy3D" }),
+    );
+    const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
+    expect(pool.slots.size).toBe(1);
+
+    const released = reconcileProxyResidency(ctx.state, "ds1", []);
+
+    expect(released).toBe(1);
+    expect(pool.slots.size).toBe(0);
+    expect(pool.freeSlots).toContain(0);
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("wellA", 0, 0))!.wellProxyHandle,
+    ).toBeNull();
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.wellProxyHandle,
+    ).toBeNull();
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldB", 0, 0))!.wellProxyHandle,
+    ).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -312,6 +365,163 @@ describe("Suite B — handleProxyUpload", () => {
     expect(ctx.state.proxyPoolsByDataset.size).toBe(0);
     expect(ctx.state.proxyDescriptorsByEntity.size).toBe(0);
     expect(outcome).toEqual({ rebuildDescriptor: false, wantedSetChanged: false });
+  });
+
+  it("upload absent from current desiredProxyKeys → dropped before pool allocation", () => {
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: [],
+      epochs: makeEpochs({ request: 1 }),
+    });
+    const outcome = handleProxyUpload(
+      ctx,
+      makeMsg({
+        entityId: "fieldA",
+        kind: "FieldProxy3D",
+        epochs: makeEpochs({ request: 1 }),
+      }),
+    );
+    expect(ctx.state.proxyStats.dropped).toBe(1);
+    expect(ctx.state.proxyStats.uploaded).toBe(0);
+    expect(ctx.state.proxyPoolsByDataset.size).toBe(0);
+    expect(ctx.state.proxyDescriptorsByEntity.size).toBe(0);
+    expect(outcome).toEqual({ rebuildDescriptor: false, wantedSetChanged: false });
+  });
+
+  it("upload present in current desiredProxyKeys → accepted", () => {
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],
+      epochs: makeEpochs({ request: 1 }),
+    });
+    const outcome = handleProxyUpload(
+      ctx,
+      makeMsg({
+        entityId: "fieldA",
+        kind: "FieldProxy3D",
+        epochs: makeEpochs({ request: 1 }),
+      }),
+    );
+    expect(ctx.state.proxyStats.dropped).toBe(0);
+    expect(ctx.state.proxyStats.uploaded).toBe(1);
+    expect(ctx.state.proxyPoolsByDataset.size).toBe(1);
+    expect(outcome).toEqual({ rebuildDescriptor: true, wantedSetChanged: true });
+  });
+
+  it("policy-driven pool capacity tracks desired proxy count for the pool", () => {
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: [
+        "ds1|fieldA|FieldProxy3D|0|0",
+        "ds1|fieldB|FieldProxy3D|0|0",
+        "ds1|fieldC|FieldProxy3D|0|0",
+      ],
+      epochs: makeEpochs({ request: 1 }),
+    });
+    handleProxyUpload(
+      ctx,
+      makeMsg({
+        entityId: "fieldA",
+        kind: "FieldProxy3D",
+        epochs: makeEpochs({ request: 1 }),
+      }),
+    );
+    const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
+    expect(pool.capacity).toBe(3);
+    expect(pool.requestedCapacity).toBe(3);
+  });
+
+  it("grows an existing proxy pool when the desired set exceeds prior requested capacity", () => {
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],
+      epochs: makeEpochs({ request: 1 }),
+    });
+    handleProxyUpload(
+      ctx,
+      makeMsg({
+        entityId: "fieldA",
+        kind: "FieldProxy3D",
+        epochs: makeEpochs({ request: 1 }),
+      }),
+    );
+    const firstPool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
+    const firstTexture = firstPool.texture as unknown as MockTexture;
+    expect(firstPool.capacity).toBe(1);
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle,
+    ).not.toBeNull();
+
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: [
+        "ds1|fieldA|FieldProxy3D|0|0",
+        "ds1|fieldB|FieldProxy3D|0|0",
+      ],
+      epochs: makeEpochs({ request: 2 }),
+    });
+    handleProxyUpload(
+      ctx,
+      makeMsg({
+        entityId: "fieldB",
+        kind: "FieldProxy3D",
+        epochs: makeEpochs({ request: 2 }),
+      }),
+    );
+    const grownPool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
+    expect(grownPool).not.toBe(firstPool);
+    expect(firstTexture.destroyed).toBe(true);
+    expect(grownPool.capacity).toBe(2);
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle,
+    ).toBeNull();
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldB", 0, 0))!.fieldProxyHandle,
+    ).not.toBeNull();
+  });
+
+  it("does not evict while uploading a desired set larger than the old X-only 16-slot limit", () => {
+    const desiredKeys = Array.from(
+      { length: 40 },
+      (_, i) => `ds1|field-${i}|FieldProxy3D|0|0`,
+    );
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: desiredKeys,
+      epochs: makeEpochs({ request: 1 }),
+    });
+
+    for (let i = 0; i < desiredKeys.length; i++) {
+      handleProxyUpload(
+        ctx,
+        makeMsg({
+          entityId: `field-${i}`,
+          kind: "FieldProxy3D",
+          dims: [1, 128, 128],
+          epochs: makeEpochs({ request: 1 }),
+        }),
+      );
+    }
+
+    const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
+    expect(pool.capacity).toBe(40);
+    expect(pool.slots.size).toBe(40);
+    expect(ctx.state.proxyStats.evicted).toBe(0);
+    expect(ctx.state.proxyStats.evictedLru).toBe(0);
+    expect(ctx.state.proxyStats.uploaded).toBe(40);
+  });
+
+  it("desired upload from stale request epoch → dropped and requests a wanted-set refresh", () => {
+    ctx.state.currentColdState = makeColdState({
+      desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],
+      epochs: makeEpochs({ request: 2 }),
+    });
+    const outcome = handleProxyUpload(
+      ctx,
+      makeMsg({
+        entityId: "fieldA",
+        kind: "FieldProxy3D",
+        epochs: makeEpochs({ request: 1 }),
+      }),
+    );
+    expect(ctx.state.proxyStats.dropped).toBe(1);
+    expect(ctx.state.proxyStats.uploaded).toBe(0);
+    expect(ctx.state.proxyPoolsByDataset.size).toBe(0);
+    expect(outcome).toEqual({ rebuildDescriptor: false, wantedSetChanged: true });
   });
 
   // -------------------------------------------------------------------------

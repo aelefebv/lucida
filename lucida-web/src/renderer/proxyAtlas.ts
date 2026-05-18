@@ -6,26 +6,26 @@
  * (`FieldProxy3D`). They live in dedicated atlas pools so they don't
  * compete with detail-chunk slots.
  *
- * Slot layout (1-D-along-X)
- * -------------------------
- * Each pool fixes its slot dimensions `[Z, Y, X]`. Slots are tiled
- * along the X axis, so the atlas texture is sized
- * `[slotDims.X * capacity, slotDims.Y, slotDims.Z]`. Slot `i` occupies
- * the region
+ * Slot layout (3-D grid)
+ * ---------------------
+ * Each pool fixes its slot dimensions `[Z, Y, X]`. Slots are tiled in
+ * a 3-D grid whose texture-space dimensions are
+ * `[slotDims.X * slotsX, slotDims.Y * slotsY, slotDims.Z * slotsZ]`.
+ * Slot `i` occupies the region
  *
  * ```text
- *   origin = [i * slotDims.X, 0, 0]
+ *   tileX  = i % slotsX
+ *   tileY  = floor(i / slotsX) % slotsY
+ *   tileZ  = floor(i / (slotsX * slotsY))
+ *   origin = [tileX * slotDims.X, tileY * slotDims.Y, tileZ * slotDims.Z]
  *   size   = slotDims
  * ```
  *
- * Why 1-D-along-X: simplest layout that keeps slot origin arithmetic
- * trivial (`i * X`). Proxy slots are typically modest (≤128³), pool
- * capacity is small (default 64), so a 1-D pack of `64 * 128 = 8192`
- * texels per axis fits comfortably under WebGPU's standard
- * `maxTextureDimension3D = 2048` limit for typical proxy dims. We
- * still validate against the limit at creation time and clamp
- * `capacity` downward if needed; if a future change pushes us past
- * that, swap in a 3-D pack.
+ * Why 3-D grid: common field proxies such as `128x128x1` can fit only
+ * 16 slots in an X-only layout on devices with
+ * `maxTextureDimension3D = 2048`. A 3-D grid uses the Y/Z texture axes
+ * too, so pool capacity tracks the proxy residency budget instead of
+ * the single-axis texture limit.
  *
  * Eviction
  * --------
@@ -41,14 +41,19 @@ import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import { getDeviceLimits } from "./gpuContext.ts";
 
 export interface ProxyAtlasState {
-  /** 3-D `r16uint` texture; slots tiled along X. */
+  /** 3-D `r16uint` texture; slots tiled in a 3-D grid. */
   texture: GPUTexture;
   /** Composite key `${entityId}|${t}|${c}` → slot index. */
   slots: Map<string, number>;
   freeSlots: number[];
   capacity: number;
+  /** Capacity requested by policy before device-limit clamping. */
+  requestedCapacity: number;
   /** Voxel dimensions of one slot, `[Z, Y, X]`. */
   slotDims: [number, number, number];
+  slotsX: number;
+  slotsY: number;
+  slotsZ: number;
   kind: ProxyKind;
   /** Single channel per pool — multi-channel uses multi-pool. */
   channel: number;
@@ -63,6 +68,19 @@ export interface ProxyAtlasState {
 export interface ProxyHandle {
   poolKey: string;
   slotIndex: number;
+}
+
+export interface ProxySlotAllocation {
+  slotIndex: number;
+  evictedKey: string | null;
+}
+
+export interface ProxyAtlasLayout {
+  capacity: number;
+  slotsX: number;
+  slotsY: number;
+  slotsZ: number;
+  textureSize: [number, number, number];
 }
 
 export function proxyPoolKey(
@@ -80,12 +98,13 @@ export function proxySlotKey(entityId: string, t: number, c: number): string {
 }
 
 /**
- * Create a new proxy atlas pool. Slots are laid out 1-D along X; the
- * texture has size `[slotDims.X * capacity, slotDims.Y, slotDims.Z]`.
+ * Create a new proxy atlas pool. Slots are laid out in a 3-D grid whose
+ * texture size is `[slotDims.X * slotsX, slotDims.Y * slotsY,
+ * slotDims.Z * slotsZ]`.
  *
- * If the requested layout exceeds the device's max 3-D texture
- * dimension on the X axis, capacity is clamped downward and a warning
- * is logged.
+ * If the requested capacity exceeds what can fit under the device's max
+ * 3-D texture dimensions, capacity is clamped downward and a warning is
+ * logged.
  */
 export function createProxyAtlas(
   device: GPUDevice,
@@ -94,26 +113,17 @@ export function createProxyAtlas(
   channel: number,
   capacity: number,
 ): ProxyAtlasState {
-  const [slotZ, slotY, slotX] = slotDims;
-
-  // Clamp capacity to fit under the device's 3-D texture limits.
-  const limit = getDeviceLimits(device).maxTextureDimension3D;
-  let cap = capacity;
-  if (slotX > 0 && slotX * cap > limit) {
-    const maxCap = Math.max(1, Math.floor(limit / slotX));
-    if (maxCap < cap) {
-      console.warn(
-        `[proxyAtlas] capacity ${cap} exceeds 3D texture limit ` +
-          `(${slotX} * ${cap} > ${limit}); clamping to ${maxCap}`,
-      );
-      cap = maxCap;
-    }
+  const layout = computeProxyAtlasLayout(slotDims, capacity, getDeviceLimits(device).maxTextureDimension3D);
+  const requestedCapacity = Math.max(1, Math.floor(capacity));
+  if (layout.capacity < Math.max(1, Math.floor(capacity))) {
+    console.warn(
+      `[proxyAtlas] capacity ${capacity} exceeds 3D texture limit; ` +
+        `clamping to ${layout.capacity} ` +
+        `(grid=${layout.slotsX}x${layout.slotsY}x${layout.slotsZ})`,
+    );
   }
 
-  const texW = slotX * cap;
-  const texH = slotY;
-  const texD = slotZ;
-
+  const [texW, texH, texD] = layout.textureSize;
   const texture = device.createTexture({
     size: [texW, texH, texD],
     format: "r16uint",
@@ -122,18 +132,98 @@ export function createProxyAtlas(
   });
 
   const freeSlots: number[] = [];
-  for (let i = cap - 1; i >= 0; i--) freeSlots.push(i);
+  for (let i = layout.capacity - 1; i >= 0; i--) freeSlots.push(i);
 
   return {
     texture,
     slots: new Map(),
     freeSlots,
-    capacity: cap,
+    capacity: layout.capacity,
+    requestedCapacity,
     slotDims,
+    slotsX: layout.slotsX,
+    slotsY: layout.slotsY,
+    slotsZ: layout.slotsZ,
     kind,
     channel,
     touchOrder: [],
   };
+}
+
+export function computeProxyAtlasLayout(
+  slotDims: [number, number, number],
+  requestedCapacity: number,
+  maxTextureDimension3D: number,
+): ProxyAtlasLayout {
+  const [slotZ, slotY, slotX] = slotDims;
+  if (slotX <= 0 || slotY <= 0 || slotZ <= 0) {
+    throw new Error(`[proxyAtlas] invalid slotDims=${slotDims.join(",")}`);
+  }
+
+  const maxSlotsX = Math.floor(maxTextureDimension3D / slotX);
+  const maxSlotsY = Math.floor(maxTextureDimension3D / slotY);
+  const maxSlotsZ = Math.floor(maxTextureDimension3D / slotZ);
+  if (maxSlotsX < 1 || maxSlotsY < 1 || maxSlotsZ < 1) {
+    throw new Error(
+      `[proxyAtlas] slotDims=${slotDims.join(",")} exceed maxTextureDimension3D=${maxTextureDimension3D}`,
+    );
+  }
+
+  const maxCapacity = maxSlotsX * maxSlotsY * maxSlotsZ;
+  const capacity = Math.min(
+    Math.max(1, Math.floor(requestedCapacity)),
+    maxCapacity,
+  );
+
+  let best: ProxyAtlasLayout | null = null;
+  const maxCandidateX = Math.min(maxSlotsX, capacity);
+  for (let slotsX = 1; slotsX <= maxCandidateX; slotsX++) {
+    const maxCandidateY = Math.min(maxSlotsY, Math.ceil(capacity / slotsX));
+    for (let slotsY = 1; slotsY <= maxCandidateY; slotsY++) {
+      const slotsZ = Math.ceil(capacity / (slotsX * slotsY));
+      if (slotsZ < 1 || slotsZ > maxSlotsZ) continue;
+
+      const textureSize: [number, number, number] = [
+        slotsX * slotX,
+        slotsY * slotY,
+        slotsZ * slotZ,
+      ];
+      const candidate: ProxyAtlasLayout = {
+        capacity,
+        slotsX,
+        slotsY,
+        slotsZ,
+        textureSize,
+      };
+      if (!best || compareLayouts(candidate, best) < 0) best = candidate;
+    }
+  }
+
+  if (!best) {
+    throw new Error(
+      `[proxyAtlas] cannot pack capacity=${capacity} slotDims=${slotDims.join(",")} ` +
+        `under maxTextureDimension3D=${maxTextureDimension3D}`,
+    );
+  }
+  return best;
+}
+
+function compareLayouts(a: ProxyAtlasLayout, b: ProxyAtlasLayout): number {
+  const aAllocated = a.slotsX * a.slotsY * a.slotsZ;
+  const bAllocated = b.slotsX * b.slotsY * b.slotsZ;
+  if (aAllocated !== bAllocated) return aAllocated - bAllocated;
+
+  const aMaxAxis = Math.max(...a.textureSize);
+  const bMaxAxis = Math.max(...b.textureSize);
+  if (aMaxAxis !== bMaxAxis) return aMaxAxis - bMaxAxis;
+
+  const aMinAxis = Math.min(...a.textureSize);
+  const bMinAxis = Math.min(...b.textureSize);
+  if (aMinAxis !== bMinAxis) return bMinAxis - aMinAxis;
+
+  const aArea = a.textureSize[0] * a.textureSize[1] * a.textureSize[2];
+  const bArea = b.textureSize[0] * b.textureSize[1] * b.textureSize[2];
+  return aArea - bArea;
 }
 
 /**
@@ -147,13 +237,25 @@ export function allocateProxySlot(
   atlas: ProxyAtlasState,
   key: string,
 ): number {
+  return allocateProxySlotWithEviction(atlas, key).slotIndex;
+}
+
+/**
+ * Allocate (or look up) a slot for `key`, returning the evicted slot key
+ * when the allocation had to reuse an occupied slot.
+ */
+export function allocateProxySlotWithEviction(
+  atlas: ProxyAtlasState,
+  key: string,
+): ProxySlotAllocation {
   const existing = atlas.slots.get(key);
   if (existing !== undefined) {
     moveToEnd(atlas.touchOrder, key);
-    return existing;
+    return { slotIndex: existing, evictedKey: null };
   }
 
   let slotIndex: number;
+  let evictedKey: string | null = null;
   if (atlas.freeSlots.length > 0) {
     slotIndex = atlas.freeSlots.pop()!;
   } else {
@@ -168,11 +270,12 @@ export function allocateProxySlot(
     const victim = atlas.touchOrder.shift()!;
     slotIndex = atlas.slots.get(victim)!;
     atlas.slots.delete(victim);
+    evictedKey = victim;
   }
 
   atlas.slots.set(key, slotIndex);
   atlas.touchOrder.push(key);
-  return slotIndex;
+  return { slotIndex, evictedKey };
 }
 
 /** Does NOT touch LRU order. */
@@ -189,14 +292,37 @@ export function touchProxySlot(atlas: ProxyAtlasState, key: string): void {
 }
 
 /**
+ * Release a resident slot without touching GPU memory. Returns the freed
+ * slot index, or undefined if the key was not resident.
+ */
+export function releaseProxySlot(
+  atlas: ProxyAtlasState,
+  key: string,
+): number | undefined {
+  const slotIndex = atlas.slots.get(key);
+  if (slotIndex === undefined) return undefined;
+  atlas.slots.delete(key);
+  const idx = atlas.touchOrder.indexOf(key);
+  if (idx >= 0) atlas.touchOrder.splice(idx, 1);
+  if (!atlas.freeSlots.includes(slotIndex)) atlas.freeSlots.push(slotIndex);
+  return slotIndex;
+}
+
+/**
  * Compute the [x, y, z] origin in the atlas texture for a slot index.
- * Layout: 1-D along X, so `origin = [slotIndex * slotDims.X, 0, 0]`.
  */
 export function proxySlotOrigin(
   atlas: ProxyAtlasState,
   slotIndex: number,
 ): [number, number, number] {
-  return [slotIndex * atlas.slotDims[2], 0, 0];
+  const tileX = slotIndex % atlas.slotsX;
+  const tileY = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
+  const tileZ = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
+  return [
+    tileX * atlas.slotDims[2],
+    tileY * atlas.slotDims[1],
+    tileZ * atlas.slotDims[0],
+  ];
 }
 
 export function destroyProxyAtlas(atlas: ProxyAtlasState): void {

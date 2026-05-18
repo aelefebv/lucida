@@ -51,9 +51,9 @@ import type { LevelGeometry } from "../manifestTypes.ts";
 function makeCatalog(
   entries: [string, ProxyKind[]][],
 ): AssetCatalogSnapshot {
-  const byEntity = new Map<string, { kinds: Set<ProxyKind> }>();
+  const byEntity: AssetCatalogSnapshot["byEntity"] = new Map();
   for (const [entityId, kinds] of entries) {
-    byEntity.set(entityId, { kinds: new Set(kinds) });
+    byEntity.set(entityId, { kinds: new Set(kinds), footprints: new Map() });
   }
   return { byEntity };
 }

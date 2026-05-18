@@ -612,6 +612,48 @@ describe("computeWantedSet", () => {
       expect(ps[0].proxyKind).toBe("FieldProxy3D");
     });
 
+    it("desiredProxyKeys=[] suppresses otherwise-missing proxy asks", () => {
+      const coldState = makeColdState({
+        desiredProxyKeys: [],
+        activeSet: [
+          makeActiveEntry({
+            entityId: "well-1",
+            imageId: "",
+            mode: "well-as-proxy",
+            proxyKind: "WellProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+          }),
+        ],
+      });
+      const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), new Map());
+      expect(result.missing).toHaveLength(0);
+    });
+
+    it("desiredProxyKeys gates field and parent-well proxy asks independently", () => {
+      const coldState = makeColdState({
+        desiredProxyKeys: ["ds-0|well-1|WellProxy3D|0|0"],
+        activeSet: [
+          makeActiveEntry({
+            entityId: "field-1",
+            imageId: "img",
+            mode: "fields-with-proxy-fallback",
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+            parentWellId: "well-1",
+          }),
+        ],
+      });
+      const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), new Map());
+      const ps = proxies(result.missing);
+      expect(ps).toHaveLength(1);
+      expect(ps[0]).toMatchObject({
+        entityId: "well-1",
+        proxyKind: "WellProxy3D",
+      });
+    });
+
     it("fields-with-detail + proxyAvailable=false -> no MissingProxy", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({

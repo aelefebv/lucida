@@ -1232,6 +1232,39 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   </div>
                 )}
 
+                {snap.orch?.proxyResidency && (
+                  <div className="debug-section">
+                    <div className="debug-title">Proxy Residency</div>
+                    {(() => {
+                      const p = snap.orch.proxyResidency!;
+                      const pct = p.budgetBytes > 0
+                        ? Math.min(100, Math.round((p.admittedBytes / p.budgetBytes) * 100))
+                        : 0;
+                      return (
+                        <>
+                          <div>
+                            Desired: {p.desiredProxyCount} proxies ·{" "}
+                            {fmtBytes(p.admittedBytes)} / {fmtBytes(p.budgetBytes)} ({pct}%)
+                          </div>
+                          <div style={{ color: "#888", fontSize: 11 }}>
+                            bundles: {p.admittedBundleCount}/{p.candidateBundleCount} admitted
+                            {p.skippedBundleCount > 0 && (
+                              <span style={{ color: "#fb4" }}>
+                                {" "}· skipped {p.skippedBundleCount} ({p.skippedProxyCount} proxies)
+                              </span>
+                            )}
+                          </div>
+                          {p.missingFootprintCount > 0 && (
+                            <div style={{ color: "#fb4", fontSize: 11 }}>
+                              missing footprints: {p.missingFootprintCount}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+
                 {/* Upload — rolling stats */}
                 {snap.upload.rolling && (
                   <div className="debug-section">
@@ -1246,6 +1279,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         <>
                           <div>
                             {fmtBytes(r.bytesPerSec)}/s · {r.uploadsPerSec} uploads/s
+                          </div>
+                          <div style={{ color: "#888", fontSize: 11 }}>
+                            {r.chunkUploadsPerSec} chunks/s · {r.proxyUploadsPerSec} proxies/s
                           </div>
                           <div>
                             <span style={{ color: resendBad ? "#fb4" : "#888" }}>

@@ -129,6 +129,7 @@ export function buildColdState(args: {
   selection: SelectionState;
   multiChannel: boolean;
   visibleRegion: VisibleRegion;
+  desiredProxyKeys?: Iterable<string>;
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   dsSettings: DatasetSettings | undefined;
@@ -150,6 +151,7 @@ export function buildColdState(args: {
     multiChannel: args.multiChannel,
     visibleChannels: args.selection.visibleChannels,
     visibleRegion: args.visibleRegion,
+    desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,
   };

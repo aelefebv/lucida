@@ -138,6 +138,8 @@ export interface OrchDebug {
   hasMixedLevels: boolean;
   /** Whether this was an epoch cache hit (plan() skipped) */
   epochCacheHit: boolean;
+  /** Proxy residency budget/admission snapshot from the latest planning pass. */
+  proxyResidency: ProxyResidencyDebug | null;
   /**
    * Cold-state rebuild telemetry. Counts and rates for `planAndFetch`
    * fast-path hits vs full rebuilds, with per-epoch cause attribution
@@ -157,6 +159,25 @@ export interface OrchDebug {
     position: [number, number];
     fullShape: [number, number] | null; // [fullX, fullY] from level 0
     cachedKeys: number; // how many keys getCachedKeys returned
+  }>;
+}
+
+export interface ProxyResidencyDebug {
+  budgetBytes: number;
+  admittedBytes: number;
+  desiredProxyCount: number;
+  candidateBundleCount: number;
+  admittedBundleCount: number;
+  skippedBundleCount: number;
+  skippedProxyCount: number;
+  missingFootprintCount: number;
+  topDecisions: Array<{
+    datasetId: string;
+    wellId: string;
+    representation: "field" | "well";
+    proxyCount: number;
+    bytes: number;
+    reason: "admitted" | "over-budget" | "replaced";
   }>;
 }
 
@@ -353,6 +374,10 @@ export interface UploadRollingStats {
   bytesPerSec: number;
   /** Uploads/sec (chunks + proxies). */
   uploadsPerSec: number;
+  /** Chunk uploads/sec in the last 1s. */
+  chunkUploadsPerSec: number;
+  /** Proxy uploads/sec in the last 1s. */
+  proxyUploadsPerSec: number;
   /**
    * Legacy resend-sourced ratio. Now normally 0 because deliverability is a
    * single `cpuCache.getDeliverable()` pass.

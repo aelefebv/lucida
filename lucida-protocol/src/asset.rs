@@ -28,6 +28,30 @@ pub struct AssetCatalog {
 pub struct ProxyAvailability {
     pub entity_id: EntityId,
     pub kinds: Vec<ProxyKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub footprints: Vec<ProxyFootprint>,
+}
+
+/// Estimated GPU footprint for one advertised proxy kind.
+///
+/// `dims` is `[Z, Y, X]`, matching `lucida_proxy::ProxyHeader`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyFootprint {
+    pub kind: ProxyKind,
+    pub dims: [u32; 3],
+    pub bytes: u64,
+}
+
+impl ProxyFootprint {
+    pub fn u16(kind: ProxyKind, dims: [u32; 3]) -> Self {
+        Self {
+            kind,
+            dims,
+            bytes: dims
+                .iter()
+                .fold(2_u64, |acc, dim| acc.saturating_mul(*dim as u64)),
+        }
+    }
 }
 
 /// Incremental update to an [`AssetCatalog`].
@@ -66,10 +90,12 @@ mod tests {
                 ProxyAvailability {
                     entity_id: EntityId("well-A1".into()),
                     kinds: vec![ProxyKind::WellProxy3D],
+                    footprints: vec![ProxyFootprint::u16(ProxyKind::WellProxy3D, [1, 64, 64])],
                 },
                 ProxyAvailability {
                     entity_id: EntityId("field-F17".into()),
                     kinds: vec![ProxyKind::FieldProxy3D, ProxyKind::WellProxy3D],
+                    footprints: vec![ProxyFootprint::u16(ProxyKind::FieldProxy3D, [1, 64, 64])],
                 },
             ],
         };
@@ -79,11 +105,21 @@ mod tests {
     }
 
     #[test]
+    fn proxy_availability_deserializes_without_footprints() {
+        let json = r#"{"entity_id":"field-F17","kinds":["FieldProxy3D"]}"#;
+        let entry: ProxyAvailability = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.entity_id, EntityId("field-F17".into()));
+        assert_eq!(entry.kinds, vec![ProxyKind::FieldProxy3D]);
+        assert!(entry.footprints.is_empty());
+    }
+
+    #[test]
     fn delta_round_trip() {
         let delta = AssetCatalogDelta {
             added: vec![ProxyAvailability {
                 entity_id: EntityId("e1".into()),
                 kinds: vec![ProxyKind::FieldProxy3D],
+                footprints: vec![ProxyFootprint::u16(ProxyKind::FieldProxy3D, [1, 32, 32])],
             }],
         };
         let json = serde_json::to_string(&delta).unwrap();

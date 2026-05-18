@@ -72,6 +72,16 @@ const PRIORITY_WEIGHTS: TunableSpec[] = [
   },
 ];
 
+const RESIDENCY_BUDGETS: TunableSpec[] = [
+  {
+    field: "proxyResidencyBudgetBytes",
+    label: "Proxy GPU budget (bytes)",
+    min: 16 * 1024 * 1024,
+    max: 512 * 1024 * 1024,
+    step: 16 * 1024 * 1024,
+  },
+];
+
 const LANE_OFFSETS: TunableSpec[] = [
   { field: "minimapLaneOffset", label: "MINIMAP lane offset", min: 0, max: 5000, step: 50 },
   { field: "detailLaneOffset", label: "DETAIL lane offset", min: 0, max: 5000, step: 50 },
@@ -134,7 +144,12 @@ function laneOrderWarning(
 }
 
 function labelForField(field: keyof PlanningConfig): string {
-  for (const spec of [...MODE_THRESHOLDS, ...PRIORITY_WEIGHTS, ...LANE_OFFSETS]) {
+  for (const spec of [
+    ...MODE_THRESHOLDS,
+    ...PRIORITY_WEIGHTS,
+    ...RESIDENCY_BUDGETS,
+    ...LANE_OFFSETS,
+  ]) {
     if (spec.field === field) return spec.label;
   }
   return String(field);
@@ -288,6 +303,18 @@ export function ConfigTab() {
       <div className="debug-section">
         <div className="debug-title">Priority weights</div>
         {PRIORITY_WEIGHTS.map((spec) => (
+          <TunableRow
+            key={spec.field}
+            spec={spec}
+            cfg={cfg}
+            warning={warningFor(spec.field)}
+          />
+        ))}
+      </div>
+
+      <div className="debug-section">
+        <div className="debug-title">Residency budgets</div>
+        {RESIDENCY_BUDGETS.map((spec) => (
           <TunableRow
             key={spec.field}
             spec={spec}

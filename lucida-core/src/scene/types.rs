@@ -186,7 +186,12 @@ impl DocumentState {
         delta: lucida_protocol::AssetCatalogDelta,
     ) {
         let catalog = self.asset_catalogs.entry(dataset_id).or_default();
-        for incoming in delta.added {
+        for mut incoming in delta.added {
+            for footprint in &incoming.footprints {
+                if !incoming.kinds.contains(&footprint.kind) {
+                    incoming.kinds.push(footprint.kind);
+                }
+            }
             if let Some(existing) = catalog
                 .entries
                 .iter_mut()
@@ -195,6 +200,20 @@ impl DocumentState {
                 for kind in incoming.kinds {
                     if !existing.kinds.contains(&kind) {
                         existing.kinds.push(kind);
+                    }
+                }
+                for footprint in incoming.footprints {
+                    if !existing.kinds.contains(&footprint.kind) {
+                        existing.kinds.push(footprint.kind);
+                    }
+                    if let Some(existing_footprint) = existing
+                        .footprints
+                        .iter_mut()
+                        .find(|candidate| candidate.kind == footprint.kind)
+                    {
+                        *existing_footprint = footprint;
+                    } else {
+                        existing.footprints.push(footprint);
                     }
                 }
             } else {

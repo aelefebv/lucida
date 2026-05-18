@@ -228,9 +228,49 @@ describe("buildColdState", () => {
     expect(msg.multiChannel).toBe(false);
     expect(msg.visibleChannels).toEqual([0]);
     expect(msg.viewMode).toBe("volume");
+    expect(msg.desiredProxyKeys).toEqual([]);
     expect(msg.epochs).toEqual({ content: 1, layout: 2, view: 3, selection: 4, asset: 5, request: 6 });
     expect(msg.activeSet).toHaveLength(1);
     expect(msg.activeSet[0].entityId).toBe("ent-a");
+  });
+
+  it("threads desired proxy keys into cold state in stable order", () => {
+    const entities = [makeField("ent-a", "img-a", "well-0")];
+    const activeSet: ActiveSetEntry[] = [
+      {
+        kind: "field",
+        entityId: "ent-a",
+        imageId: "img-a",
+        mode: "fields-with-detail",
+        targetLod: 0,
+        coarsestDetailLod: 0,
+        detailOwnedLodRange: [0, 0],
+        proxyAvailable: true,
+        proxyKind: "FieldProxy3D",
+        wellProxyAvailable: false,
+      } as ActiveSetEntry,
+    ];
+
+    const msg = buildColdState({
+      datasetId: "ds1",
+      activeSet,
+      entities,
+      selection: makeSelection(),
+      multiChannel: false,
+      visibleRegion: makeVisibleRegion(),
+      desiredProxyKeys: new Set([
+        "ds1|ent-b|FieldProxy3D|0|0",
+        "ds1|ent-a|FieldProxy3D|0|0",
+      ]),
+      epochs: makeEpochs(),
+      matricesByEntity: makeMatrices(),
+      dsSettings: undefined,
+    });
+
+    expect(msg.desiredProxyKeys).toEqual([
+      "ds1|ent-a|FieldProxy3D|0|0",
+      "ds1|ent-b|FieldProxy3D|0|0",
+    ]);
   });
 
   it("bakes display state per visible channel with dataset-level fallbacks", () => {

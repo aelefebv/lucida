@@ -73,6 +73,7 @@ export class Uploader {
     selection: SelectionState;
     multiChannel: boolean;
     visibleRegion: VisibleRegion;
+    desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
@@ -84,6 +85,7 @@ export class Uploader {
       selection: args.selection,
       multiChannel: args.multiChannel,
       visibleRegion: args.visibleRegion,
+      desiredProxyKeys: args.desiredProxyKeys,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
@@ -144,8 +146,8 @@ export class Uploader {
     };
     const manifestByImage = buildManifestByImage(ctx.datasets);
 
-    const recordUpload = (bytes: number): void => {
-      this.uploadTelemetry.recordEvent(tickStart, bytes, false);
+    const recordUpload = (bytes: number, kind: "chunk" | "proxy"): void => {
+      this.uploadTelemetry.recordEvent(tickStart, bytes, false, kind);
     };
 
     let remaining = budget;
@@ -174,7 +176,7 @@ export class Uploader {
       ctx.cpuCache.markSent(delivery);
       sentAny = true;
       this.currentUploadStats.bytesUploaded += sent;
-      recordUpload(sent);
+      recordUpload(sent, delivery.kind);
       remaining -= sent;
       if (remaining <= 0) budgetExhausted = true;
     }

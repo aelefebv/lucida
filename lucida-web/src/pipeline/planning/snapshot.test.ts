@@ -422,7 +422,7 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
   it("threads the asset catalog through into the snapshot", () => {
     const catalog: AssetCatalogSnapshot = {
       byEntity: new Map([
-        ["field-0", { kinds: new Set(["WellProxy3D"]) }],
+        ["field-0", { kinds: new Set(["WellProxy3D"]), footprints: new Map() }],
       ]),
     };
     const built = buildPlanningSnapshot(makeArgs({ assetCatalog: catalog }));

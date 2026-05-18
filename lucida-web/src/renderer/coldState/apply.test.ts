@@ -32,11 +32,20 @@ import { describe, it, expect, vi } from "vitest";
 };
 
 import { applyColdState } from "./apply.ts";
-import type { WorkerCtx } from "../workerContext.ts";
+import {
+  proxyDescriptorKey,
+  type WorkerCtx,
+} from "../workerContext.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
 } from "../workerProtocol.ts";
+import {
+  allocateProxySlot,
+  createProxyAtlas,
+  proxyPoolKey,
+  proxySlotKey,
+} from "../proxyAtlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 
 // ---------------------------------------------------------------------------
@@ -171,6 +180,7 @@ function makeCold(
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    desiredProxyKeys: opts?.desiredProxyKeys,
     activeSet,
     viewMode: opts?.viewMode ?? "volume",
   };
@@ -452,5 +462,37 @@ describe("Suite A — applyColdState", () => {
     // wellsByDataset tracks which wells came from this dataset so
     // removeLayerResources can clear them cheaply.
     expect(ctx.state.wellsByDataset.get("ds1")).toEqual(new Set(["wellA", "wellB"]));
+  });
+
+  it("reconciles resident proxies against desiredProxyKeys before rebuilding descriptors", () => {
+    const device = makeMockDevice();
+    const ctx = makeCtx(device);
+    const poolKey = proxyPoolKey("ds1", "FieldProxy3D", [8, 8, 8], 0);
+    const pool = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 4);
+    const slotIndex = allocateProxySlot(pool, proxySlotKey("field1", 0, 0));
+    ctx.state.proxyPoolsByDataset.set("ds1", new Map([[poolKey, pool]]));
+    ctx.state.proxyDescriptorsByEntity.set(proxyDescriptorKey("field1", 0, 0), {
+      fieldProxyHandle: { poolKey, slotIndex },
+      wellProxyHandle: null,
+    });
+
+    const cold = makeCold(
+      [
+        makeEntry({
+          entityId: "field1", imageId: "img1", mode: "fields-with-detail",
+          proxyKind: "FieldProxy3D",
+          proxyAvailable: true,
+        }),
+      ],
+      { desiredProxyKeys: [] },
+    );
+    applyColdState(ctx, cold);
+
+    expect(pool.slots.has(proxySlotKey("field1", 0, 0))).toBe(false);
+    expect(pool.freeSlots).toContain(slotIndex);
+    expect(
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("field1", 0, 0))!.fieldProxyHandle,
+    ).toBeNull();
+    expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });
 });

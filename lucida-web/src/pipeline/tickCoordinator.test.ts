@@ -4,13 +4,19 @@ import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type { CpuCache } from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
+import type { ColdStateMessage } from "../renderer/workerProtocol.ts";
+import type { RequestPlan } from "./planning/index.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
-function createMockAssetCatalog(): AssetCatalog {
-  return new AssetCatalog({ apply_asset_catalog_delta: () => {} });
+function createMockAssetCatalog(entries: Parameters<AssetCatalog["applyInitial"]>[1]["entries"] = []): AssetCatalog {
+  const catalog = new AssetCatalog({ apply_asset_catalog_delta: () => {} });
+  if (entries.length > 0) {
+    catalog.applyInitial("ds1", { entries });
+  }
+  return catalog;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +333,50 @@ describe("epoch caching", () => {
     orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
 
     expect(planSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits only budget-admitted proxies while preserving detail requests", async () => {
+    const { debugStats } = await import("../debug/debugStats.ts");
+    const previousDebugEnabled = debugStats.enabled;
+    debugStats.enabled = true;
+    debugStats.orch = null;
+    const { scene, datasets } = makeTickCoordinatorDeps();
+    const orch = makeOrch();
+    const cpuCache = createMockCpuCache();
+    const coldState = vi.fn();
+    const ctx = makeCtx(scene, datasets);
+    ctx.cpuCache = cpuCache;
+    ctx.client = { coldState, viewHotState: vi.fn() } as unknown as TickContext["client"];
+    ctx.assetCatalog = createMockAssetCatalog([
+      {
+        entity_id: "field-0",
+        kinds: ["FieldProxy3D"],
+        footprints: [{ kind: "FieldProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
+      },
+      {
+        entity_id: "well-0",
+        kinds: ["WellProxy3D"],
+        footprints: [{ kind: "WellProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
+      },
+    ]);
+
+    try {
+      orch.planAndFetch(ctx, emptyMinimap);
+
+      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
+      expect(submitted.requests.length).toBeGreaterThan(0);
+      expect(submitted.proxyRequests).toEqual([]);
+      const cold = coldState.mock.calls[0][0] as ColdStateMessage;
+      expect(cold.desiredProxyKeys).toEqual([]);
+      const orchDebug = debugStats.orch as { proxyResidency?: unknown } | null;
+      expect(orchDebug?.proxyResidency).toMatchObject({
+        desiredProxyCount: 0,
+        skippedProxyCount: 2,
+        admittedBytes: 0,
+      });
+    } finally {
+      debugStats.enabled = previousDebugEnabled;
+    }
   });
 });
 

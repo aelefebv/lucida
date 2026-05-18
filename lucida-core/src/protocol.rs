@@ -466,6 +466,7 @@ mod tests {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("e1".into()),
                     kinds: vec![ProxyKind::WellProxy3D],
+                    footprints: vec![],
                 }],
             },
         };

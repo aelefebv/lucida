@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   AssetCatalog,
+  snapshotProxyFootprint,
   type AssetCatalogWasm,
   type WireAssetCatalog,
   type WireAssetCatalogDelta,
@@ -71,6 +72,23 @@ describe("AssetCatalog", () => {
       expect(snap.byEntity.get("field-F17")?.kinds.has("FieldProxy3D")).toBe(true);
     });
 
+    it("preserves proxy footprint metadata from applyInitial", () => {
+      const wasm = createMockWasm();
+      const cat = new AssetCatalog(wasm);
+      cat.applyInitial("ds1", {
+        entries: [
+          {
+            entity_id: "field-F17",
+            kinds: ["FieldProxy3D"],
+            footprints: [{ kind: "FieldProxy3D", dims: [1, 64, 128], bytes: 16384 }],
+          },
+        ],
+      });
+
+      const footprint = snapshotProxyFootprint(cat.snapshot(), "field-F17", "FieldProxy3D");
+      expect(footprint).toEqual({ kind: "FieldProxy3D", dims: [1, 64, 128], bytes: 16384 });
+    });
+
     it("forwards through WASM as a delta with the same dataset_id", () => {
       const wasm = createMockWasm();
       const cat = new AssetCatalog(wasm);
@@ -123,6 +141,41 @@ describe("AssetCatalog", () => {
       expect(kinds.size).toBe(2);
       expect(kinds.has("WellProxy3D")).toBe(true);
       expect(kinds.has("FieldProxy3D")).toBe(true);
+    });
+
+    it("merges footprints for the same entity across deltas", () => {
+      const wasm = createMockWasm();
+      const cat = new AssetCatalog(wasm);
+      cat.applyDelta("ds1", {
+        added: [
+          {
+            entity_id: "e1",
+            kinds: ["WellProxy3D"],
+            footprints: [{ kind: "WellProxy3D", dims: [1, 64, 64], bytes: 8192 }],
+          },
+        ],
+      });
+      cat.applyDelta("ds1", {
+        added: [
+          {
+            entity_id: "e1",
+            kinds: ["FieldProxy3D"],
+            footprints: [{ kind: "FieldProxy3D", dims: [1, 32, 32], bytes: 2048 }],
+          },
+        ],
+      });
+
+      const snap = cat.snapshot();
+      expect(snapshotProxyFootprint(snap, "e1", "WellProxy3D")).toEqual({
+        kind: "WellProxy3D",
+        dims: [1, 64, 64],
+        bytes: 8192,
+      });
+      expect(snapshotProxyFootprint(snap, "e1", "FieldProxy3D")).toEqual({
+        kind: "FieldProxy3D",
+        dims: [1, 32, 32],
+        bytes: 2048,
+      });
     });
 
     it("re-applying the same delta is idempotent on the snapshot", () => {
@@ -231,6 +284,27 @@ describe("AssetCatalog", () => {
 
       // Catalog still has it.
       expect(cat.hasProxy("e1", "FieldProxy3D")).toBe(true);
+    });
+
+    it("mutating returned footprint metadata does not affect the catalog", () => {
+      const wasm = createMockWasm();
+      const cat = new AssetCatalog(wasm);
+      cat.applyInitial("ds1", {
+        entries: [
+          {
+            entity_id: "e1",
+            kinds: ["FieldProxy3D"],
+            footprints: [{ kind: "FieldProxy3D", dims: [1, 16, 16], bytes: 512 }],
+          },
+        ],
+      });
+
+      const snap = cat.snapshot();
+      snap.byEntity.get("e1")!.footprints.get("FieldProxy3D")!.dims[1] = 999;
+
+      expect(snapshotProxyFootprint(cat.snapshot(), "e1", "FieldProxy3D")?.dims).toEqual([
+        1, 16, 16,
+      ]);
     });
   });
 

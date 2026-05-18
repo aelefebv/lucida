@@ -17,9 +17,9 @@
  *   - `descriptorBuffersByDataset` — per-dataset descriptor buffer
  *     (rebuilt fresh each cold state).
  *
- * `proxyDescriptorsByEntity` + `proxyPoolsByDataset` are READ (not
- * mutated) — the descriptor build resolves pool indices through them
- * but cold-state ingestion doesn't touch proxy state.
+ * `proxyDescriptorsByEntity` + `proxyPoolsByDataset` are reconciled
+ * against `desiredProxyKeys` when present, then read by the descriptor
+ * build so evicted proxies do not leave stale handles behind.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -40,6 +40,7 @@ import {
   resizeSliceIndirection,
   remapSliceIndirection,
 } from "../slice/index.ts";
+import { reconcileProxyResidency } from "../proxy/residency.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityMetas } from "./entityMetas.ts";
 
@@ -80,6 +81,12 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.wellsByDataset.set(msg.datasetId, wellsForDataset);
   } else {
     state.wellsByDataset.delete(msg.datasetId);
+  }
+
+  if (msg.desiredProxyKeys !== undefined) {
+    const evicted = reconcileProxyResidency(state, msg.datasetId, msg.desiredProxyKeys);
+    state.proxyStats.evicted += evicted;
+    state.proxyStats.evictedPolicy += evicted;
   }
 
   // 2. Register member→dataset mappings for every (entry, channel)
