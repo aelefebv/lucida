@@ -15,7 +15,11 @@ import {
   compositeKey,
 } from "../tickCommon.ts";
 import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
-import { plan, emptyPlanStats } from "./planning/index.ts";
+import {
+  plan,
+  emptyPlanStats,
+  planProxyResidencyForInputs,
+} from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
 import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
@@ -25,6 +29,8 @@ import type {
   PlanningState,
   ChunkRequest,
   RequestPlan,
+  PlanningSnapshot,
+  SelectionState,
 } from "./planning/index.ts";
 import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
@@ -92,6 +98,16 @@ export interface TickCoordinatorResult {
    * worker uses, so indices agree by construction.
    */
   entityIndexByDataset: Map<string, Map<string, number>>;
+}
+
+interface PlannedDataset {
+  dsId: string;
+  dsSettings: SceneSettings["allSettings"][string] | undefined;
+  snapshot: PlanningSnapshot;
+  entities: EntitySnapshot[];
+  visibleRegion: VisibleRegion;
+  selection: SelectionState;
+  result: RequestPlan;
 }
 
 // Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
@@ -222,6 +238,7 @@ export class TickCoordinator {
     // Step 3 — Per-dataset loop
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
+    const plannedDatasets: PlannedDataset[] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
       // 3a. Skip invisible datasets
@@ -268,7 +285,6 @@ export class TickCoordinator {
       this._lastRequests = result.requests;
       this._lastVisibleRegion.set(dsId, visibleRegion);
       this._lastEntities.set(dsId, entities);
-      this._lastPlanByDataset.set(dsId, result);
 
       const entityById = new Map(entities.map(e => [e.entityId, e]));
 
@@ -280,6 +296,51 @@ export class TickCoordinator {
           planningConfig,
         );
       }
+
+      plannedDatasets.push({
+        dsId,
+        dsSettings,
+        snapshot,
+        entities,
+        visibleRegion,
+        selection,
+        result,
+      });
+    }
+
+    const proxyResidency = planProxyResidencyForInputs({
+      inputs: plannedDatasets.map((planned) => ({
+        snapshot: planned.snapshot,
+        activeSet: planned.result.activeSet,
+        proxyRequests: planned.result.proxyRequests,
+      })),
+      config: planningConfig,
+    });
+
+    const proxyRequestsByDataset = new Map<string, ProxyRequest[]>();
+    for (const req of proxyResidency.admittedProxyRequests) {
+      const list = proxyRequestsByDataset.get(req.datasetId) ?? [];
+      list.push(req);
+      proxyRequestsByDataset.set(req.datasetId, list);
+    }
+
+    const desiredProxyKeysByDataset = new Map<string, Set<string>>();
+    for (const key of proxyResidency.desiredProxyKeys) {
+      const datasetId = key.split("|", 1)[0];
+      const set = desiredProxyKeysByDataset.get(datasetId) ?? new Set<string>();
+      set.add(key);
+      desiredProxyKeysByDataset.set(datasetId, set);
+    }
+
+    for (const planned of plannedDatasets) {
+      const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
+      const result = planned.result;
+      const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
+      const budgetedResult: RequestPlan = {
+        ...result,
+        proxyRequests: budgetedProxyRequests,
+      };
+      this._lastPlanByDataset.set(dsId, budgetedResult);
 
       // 3e. Build member roster + per-entity matrix map in one walk.
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
@@ -300,7 +361,8 @@ export class TickCoordinator {
         selection,
         multiChannel,
         visibleRegion,
-        epochs: currentEpochs,
+        epochs: result.epochs,
+        desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
         matricesByEntity,
         dsSettings,
       });
@@ -314,7 +376,7 @@ export class TickCoordinator {
         ctx,
         datasetId: dsId,
         coldMsg,
-        epochs: currentEpochs,
+        epochs: result.epochs,
       });
 
       // Submit chunks + proxies in a single call so they don't cancel
@@ -323,8 +385,8 @@ export class TickCoordinator {
       ctx.cpuCache.submit({
         requests: result.requests,
         activeSet: result.activeSet,
-        proxyRequests: result.proxyRequests,
-        epochs: currentEpochs,
+        proxyRequests: budgetedProxyRequests,
+        epochs: result.epochs,
         stats: result.stats,
         // `nextState` is required on RequestPlan but unused by submit();
         // forward the planner's pointer so the shape stays honest.
@@ -488,8 +550,9 @@ export class TickCoordinator {
     }
 
     // Step 5 — Cache and return
-    this.lastEpochs = currentEpochs;
-    this.cachedResult = { memberRoster, settings, multiChannel, epochs: currentEpochs, entityIndexByDataset };
+    const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
+    this.lastEpochs = outputEpochs;
+    this.cachedResult = { memberRoster, settings, multiChannel, epochs: outputEpochs, entityIndexByDataset };
     if (debugStats.enabled) {
       this.cachedDebugMemberSnapshot = {
         visibleMembers: debugStats.visibleMembers,

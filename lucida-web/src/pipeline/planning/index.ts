@@ -77,8 +77,10 @@ export {
 
 export {
   planProxyResidency,
+  planProxyResidencyForInputs,
   proxyRequestKey,
   type ProxyResidencyBundleDecision,
+  type ProxyResidencyInput,
   type ProxyResidencyPlan,
   type ProxyResidencyStats,
 } from "./proxyResidency.ts";

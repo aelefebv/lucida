@@ -389,6 +389,8 @@ export interface ColdStateMessage {
   multiChannel: boolean;
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
+  /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
+  desiredProxyKeys?: string[];
   activeSet: ColdStateActiveEntry[];
   viewMode: "slice" | "volume";
 }

@@ -13,6 +13,7 @@ const FALLBACK_PROXY_BYTES = 1 * 128 * 128 * 2;
 type ProxyRepresentation = "field" | "well";
 
 interface ProxyResidencyGroup {
+  snapshot: PlanningSnapshot;
   datasetId: string;
   wellId: string;
   t: number;
@@ -64,6 +65,12 @@ export interface ProxyResidencyPlan {
   stats: ProxyResidencyStats;
 }
 
+export interface ProxyResidencyInput {
+  snapshot: PlanningSnapshot;
+  activeSet: ActiveSetEntry[];
+  proxyRequests: ProxyRequest[];
+}
+
 export function proxyRequestKey(req: ProxyRequest): string {
   return `${req.datasetId}|${req.entityId}|${req.kind}|${req.t}|${req.c}`;
 }
@@ -79,9 +86,24 @@ export function planProxyResidency({
   proxyRequests: ProxyRequest[];
   config: PlanningConfig;
 }): ProxyResidencyPlan {
+  return planProxyResidencyForInputs({
+    inputs: [{ snapshot, activeSet, proxyRequests }],
+    config,
+  });
+}
+
+export function planProxyResidencyForInputs({
+  inputs,
+  config,
+}: {
+  inputs: ProxyResidencyInput[];
+  config: PlanningConfig;
+}): ProxyResidencyPlan {
   const budgetBytes = Math.max(0, config.proxyResidencyBudgetBytes);
-  const groups = buildGroups(snapshot, activeSet, proxyRequests);
-  const candidates = buildCandidates(snapshot, groups, config);
+  const groups = inputs.flatMap((input) =>
+    buildGroups(input.snapshot, input.activeSet, input.proxyRequests),
+  );
+  const candidates = buildCandidates(groups, config);
   candidates.sort(compareCandidates);
 
   const desiredProxyKeys = new Set<string>();
@@ -163,6 +185,7 @@ function buildGroups(
     let group = groups.get(key);
     if (!group) {
       group = {
+        snapshot,
         datasetId,
         wellId,
         t,
@@ -199,25 +222,20 @@ function buildGroups(
   return [...groups.values()];
 }
 
-function buildCandidates(
-  snapshot: PlanningSnapshot,
-  groups: ProxyResidencyGroup[],
-  config: PlanningConfig,
-): ProxyBundleCandidate[] {
+function buildCandidates(groups: ProxyResidencyGroup[], config: PlanningConfig): ProxyBundleCandidate[] {
   const out: ProxyBundleCandidate[] = [];
   for (const group of groups) {
     if (group.fieldRequests.length > 0) {
-      out.push(buildCandidate(snapshot, group, "field", group.fieldRequests, config));
+      out.push(buildCandidate(group, "field", group.fieldRequests, config));
     }
     if (group.wellRequests.length > 0) {
-      out.push(buildCandidate(snapshot, group, "well", group.wellRequests, config));
+      out.push(buildCandidate(group, "well", group.wellRequests, config));
     }
   }
   return out;
 }
 
 function buildCandidate(
-  snapshot: PlanningSnapshot,
   group: ProxyResidencyGroup,
   representation: ProxyRepresentation,
   requests: ProxyRequest[],
@@ -227,8 +245,8 @@ function buildCandidate(
   let bytes = 0;
   let missingFootprints = 0;
   for (const req of requests) {
-    const footprint = snapshot.assetCatalog
-      ? snapshotProxyFootprint(snapshot.assetCatalog, req.entityId, req.kind)
+    const footprint = group.snapshot.assetCatalog
+      ? snapshotProxyFootprint(group.snapshot.assetCatalog, req.entityId, req.kind)
       : null;
     if (footprint) {
       bytes += footprint.bytes;
@@ -240,7 +258,7 @@ function buildCandidate(
 
   const entities = representativeEntities(group, representation);
   const importance = maxImportance(entities);
-  const distance = nearestDistanceFromViewCenter(snapshot, entities);
+  const distance = nearestDistanceFromViewCenter(group.snapshot, entities);
   const representationBias = representation === "field" ? 0 : 1;
   const score =
     representationBias +
