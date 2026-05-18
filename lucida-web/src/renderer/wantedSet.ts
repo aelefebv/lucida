@@ -87,6 +87,10 @@ export function computeWantedSet(
   proxyAtlases?: Map<string, ProxyAtlasSnapshot>,
 ): WantedSetResult {
   const missing: Array<MissingChunk | MissingProxy> = [];
+  const desiredProxyKeys =
+    coldState.desiredProxyKeys === undefined
+      ? null
+      : new Set(coldState.desiredProxyKeys);
 
   if (coldState.activeSet.length === 0) {
     return { missing };
@@ -103,7 +107,10 @@ export function computeWantedSet(
     // branches see the field variant typed-out.
     if (entry.kind === "well-as-proxy") {
       for (const c of coldState.visibleChannels) {
-        if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")) {
+        if (
+          isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "WellProxy3D", coldState.currentT, c) &&
+          !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")
+        ) {
           missing.push({
             kind: "proxy",
             datasetId: coldState.datasetId,
@@ -120,7 +127,10 @@ export function computeWantedSet(
     if (entry.mode === "fields-with-proxy-fallback") {
       if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
         for (const c of coldState.visibleChannels) {
-          if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
+          if (
+            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "FieldProxy3D", coldState.currentT, c) &&
+            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")
+          ) {
             missing.push({
               kind: "proxy",
               datasetId: coldState.datasetId,
@@ -137,7 +147,10 @@ export function computeWantedSet(
         for (const c of coldState.visibleChannels) {
           const dk = `${wellId}|${coldState.currentT}|${c}`;
           if (wellProxyEmitted.has(dk)) continue;
-          if (!isProxyResident(proxyAtlases, wellId, coldState.currentT, c, "WellProxy3D")) {
+          if (
+            isProxyDesired(desiredProxyKeys, coldState.datasetId, wellId, "WellProxy3D", coldState.currentT, c) &&
+            !isProxyResident(proxyAtlases, wellId, coldState.currentT, c, "WellProxy3D")
+          ) {
             wellProxyEmitted.add(dk);
             missing.push({
               kind: "proxy",
@@ -158,7 +171,10 @@ export function computeWantedSet(
       // are still loading. Only request if catalog advertises one.
       if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
         for (const c of coldState.visibleChannels) {
-          if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
+          if (
+            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "FieldProxy3D", coldState.currentT, c) &&
+            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")
+          ) {
             missing.push({
               kind: "proxy",
               datasetId: coldState.datasetId,
@@ -295,4 +311,16 @@ function isProxyResident(
     if (atlas.slots.has(slotKey)) return true;
   }
   return false;
+}
+
+function isProxyDesired(
+  desiredProxyKeys: Set<string> | null,
+  datasetId: string,
+  entityId: string,
+  proxyKind: ProxyKind,
+  t: number,
+  c: number,
+): boolean {
+  if (desiredProxyKeys === null) return true;
+  return desiredProxyKeys.has(`${datasetId}|${entityId}|${proxyKind}|${t}|${c}`);
 }

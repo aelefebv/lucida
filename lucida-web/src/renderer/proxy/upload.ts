@@ -37,13 +37,17 @@ import type {
 } from "../proxyAtlas.ts";
 import {
   createProxyAtlas,
-  allocateProxySlot,
+  allocateProxySlotWithEviction,
   proxyPoolKey,
   proxySlotKey,
   proxySlotOrigin,
 } from "../proxyAtlas.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
 import { propagateWellProxyToFields } from "./propagate.ts";
+import {
+  clearResidentProxyDescriptor,
+  evaluateProxyDeliveryPolicy,
+} from "./residency.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
 
 /**
@@ -134,6 +138,22 @@ export function handleProxyUpload(
     );
     return { rebuildDescriptor: false, wantedSetChanged: false };
   }
+  const policy = evaluateProxyDeliveryPolicy(state.currentColdState, msg);
+  if (policy.kind !== "accept") {
+    state.proxyStats.dropped++;
+    console.log(
+      "[proxy.upload] dropped",
+      policy.kind,
+      msg.entityId,
+      msg.kind,
+      `T${msg.t}/C${msg.c}`,
+      `(deliveryEpoch=${JSON.stringify(msg.epochs)})`,
+    );
+    return {
+      rebuildDescriptor: false,
+      wantedSetChanged: policy.kind === "stale-request" && policy.desired,
+    };
+  }
 
   // 1. Validate buffer length.
   const slotDims = msg.dims;
@@ -156,13 +176,20 @@ export function handleProxyUpload(
     msg.c,
   );
 
-  // 3. Allocate slot (may evict LRU). An eviction happens iff this is
-  // a brand-new key AND the pool has no free slots before the call.
+  // 3. Allocate slot (may evict LRU).
   const compositeKey = proxySlotKey(msg.entityId, msg.t, msg.c);
-  const willEvict =
-    !pool.slots.has(compositeKey) && pool.freeSlots.length === 0;
-  const slotIndex = allocateProxySlot(pool, compositeKey);
-  if (willEvict) state.proxyStats.evicted++;
+  const allocation = allocateProxySlotWithEviction(pool, compositeKey);
+  const { slotIndex } = allocation;
+  if (allocation.evictedKey !== null) {
+    state.proxyStats.evicted++;
+    clearResidentProxyDescriptor(
+      state,
+      poolKey,
+      pool.kind,
+      allocation.evictedKey,
+      slotIndex,
+    );
+  }
 
   // 4. Upload to the slot region. Layout is 1-D-along-X.
   const origin = proxySlotOrigin(pool, slotIndex);

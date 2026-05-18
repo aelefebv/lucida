@@ -65,6 +65,11 @@ export interface ProxyHandle {
   slotIndex: number;
 }
 
+export interface ProxySlotAllocation {
+  slotIndex: number;
+  evictedKey: string | null;
+}
+
 export function proxyPoolKey(
   datasetId: string,
   kind: ProxyKind,
@@ -147,13 +152,25 @@ export function allocateProxySlot(
   atlas: ProxyAtlasState,
   key: string,
 ): number {
+  return allocateProxySlotWithEviction(atlas, key).slotIndex;
+}
+
+/**
+ * Allocate (or look up) a slot for `key`, returning the evicted slot key
+ * when the allocation had to reuse an occupied slot.
+ */
+export function allocateProxySlotWithEviction(
+  atlas: ProxyAtlasState,
+  key: string,
+): ProxySlotAllocation {
   const existing = atlas.slots.get(key);
   if (existing !== undefined) {
     moveToEnd(atlas.touchOrder, key);
-    return existing;
+    return { slotIndex: existing, evictedKey: null };
   }
 
   let slotIndex: number;
+  let evictedKey: string | null = null;
   if (atlas.freeSlots.length > 0) {
     slotIndex = atlas.freeSlots.pop()!;
   } else {
@@ -168,11 +185,12 @@ export function allocateProxySlot(
     const victim = atlas.touchOrder.shift()!;
     slotIndex = atlas.slots.get(victim)!;
     atlas.slots.delete(victim);
+    evictedKey = victim;
   }
 
   atlas.slots.set(key, slotIndex);
   atlas.touchOrder.push(key);
-  return slotIndex;
+  return { slotIndex, evictedKey };
 }
 
 /** Does NOT touch LRU order. */
@@ -186,6 +204,23 @@ export function lookupProxySlot(
 export function touchProxySlot(atlas: ProxyAtlasState, key: string): void {
   if (!atlas.slots.has(key)) return;
   moveToEnd(atlas.touchOrder, key);
+}
+
+/**
+ * Release a resident slot without touching GPU memory. Returns the freed
+ * slot index, or undefined if the key was not resident.
+ */
+export function releaseProxySlot(
+  atlas: ProxyAtlasState,
+  key: string,
+): number | undefined {
+  const slotIndex = atlas.slots.get(key);
+  if (slotIndex === undefined) return undefined;
+  atlas.slots.delete(key);
+  const idx = atlas.touchOrder.indexOf(key);
+  if (idx >= 0) atlas.touchOrder.splice(idx, 1);
+  if (!atlas.freeSlots.includes(slotIndex)) atlas.freeSlots.push(slotIndex);
+  return slotIndex;
 }
 
 /**
