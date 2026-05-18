@@ -63,9 +63,10 @@ struct EntityDescriptor {
 @group(0) @binding(2) var<storage, read> indirection: array<u32>;
 @group(0) @binding(3) var lutTex: texture_2d<f32>;
 @group(0) @binding(4) var lutSampler: sampler;
-// Proxy textures. Same r16uint format as the chunk atlas. A slot
-// occupies texture region [slotIdx * dims.z, 0, 0] of size dims (X=dims.z,
-// Y=dims.y, Z=dims.x), matching `proxySlotOrigin()` in proxyAtlas.ts.
+// Proxy textures. Same r16uint format as the chunk atlas. Slots occupy
+// a 3-D grid in the texture; the grid shape is derived from
+// textureDimensions(tex) / slot dims, matching `proxySlotOrigin()` in
+// proxyAtlas.ts.
 @group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
 
@@ -110,7 +111,7 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
 // Sample one voxel from a proxy atlas slot.
 //   - `dims.x` = slot Z, `dims.y` = slot Y, `dims.z` = slot X (matches
 //     `proxyAtlas.ts` `slotDims: [Z, Y, X]`).
-//   - Slot origin is `[slotIdx * dims.z, 0, 0]` (1-D-along-X layout).
+//   - Slot origin is derived from slot index over a 3-D atlas grid.
 //   - `frac` is in [0,1]³ over the slot's voxel cube; Y is flipped to
 //     match the chunk path's image-convention sampling.
 // Returns 0xFFFFFFFFu if the slot index is the sentinel.
@@ -121,14 +122,20 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
   let slotZ = dims.x;
   let slotY = dims.y;
   let slotX = dims.z;
-  let originX = slotIdx * slotX;
+  let atlasDims = textureDimensions(tex);
+  let slotsX = max(1u, atlasDims.x / slotX);
+  let slotsY = max(1u, atlasDims.y / slotY);
+  let tileX = slotIdx % slotsX;
+  let tileY = (slotIdx / slotsX) % slotsY;
+  let tileZ = slotIdx / (slotsX * slotsY);
+  let origin = vec3u(tileX * slotX, tileY * slotY, tileZ * slotZ);
   let voxX = clamp(u32(frac.x * f32(slotX)), 0u, slotX - 1u);
   let voxY = clamp(u32((1.0 - frac.y) * f32(slotY)), 0u, slotY - 1u);
   let voxZ = clamp(u32(frac.z * f32(slotZ)), 0u, slotZ - 1u);
   let coord = vec3i(
-    i32(originX + voxX),
-    i32(voxY),
-    i32(voxZ),
+    i32(origin.x + voxX),
+    i32(origin.y + voxY),
+    i32(origin.z + voxZ),
   );
   return textureLoad(tex, coord, 0).r;
 }

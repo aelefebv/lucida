@@ -3,9 +3,9 @@
  * shaders' proxy sampling math. We can't run WGSL in vitest, but the
  * critical invariants we DO want to lock down are:
  *
- *   1. The shader's `slotOrigin = slotIdx * dims.z` math agrees with the
- *      TS-side `proxySlotOrigin()` (which is what gpu.worker.ts uses to
- *      decide where to write proxy uploads).
+ *   1. The shader's 3-D slot-origin math agrees with the TS-side
+ *      `proxySlotOrigin()` (which is what gpu.worker.ts uses to decide
+ *      where to write proxy uploads).
  *   2. The renderers' per-frame uniform layouts stay in sync with the
  *      shader's `Uniforms` struct. Step 9 unified the proxy/detail
  *      fallback chain and dropped `proxyParams.x = renderMode` from
@@ -61,15 +61,23 @@ function makeMockDevice(maxDim = 2048): GPUDevice {
 
 // ---------------------------------------------------------------------------
 // Shader-side slot-origin recomputation. Mirrors `sampleProxy()` in
-// volume.wgsl: dims = vec4u(Z, Y, X, _); originX = slotIdx * dims.z.
+// volume.wgsl: dims = vec4u(Z, Y, X, _); grid = textureDims / slotDims.
 // ---------------------------------------------------------------------------
-function shaderOriginX(slotIdx: number, dims: [number, number, number]): number {
-  // dims = [Z, Y, X]; shader reads dims.z = X.
-  return slotIdx * dims[2];
+function shaderOrigin(
+  slotIdx: number,
+  dims: [number, number, number],
+  textureSize: [number, number, number],
+): [number, number, number] {
+  const slotsX = Math.max(1, Math.floor(textureSize[0] / dims[2]));
+  const slotsY = Math.max(1, Math.floor(textureSize[1] / dims[1]));
+  const tileX = slotIdx % slotsX;
+  const tileY = Math.floor(slotIdx / slotsX) % slotsY;
+  const tileZ = Math.floor(slotIdx / (slotsX * slotsY));
+  return [tileX * dims[2], tileY * dims[1], tileZ * dims[0]];
 }
 
 describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
-  it("shader's `slotIdx * dims.z` agrees with proxySlotOrigin().x", () => {
+  it("shader's grid origin agrees with proxySlotOrigin()", () => {
     const device = makeMockDevice();
     // Three different shapes to be thorough.
     for (const slotDims of [
@@ -78,10 +86,10 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
       [4, 16, 128] as [number, number, number],
     ]) {
       const atlas = createProxyAtlas(device, "FieldProxy3D", slotDims, 0, 4);
+      const textureSize = (atlas.texture as unknown as MockTexture).size;
       for (let slot = 0; slot < atlas.capacity; slot++) {
         const tsOrigin = proxySlotOrigin(atlas, slot);
-        const shaderX = shaderOriginX(slot, slotDims);
-        expect(tsOrigin).toEqual([shaderX, 0, 0]);
+        expect(tsOrigin).toEqual(shaderOrigin(slot, slotDims, textureSize));
       }
     }
   });
@@ -89,15 +97,19 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
   it("upload origin (used by gpu.worker.ts) matches shader sampling", () => {
     // gpu.worker.ts: device.queue.writeTexture({ origin }) with
     // origin = proxySlotOrigin(...). The shader then reads from
-    // (slotIdx * dims.z + frac.x * dims.z, ...). At frac=(0,0,0) that's
-    // exactly the upload origin — so the first voxel uploaded reads
-    // back at slot frac (0,0,0).
+    // (slot-origin + frac * dims). At frac=(0,0,0) that's exactly the
+    // upload origin, so the first voxel uploaded reads back at slot frac
+    // (0,0,0).
     const device = makeMockDevice();
     const atlas = createProxyAtlas(device, "WellProxy3D", [16, 32, 64], 0, 8);
     const slot = allocateProxySlot(atlas, proxySlotKey("entity-0", 0, 0));
     const uploadOrigin = proxySlotOrigin(atlas, slot);
-    const shaderReadAtFracZero = shaderOriginX(slot, atlas.slotDims);
-    expect(uploadOrigin[0]).toBe(shaderReadAtFracZero);
+    const shaderReadAtFracZero = shaderOrigin(
+      slot,
+      atlas.slotDims,
+      (atlas.texture as unknown as MockTexture).size,
+    );
+    expect(uploadOrigin).toEqual(shaderReadAtFracZero);
   });
 });
 

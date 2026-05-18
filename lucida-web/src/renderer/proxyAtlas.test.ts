@@ -20,6 +20,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import {
   createProxyAtlas,
+  computeProxyAtlasLayout,
   allocateProxySlot,
   lookupProxySlot,
   touchProxySlot,
@@ -74,25 +75,47 @@ describe("proxyAtlas", () => {
   });
 
   describe("createProxyAtlas", () => {
-    it("creates pool with capacity slots and 1-D-along-X texture layout", () => {
+    it("creates pool with capacity slots and 3-D grid texture layout", () => {
       const atlas = createProxyAtlas(device, "FieldProxy3D", [16, 32, 64], 0, 4);
       expect(atlas.capacity).toBe(4);
+      expect(atlas.requestedCapacity).toBe(4);
       expect(atlas.slots.size).toBe(0);
       expect(atlas.freeSlots).toHaveLength(4);
       expect(atlas.touchOrder).toHaveLength(0);
       expect(atlas.kind).toBe("FieldProxy3D");
       expect(atlas.channel).toBe(0);
       expect(atlas.slotDims).toEqual([16, 32, 64]);
-      // Texture should be sized 1-D along X
-      expect((atlas.texture as unknown as MockTexture).size).toEqual([64 * 4, 32, 16]);
+      expect(atlas.slotsX * atlas.slotsY * atlas.slotsZ).toBeGreaterThanOrEqual(4);
+      expect((atlas.texture as unknown as MockTexture).size).toEqual([
+        atlas.slotsX * 64,
+        atlas.slotsY * 32,
+        atlas.slotsZ * 16,
+      ]);
     });
 
-    it("clamps capacity to fit under maxTextureDimension3D", () => {
-      // limit=2048, slotX=512, requested capacity=16 → 512*16=8192 > 2048, clamp to 4
-      const lowLimitDevice = makeMockDevice(2048);
-      const atlas = createProxyAtlas(lowLimitDevice, "WellProxy3D", [8, 8, 512], 0, 16);
-      expect(atlas.capacity).toBe(4);
-      expect(atlas.freeSlots).toHaveLength(4);
+    it("uses the Z/Y axes instead of clamping to the X-only limit", () => {
+      const atlas = createProxyAtlas(device, "FieldProxy3D", [1, 128, 128], 0, 64);
+      expect(atlas.capacity).toBe(64);
+      expect(atlas.slotsX * atlas.slotsY * atlas.slotsZ).toBeGreaterThanOrEqual(64);
+      const [texW, texH, texD] = (atlas.texture as unknown as MockTexture).size;
+      expect(texW).toBeLessThanOrEqual(2048);
+      expect(texH).toBeLessThanOrEqual(2048);
+      expect(texD).toBeLessThanOrEqual(2048);
+    });
+
+    it("clamps capacity only when the 3-D grid cannot fit under maxTextureDimension3D", () => {
+      const lowLimitDevice = makeMockDevice(16);
+      const atlas = createProxyAtlas(lowLimitDevice, "WellProxy3D", [8, 8, 8], 0, 16);
+      expect(atlas.capacity).toBe(8);
+      expect(atlas.requestedCapacity).toBe(16);
+      expect(atlas.freeSlots).toHaveLength(8);
+    });
+
+    it("computes a compact 3-D layout for cubic proxies", () => {
+      const layout = computeProxyAtlasLayout([128, 128, 128], 64, 2048);
+      expect(layout.capacity).toBe(64);
+      expect(layout.slotsX * layout.slotsY * layout.slotsZ).toBe(64);
+      expect(layout.textureSize).toEqual([512, 512, 512]);
     });
   });
 
@@ -198,11 +221,11 @@ describe("proxyAtlas", () => {
   });
 
   describe("proxySlotOrigin", () => {
-    it("returns [slotIndex * X, 0, 0]", () => {
+    it("returns the 3-D grid origin for a slot index", () => {
       const atlas = createProxyAtlas(device, "FieldProxy3D", [16, 32, 64], 0, 4);
       expect(proxySlotOrigin(atlas, 0)).toEqual([0, 0, 0]);
-      expect(proxySlotOrigin(atlas, 1)).toEqual([64, 0, 0]);
-      expect(proxySlotOrigin(atlas, 3)).toEqual([192, 0, 0]);
+      expect(proxySlotOrigin(atlas, 1)).toEqual([0, 0, 16]);
+      expect(proxySlotOrigin(atlas, 3)).toEqual([0, 0, 48]);
     });
   });
 

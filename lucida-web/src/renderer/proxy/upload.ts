@@ -41,21 +41,24 @@ import {
   proxyPoolKey,
   proxySlotKey,
   proxySlotOrigin,
+  destroyProxyAtlas,
 } from "../proxyAtlas.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
 import { propagateWellProxyToFields } from "./propagate.ts";
 import {
   clearResidentProxyDescriptor,
+  desiredProxyCountForPool,
   evaluateProxyDeliveryPolicy,
 } from "./residency.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
+import type { RendererState } from "../worker/state.ts";
 
 /**
- * Default capacity per proxy pool. 64 keeps memory modest (a 64³ slot
- * × 64 = 16 MiB per pool at u16) while comfortably covering visible
- * wells/fields in typical plate views.
+ * Legacy capacity when no cold-state desired set is available. Normal
+ * policy-driven pools request enough slots for the current desired set
+ * for that `(dataset, kind, channel)`.
  */
-const PROXY_POOL_CAPACITY = 64;
+const PROXY_FALLBACK_POOL_CAPACITY = 64;
 
 /**
  * Outcome of a proxy upload. The caller uses these flags to drive the
@@ -95,21 +98,29 @@ function getOrCreateProxyDescriptor(
  */
 function getOrCreateProxyPool(
   device: GPUDevice,
-  poolsByDataset: Map<string, Map<string, ProxyAtlasState>>,
+  state: RendererState,
   datasetId: string,
   kind: ProxyKind,
   slotDims: [number, number, number],
   channel: number,
+  requestedCapacity: number,
 ): { poolKey: string; pool: ProxyAtlasState } {
   const poolKey = proxyPoolKey(datasetId, kind, slotDims, channel);
-  let dsPools = poolsByDataset.get(datasetId);
+  let dsPools = state.proxyPoolsByDataset.get(datasetId);
   if (!dsPools) {
     dsPools = new Map();
-    poolsByDataset.set(datasetId, dsPools);
+    state.proxyPoolsByDataset.set(datasetId, dsPools);
   }
   let pool = dsPools.get(poolKey);
   if (!pool) {
-    pool = createProxyAtlas(device, kind, slotDims, channel, PROXY_POOL_CAPACITY);
+    pool = createProxyAtlas(device, kind, slotDims, channel, requestedCapacity);
+    dsPools.set(poolKey, pool);
+  } else if (pool.requestedCapacity < requestedCapacity) {
+    for (const [slotKey, slotIndex] of Array.from(pool.slots)) {
+      clearResidentProxyDescriptor(state, poolKey, pool.kind, slotKey, slotIndex);
+    }
+    destroyProxyAtlas(pool);
+    pool = createProxyAtlas(device, kind, slotDims, channel, requestedCapacity);
     dsPools.set(poolKey, pool);
   }
   return { poolKey, pool };
@@ -167,13 +178,24 @@ export function handleProxyUpload(
   }
 
   // 2. Resolve pool.
+  const desiredCount = desiredProxyCountForPool(
+    state.currentColdState,
+    msg.datasetId,
+    msg.kind,
+    msg.c,
+  );
+  const requestedCapacity =
+    desiredCount === null
+      ? PROXY_FALLBACK_POOL_CAPACITY
+      : Math.max(1, desiredCount);
   const { poolKey, pool } = getOrCreateProxyPool(
     ctx.device,
-    state.proxyPoolsByDataset,
+    state,
     msg.datasetId,
     msg.kind,
     slotDims,
     msg.c,
+    requestedCapacity,
   );
 
   // 3. Allocate slot (may evict LRU).

@@ -81,8 +81,8 @@ fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
 }
 
 // Sample one voxel from a proxy slot using 2D UV. Reads at the slot's
-// Z midpoint. Slot layout (1-D-along-X) and dim convention match
-// `proxyAtlas.ts` (`slotDims: [Z, Y, X]` → `dims.x=Z, dims.y=Y, dims.z=X`).
+// Z midpoint. Slot grid layout and dim convention match `proxyAtlas.ts`
+// (`slotDims: [Z, Y, X]` → `dims.x=Z, dims.y=Y, dims.z=X`).
 fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f) -> u32 {
   if (slotIdx == 0xFFFFFFFFu) {
     return 0xFFFFFFFFu;
@@ -90,14 +90,20 @@ fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f)
   let slotZ = dims.x;
   let slotY = dims.y;
   let slotX = dims.z;
-  let originX = slotIdx * slotX;
+  let atlasDims = textureDimensions(tex);
+  let slotsX = max(1u, atlasDims.x / slotX);
+  let slotsY = max(1u, atlasDims.y / slotY);
+  let tileX = slotIdx % slotsX;
+  let tileY = (slotIdx / slotsX) % slotsY;
+  let tileZ = slotIdx / (slotsX * slotsY);
+  let origin = vec3u(tileX * slotX, tileY * slotY, tileZ * slotZ);
   let voxX = clamp(u32(uv.x * f32(slotX)), 0u, slotX - 1u);
   let voxY = clamp(u32(uv.y * f32(slotY)), 0u, slotY - 1u);
   let voxZ = slotZ / 2u;
   let coord = vec3i(
-    i32(originX + voxX),
-    i32(voxY),
-    i32(voxZ),
+    i32(origin.x + voxX),
+    i32(origin.y + voxY),
+    i32(origin.z + voxZ),
   );
   return textureLoad(tex, coord, 0).r;
 }

@@ -41,6 +41,30 @@ export function evaluateProxyDeliveryPolicy(
   return { kind: "accept" };
 }
 
+export function desiredProxyCountForPool(
+  coldState: ColdStateMessage | null,
+  datasetId: string,
+  proxyKind: ProxyKind,
+  c: number,
+): number | null {
+  if (!coldState || coldState.datasetId !== datasetId) return null;
+  if (coldState.desiredProxyKeys === undefined) return null;
+
+  let count = 0;
+  for (const key of coldState.desiredProxyKeys) {
+    const parsed = parseProxyResidencyKey(key);
+    if (!parsed) continue;
+    if (
+      parsed.datasetId === datasetId &&
+      parsed.proxyKind === proxyKind &&
+      parsed.c === c
+    ) {
+      count++;
+    }
+  }
+  return count;
+}
+
 export function clearResidentProxyDescriptor(
   state: RendererState,
   poolKey: string,
@@ -173,4 +197,27 @@ function parseProxySlotKey(
   const t = Number(tRaw);
   if (!Number.isInteger(t) || !Number.isInteger(c)) return null;
   return { entityId: parts.join("|"), t, c };
+}
+
+function parseProxyResidencyKey(
+  key: string,
+): { datasetId: string; entityId: string; proxyKind: ProxyKind; t: number; c: number } | null {
+  const parts = key.split("|");
+  if (parts.length < 5) return null;
+  const cRaw = parts.pop()!;
+  const tRaw = parts.pop()!;
+  const kindRaw = parts.pop()!;
+  const datasetId = parts.shift()!;
+  const c = Number(cRaw);
+  const t = Number(tRaw);
+  if ((kindRaw !== "WellProxy3D" && kindRaw !== "FieldProxy3D") || !Number.isInteger(t) || !Number.isInteger(c)) {
+    return null;
+  }
+  return {
+    datasetId,
+    entityId: parts.join("|"),
+    proxyKind: kindRaw,
+    t,
+    c,
+  };
 }
