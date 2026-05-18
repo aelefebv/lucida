@@ -144,6 +144,7 @@ mod tests {
             entries: vec![ProxyAvailability {
                 entity_id: EntityId("img-0".into()),
                 kinds: vec![ProxyKind::FieldProxy3D],
+                footprints: vec![],
             }],
         };
         let json = serde_json::to_string(&event).unwrap();

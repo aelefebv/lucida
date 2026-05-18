@@ -41,6 +41,23 @@ pub enum GenerateError {
     InvalidTarget,
 }
 
+/// Errors returned by [`estimate_proxy_dims`].
+#[derive(thiserror::Error, Debug)]
+pub enum EstimateError {
+    #[error("entity not found in content graph: {0}")]
+    MissingEntity(EntityId),
+    #[error("image not found for entity: {0}")]
+    MissingImage(EntityId),
+    #[error("image has no multiscale levels: {0}")]
+    EmptyMultiscale(EntityId),
+    #[error("well has no field children: {0}")]
+    NoFields(EntityId),
+    #[error("invalid spec: target_long_axis must be > 0")]
+    InvalidTarget,
+    #[error("proxy dimensions are too large for u32: {0}")]
+    TooLarge(EntityId),
+}
+
 /// Top-level entry point. Dispatches on [`ProxyKind`] and produces a
 /// [`ProxyAsset`] (in-memory header + voxels).
 pub fn generate_proxy(
@@ -62,6 +79,108 @@ pub fn generate_proxy(
         ProxyKind::FieldProxy3D => downsample_field(spec, content, entity, source),
         ProxyKind::WellProxy3D => aggregate_well(spec, content, entity, source),
     }
+}
+
+/// Estimate the `[Z, Y, X]` proxy dimensions from manifest geometry alone.
+///
+/// This mirrors the shape math used by [`generate_proxy`] but does not read
+/// source voxels. Callers use it to budget GPU residency before fetching or
+/// uploading proxy bytes.
+pub fn estimate_proxy_dims(
+    spec: &ProxySpec,
+    content: &DatasetManifest,
+) -> Result<[u32; 3], EstimateError> {
+    if spec.target_long_axis == 0 {
+        return Err(EstimateError::InvalidTarget);
+    }
+
+    let entity = content
+        .entities()
+        .iter()
+        .find(|e| e.id == spec.entity_id)
+        .ok_or_else(|| EstimateError::MissingEntity(spec.entity_id.clone()))?;
+
+    match spec.kind {
+        ProxyKind::FieldProxy3D => estimate_field_dims(spec, content, entity),
+        ProxyKind::WellProxy3D => estimate_well_dims(spec, content, entity),
+    }
+}
+
+fn estimate_field_dims(
+    spec: &ProxySpec,
+    content: &DatasetManifest,
+    entity: &Entity,
+) -> Result<[u32; 3], EstimateError> {
+    let image = content
+        .images()
+        .iter()
+        .find(|img| img.owner == entity.id)
+        .ok_or_else(|| EstimateError::MissingImage(entity.id.clone()))?;
+
+    let levels = &image.multiscale.levels;
+    if levels.is_empty() {
+        return Err(EstimateError::EmptyMultiscale(entity.id.clone()));
+    }
+    let level_index = pick_level(levels, spec.target_long_axis);
+    let dims = level_spatial_dims(&levels[level_index], &entity.id)?;
+    Ok(target_dims_for_long_axis(dims, spec.target_long_axis))
+}
+
+fn estimate_well_dims(
+    spec: &ProxySpec,
+    content: &DatasetManifest,
+    well_entity: &Entity,
+) -> Result<[u32; 3], EstimateError> {
+    if !matches!(well_entity.kind, EntityKind::Well) {
+        return estimate_field_dims(spec, content, well_entity);
+    }
+
+    let fields: Vec<&Entity> = content
+        .entities()
+        .iter()
+        .filter(|e| matches!(e.kind, EntityKind::Field))
+        .filter(|e| e.parent.as_ref() == Some(&well_entity.id))
+        .collect();
+    if fields.is_empty() {
+        return Err(EstimateError::NoFields(well_entity.id.clone()));
+    }
+
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for field in fields {
+        let image = content
+            .images()
+            .iter()
+            .find(|img| img.owner == field.id)
+            .ok_or_else(|| EstimateError::MissingImage(field.id.clone()))?;
+        if image.multiscale.levels.is_empty() {
+            return Err(EstimateError::EmptyMultiscale(field.id.clone()));
+        }
+        let level_index = pick_level(&image.multiscale.levels, spec.target_long_axis);
+        let dims = level_spatial_dims(&image.multiscale.levels[level_index], &field.id)?;
+        let voxel_to_image = estimate_level_voxel_to_image(content, image, level_index)?;
+        let field_to_well = find_field_to_well(content, &field.id, &well_entity.id);
+        let voxel_to_well = compose(&field_to_well, &voxel_to_image);
+
+        let [vz, vy, vx] = dims;
+        for &z in &[0.0_f64, vz as f64] {
+            for &y in &[0.0_f64, vy as f64] {
+                for &x in &[0.0_f64, vx as f64] {
+                    let p = transform_point(&voxel_to_well, [x, y, z]);
+                    for axis in 0..3 {
+                        if p[axis] < min[axis] {
+                            min[axis] = p[axis];
+                        }
+                        if p[axis] > max[axis] {
+                            max[axis] = p[axis];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(well_dims_from_bounds(min, max, spec.target_long_axis))
 }
 
 fn downsample_field(
@@ -134,16 +253,9 @@ struct DownsampleOut {
 }
 
 fn box_filter_to_target(data: &[u16], dims: [u32; 3], target_long_axis: u32) -> DownsampleOut {
+    let out_dims = target_dims_for_long_axis(dims, target_long_axis);
     let [in_z, in_y, in_x] = dims;
-    let max_in = in_z.max(in_y).max(in_x);
-    let target = target_long_axis.min(max_in).max(1);
-
-    let scale = target as f64 / max_in as f64;
-    let out_z = ((in_z as f64 * scale).round() as u32).clamp(1, in_z);
-    let out_y = ((in_y as f64 * scale).round() as u32).clamp(1, in_y);
-    let out_x = ((in_x as f64 * scale).round() as u32).clamp(1, in_x);
-
-    let out_dims = [out_z, out_y, out_x];
+    let [out_z, out_y, out_x] = out_dims;
     let mut out = vec![0u16; (out_z as usize) * (out_y as usize) * (out_x as usize)];
 
     for oz in 0..out_z {
@@ -266,18 +378,9 @@ fn aggregate_well(
         }
     }
 
+    let out_dims = well_dims_from_bounds(min, max, spec.target_long_axis);
+    let [out_z, out_y, out_x] = out_dims;
     let span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-    let mut max_span = span[0].max(span[1]).max(span[2]);
-    if !max_span.is_finite() || max_span <= 0.0 {
-        max_span = 1.0;
-    }
-
-    let target = spec.target_long_axis.max(1) as f64;
-    let scale = target / max_span; // output voxels per well unit
-    let out_x = ((span[0] * scale).round() as u32).max(1);
-    let out_y = ((span[1] * scale).round() as u32).max(1);
-    let out_z = ((span[2] * scale).round() as u32).max(1);
-    let out_dims = [out_z, out_y, out_x];
 
     // Per-output-voxel size in well units.
     let voxel_w_x = span[0] / out_x as f64;
@@ -375,6 +478,46 @@ fn aggregate_well(
     Ok(ProxyAsset { header, voxels })
 }
 
+fn level_spatial_dims(
+    level: &LevelGeometry,
+    entity_id: &EntityId,
+) -> Result<[u32; 3], EstimateError> {
+    Ok([
+        u32::try_from(level.shape[2]).map_err(|_| EstimateError::TooLarge(entity_id.clone()))?,
+        u32::try_from(level.shape[3]).map_err(|_| EstimateError::TooLarge(entity_id.clone()))?,
+        u32::try_from(level.shape[4]).map_err(|_| EstimateError::TooLarge(entity_id.clone()))?,
+    ])
+}
+
+fn target_dims_for_long_axis(dims: [u32; 3], target_long_axis: u32) -> [u32; 3] {
+    let [in_z, in_y, in_x] = dims;
+    let max_in = in_z.max(in_y).max(in_x);
+    let target = target_long_axis.min(max_in).max(1);
+
+    let scale = target as f64 / max_in as f64;
+    [
+        ((in_z as f64 * scale).round() as u32).clamp(1, in_z),
+        ((in_y as f64 * scale).round() as u32).clamp(1, in_y),
+        ((in_x as f64 * scale).round() as u32).clamp(1, in_x),
+    ]
+}
+
+fn well_dims_from_bounds(min: [f64; 3], max: [f64; 3], target_long_axis: u32) -> [u32; 3] {
+    let span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    let mut max_span = span[0].max(span[1]).max(span[2]);
+    if !max_span.is_finite() || max_span <= 0.0 {
+        max_span = 1.0;
+    }
+
+    let target = target_long_axis.max(1) as f64;
+    let scale = target / max_span;
+    [
+        ((span[2] * scale).round() as u32).max(1),
+        ((span[1] * scale).round() as u32).max(1),
+        ((span[0] * scale).round() as u32).max(1),
+    ]
+}
+
 struct FieldEntry {
     #[allow(dead_code)]
     image: ImageSpec,
@@ -394,6 +537,49 @@ fn find_field_to_well(
         .transforms()
         .iter()
         .find(|edge| &edge.from == field_id && &edge.to == well_id)
+        .map(|edge| edge.transform.clone())
+        .unwrap_or_else(VoxelTransform::identity)
+}
+
+fn estimate_level_voxel_to_image(
+    content: &DatasetManifest,
+    image: &ImageSpec,
+    level_index: usize,
+) -> Result<VoxelTransform, EstimateError> {
+    let level0 = image
+        .multiscale
+        .levels
+        .first()
+        .ok_or_else(|| EstimateError::EmptyMultiscale(image.owner.clone()))?;
+    let level = image
+        .multiscale
+        .levels
+        .get(level_index)
+        .ok_or_else(|| EstimateError::EmptyMultiscale(image.owner.clone()))?;
+
+    let scale_axis = |full: u64, lvl: u64| -> f64 {
+        if lvl == 0 {
+            1.0
+        } else {
+            full as f64 / lvl as f64
+        }
+    };
+    let sx = scale_axis(level0.shape[4], level.shape[4]);
+    let sy = scale_axis(level0.shape[3], level.shape[3]);
+    let sz = scale_axis(level0.shape[2], level.shape[2]);
+    let level_scale = VoxelTransform::from_voxel_matrix([
+        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]);
+
+    let owner_self = find_voxel_to_image(content, &image.owner);
+    Ok(compose(&owner_self, &level_scale))
+}
+
+fn find_voxel_to_image(content: &DatasetManifest, owner: &EntityId) -> VoxelTransform {
+    content
+        .transforms()
+        .iter()
+        .find(|edge| &edge.from == owner && &edge.to == owner)
         .map(|edge| edge.transform.clone())
         .unwrap_or_else(VoxelTransform::identity)
 }

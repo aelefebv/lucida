@@ -13,8 +13,15 @@
 
 export type ProxyKind = "WellProxy3D" | "FieldProxy3D";
 
+export interface ProxyFootprint {
+  kind: ProxyKind;
+  dims: [number, number, number];
+  bytes: number;
+}
+
 export interface ProxyAvailabilitySnapshot {
   kinds: Set<ProxyKind>;
+  footprints: Map<ProxyKind, ProxyFootprint>;
 }
 
 export interface AssetCatalogSnapshot {
@@ -26,6 +33,7 @@ export interface AssetCatalogSnapshot {
 export interface WireProxyAvailability {
   entity_id: string;
   kinds: ProxyKind[];
+  footprints?: ProxyFootprint[];
 }
 
 /** Wire shape — matches `lucida_protocol::AssetCatalog`. */
@@ -44,8 +52,8 @@ export interface AssetCatalogWasm {
 }
 
 export class AssetCatalog {
-  /** datasetId → entityId → set of available proxy kinds. */
-  private readonly byDataset = new Map<string, Map<string, Set<ProxyKind>>>();
+  /** datasetId → entityId → available proxy kinds and optional footprints. */
+  private readonly byDataset = new Map<string, Map<string, ProxyAvailabilitySnapshot>>();
   private readonly wasmScene: AssetCatalogWasm;
 
   constructor(wasmScene: AssetCatalogWasm) {
@@ -83,13 +91,21 @@ export class AssetCatalog {
       this.byDataset.set(datasetId, datasetMap);
     }
     for (const entry of delta.added) {
-      let kinds = datasetMap.get(entry.entity_id);
-      if (!kinds) {
-        kinds = new Set();
-        datasetMap.set(entry.entity_id, kinds);
+      let snapshot = datasetMap.get(entry.entity_id);
+      if (!snapshot) {
+        snapshot = { kinds: new Set(), footprints: new Map() };
+        datasetMap.set(entry.entity_id, snapshot);
       }
       for (const kind of entry.kinds) {
-        kinds.add(kind);
+        snapshot.kinds.add(kind);
+      }
+      for (const footprint of entry.footprints ?? []) {
+        snapshot.kinds.add(footprint.kind);
+        snapshot.footprints.set(footprint.kind, {
+          kind: footprint.kind,
+          dims: [...footprint.dims] as [number, number, number],
+          bytes: footprint.bytes,
+        });
       }
     }
   }
@@ -104,19 +120,27 @@ export class AssetCatalog {
 
   /**
    * Snapshot for Planning. Flattens all datasets into a single
-   * `byEntity` map. Returns a fresh map each call but reuses the inner
-   * `Set` references so entries are cheap to read.
+   * `byEntity` map. Returns fresh containers so callers cannot mutate
+   * the per-dataset backing store.
    */
   snapshot(): AssetCatalogSnapshot {
     const byEntity = new Map<string, ProxyAvailabilitySnapshot>();
     for (const datasetMap of this.byDataset.values()) {
-      for (const [entityId, kinds] of datasetMap) {
+      for (const [entityId, snapshot] of datasetMap) {
         const existing = byEntity.get(entityId);
         if (existing) {
-          for (const kind of kinds) existing.kinds.add(kind);
+          for (const kind of snapshot.kinds) existing.kinds.add(kind);
+          for (const [kind, footprint] of snapshot.footprints) {
+            if (!existing.footprints.has(kind)) {
+              existing.footprints.set(kind, cloneFootprint(footprint));
+            }
+          }
         } else {
-          // New Set so callers can't mutate the per-dataset backing store.
-          byEntity.set(entityId, { kinds: new Set(kinds) });
+          // New containers so callers can't mutate the per-dataset backing store.
+          byEntity.set(entityId, {
+            kinds: new Set(snapshot.kinds),
+            footprints: cloneFootprintMap(snapshot.footprints),
+          });
         }
       }
     }
@@ -129,8 +153,8 @@ export class AssetCatalog {
    */
   hasProxy(entityId: string, kind: ProxyKind): boolean {
     for (const datasetMap of this.byDataset.values()) {
-      const kinds = datasetMap.get(entityId);
-      if (kinds && kinds.has(kind)) return true;
+      const snapshot = datasetMap.get(entityId);
+      if (snapshot && snapshot.kinds.has(kind)) return true;
     }
     return false;
   }
@@ -150,4 +174,29 @@ export function snapshotHasProxy(
   kind: ProxyKind,
 ): boolean {
   return snapshot.byEntity.get(entityId)?.kinds.has(kind) ?? false;
+}
+
+export function snapshotProxyFootprint(
+  snapshot: AssetCatalogSnapshot,
+  entityId: string,
+  kind: ProxyKind,
+): ProxyFootprint | null {
+  const footprint = snapshot.byEntity.get(entityId)?.footprints.get(kind);
+  return footprint ? cloneFootprint(footprint) : null;
+}
+
+function cloneFootprintMap(source: Map<ProxyKind, ProxyFootprint>): Map<ProxyKind, ProxyFootprint> {
+  const out = new Map<ProxyKind, ProxyFootprint>();
+  for (const [kind, footprint] of source) {
+    out.set(kind, cloneFootprint(footprint));
+  }
+  return out;
+}
+
+function cloneFootprint(footprint: ProxyFootprint): ProxyFootprint {
+  return {
+    kind: footprint.kind,
+    dims: [...footprint.dims] as [number, number, number],
+    bytes: footprint.bytes,
+  };
 }

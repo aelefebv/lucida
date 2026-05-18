@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use lucida_content::{DatasetId, EntityKind, ImageId};
+use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
-use lucida_protocol::{AssetCatalog, AssetMessage, DatasetOpened, ProxyAvailability};
-use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
+use lucida_protocol::{
+    AssetCatalog, AssetMessage, DatasetOpened, ProxyAvailability, ProxyFootprint,
+};
+use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -570,9 +572,11 @@ async fn handle_open_remote_dataset(
             if !has_image {
                 return None;
             }
+            let footprints = proxy_footprints_for_entity(&result.manifest, &entity.id, &kinds);
             Some(ProxyAvailability {
                 entity_id: entity.id.clone(),
                 kinds,
+                footprints,
             })
         })
         .collect();
@@ -700,6 +704,28 @@ async fn handle_open_remote_dataset(
 /// `(entity, kind, t, c)` only, not the target) stays in lockstep with the
 /// pre-generation task.
 const PROXY_TARGET_LONG_AXIS: u32 = 128;
+
+fn proxy_footprints_for_entity(
+    manifest: &DatasetManifest,
+    entity_id: &EntityId,
+    kinds: &[ProxyKind],
+) -> Vec<ProxyFootprint> {
+    kinds
+        .iter()
+        .filter_map(|kind| {
+            let spec = ProxySpec {
+                entity_id: entity_id.clone(),
+                kind: *kind,
+                t: 0,
+                c: 0,
+                target_long_axis: PROXY_TARGET_LONG_AXIS,
+            };
+            estimate_proxy_dims(&spec, manifest)
+                .ok()
+                .map(|dims| ProxyFootprint::u16(*kind, dims))
+        })
+        .collect()
+}
 
 /// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
 /// Returns `0` if the key is malformed or missing a numeric prefix — the

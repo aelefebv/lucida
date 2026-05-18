@@ -1234,6 +1234,7 @@ mod tests {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("ds1-entity".into()),
                     kinds: vec![ProxyKind::FieldProxy3D],
+                    footprints: vec![],
                 }],
             },
         };
@@ -1258,6 +1259,7 @@ mod tests {
             added: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("ds1-entity".into()),
                 kinds: vec![ProxyKind::FieldProxy3D],
+                footprints: vec![],
             }],
         };
         let cmd1 = DocumentCommand::ApplyAssetCatalogDelta {
@@ -1298,6 +1300,7 @@ mod tests {
                     added: vec![ProxyAvailability {
                         entity_id: lucida_content::EntityId("e1".into()),
                         kinds: vec![ProxyKind::FieldProxy3D],
+                        footprints: vec![],
                     }],
                 },
             }
@@ -1311,6 +1314,7 @@ mod tests {
                     added: vec![ProxyAvailability {
                         entity_id: lucida_content::EntityId("e1".into()),
                         kinds: vec![ProxyKind::WellProxy3D],
+                        footprints: vec![],
                     }],
                 },
             }
@@ -1332,6 +1336,7 @@ mod tests {
             entries: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("seed".into()),
                 kinds: vec![ProxyKind::WellProxy3D],
+                footprints: vec![],
             }],
         };
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -1353,6 +1358,7 @@ mod tests {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("e1".into()),
                     kinds: vec![ProxyKind::FieldProxy3D],
+                    footprints: vec![],
                 }],
             },
         };

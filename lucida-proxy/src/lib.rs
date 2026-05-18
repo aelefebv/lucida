@@ -12,7 +12,7 @@
 //!
 //! [`DatasetManifest`]: lucida_content::DatasetManifest
 
-pub use generate::{GenerateError, generate_proxy};
+pub use generate::{EstimateError, GenerateError, estimate_proxy_dims, generate_proxy};
 pub use header::{read_header, source_content_hash, write_header};
 pub use source::{FieldVolume, ProxySourceData, SourceError};
 pub use spec::{ALGORITHM_VERSION, ProxyAsset, ProxyDtype, ProxyHeader, ProxyKind, ProxySpec};
