@@ -8,7 +8,10 @@
  */
 
 import type { ProxyHandle } from "../proxyAtlas.ts";
-import type { EntityProxyDescriptor } from "../workerContext.ts";
+import {
+  proxyDescriptorKey,
+  type EntityProxyDescriptor,
+} from "../workerContext.ts";
 
 /**
  * Propagate a `WellProxy3D` handle to every child field's descriptor.
@@ -21,16 +24,19 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
 export function propagateWellProxyToFields(
   handle: ProxyHandle,
   wellId: string,
+  t: number,
+  c: number,
   wellToFields: Map<string, Set<string>>,
   proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>,
 ): void {
   const childFields = wellToFields.get(wellId);
   if (!childFields) return;
   for (const fid of childFields) {
-    let desc = proxyDescriptorsByEntity.get(fid);
+    const key = proxyDescriptorKey(fid, t, c);
+    let desc = proxyDescriptorsByEntity.get(key);
     if (!desc) {
       desc = { fieldProxyHandle: null, wellProxyHandle: null };
-      proxyDescriptorsByEntity.set(fid, desc);
+      proxyDescriptorsByEntity.set(key, desc);
     }
     desc.wellProxyHandle = handle;
   }

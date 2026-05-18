@@ -106,11 +106,10 @@ export interface VolumeLayerParams {
   renderMode: "translucent" | "max_intensity";
   scissorRect?: [number, number, number, number];
   /**
-   * Per-entity id used by the worker to look up the proxy descriptor
-   * (`proxyDescriptorsByEntity`). For field entries this is the field's
-   * entity id; for `well-as-proxy` entries this is the well's entity id.
-   * Optional for backward compat — when absent, the worker has no proxy
-   * binding for this layer.
+   * Per-entity id retained for compatibility and inspection. For field
+   * entries this is the field's entity id; for `well-as-proxy` entries
+   * this is the well's entity id. Proxy binding is selected from the
+   * member id because proxy residency is scoped by `(entity, t, c)`.
    */
   entityId?: string;
   /**

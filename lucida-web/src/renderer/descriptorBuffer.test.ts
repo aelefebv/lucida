@@ -42,7 +42,10 @@ import {
   DESCRIPTOR_SENTINEL_INDEX,
 } from "./descriptorBuffer.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
-import type { EntityProxyDescriptor } from "./workerContext.ts";
+import {
+  proxyDescriptorKey,
+  type EntityProxyDescriptor,
+} from "./workerContext.ts";
 import type { ColdStateActiveEntry, ColdStateMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
@@ -351,8 +354,8 @@ describe("pool index assignment", () => {
       makeEntry({ entityId: "field-1", imageId: "img-1", mode: "fields-with-proxy-fallback" }),
     ]);
     const proxyDesc = new Map<string, EntityProxyDescriptor>([
-      ["well-A", { fieldProxyHandle: null, wellProxyHandle: { poolKey: "ds1|proxy|WellProxy3D|64x64x16|ch0", slotIndex: 3 } }],
-      ["field-1", { fieldProxyHandle: { poolKey: "ds1|proxy|FieldProxy3D|32x32x8|ch0", slotIndex: 1 }, wellProxyHandle: { poolKey: "ds1|proxy|WellProxy3D|64x64x16|ch0", slotIndex: 3 } }],
+      [proxyDescriptorKey("well-A", 0, 0), { fieldProxyHandle: null, wellProxyHandle: { poolKey: "ds1|proxy|WellProxy3D|64x64x16|ch0", slotIndex: 3 } }],
+      [proxyDescriptorKey("field-1", 0, 0), { fieldProxyHandle: { poolKey: "ds1|proxy|FieldProxy3D|32x32x8|ch0", slotIndex: 1 }, wellProxyHandle: { poolKey: "ds1|proxy|WellProxy3D|64x64x16|ch0", slotIndex: 3 } }],
     ]);
     const dsPools = new Map<string, ProxyAtlasState>([
       ["ds1|proxy|WellProxy3D|64x64x16|ch0", fakePool([16, 64, 64])],
@@ -373,7 +376,7 @@ describe("pool index assignment", () => {
     ]);
     const pool = fakePool([16, 64, 64]);
     const proxyDesc = new Map<string, EntityProxyDescriptor>([
-      ["well-A", { fieldProxyHandle: null, wellProxyHandle: { poolKey: "ds1|proxy|WellProxy3D|64x64x16|ch0", slotIndex: 3 } }],
+      [proxyDescriptorKey("well-A", 0, 0), { fieldProxyHandle: null, wellProxyHandle: { poolKey: "ds1|proxy|WellProxy3D|64x64x16|ch0", slotIndex: 3 } }],
     ]);
     const proxyPoolsByDataset = new Map([
       ["ds1", new Map([["ds1|proxy|WellProxy3D|64x64x16|ch0", pool]])],
@@ -630,6 +633,42 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
     const f1 = new Float32Array(buf, idx1 * DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_ENTRY_SIZE / 4);
     expect(f0[49]).toBe(1000);
     expect(f1[49]).toBe(2000);
+    destroyDescriptorBuffer(result);
+  });
+
+  it("multi-channel proxy descriptors stay scoped to each member channel", () => {
+    const cold = makeCold(
+      [
+        makeEntry({
+          entityId: "e1", imageId: "img-0", mode: "fields-with-detail",
+          displayStateByChannel: {
+            0: { ...defaultDisplayState(), colormapName: "magenta" },
+            1: { ...defaultDisplayState(), colormapName: "green" },
+          },
+        }),
+      ],
+      [0, 1],
+    );
+    const ch0Pool = "ds1|proxy|FieldProxy3D|32x32x8|ch0";
+    const ch1Pool = "ds1|proxy|FieldProxy3D|32x32x8|ch1";
+    const proxyDesc = new Map<string, EntityProxyDescriptor>([
+      [proxyDescriptorKey("e1", 0, 0), { fieldProxyHandle: { poolKey: ch0Pool, slotIndex: 1 }, wellProxyHandle: null }],
+      [proxyDescriptorKey("e1", 0, 1), { fieldProxyHandle: { poolKey: ch1Pool, slotIndex: 2 }, wellProxyHandle: null }],
+    ]);
+    const proxyPoolsByDataset = new Map([
+      ["ds1", new Map<string, ProxyAtlasState>([
+        [ch0Pool, fakePool([8, 32, 32])],
+        [ch1Pool, fakePool([8, 32, 32])],
+      ])],
+    ]);
+
+    const { device } = makeMockDevice();
+    const result = buildDescriptorBuffer(device, cold, proxyDesc, proxyPoolsByDataset, new Map());
+
+    expect(result.proxyDescriptorByMember.get("img-0:ch0")?.fieldProxyHandle?.poolKey).toBe(ch0Pool);
+    expect(result.proxyDescriptorByMember.get("img-0:ch1")?.fieldProxyHandle?.poolKey).toBe(ch1Pool);
+    expect(result.proxyPoolIndexByKey.get(ch0Pool)).toBe(0);
+    expect(result.proxyPoolIndexByKey.get(ch1Pool)).toBe(1);
     destroyDescriptorBuffer(result);
   });
 
