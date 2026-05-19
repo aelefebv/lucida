@@ -504,7 +504,7 @@ describe("CpuCache", () => {
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["proxy"]);
     });
 
-    it("does not deliver stale in-flight chunks omitted by a newer rebuild", async () => {
+    it("cancels stale in-flight chunks omitted by a newer rebuild", async () => {
       const { cache, source } = createTestCache();
       const staleLowRes = makeRequest({
         level: 2,
@@ -523,10 +523,11 @@ describe("CpuCache", () => {
       cache.onPlanRebuildStart();
       cache.submit(makePlan([currentHighRes]));
 
+      expect(source.pendingFetches.has("entity-1/image-1/2/0/0/0/0/0")).toBe(false);
       source.resolve("entity-1/image-1/2/0/0/0/0/0");
       await flush();
 
-      expect(cache.getCachedChunk("entity-1", staleLowRes.chunkKey)).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", staleLowRes.chunkKey)).toBeNull();
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
@@ -656,11 +657,11 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Fetch lifecycle decoupled from plan omission
+  // Fetch lifecycle preempted by plan omission
   // =========================================================================
 
-  describe("fetch lifecycle decoupled from plan omission", () => {
-    it("submit twice with overlapping requests does not cancel first batch's in-flight", async () => {
+  describe("fetch lifecycle preempted by plan omission", () => {
+    it("submit twice with overlapping requests cancels omitted in-flight work for active entities", async () => {
       const { cache, source } = createTestCache();
       const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
@@ -668,15 +669,15 @@ describe("CpuCache", () => {
       cache.submit(makePlan([reqA, reqB]));
       expect(source.pendingFetches.size).toBe(2);
 
-      // Submit again with only reqB — reqA must remain in-flight.
+      // Submit again with only reqB — reqA is stale and should free a slot.
       cache.submit(makePlan([reqB]));
 
-      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/1")).toBe(true);
-      expect(cache.telemetry().inFlightCount).toBe(2);
+      expect(cache.telemetry().inFlightCount).toBe(1);
     });
 
-    it("submit with smaller plan keeps prior in-flight alive", async () => {
+    it("submit with smaller plan drops prior in-flight for the same active entity", async () => {
       const { cache, source } = createTestCache();
       const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
@@ -684,23 +685,38 @@ describe("CpuCache", () => {
       cache.submit(makePlan([reqA, reqB]));
       expect(cache.telemetry().inFlightCount).toBe(2);
 
-      // Smaller plan that omits reqA. The in-flight fetch must persist.
+      // Smaller plan that omits reqA. The stale fetch is cancelled.
       cache.submit(makePlan([reqB]));
-      expect(cache.telemetry().inFlightCount).toBe(2);
-      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
     });
 
-    it("submit with empty plan does not cancel in-flight", async () => {
+    it("submit with empty plan cancels in-flight work for the active entity", async () => {
       const { cache, source } = createTestCache();
       const req = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
 
       cache.submit(makePlan([req]));
       expect(cache.telemetry().inFlightCount).toBe(1);
 
-      // Empty plan must not abort prior in-flight fetches.
+      // Empty plan means no chunks remain wanted for the active entity.
       cache.submit(makePlan([]));
-      expect(cache.telemetry().inFlightCount).toBe(1);
+      expect(cache.telemetry().inFlightCount).toBe(0);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
+    });
+
+    it("omitted stale work frees scheduler capacity for the newer request", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      const staleT = makeRequest({ t: 0, chunkKey: "0/0/0/0/0/0" });
+      const currentT = makeRequest({ t: 1, chunkKey: "0/1/0/0/0/0" });
+
+      cache.submit(makePlan([staleT]));
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+
+      cache.submit(makePlan([currentT]));
+
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-1/image-1/0/1/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
     });
 
     it("re-submitting an unchanged plan is a no-op for the fetch queue", () => {

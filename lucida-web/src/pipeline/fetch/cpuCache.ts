@@ -236,8 +236,10 @@ export class CpuCache {
   // Public API
 
   /**
-   * Purely additive. Re-submitting an unchanged plan is a no-op for
-   * the fetch queue; cancellation goes through {@link cancelDataset}.
+   * Submit the current request plan. Re-submitting an unchanged plan is
+   * still a no-op, but work for active entities that disappeared from
+   * the new plan is preempted so scrubbed-away T/Z/channel work does not
+   * block current requests behind the scheduler caps.
    */
   submit(plan: RequestPlan): void {
     this.currentEpochs = plan.epochs;
@@ -246,6 +248,8 @@ export class CpuCache {
 
     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
     for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
+    const plannedChunkKeys = new Set(plan.requests.map(req => this.inFlightKey(req)));
+    this.cancelOmittedChunkWork(newActiveIds, plannedChunkKeys);
 
     const pendingChunks: ChunkRequest[] = [];
     const enqueueNow = performance.now();
@@ -307,6 +311,20 @@ export class CpuCache {
     this.proxyScheduler.enqueue(pendingProxies, enqueueNow);
 
     this.drainSchedulers();
+  }
+
+  private cancelOmittedChunkWork(
+    activeEntityIds: Set<string>,
+    plannedChunkKeys: Set<string>,
+  ): void {
+    if (activeEntityIds.size === 0) return;
+    const cancelled = this.chunkScheduler.cancelWhere((entry) => (
+      activeEntityIds.has(entry.request.entityId) &&
+      !plannedChunkKeys.has(this.inFlightKey(entry.request))
+    ));
+    for (const key of cancelled) {
+      this.inFlightChunkMeta.delete(key);
+    }
   }
 
   /**

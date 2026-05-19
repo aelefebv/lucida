@@ -357,6 +357,32 @@ describe("Scheduler.cancelDataset", () => {
 });
 
 // ---------------------------------------------------------------------------
+// cancelWhere
+// ---------------------------------------------------------------------------
+
+describe("Scheduler.cancelWhere", () => {
+  it("returns keys removed from in-flight and pending queues", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 1 });
+    scheduler.enqueue([
+      req({ chunkKey: "a", entityId: "e-1" }),
+      req({ chunkKey: "b", entityId: "e-1" }),
+      req({ chunkKey: "c", entityId: "e-2" }),
+    ]);
+    scheduler.drain(() => 10);
+
+    const cancelled = scheduler.cancelWhere((entry) => entry.request.entityId === "e-1");
+
+    expect(cancelled.sort()).toEqual([
+      keyOf(req({ chunkKey: "a", entityId: "e-1" })),
+      keyOf(req({ chunkKey: "b", entityId: "e-1" })),
+    ].sort());
+    expect(scheduler.inFlightSize).toBe(0);
+    expect(scheduler.inFlightBytes).toBe(0);
+    expect(scheduler.pendingSnapshot().map((r) => r.chunkKey)).toEqual(["c"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // reset
 // ---------------------------------------------------------------------------
 
