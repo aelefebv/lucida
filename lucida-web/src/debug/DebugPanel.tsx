@@ -69,6 +69,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
   wellModes: "Per-well badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
   chunkGrid: "LOD chunk grid for every visible field, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
+  chunkTier: "Sub-color field chunks by render tier (detail = green, coarse = yellow). Requires chunkGrid.",
   cachedTier: "Sub-color cached chunks by eviction tier (active = bright green, demoted = pale sage, prefetch = teal). Requires chunkGrid.",
   plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
 };

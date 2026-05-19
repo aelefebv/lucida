@@ -4,10 +4,10 @@
  * Reads from existing scene + orchestrator + cache state — no new
  * production-side state added for it to work.
  *
- * Two overlays, each gated by its own toggle in the Logging tab:
+ * Primary overlays, each gated by its own toggle in the Logging tab:
  *  - wellModes: per-well badge with detail/coarse worker-delivered coverage
- *  - chunkGrid: LOD chunk grid for every visible field, colored by
- *    status. Capped at MAX_CHUNK_RECTS per tick as a backstop for
+ *  - chunkGrid: planned LOD chunk grid for every visible field, colored
+ *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
  *
  * Both modes (slice + volume) share the same projection pipeline:
@@ -103,6 +103,8 @@ interface ChunkRect {
   w: number;
   h: number;
   status: "cached" | "in-flight" | "planned";
+  /** Current render tier that produced the planned request. */
+  sourceTier?: OverlayTier;
   /**
    * For `status === "planned"`: zero-based rank in the pending fetch
    * queue (0 = next to fetch). `undefined` means "in plan but not in
@@ -125,6 +127,22 @@ interface ChunkRect {
 const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
 const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
 const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
+const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
+const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
+
+function tierColor(tier: OverlayTier | undefined): string | null {
+  switch (tier) {
+    case "detail": return TIER_DETAIL;
+    case "coarse": return TIER_COARSE;
+    default: return null;
+  }
+}
+
+function tierDrawOrder(rect: ChunkRect): number {
+  if (rect.sourceTier === "coarse") return 0;
+  if (rect.sourceTier === "detail") return 1;
+  return 2;
+}
 
 /**
  * Color for a planned chunk based on its position in the pending fetch
@@ -177,6 +195,7 @@ function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
   return null;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function buildWellTierCoverage(
   plan: Pick<RequestPlan, "requests">,
   parentByEntity: ReadonlyMap<string, string | null>,
@@ -211,6 +230,7 @@ export function buildWellTierCoverage(
   return out;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function formatTierCoverageLabel(
   coverage: WellTierCoverage,
   fallbackLabel: string,
@@ -235,6 +255,7 @@ export function formatTierCoverageLabel(
   return `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function tierCoverageMode(
   coverage: WellTierCoverage,
   fallbackMode: string,
@@ -250,6 +271,7 @@ export function tierCoverageMode(
   return fallbackMode;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function formatTierCoverageTitle(
   coverage: WellTierCoverage,
   fallbackLabel: string,
@@ -598,28 +620,7 @@ export function DebugOverlays({
             positions = {};
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
-
-          // Per-dataset visible region — drives clipping for every
-          // field. visible_region is in dataset (plate) voxel coords;
-          // we subtract each field's pos to get field-local bounds.
-          let vrJson: string | null = null;
-          try {
-            vrJson = ws.visible_region(dsId);
-          } catch {
-            vrJson = null;
-          }
-          let xyBounds: [number, number, number, number] | null = null;
-          let zRange: [number, number] | null = null;
-          if (vrJson && vrJson !== "null") {
-            try {
-              const vr = JSON.parse(vrJson);
-              xyBounds = vr.xy_bounds;
-              zRange = vr.z_range;
-            } catch {
-              xyBounds = null;
-              zRange = null;
-            }
-          }
+          const fieldEntries = new Map<string, Extract<RequestPlan["activeSet"][number], { kind: "field" }>>();
 
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
@@ -703,14 +704,28 @@ export function DebugOverlays({
               });
               continue;
             }
-            const pos = positions[entry.entityId];
-            const img = imgById.get(entry.imageId);
-            if (!pos || !img) continue;
+            fieldEntries.set(entry.entityId, entry);
+          }
+
+          // Field chunks are rendered from the actual current plan
+          // requests, not from `entry.targetLod`. That keeps the grid
+          // honest for the two-source renderer: detail and coarse can
+          // have independent LODs, chunk sizes, and residency state.
+          for (const req of plan.requests) {
+            if (out.length >= MAX_CHUNK_RECTS) break outer;
+            const sourceTier = overlayTierForRequest(req);
+            if (!sourceTier) continue;
+            if (req.t !== t || req.c !== c) continue;
+
+            const entry = fieldEntries.get(req.entityId);
+            const pos = positions[req.entityId];
+            const img = imgById.get(req.imageId);
+            if (!entry || !pos || !img) continue;
             const lvl0 = img.multiscale.levels[0];
-            const lvl = img.multiscale.levels[entry.targetLod];
+            const lvl = img.multiscale.levels[req.level];
             if (!lvl0 || !lvl) continue;
 
-            const frame = getFrame(dsId, entry.imageId, lvl0.shape);
+            const frame = getFrame(dsId, req.imageId, lvl0.shape);
             frame.pos = pos;
 
             const fullX = lvl0.shape[Axis.X];
@@ -728,81 +743,52 @@ export function DebugOverlays({
             const chunkWorldX = chunkPxX * scaleX;
             const chunkWorldY = chunkPxY * scaleY;
             const chunkWorldZ = chunkPxZ * scaleZ;
-            const maxCol = Math.ceil(lvlX / chunkPxX);
-            const maxRow = Math.ceil(lvlY / chunkPxY);
-            const maxZ = Math.ceil(lvlZ / chunkPxZ);
 
-            // Default: this field's full extent.
-            const fieldXyBounds: [number, number, number, number] =
-              xyBounds ?? [pos[0], pos[1], pos[0] + fullX, pos[1] + fullY];
-            const fieldZRange: [number, number] = zRange ?? [0, fullZ];
-
-            const localMinX = fieldXyBounds[0] - pos[0];
-            const localMaxX = fieldXyBounds[2] - pos[0];
-            const localMinY = fieldXyBounds[1] - pos[1];
-            const localMaxY = fieldXyBounds[3] - pos[1];
-            if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) continue;
-
-            const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
-            const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
-            const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
-            const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
-            const zStart = Math.max(0, Math.floor(fieldZRange[0] / chunkWorldZ));
-            const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(fieldZRange[1] / chunkWorldZ)));
-
-            const cachedSet = snap.cached.get(entry.entityId);
-            const inFlightSet = snap.inFlight.get(entry.entityId);
-
-            for (let iz = zStart; iz < zEnd; iz++) {
-              if (out.length >= MAX_CHUNK_RECTS) break;
-              for (let row = rowStart; row < rowEnd; row++) {
-                if (out.length >= MAX_CHUNK_RECTS) break;
-                for (let col = colStart; col < colEnd; col++) {
-                  if (out.length >= MAX_CHUNK_RECTS) break;
-                  const key = `${entry.targetLod}/${t}/${c}/${iz}/${row}/${col}`;
-                  const vMin: [number, number, number] = [
-                    col * chunkWorldX,
-                    row * chunkWorldY,
-                    iz * chunkWorldZ,
-                  ];
-                  const vMax: [number, number, number] = [
-                    (col + 1) * chunkWorldX,
-                    (row + 1) * chunkWorldY,
-                    (iz + 1) * chunkWorldZ,
-                  ];
-                  const rect = projectVoxelAabb(ws, frame, vMin, vMax, dpr);
-                  if (!rect) continue;
-                  if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
-                    continue;
-                  }
-                  let status: ChunkRect["status"] = "planned";
-                  let priorityRank: number | undefined;
-                  let tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined;
-                  if (cachedSet?.has(key)) {
-                    status = "cached";
-                    if (enabled.cachedTier) {
-                      tier = cpuCache.getCachedChunkTier(entry.entityId, key);
-                    }
-                  } else if (inFlightSet?.has(key)) {
-                    status = "in-flight";
-                  } else if (enabled.plannedRank) {
-                    priorityRank = rankByKey.get(`${entry.entityId}/${key}`);
-                  }
-                  out.push({
-                    key: `${dsId}/${entry.entityId}/${key}`,
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    status,
-                    priorityRank,
-                    tier,
-                  });
-                }
-              }
+            const vMin: [number, number, number] = [
+              req.x * chunkWorldX,
+              req.y * chunkWorldY,
+              req.z * chunkWorldZ,
+            ];
+            const vMax: [number, number, number] = [
+              (req.x + 1) * chunkWorldX,
+              (req.y + 1) * chunkWorldY,
+              (req.z + 1) * chunkWorldZ,
+            ];
+            const rect = projectVoxelAabb(ws, frame, vMin, vMax, dpr);
+            if (!rect) continue;
+            if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
+              continue;
             }
+
+            const cachedSet = snap.cached.get(req.entityId);
+            const inFlightSet = snap.inFlight.get(req.entityId);
+            let status: ChunkRect["status"] = "planned";
+            let priorityRank: number | undefined;
+            let tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined;
+            if (cachedSet?.has(req.chunkKey)) {
+              status = "cached";
+              if (enabled.cachedTier) {
+                tier = cpuCache.getCachedChunkTier(req.entityId, req.chunkKey);
+              }
+            } else if (inFlightSet?.has(req.chunkKey)) {
+              status = "in-flight";
+            } else if (enabled.plannedRank) {
+              priorityRank = rankByKey.get(`${req.entityId}/${req.chunkKey}`);
+            }
+            out.push({
+              key: `${dsId}/${req.entityId}/${req.lane}/${req.chunkKey}`,
+              x: rect.x,
+              y: rect.y,
+              w: rect.w,
+              h: rect.h,
+              status,
+              sourceTier,
+              priorityRank,
+              tier,
+            });
           }
         }
+        out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));
         setChunks(out);
       } else if (chunks.length > 0) {
         setChunks([]);
@@ -833,13 +819,15 @@ export function DebugOverlays({
         // Each color band gates on its own toggle so the simple
         // 3-color view (cached/in-flight/planned) is recoverable by
         // turning off both sub-toggles.
+        const tierBg = enabled.chunkTier ? tierColor(c.sourceTier) : null;
         const bg =
-          c.status === "cached"
+          tierBg ??
+          (c.status === "cached"
             ? enabled.cachedTier ? cachedColor(c.tier) : SOLID_CACHED
             : c.status === "in-flight"
               ? SOLID_IN_FLIGHT
-              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED;
-        const tooltip = c.status === "cached"
+              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED);
+        const statusTooltip = c.status === "cached"
           ? enabled.cachedTier && c.tier
             ? `cached · tier ${c.tier}`
             : "cached"
@@ -850,6 +838,7 @@ export function DebugOverlays({
               : enabled.plannedRank
                 ? "planned · not in pending queue"
                 : "planned";
+        const tooltip = c.sourceTier ? `${c.sourceTier} · ${statusTooltip}` : statusTooltip;
         return (
           <div
             key={c.key}
