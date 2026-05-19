@@ -92,11 +92,13 @@ interface FailedEntry {
 interface InFlightChunkMeta {
   request: ChunkRequest;
   lastSeenTick: number;
+  epochs: SceneEpochs;
 }
 
 interface InFlightProxyMeta {
   request: ProxyRequest;
   lastSeenTick: number;
+  epochs: SceneEpochs;
 }
 
 export class CpuCache {
@@ -220,8 +222,9 @@ export class CpuCache {
       },
       (req) => this.inFlightKey(req),
       (req, controller, _estimate, key) => {
-        this.rememberInFlightChunk(key, req);
-        this.fetchAndDecode(req, controller, key).catch(() => {});
+        const startedEpochs = { ...this.currentEpochs };
+        this.rememberInFlightChunk(key, req, startedEpochs);
+        this.fetchAndDecode(req, controller, key, 0, startedEpochs).catch(() => {});
       },
     );
     this.proxyScheduler = new Scheduler<ProxyRequest>(
@@ -235,7 +238,7 @@ export class CpuCache {
       },
       (req) => this.inFlightProxyKey(req),
       (req, controller, _estimate, key) => {
-        this.rememberInFlightProxy(key, req);
+        this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
         this.fetchProxy(req, controller, key).catch(() => {});
       },
     );
@@ -258,6 +261,7 @@ export class CpuCache {
     for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
     const plannedChunkKeys = new Set(plan.requests.map(req => this.inFlightKey(req)));
     this.recordTierDemand(plan.requests);
+    this.applyElasticTierBudgets();
     this.cancelOmittedChunkWork(newActiveIds, plannedChunkKeys);
 
     const pendingChunks: ChunkRequest[] = [];
@@ -287,7 +291,7 @@ export class CpuCache {
       }
 
       if (this.chunkScheduler.hasInFlight(key)) {
-        this.rememberInFlightChunk(key, req);
+        this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
         continue;
       }
 
@@ -296,7 +300,7 @@ export class CpuCache {
 
       pendingChunks.push(req);
     }
-    this.chunkScheduler.enqueue(pendingChunks, enqueueNow);
+    this.chunkScheduler.enqueue(this.orderChunkRequestsForTierAllocation(pendingChunks), enqueueNow);
 
     const proxyRequests = plan.proxyRequests ?? [];
     const pendingProxies: ProxyRequest[] = [];
@@ -311,7 +315,7 @@ export class CpuCache {
       }
 
       if (this.proxyScheduler.hasInFlight(key)) {
-        this.rememberInFlightProxy(key, req);
+        this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
         continue;
       }
 
@@ -522,6 +526,7 @@ export class CpuCache {
 
     const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
     const tierDemand = this.computeTierDemandTelemetry();
+    const tierQueues = this.computeTierQueueTelemetry();
     this.maybeLogSparseDetail(now, tierDemand);
 
     return {
@@ -558,11 +563,17 @@ export class CpuCache {
       decodeP95Ms: counters.decodeP95Ms,
       tierResidency,
       tierDemand,
+      tierQueues,
+      tierBudgets: {
+        detailBytes: this.chunkStore.budgetBytes,
+        coarseBytes: this.overviewStore.budgetBytes,
+      },
     };
   }
 
   updateConfig(partial: Partial<CpuCacheConfig>): void {
     Object.assign(this.config, partial);
+    this.applyElasticTierBudgets();
   }
 
   /** Searches detail then overview; proxies use {@link getCachedProxy}. */
@@ -691,6 +702,8 @@ export class CpuCache {
     this.inFlightProxyMeta.clear();
     this.lruCounter = 0;
     this.currentSubmitTick = 0;
+    this.chunkStore.setBudgetBytes(this.config.mainBudgetBytes);
+    this.overviewStore.setBudgetBytes(this.config.overviewBudgetBytes);
 
     this.listeners = [];
 
@@ -705,6 +718,7 @@ export class CpuCache {
     controller: AbortController,
     key: string,
     retryCount = 0,
+    startedEpochs: SceneEpochs = { ...this.currentEpochs },
   ): Promise<void> {
     let result: FetchResult;
     try {
@@ -724,7 +738,7 @@ export class CpuCache {
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
-        return this.fetchAndDecode(req, controller, key, retryCount + 1);
+        return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs);
       }
 
       const isPermanent = fe.kind === "permanent";
@@ -758,7 +772,12 @@ export class CpuCache {
 
     const latestMeta = this.inFlightChunkMeta.get(key);
     const effectiveReq = latestMeta?.request ?? req;
-    const lastSeenTick = latestMeta?.lastSeenTick ?? this.currentSubmitTick;
+    const metaEpochs = latestMeta?.epochs ?? startedEpochs;
+    const stale =
+      latestMeta === undefined ||
+      latestMeta.lastSeenTick !== this.currentSubmitTick ||
+      isEpochStale(metaEpochs, this.currentEpochs);
+    const lastSeenTick = stale ? -1 : latestMeta.lastSeenTick;
 
     this.chunkScheduler.markInFlightDone(key);
     if (this.inFlightChunkMeta.get(key) === latestMeta) {
@@ -767,7 +786,7 @@ export class CpuCache {
 
     // Cache even if cancelled during decode — the work is done.
     const lane = effectiveReq.lane;
-    const tier = this.laneToTier(lane);
+    const tier = stale ? "demoted-detail" : this.laneToTier(lane);
     const cacheEntry: CacheEntry = {
       data: decoded,
       sizeBytes: decoded.byteLength,
@@ -783,17 +802,25 @@ export class CpuCache {
       x: effectiveReq.x,
       chunkKey: effectiveReq.chunkKey,
       insertedAt: this.lruCounter++,
-      epochs: { ...this.currentEpochs },
+      epochs: { ...metaEpochs },
       dataType: result.dataType,
       residencyTier: this.requestResidencyTier(effectiveReq),
-      priority: effectiveReq.priority,
+      priority: stale ? Number.MAX_SAFE_INTEGER : effectiveReq.priority,
       lastSeenTick,
     };
 
     // minimap/overview/coarse route to the overview/coarse bucket (ADR 0023 + coarse/detail bridge).
     if (lane === "overview" || lane === "minimap" || lane === "coarse") {
+      if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
+        this.drainSchedulers();
+        return;
+      }
       this.overviewStore.insert(cacheEntry);
     } else {
+      if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
+        this.drainSchedulers();
+        return;
+      }
       this.chunkStore.insert(cacheEntry);
     }
 
@@ -885,17 +912,72 @@ export class CpuCache {
     this.chunkScheduler.drain(estimateBytes);
   }
 
-  private rememberInFlightChunk(key: string, req: ChunkRequest): void {
+  private orderChunkRequestsForTierAllocation(requests: ChunkRequest[]): ChunkRequest[] {
+    const detail: ChunkRequest[] = [];
+    const coarse: ChunkRequest[] = [];
+    const other: ChunkRequest[] = [];
+
+    for (const req of requests) {
+      const tier = this.requestResidencyTier(req);
+      if (tier === "detail") detail.push(req);
+      else if (tier === "coarse") coarse.push(req);
+      else other.push(req);
+    }
+
+    if (detail.length === 0 || coarse.length === 0) {
+      return [...detail, ...coarse, ...other];
+    }
+
+    const ordered: ChunkRequest[] = [];
+    const max = Math.max(detail.length, coarse.length);
+    for (let i = 0; i < max; i++) {
+      if (i < detail.length) ordered.push(detail[i]);
+      if (i < coarse.length) ordered.push(coarse[i]);
+    }
+    ordered.push(...other);
+    return ordered;
+  }
+
+  private applyElasticTierBudgets(): void {
+    const detailDemand = this.desiredDetailKeysThisTick.size > 0;
+    const coarseDemand = this.desiredCoarseKeysThisTick.size > 0;
+    const protectedDetail = this.config.mainBudgetBytes;
+    const protectedCoarse = this.config.overviewBudgetBytes;
+
+    let detailBudget = protectedDetail;
+    let coarseBudget = protectedCoarse;
+
+    if (detailDemand && !coarseDemand) {
+      detailBudget += Math.max(0, protectedCoarse - this.overviewStore.bytes);
+    } else if (coarseDemand && !detailDemand) {
+      coarseBudget += Math.max(0, protectedDetail - this.chunkStore.bytes);
+    }
+
+    this.chunkStore.setBudgetBytes(detailBudget);
+    this.overviewStore.setBudgetBytes(coarseBudget);
+  }
+
+  private rememberInFlightChunk(
+    key: string,
+    req: ChunkRequest,
+    epochs: SceneEpochs,
+  ): void {
     this.inFlightChunkMeta.set(key, {
       request: req,
       lastSeenTick: this.currentSubmitTick,
+      epochs,
     });
   }
 
-  private rememberInFlightProxy(key: string, req: ProxyRequest): void {
+  private rememberInFlightProxy(
+    key: string,
+    req: ProxyRequest,
+    epochs: SceneEpochs,
+  ): void {
     this.inFlightProxyMeta.set(key, {
       request: req,
       lastSeenTick: this.currentSubmitTick,
+      epochs,
     });
   }
 
@@ -1016,9 +1098,9 @@ export class CpuCache {
 
   private recordTierDemand(requests: ChunkRequest[]): void {
     for (const req of requests) {
-      if (req.lane === "detail" && this.requestResidencyTier(req) === "detail") {
+      if (this.requestResidencyTier(req) === "detail") {
         this.desiredDetailKeysThisTick.add(this.inFlightKey(req));
-      } else if (req.lane === "coarse" && this.requestResidencyTier(req) === "coarse") {
+      } else if (this.requestResidencyTier(req) === "coarse") {
         this.desiredCoarseKeysThisTick.add(this.inFlightKey(req));
       }
     }
@@ -1073,6 +1155,23 @@ export class CpuCache {
     };
   }
 
+  private computeTierQueueTelemetry(): CacheTelemetry["tierQueues"] {
+    const queues: CacheTelemetry["tierQueues"] = {
+      detail: { pending: 0, inFlight: 0, inFlightBytes: 0 },
+      coarse: { pending: 0, inFlight: 0, inFlightBytes: 0 },
+    };
+
+    for (const req of this.chunkScheduler.pendingSnapshot()) {
+      queues[this.requestResidencyTier(req)].pending++;
+    }
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      const tier = this.requestResidencyTier(entry.request);
+      queues[tier].inFlight++;
+      queues[tier].inFlightBytes += entry.estimatedBytes;
+    }
+    return queues;
+  }
+
   private maybeLogSparseDetail(
     now: number,
     tierDemand: CacheTelemetry["tierDemand"],
@@ -1100,4 +1199,11 @@ export class CpuCache {
   private inFlightKey(req: ChunkRequest): string {
     return `${req.entityId}/${req.chunkKey}`;
   }
+}
+
+function isEpochStale(deliveryEpochs: SceneEpochs, currentEpochs: SceneEpochs): boolean {
+  return (
+    deliveryEpochs.selection < currentEpochs.selection ||
+    deliveryEpochs.content < currentEpochs.content
+  );
 }

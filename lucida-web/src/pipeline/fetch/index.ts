@@ -22,6 +22,7 @@ export type {
   ReadyDelivery,
   ReadyChunkDelivery,
   ReadyProxyDelivery,
+  ResidencyTier,
   CacheTelemetry,
   TierResidencyEntry,
   TierCounters,

@@ -155,6 +155,12 @@ export interface TierDemandTelemetry {
   sparseDetail: boolean;
 }
 
+export interface TierQueueTelemetry {
+  pending: number;
+  inFlight: number;
+  inFlightBytes: number;
+}
+
 export interface TierCounters {
   activeDetail: number;
   demotedDetail: number;
@@ -209,4 +215,14 @@ export interface CacheTelemetry {
   };
   /** Current-plan wanted vs CPU-resident chunk coverage by coarse/detail tier. */
   tierDemand: TierDemandTelemetry;
+  /** Queue depth split by chunk residency tier. */
+  tierQueues: {
+    detail: TierQueueTelemetry;
+    coarse: TierQueueTelemetry;
+  };
+  /** Effective elastic budgets for the CPU chunk tier buckets. */
+  tierBudgets: {
+    detailBytes: number;
+    coarseBytes: number;
+  };
 }

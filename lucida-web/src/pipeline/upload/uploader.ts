@@ -6,7 +6,7 @@
  * handles worker-feedback parsing.
  */
 
-import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
+import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -150,14 +150,29 @@ export class Uploader {
       this.uploadTelemetry.recordEvent(tickStart, bytes, false, kind);
     };
 
+    const deliverables = Array.from(ctx.cpuCache.getDeliverable());
+    const tierDemand = this.computeChunkTierDemand(deliverables);
+    const splitTierBudget = tierDemand.detail && tierDemand.coarse;
+    let detailRemaining = splitTierBudget ? Math.ceil(budget / 2) : budget;
+    let coarseRemaining = splitTierBudget ? Math.floor(budget / 2) : budget;
     let remaining = budget;
     let budgetExhausted = false;
     let sentAny = false;
 
-    for (const delivery of ctx.cpuCache.getDeliverable()) {
+    for (const delivery of deliverables) {
       if (remaining <= 0) {
         budgetExhausted = true;
         break;
+      }
+
+      const chunkTier = this.deliveryResidencyTier(delivery);
+      if (splitTierBudget && chunkTier === "detail" && detailRemaining <= 0) {
+        budgetExhausted = true;
+        continue;
+      }
+      if (splitTierBudget && chunkTier === "coarse" && coarseRemaining <= 0) {
+        budgetExhausted = true;
+        continue;
       }
 
       if (delivery.kind === "proxy") this.currentUploadStats.drainedProxies++;
@@ -178,6 +193,8 @@ export class Uploader {
       this.currentUploadStats.bytesUploaded += sent;
       recordUpload(sent, delivery.kind);
       remaining -= sent;
+      if (splitTierBudget && chunkTier === "detail") detailRemaining -= sent;
+      if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= sent;
       if (remaining <= 0) budgetExhausted = true;
     }
 
@@ -221,6 +238,21 @@ export class Uploader {
     this.workerResources.recordMember(memberId);
     this.currentUploadStats.uploadedChunks++;
     return delivery.data.byteLength;
+  }
+
+  private computeChunkTierDemand(deliveries: ReadyDelivery[]): Record<ResidencyTier, boolean> {
+    return {
+      detail: deliveries.some((d) => this.deliveryResidencyTier(d) === "detail"),
+      coarse: deliveries.some((d) => this.deliveryResidencyTier(d) === "coarse"),
+    };
+  }
+
+  private deliveryResidencyTier(delivery: ReadyDelivery): ResidencyTier | null {
+    if (delivery.kind !== "chunk") return null;
+    return delivery.residencyTier ??
+      (delivery.lane === "coarse" || delivery.lane === "overview" || delivery.lane === "minimap"
+        ? "coarse"
+        : "detail");
   }
 
   // Worker feedback (wired in renderLoop.start)

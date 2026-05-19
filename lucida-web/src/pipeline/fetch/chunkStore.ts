@@ -49,7 +49,7 @@ const EVICTION_BURST_THRESHOLD = 16;
 export class ChunkStore {
   private store = new Map<string, Map<string, CacheEntry>>();
   private bytesCounter = 0;
-  readonly budgetBytes: number;
+  private budgetBytesCounter: number;
   private readonly policy: EvictionPolicy<CacheEntry>;
   private readonly evictionTier: (entry: CacheEntry) => EvictionRecordTier;
   private readonly recordEviction: (tier: EvictionRecordTier) => void;
@@ -59,7 +59,7 @@ export class ChunkStore {
 
   constructor(opts: ChunkStoreOptions) {
     this.policy = opts.policy;
-    this.budgetBytes = opts.budgetBytes;
+    this.budgetBytesCounter = opts.budgetBytes;
     this.evictionTier = opts.evictionTier;
     this.recordEviction = opts.recordEviction;
     this.onEvictionBurst = opts.onEvictionBurst;
@@ -67,6 +67,15 @@ export class ChunkStore {
 
   get bytes(): number {
     return this.bytesCounter;
+  }
+
+  get budgetBytes(): number {
+    return this.budgetBytesCounter;
+  }
+
+  setBudgetBytes(budgetBytes: number): void {
+    this.budgetBytesCounter = Math.max(0, budgetBytes);
+    this.evictIfNeeded(0);
   }
 
   /** Evicts via the policy if over budget; caller assembles the entry. */
@@ -83,8 +92,8 @@ export class ChunkStore {
   }
 
   private evictIfNeeded(incomingBytes: number): void {
-    if (this.bytesCounter + incomingBytes <= this.budgetBytes) return;
-    const bytesNeeded = this.bytesCounter + incomingBytes - this.budgetBytes;
+    if (this.bytesCounter + incomingBytes <= this.budgetBytesCounter) return;
+    const bytesNeeded = this.bytesCounter + incomingBytes - this.budgetBytesCounter;
     const entries = this.collectEntries();
     const victims = this.policy.selectVictims(entries, bytesNeeded);
 
