@@ -26,6 +26,10 @@ import {
   DEFAULT_PLANNING_CONFIG,
   type PlanningConfig,
 } from "../pipeline/planning/config.ts";
+import {
+  setRenderRadiusPreviewTier,
+  type RenderRadiusPreviewTier,
+} from "./logging.ts";
 
 // Single source of truth for the per-field UI metadata: label, slider
 // bounds + step, and the section grouping. The render loop walks these
@@ -44,6 +48,7 @@ interface TunableSpec {
    * `min`. Returns the runtime lower bound; the slider clamps to it.
    */
   dynamicMin?: (cfg: PlanningConfig) => number;
+  previewRadiusTier?: RenderRadiusPreviewTier;
 }
 
 const MODE_THRESHOLDS: TunableSpec[] = [
@@ -79,6 +84,7 @@ const RESIDENCY_BUDGETS: TunableSpec[] = [
     min: 0,
     max: 2,
     step: 0.05,
+    previewRadiusTier: "detail",
   },
   {
     field: "coarseRenderRadiusView",
@@ -86,6 +92,7 @@ const RESIDENCY_BUDGETS: TunableSpec[] = [
     min: 0,
     max: 2,
     step: 0.05,
+    previewRadiusTier: "coarse",
   },
   {
     field: "proxyResidencyBudgetBytes",
@@ -239,6 +246,14 @@ function TunableRow({
     configStore.set(spec.field, clamped as PlanningConfig[typeof spec.field]);
   };
 
+  const startRadiusPreview = () => {
+    if (!spec.previewRadiusTier) return;
+    setRenderRadiusPreviewTier(spec.previewRadiusTier);
+    const clear = () => setRenderRadiusPreviewTier(null);
+    window.addEventListener("pointerup", clear, { once: true });
+    window.addEventListener("pointercancel", clear, { once: true });
+  };
+
   const sliderId = `cfg-${spec.field}`;
 
   return (
@@ -254,6 +269,7 @@ function TunableRow({
           max={spec.max}
           step={spec.step}
           value={value}
+          onPointerDown={startRadiusPreview}
           onChange={(e) => onChange(Number(e.target.value))}
           className="debug-config-tunable-slider"
           aria-label={`${spec.label} slider`}
