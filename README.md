@@ -49,9 +49,10 @@ cargo run -p lucida-server
 ```
 Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876)
 ```bash
-(cd lucida-web && pnpm run build:wasm ) 
-(cd lucida-web && pnpm run dev)
+(cd lucida-web && pnpm run build:wasm && pnpm install --force && pnpm run dev -- --force)
 ```
+
+`pnpm install --force` refreshes the local `file:../lucida-core/pkg` copy in `node_modules`, and `pnpm run dev -- --force` makes Vite discard any stale optimized dependency cache.
 
 Visit <http://localhost:5173>.
 
