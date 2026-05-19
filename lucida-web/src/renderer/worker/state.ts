@@ -26,8 +26,10 @@ export interface RendererState {
   // ── Cold-state routing ────────────────────────────────────────────
   /** memberId → datasetId (canonical: imageId or imageId:chN; well-as-proxy resolves to entityId). */
   memberToDataset: Map<string, string>;
-  /** memberId → pool key encoding (datasetId, channel, chunkDims). */
+  /** memberId → detail pool key. Legacy compatibility for callers that have not become tier-aware. */
   memberToPool: Map<string, string>;
+  /** `${memberId}|${tier}` → pool key encoding (datasetId, channel, tier, chunkDims). */
+  memberTierToPool: Map<string, string>;
   /** Per-dataset entityMetas snapshot captured during the most recent cold state. */
   currentEntityMetasByDataset: Map<string, Map<string, LodIndirectionMeta[]>>;
   /** wellId → set of child fieldEntityIds (used for WellProxy3D fan-out). */
@@ -84,6 +86,7 @@ export function createInitialState(): RendererState {
   return {
     memberToDataset: new Map(),
     memberToPool: new Map(),
+    memberTierToPool: new Map(),
     currentEntityMetasByDataset: new Map(),
     wellToFields: new Map(),
     wellsByDataset: new Map(),

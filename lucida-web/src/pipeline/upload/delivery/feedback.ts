@@ -17,6 +17,9 @@ import {
 } from "./dispatch.ts";
 
 export class WorkerFeedback {
+  private readonly datasetsWithWantedSnapshot = new Set<string>();
+  private readonly missingChunksByDataset = new Map<string, Map<string, Map<number, Set<string>>>>();
+
   /**
    * - `evicted` chunks were displaced by closer arrivals — re-eligible
    *   under the same plan.
@@ -70,15 +73,30 @@ export class WorkerFeedback {
    * proxy key. Both paths schedule a residency tick in RenderLoop.
    */
   handleWantedSetDelta(
+    datasetId: string,
     missing: Array<MissingChunk | MissingProxy>,
     cpuCache: CpuCache,
   ): void {
+    this.datasetsWithWantedSnapshot.add(datasetId);
+    const missingChunksForDataset = new Map<string, Map<number, Set<string>>>();
     let missingChunks = 0;
     let missingProxies = 0;
     for (const entry of missing) {
       if (entry.kind === "chunk") {
         const parsed = parseWorkerMemberId(entry.memberId);
         const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
+        const imageId = parsed.imageId;
+        let byChannel = missingChunksForDataset.get(imageId);
+        if (!byChannel) {
+          byChannel = new Map();
+          missingChunksForDataset.set(imageId, byChannel);
+        }
+        let keys = byChannel.get(c);
+        if (!keys) {
+          keys = new Set();
+          byChannel.set(c, keys);
+        }
+        keys.add(entry.chunkKey);
         cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
         missingChunks++;
       } else if (entry.kind === "proxy") {
@@ -92,5 +110,20 @@ export class WorkerFeedback {
         missingProxies,
       });
     }
+    this.missingChunksByDataset.set(datasetId, missingChunksForDataset);
+  }
+
+  chunkResidency(
+    datasetId: string,
+    imageId: string,
+    c: number,
+    chunkKey: string,
+  ): "resident" | "missing" | "unknown" {
+    if (!this.datasetsWithWantedSnapshot.has(datasetId)) return "unknown";
+    const missing = this.missingChunksByDataset.get(datasetId)
+      ?.get(imageId)
+      ?.get(c)
+      ?.has(chunkKey) ?? false;
+    return missing ? "missing" : "resident";
   }
 }

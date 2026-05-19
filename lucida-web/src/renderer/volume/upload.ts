@@ -15,6 +15,7 @@ import {
   makeCompositeKey,
 } from "../chunkKeys.ts";
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
+import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
 
 export function handleVolumeChunkData(
@@ -60,8 +61,22 @@ export function handleVolumeChunkData(
   const totalChunks = msg.chunks.length;
   const evictedKeys: string[] = [];
   const insertedKeys: string[] = []; // composite keys we successfully inserted
+  const radiusFilteredKeys: string[] = [];
+  const radiusFilteredKeySet = new Set<string>();
 
   for (const chunk of msg.chunks) {
+    if (
+      !chunkAllowedByCurrentRenderRadius(
+        ctx.state,
+        memberId,
+        msg.tier,
+        { ...chunk, level },
+      )
+    ) {
+      radiusFilteredKeys.push(chunk.key);
+      radiusFilteredKeySet.add(chunk.key);
+      continue;
+    }
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (atlas.slots.has(compositeKey)) continue;
 
@@ -73,7 +88,9 @@ export function handleVolumeChunkData(
       if (!evictKey) continue;
       const cam = rayHitForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
-      if (incomingDist >= farthestDist) continue;
+      // Equal-distance replacement matters for T/C scrubbing: the new
+      // timepoint often maps to the same spatial cell as the old one.
+      if (incomingDist > farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);
@@ -117,6 +134,7 @@ export function handleVolumeChunkData(
   // Report chunks from the batch that the pool did not keep
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
+    if (radiusFilteredKeySet.has(chunk.key)) continue;
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (!atlas.slots.has(compositeKey)) {
       skippedKeys.push(chunk.key); // report bare chunk key (not composite) for orchestrator
@@ -125,7 +143,7 @@ export function handleVolumeChunkData(
 
   // Report evicted/skipped chunks. Convert composite eviction keys back to (memberId, chunkKey)
   // so the orchestrator can clear the right delivery tracking.
-  if (evictedKeys.length > 0 || skippedKeys.length > 0) {
+  if (evictedKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0) {
     // Group evicted keys by memberId (each entity has its own delivery tracking)
     const evictedByMember = new Map<string, string[]>();
     for (const ck of evictedKeys) {
@@ -145,6 +163,14 @@ export function handleVolumeChunkData(
         ctx,
         memberId,
         skippedKeys.map(key => ({ key })),
+      );
+    }
+    if (radiusFilteredKeys.length > 0) {
+      postChunksRequeued(
+        ctx,
+        memberId,
+        radiusFilteredKeys.map(key => ({ key })),
+        "radius-filter",
       );
     }
     ctx.postWantedSet();

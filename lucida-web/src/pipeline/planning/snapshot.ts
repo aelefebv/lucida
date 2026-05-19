@@ -50,6 +50,7 @@ interface VisibleRegionJson {
   xy_bounds: [number, number, number, number];
   z_range: [number, number];
   effective_zoom: number;
+  radius_basis_vox?: number;
   sort_center: [number, number, number] | null;
   frustum_planes: [number, number, number, number][] | null;
 }
@@ -66,6 +67,52 @@ const DEFAULT_VISIBLE_REGION: VisibleRegion = {
   sortCenterVox: null,
   frustumPlanes: null,
 };
+
+function generatedLevelIndices(imgSpec: ImageSpec | undefined): Set<number> {
+  return new Set(
+    (imgSpec?.multiscale.generated_levels ?? []).map((level) => level.level_index),
+  );
+}
+
+function selectableDetailLevels(imgSpec: ImageSpec | undefined): number[] {
+  if (!imgSpec) return [0];
+  const generated = generatedLevelIndices(imgSpec);
+  const sourceLevels = imgSpec.multiscale.levels
+    .map((level, idx) => level.level_index ?? idx)
+    .filter((level) => !generated.has(level))
+    .sort((a, b) => a - b);
+  return sourceLevels.length > 0 ? sourceLevels : [0];
+}
+
+function resolveDetailLevel(
+  imgSpec: ImageSpec | undefined,
+  override: number | null | undefined,
+): number {
+  const selectable = selectableDetailLevels(imgSpec);
+  if (typeof override === "number" && selectable.includes(override)) {
+    return override;
+  }
+  if (typeof override === "number") {
+    const lowerOrEqual = selectable.filter((level) => level <= override).at(-1);
+    if (lowerOrEqual !== undefined) return lowerOrEqual;
+    return selectable[0] ?? 0;
+  }
+  return selectable.includes(0) ? 0 : selectable[0] ?? 0;
+}
+
+export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | null {
+  if (!imgSpec || imgSpec.multiscale.levels.length === 0) return null;
+  const levels = imgSpec.multiscale.levels;
+  const explicit = imgSpec.multiscale.coarse_level_index;
+  if (
+    typeof explicit === "number" &&
+    explicit >= 0 &&
+    explicit < levels.length
+  ) {
+    return explicit;
+  }
+  return null;
+}
 
 /**
  * Minimal `DatasetEntry` shape consumed by the snapshot builder.
@@ -202,6 +249,8 @@ export function buildPlanningSnapshot(
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
+    const detailLevel = resolveDetailLevel(imgSpec, dsSettings?.detail_level_override);
+    const coarseLevel = resolveCoarseLevel(imgSpec);
     const layoutPositionVox =
       positions[e.entity_id] ?? ([0, 0] as [number, number]);
     const base = {
@@ -212,6 +261,8 @@ export function buildPlanningSnapshot(
       projectedAreaPx2: e.projected_area_px2,
       centroidWorld: e.centroid_world,
       idealTargetLod: e.ideal_target_lod,
+      detailLevel,
+      coarseLevel,
       importance: e.importance,
       layoutPositionVox,
       levels,
@@ -244,6 +295,7 @@ export function buildPlanningSnapshot(
         xyBoundsVox: vr.xy_bounds,
         zRangeVox: vr.z_range,
         effectiveZoom: vr.effective_zoom,
+        ...(vr.radius_basis_vox !== undefined ? { radiusBasisVox: vr.radius_basis_vox } : {}),
         sortCenterVox: vr.sort_center,
         frustumPlanes: vr.frustum_planes,
       }

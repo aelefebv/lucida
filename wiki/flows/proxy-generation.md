@@ -1,9 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-19
 ---
 
 # Flow: Proxy Generation (S5)
+
+Status: Historical / legacy bridge. The default fallback model is chunk-only
+coarse/detail (ADR 0039-0041). Proxy generation remains documented here only
+for the opt-in compatibility path and for understanding older code.
 
 How a `WellProxy3D` or `FieldProxy3D` request travels from the renderer's "I want this proxy" through the server's bounded-concurrency generator, the per-dataset on-disk cache, and back as a binary frame the renderer can drop into a proxy atlas.
 

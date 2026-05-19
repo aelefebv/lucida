@@ -31,6 +31,8 @@ describe("ConfigTab — rendering", () => {
     expect(screen.getByText(/Importance weight/)).toBeTruthy();
     expect(screen.getByText(/Distance weight/)).toBeTruthy();
     expect(screen.getByText(/Well-proxy priority bump/)).toBeTruthy();
+    expect(screen.getByText(/Detail render radius/)).toBeTruthy();
+    expect(screen.getByText(/Coarse render radius/)).toBeTruthy();
 
     // The slider for FAR shows the default value.
     const farSlider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
@@ -68,6 +70,13 @@ describe("ConfigTab — slider + number input edits", () => {
     const slider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
     fireEvent.change(slider, { target: { value: "120" } });
     expect(configStore.get().farThresholdPx).toBe(120);
+  });
+
+  it("dragging the detail radius slider updates the configStore", () => {
+    render(<ConfigTab />);
+    const slider = screen.getByLabelText(/Detail render radius.*slider/i) as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: "0.75" } });
+    expect(configStore.get().detailRenderRadiusView).toBe(0.75);
   });
 
   it("typing into the number input updates the configStore", () => {

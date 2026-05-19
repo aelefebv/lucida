@@ -1,9 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-19
 ---
 
 # lucida-proxy
+
+Status: Historical / legacy bridge. The default fallback model is chunk-only
+coarse/detail using source or generated pyramid levels. This crate remains for
+the opt-in proxy compatibility path and for older design context.
 
 Pure-compute proxy generation. Given a `DatasetManifest` plus caller-supplied source-volume bytes, produces a `ProxyAsset` — a small low-resolution placeholder volume that stands in for either a single field's downsampled image (`FieldProxy3D`) or an aggregated well composed of many fields (`WellProxy3D`).
 

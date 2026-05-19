@@ -53,6 +53,7 @@ export interface TickContext {
   mode: "slice" | "volume";
   renderScale: number;
   cpuCache: CpuCache;
+  sendViewerInterest?: (interest: unknown) => void;
   /**
    * Local mirror of per-entity proxy availability. Populated by
    * `bridge` from `DatasetOpened.catalog` and any subsequent

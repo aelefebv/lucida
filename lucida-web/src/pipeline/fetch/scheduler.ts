@@ -213,26 +213,42 @@ export class Scheduler<Req extends SchedulableRequest> {
 
   /** Cancel in-flight + drop pending entries matching `predicate`. */
   cancelDataset(predicate: (entry: InFlightEntry<Req>) => boolean): void {
+    this.cancelWhere(predicate);
+  }
+
+  /**
+   * Cancel in-flight + drop pending entries matching `predicate`.
+   * Returns every scheduler key that was removed so callers can clear
+   * sidecar metadata keyed outside the scheduler.
+   */
+  cancelWhere(predicate: (entry: InFlightEntry<Req>) => boolean): string[] {
+    const cancelled: string[] = [];
     for (const [key, entry] of this.inFlight) {
       if (predicate(entry)) {
         entry.controller.abort();
         this.inFlightBytesCounter -= entry.estimatedBytes;
         this.inFlight.delete(key);
         this.enqueuedAt.delete(key);
+        cancelled.push(key);
       }
     }
     // Build a synthetic InFlightEntry so callers can share one predicate
     // across both in-flight and pending entries.
     this.pending = this.pending.filter((req) => {
+      const key = this.keyFn(req);
       const synthetic: InFlightEntry<Req> = {
         request: req,
         controller: undefined as unknown as AbortController,
         estimatedBytes: 0,
       };
       const drop = predicate(synthetic);
-      if (drop) this.enqueuedAt.delete(this.keyFn(req));
+      if (drop) {
+        this.enqueuedAt.delete(key);
+        cancelled.push(key);
+      }
       return !drop;
     });
+    return cancelled;
   }
 
   reset(): void {

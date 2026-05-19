@@ -6,17 +6,18 @@ import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
-// Uniform buffer layout (240 bytes):
+// Uniform buffer layout (256 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
 //   offset 64:  cameraPos       vec4f     (16B)
 //   offset 80:  volumeDims      vec4f     (16B)
 //   offset 96:  stepInfo        vec4f     (16B) — x=opacityScale, y=stepSize, z=renderMode
-//   offset 112: atlasSlotDims   vec4u     (16B)
-//   offset 128: viewProj        mat4x4f   (64B)
-//   offset 192: camForward      vec4f     (16B)
-//   offset 208: clipParams      vec4f     (16B)
-//   offset 224: lodParams       vec4u     (16B) — x=targetLodIdx
-const UNIFORM_SIZE = 240;
+//   offset 112: detailAtlasSlotDims vec4u (16B)
+//   offset 128: coarseAtlasSlotDims vec4u (16B)
+//   offset 144: viewProj        mat4x4f   (64B)
+//   offset 208: camForward      vec4f     (16B)
+//   offset 224: clipParams      vec4f     (16B)
+//   offset 240: lodParams       vec4u     (16B) — x=targetLodIdx
+const UNIFORM_SIZE = 256;
 
 /** 16-byte uniform with the entity index for the current draw. */
 const ENTITY_REF_SIZE = 16;
@@ -38,7 +39,8 @@ export class VolumeRenderer {
   private renderMode = 0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
-  private atlasSlotDims = [1, 1, 1];
+  private detailAtlasSlotDims: [number, number, number] = [0, 0, 0];
+  private coarseAtlasSlotDims: [number, number, number] = [0, 0, 0];
   private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private clipDistance = 0;
@@ -86,7 +88,6 @@ export class VolumeRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
         },
-        // Proxy textures (fieldProxy + wellProxy)
         {
           binding: 5,
           visibility: GPUShaderStage.FRAGMENT,
@@ -94,6 +95,17 @@ export class VolumeRenderer {
         },
         {
           binding: 6,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
+        },
+        // Proxy textures (fieldProxy + wellProxy)
+        {
+          binding: 7,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" },
+        },
+        {
+          binding: 8,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
         },
@@ -204,21 +216,46 @@ export class VolumeRenderer {
     volumeDims: [number, number, number],
     _lodMetas?: LodIndirectionMeta[],
   ) {
+    this.setTierAtlases(
+      texture,
+      indirectionBuf,
+      atlasSlotDims,
+      null,
+      null,
+      [0, 0, 0],
+      volumeDims,
+    );
+  }
+
+  setTierAtlases(
+    detailTexture: GPUTexture,
+    detailIndirectionBuf: GPUBuffer,
+    detailAtlasSlotDims: [number, number, number],
+    coarseTexture: GPUTexture | null,
+    coarseIndirectionBuf: GPUBuffer | null,
+    coarseAtlasSlotDims: [number, number, number],
+    volumeDims: [number, number, number],
+  ) {
     this.volumeDims = volumeDims;
-    this.atlasSlotDims = atlasSlotDims;
+    this.detailAtlasSlotDims = detailAtlasSlotDims;
+    this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0, 0];
     const dummyProxy = this.getDummyProxyTexture();
     const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
     const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
+    const coarseBindingTexture = coarseTexture ?? detailTexture;
+    const coarseBindingIndirection = coarseIndirectionBuf ?? detailIndirectionBuf;
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: texture.createView() },
-        { binding: 2, resource: { buffer: indirectionBuf } },
+        { binding: 1, resource: detailTexture.createView() },
+        { binding: 2, resource: { buffer: detailIndirectionBuf } },
         { binding: 3, resource: this.lutTexture.createView() },
         { binding: 4, resource: this.lutSampler },
-        { binding: 5, resource: fieldProxyView },
-        { binding: 6, resource: wellProxyView },
+        { binding: 5, resource: coarseBindingTexture.createView() },
+        { binding: 6, resource: { buffer: coarseBindingIndirection } },
+        { binding: 7, resource: fieldProxyView },
+        { binding: 8, resource: wellProxyView },
       ],
     });
   }
@@ -359,21 +396,22 @@ export class VolumeRenderer {
 
     // Atlas slot dims (u32 written via Uint32Array view)
     const u32View = new Uint32Array(uniformData.buffer);
-    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 28); // atlasSlotDims at 112B = 28 u32s
+    u32View.set([this.detailAtlasSlotDims[0], this.detailAtlasSlotDims[1], this.detailAtlasSlotDims[2], 0], 28);
+    u32View.set([this.coarseAtlasSlotDims[0], this.coarseAtlasSlotDims[1], this.coarseAtlasSlotDims[2], 0], 32);
 
-    // viewProj at 128B = 32 floats
-    uniformData.set(this.viewProj, 32);
+    // viewProj at 144B = 36 floats
+    uniformData.set(this.viewProj, 36);
 
-    // camForward at 192B = 48 floats
-    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 48);
+    // camForward at 208B = 52 floats
+    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 52);
 
-    // clipParams at 208B = 52 floats
-    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 52);
+    // clipParams at 224B = 56 floats
+    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 56);
 
     // lodParams.x = targetLodIdx (always 0 — descriptor lods are
     // already trimmed to start at finest LOD). lodCount comes from
     // descriptor.
-    u32View.set([0, 0, 0, 0], 56); // lodParams at 224B = 56 u32s
+    u32View.set([0, 0, 0, 0], 60); // lodParams at 240B = 60 u32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

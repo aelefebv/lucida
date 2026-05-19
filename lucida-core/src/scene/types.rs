@@ -96,6 +96,8 @@ pub struct DatasetDisplaySettings {
     pub channel_settings: Vec<ChannelSettings>,
     #[serde(default = "default_channel_blend_mode")]
     pub channel_blend_mode: BlendMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level_override: Option<u32>,
 }
 
 impl DatasetDisplaySettings {
@@ -125,6 +127,7 @@ impl Default for DatasetDisplaySettings {
             render_mode: RenderMode::Translucent,
             channel_settings: Vec::new(),
             channel_blend_mode: BlendMode::Additive,
+            detail_level_override: None,
         }
     }
 }

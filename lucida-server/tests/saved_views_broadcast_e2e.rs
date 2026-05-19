@@ -60,6 +60,7 @@ use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::bookmarks::handlers::BookmarksState;
 use lucida_server::bookmarks::routes::router as bookmarks_router;
 use lucida_server::bookmarks::{BookmarkStore, MemoryBookmarkStore};
+use lucida_server::generated::DerivedChunkCache;
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
 use lucida_store::cache::CachedStore;
@@ -174,6 +175,8 @@ fn make_binding(url: &str) -> ServerBinding {
                     grid_shape: [1, 1, 1, 1, 1],
                     scale: [1.0; 5],
                 }],
+                coarse_level_index: None,
+                generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
             },
@@ -204,12 +207,18 @@ fn make_binding(url: &str) -> ServerBinding {
         Arc::new(manifest),
         1,
     ));
+    let derived_chunks = Arc::new(DerivedChunkCache::default());
     ServerBinding {
         source_url: url.to_string(),
         store,
         resolver,
         cache: cached,
         dataset_opened,
+        derived_chunks: derived_chunks.clone(),
+        generated_service: Arc::new(lucida_server::generated::GeneratedCoarseService::inert(
+            derived_chunks,
+        )),
+        legacy_proxy_enabled: false,
         proxy_cache,
         proxy_generator,
     }

@@ -160,6 +160,44 @@ describe("ProxiedContentSource.fetch", () => {
     await expect(chunkPromise).rejects.toThrow(/Bridge disconnected/);
     await expect(proxyPromise).rejects.toThrow(/Bridge disconnected/);
   });
+
+  it("generated pending status rejects with FetchError kind pending", async () => {
+    const ctrl = new AbortController();
+    const promise = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "2/0/0/0/0/0" },
+      ctrl.signal,
+    );
+
+    source.handleChunkStatus("ds-1", "image-1", "2/0/0/0/0/0", "pending");
+
+    try {
+      await promise;
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FetchError);
+      expect((err as FetchError).kind).toBe("pending");
+    }
+  });
+
+  it("generated statuses map unavailable/permanent/transient distinctly", async () => {
+    const statuses = [
+      ["unavailable", "permanent"],
+      ["failed_permanent", "permanent"],
+      ["failed_transient", "transient"],
+    ] as const;
+
+    for (const [status, kind] of statuses) {
+      const ctrl = new AbortController();
+      const chunkKey = `2/0/0/0/0/${status.length}`;
+      const promise = source.fetch(
+        { datasetId: "ds-1", imageId: "image-1", chunkKey },
+        ctrl.signal,
+      );
+      source.handleChunkStatus("ds-1", "image-1", chunkKey, status, "test");
+
+      await expect(promise).rejects.toMatchObject({ kind });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

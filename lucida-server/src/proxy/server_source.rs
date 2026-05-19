@@ -215,7 +215,7 @@ fn pick_level(image: &ImageSpec, target_long_axis: u32) -> usize {
 /// Fetch every chunk in `image`'s `level` grid for `(t, c)`, decompress
 /// each, and assemble a dense `[Z, Y, X]` u16 buffer of the level's
 /// spatial shape. Returns `(data, dims, voxel_to_image)`.
-async fn fetch_dense_volume(
+pub(crate) async fn fetch_dense_volume(
     content: &DatasetManifest,
     image: &ImageSpec,
     t: u32,

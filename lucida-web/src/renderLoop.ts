@@ -111,8 +111,8 @@ export class RenderLoop {
 
     // When the worker reports its wanted-set, update the uploader and
     // schedule a tick so wanted chunks can be delivered from CpuCache.
-    this.client.onWantedSetDelta = (_epochs, missing) => {
-      this.uploader.handleWantedSetDelta(missing, this.session.cpuCache);
+    this.client.onWantedSetDelta = (datasetId, _epochs, missing) => {
+      this.uploader.handleWantedSetDelta(datasetId, missing, this.session.cpuCache);
       if (missing.length > 0) {
         this.setDirty("residency", "wanted_set_delta");
       }
@@ -149,10 +149,24 @@ export class RenderLoop {
   getCpuCache(): CpuCache {
     return this.session.cpuCache;
   }
+  workerChunkResidency(
+    datasetId: string,
+    imageId: string,
+    c: number,
+    chunkKey: string,
+  ): "resident" | "missing" | "unknown" {
+    return this.uploader.workerChunkResidency(datasetId, imageId, c, chunkKey);
+  }
 
   addDataset(id: string, manifest: DatasetManifest): void {
     this.datasets.set(id, { manifest });
     this.setDirty("interactive", "dataset_added");
+  }
+
+  updateDatasetManifest(id: string, manifest: DatasetManifest): void {
+    if (!this.datasets.has(id)) return;
+    this.datasets.set(id, { manifest });
+    this.setDirty("interactive", "dataset_manifest_updated");
   }
 
   removeDataset(id: string): void {
@@ -429,6 +443,7 @@ export class RenderLoop {
       mode: this.mode,
       renderScale: this._renderScale,
       cpuCache: this.session.cpuCache,
+      sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
       assetCatalog: this.session.assetCatalog!,
     };
   }

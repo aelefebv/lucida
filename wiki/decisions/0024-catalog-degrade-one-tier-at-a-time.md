@@ -1,9 +1,13 @@
 ---
 created: 2026-05-14
-modified: 2026-05-14
+modified: 2026-05-18
 ---
 
 # Catalog Degradation Steps One Tier at a Time
+
+Status: Superseded for the chunk-only coarse/detail path by
+[[decisions/0039-chunk-only-coarse-detail-residency]]. Historical proxy-path
+behavior remains documented here.
 
 ## Decision
 

@@ -34,7 +34,9 @@ export interface CpuCacheConfig {
  * the overview store (see ADR 0023); `detail` and `prefetch` live in
  * the main chunk store.
  */
-export type Lane = "minimap" | "detail" | "prefetch" | "overview";
+export type ResidencyTier = "detail" | "coarse";
+
+export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 
 /**
  * Eviction tier label stamped on each main-store entry. Drives the
@@ -68,6 +70,7 @@ export interface ReadyChunkDelivery {
   dataType: string;
   epochs: SceneEpochs;
   lane: Lane;
+  residencyTier?: ResidencyTier;
   /** Lower numbers are delivered first when present on CpuCache output. */
   priority?: number;
 }
@@ -101,6 +104,7 @@ export interface CacheEntry {
   data: ArrayBuffer;
   sizeBytes: number;
   lane: Lane;
+  residencyTier?: ResidencyTier;
   tier: EvictionTier;
   entityId: string;
   imageId: string;
@@ -134,6 +138,27 @@ export interface CacheEntry {
 export interface TierResidencyEntry {
   count: number;
   bytes: number;
+}
+
+export interface TierDemandTelemetry {
+  desired: {
+    detailChunks: number;
+    coarseChunks: number;
+  };
+  resident: {
+    detailChunks: number;
+    coarseChunks: number;
+    detailBytes: number;
+    coarseBytes: number;
+  };
+  detailCoverageRatio: number;
+  sparseDetail: boolean;
+}
+
+export interface TierQueueTelemetry {
+  pending: number;
+  inFlight: number;
+  inFlightBytes: number;
 }
 
 export interface TierCounters {
@@ -187,5 +212,17 @@ export interface CacheTelemetry {
     prefetch: TierResidencyEntry;
     overview: TierResidencyEntry;
     proxy: TierResidencyEntry;
+  };
+  /** Current-plan wanted vs CPU-resident chunk coverage by coarse/detail tier. */
+  tierDemand: TierDemandTelemetry;
+  /** Queue depth split by chunk residency tier. */
+  tierQueues: {
+    detail: TierQueueTelemetry;
+    coarse: TierQueueTelemetry;
+  };
+  /** Effective elastic budgets for the CPU chunk tier buckets. */
+  tierBudgets: {
+    detailBytes: number;
+    coarseBytes: number;
   };
 }

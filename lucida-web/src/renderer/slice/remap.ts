@@ -8,7 +8,8 @@
  * dropped).
  */
 
-import { remapSharedIndirection } from "../remap.ts";
+import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
+import type { VisibleRegion } from "../../pipeline/viewport.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 import { computeTargetChunkZ } from "./zRetarget.ts";
 
@@ -22,6 +23,11 @@ export function remapSliceIndirection(
   currentT: number,
   currentC: number,
   currentZ: number,
+  options: {
+    visibleRegion?: VisibleRegion;
+    renderRadiusView?: number;
+    entryByMember?: Map<string, RemapEntryInfo>;
+  } = {},
 ): void {
   remapSharedIndirection({
     slots: atlas.slots,
@@ -30,6 +36,9 @@ export function remapSliceIndirection(
     entityMetas: atlas.entityMetas,
     currentT,
     currentC,
+    visibleRegion: options.visibleRegion,
+    renderRadiusView: options.renderRadiusView,
+    entryByMember: options.entryByMember,
     targetChunkZForMember: (memberId) =>
       computeTargetChunkZ(atlas.entityZInfo.get(memberId), currentZ),
   });

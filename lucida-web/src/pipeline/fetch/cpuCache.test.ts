@@ -8,6 +8,7 @@ import { debugLog } from "../../debug/logging.ts";
 
 import { CpuCache, type CpuCacheConfig, type ReadyDelivery } from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
+import { FetchError } from "./retry.ts";
 import type {
   ContentSource,
   FetchRequest,
@@ -413,6 +414,33 @@ describe("CpuCache", () => {
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
+    it("delivers coarse chunks from the overview/coarse bucket when wanted", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const coarse = makeRequest({
+        entityId: "image-1",
+        imageId: "image-1",
+        level: 2,
+        chunkKey: "2/0/0/0/0/0",
+        lane: "coarse",
+        tier: "coarse",
+      });
+      cache.submit(makePlan([coarse], [makeActiveEntry("image-1", "image-1")]));
+      await flush();
+
+      expect(cache.telemetry().overviewBytes).toBe(64);
+      const deliveries = Array.from(cache.getDeliverable());
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({
+        kind: "chunk",
+        lane: "coarse",
+        residencyTier: "coarse",
+        chunkKey: "2/0/0/0/0/0",
+      });
+    });
+
     it("resolves skipped chunk feedback from imageId back to entityId", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
@@ -477,7 +505,7 @@ describe("CpuCache", () => {
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["proxy"]);
     });
 
-    it("does not deliver stale in-flight chunks omitted by a newer rebuild", async () => {
+    it("cancels stale in-flight chunks omitted by a newer rebuild", async () => {
       const { cache, source } = createTestCache();
       const staleLowRes = makeRequest({
         level: 2,
@@ -496,10 +524,11 @@ describe("CpuCache", () => {
       cache.onPlanRebuildStart();
       cache.submit(makePlan([currentHighRes]));
 
+      expect(source.pendingFetches.has("entity-1/image-1/2/0/0/0/0/0")).toBe(false);
       source.resolve("entity-1/image-1/2/0/0/0/0/0");
       await flush();
 
-      expect(cache.getCachedChunk("entity-1", staleLowRes.chunkKey)).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", staleLowRes.chunkKey)).toBeNull();
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
@@ -629,11 +658,11 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Fetch lifecycle decoupled from plan omission
+  // Fetch lifecycle preempted by plan omission
   // =========================================================================
 
-  describe("fetch lifecycle decoupled from plan omission", () => {
-    it("submit twice with overlapping requests does not cancel first batch's in-flight", async () => {
+  describe("fetch lifecycle preempted by plan omission", () => {
+    it("submit twice with overlapping requests cancels omitted in-flight work for active entities", async () => {
       const { cache, source } = createTestCache();
       const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
@@ -641,15 +670,15 @@ describe("CpuCache", () => {
       cache.submit(makePlan([reqA, reqB]));
       expect(source.pendingFetches.size).toBe(2);
 
-      // Submit again with only reqB — reqA must remain in-flight.
+      // Submit again with only reqB — reqA is stale and should free a slot.
       cache.submit(makePlan([reqB]));
 
-      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/1")).toBe(true);
-      expect(cache.telemetry().inFlightCount).toBe(2);
+      expect(cache.telemetry().inFlightCount).toBe(1);
     });
 
-    it("submit with smaller plan keeps prior in-flight alive", async () => {
+    it("submit with smaller plan drops prior in-flight for the same active entity", async () => {
       const { cache, source } = createTestCache();
       const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
@@ -657,23 +686,38 @@ describe("CpuCache", () => {
       cache.submit(makePlan([reqA, reqB]));
       expect(cache.telemetry().inFlightCount).toBe(2);
 
-      // Smaller plan that omits reqA. The in-flight fetch must persist.
+      // Smaller plan that omits reqA. The stale fetch is cancelled.
       cache.submit(makePlan([reqB]));
-      expect(cache.telemetry().inFlightCount).toBe(2);
-      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
     });
 
-    it("submit with empty plan does not cancel in-flight", async () => {
+    it("submit with empty plan cancels in-flight work for the active entity", async () => {
       const { cache, source } = createTestCache();
       const req = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
 
       cache.submit(makePlan([req]));
       expect(cache.telemetry().inFlightCount).toBe(1);
 
-      // Empty plan must not abort prior in-flight fetches.
+      // Empty plan means no chunks remain wanted for the active entity.
       cache.submit(makePlan([]));
-      expect(cache.telemetry().inFlightCount).toBe(1);
+      expect(cache.telemetry().inFlightCount).toBe(0);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
+    });
+
+    it("omitted stale work frees scheduler capacity for the newer request", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      const staleT = makeRequest({ t: 0, chunkKey: "0/0/0/0/0/0" });
+      const currentT = makeRequest({ t: 1, chunkKey: "0/1/0/0/0/0" });
+
+      cache.submit(makePlan([staleT]));
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+
+      cache.submit(makePlan([currentT]));
+
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-1/image-1/0/1/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
     });
 
     it("re-submitting an unchanged plan is a no-op for the fetch queue", () => {
@@ -1077,7 +1121,7 @@ describe("CpuCache", () => {
   describe("eviction tiers", () => {
     it("evicts prefetch before active-detail under budget pressure", async () => {
       const budget = 256;
-      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget, overviewBudgetBytes: 0 });
       source.autoResolveBytes = 100;
 
       // Insert a detail chunk and a prefetch chunk
@@ -1105,7 +1149,7 @@ describe("CpuCache", () => {
 
     it("evicts demoted before active-detail", async () => {
       const budget = 256;
-      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget, overviewBudgetBytes: 0 });
       source.autoResolveBytes = 100;
 
       // Insert chunk for entity-1
@@ -1260,6 +1304,34 @@ describe("CpuCache", () => {
       expect(source.fetchCount).toBe(1); // no retry
     });
 
+    it("treats generated pending as non-failure and re-requests on later submit", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ level: 2, lane: "coarse", tier: "coarse" });
+      cache.submit(makePlan([req]));
+
+      source.reject(
+        "entity-1/image-1/2/0/0/0/0/0",
+        new FetchError("generated pending", { kind: "pending" }),
+      );
+      await flush();
+
+      let tel = cache.telemetry();
+      expect(tel.failedChunks.permanent).toBe(0);
+      expect(tel.failedChunks.transient).toBe(0);
+      expect(tel.inFlightCount).toBe(0);
+      expect(source.fetchCount).toBe(1);
+
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(2);
+      source.resolve("entity-1/image-1/2/0/0/0/0/0", new ArrayBuffer(8));
+      await flush();
+
+      tel = cache.telemetry();
+      expect(tel.failedChunks.permanent).toBe(0);
+      const deliveries = Array.from(cache.getDeliverable()).filter(d => d.kind === "chunk");
+      expect(deliveries[0]).toMatchObject({ chunkKey: "2/0/0/0/0/0", lane: "coarse" });
+    });
+
     it("excludes failed chunks from future submits until contentEpoch changes", async () => {
       const { cache, source } = createTestCache();
       const req = makeRequest();
@@ -1336,9 +1408,66 @@ describe("CpuCache", () => {
   // =========================================================================
 
   describe("budget enforcement", () => {
+    it("detail borrows unused coarse budget while coarse is idle, then evicts back to its protected budget", async () => {
+      const { cache, source } = createTestCache({
+        mainBudgetBytes: 200,
+        overviewBudgetBytes: 100,
+      });
+      source.autoResolveBytes = 100;
+
+      const details = [0, 1, 2].map((x) =>
+        makeRequest({ x, lane: "detail", chunkKey: `0/0/0/0/0/${x}` }),
+      );
+      cache.submit(makePlan(details));
+      await flush();
+
+      let tel = cache.telemetry();
+      expect(tel.mainBytes).toBe(300);
+      expect(tel.tierBudgets.detailBytes).toBe(300);
+
+      const coarse = makeRequest({
+        lane: "coarse",
+        tier: "coarse",
+        level: 2,
+        chunkKey: "2/0/0/0/0/0",
+      });
+      cache.submit(makePlan([...details, coarse]));
+      await flush();
+
+      tel = cache.telemetry();
+      expect(tel.tierBudgets.detailBytes).toBe(200);
+      expect(tel.tierBudgets.coarseBytes).toBe(100);
+      expect(tel.mainBytes).toBeLessThanOrEqual(200);
+      expect(tel.overviewBytes).toBe(100);
+    });
+
+    it("coarse borrows unused detail budget while detail is idle", async () => {
+      const { cache, source } = createTestCache({
+        mainBudgetBytes: 200,
+        overviewBudgetBytes: 100,
+      });
+      source.autoResolveBytes = 100;
+
+      const coarse = [0, 1, 2].map((x) =>
+        makeRequest({
+          x,
+          lane: "coarse",
+          tier: "coarse",
+          level: 2,
+          chunkKey: `2/0/0/0/0/${x}`,
+        }),
+      );
+      cache.submit(makePlan(coarse));
+      await flush();
+
+      const tel = cache.telemetry();
+      expect(tel.overviewBytes).toBe(300);
+      expect(tel.tierBudgets.coarseBytes).toBe(300);
+    });
+
     it("evicts when exceeding detail budget", async () => {
       const budget = 200;
-      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget, overviewBudgetBytes: 0 });
       source.autoResolveBytes = 100;
 
       // Insert 3 chunks (300 bytes > 200 budget)
@@ -1430,7 +1559,7 @@ describe("CpuCache", () => {
 
     it("returns null after eviction", async () => {
       const budget = 200;
-      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget, overviewBudgetBytes: 0 });
       source.autoResolveBytes = 100;
 
       // Insert 2 chunks (200 bytes = budget, oldest first)
@@ -1718,7 +1847,7 @@ describe("CpuCache", () => {
       vi.mocked(debugLog).mockClear();
     });
 
-    it("cancelled-during-decode: chunk still lands in cache and remains deliverable", async () => {
+    it("cancelled-during-decode: stale chunk can cache demoted but is not deliverable", async () => {
       // Race: fetch resolves before cancelDataset; the queued decode
       // microtask runs after. Cache-insert is unconditional, so the
       // chunk can still land and be observed by the delivery surface.
@@ -1740,12 +1869,8 @@ describe("CpuCache", () => {
 
       expect(cache.getCachedChunk("entity-1", req.chunkKey)).not.toBeNull();
       const deliveries = consumeDeliverables(cache);
-      expect(deliveries).toHaveLength(1);
-      const delivery = deliveries[0];
-      expect(delivery.kind).toBe("chunk");
-      if (delivery.kind === "chunk") {
-        expect(delivery.chunkKey).toBe(req.chunkKey);
-      }
+      expect(deliveries).toHaveLength(0);
+      expect(cache.getCachedChunkTier("entity-1", req.chunkKey)).toBe("demoted-detail");
     });
 
     it("pendingOldestAgeMs: telemetry reports the age of the oldest pending enqueue", async () => {
@@ -1768,6 +1893,78 @@ describe("CpuCache", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("telemetry reports desired versus resident coarse/detail chunks", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      const detail = makeRequest({ lane: "detail", tier: "detail", chunkKey: "0/0/0/0/0/0" });
+      const coarse = makeRequest({
+        lane: "coarse",
+        tier: "coarse",
+        level: 2,
+        chunkKey: "2/0/0/0/0/0",
+      });
+
+      cache.submit(makePlan([detail, coarse]));
+      await flush();
+
+      const demand = cache.telemetry().tierDemand;
+      expect(demand.desired).toEqual({ detailChunks: 1, coarseChunks: 1 });
+      expect(demand.resident).toMatchObject({
+        detailChunks: 1,
+        coarseChunks: 1,
+        detailBytes: 64,
+        coarseBytes: 64,
+      });
+      expect(demand.detailCoverageRatio).toBe(1);
+      expect(demand.sparseDetail).toBe(false);
+    });
+
+    it("interleaves detail and coarse fetch starts when both tiers have demand", () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 2 });
+      cache.submit(makePlan([
+        makeRequest({ x: 0, lane: "detail", tier: "detail", chunkKey: "0/0/0/0/0/0" }),
+        makeRequest({ x: 1, lane: "detail", tier: "detail", chunkKey: "0/0/0/0/0/1" }),
+        makeRequest({ x: 0, lane: "coarse", tier: "coarse", level: 2, chunkKey: "2/0/0/0/0/0" }),
+        makeRequest({ x: 1, lane: "coarse", tier: "coarse", level: 2, chunkKey: "2/0/0/0/0/1" }),
+      ]));
+
+      expect(Array.from(source.pendingFetches.keys()).sort()).toEqual([
+        "entity-1/image-1/0/0/0/0/0/0",
+        "entity-1/image-1/2/0/0/0/0/0",
+      ]);
+      const queues = cache.telemetry().tierQueues;
+      expect(queues.detail.inFlight).toBe(1);
+      expect(queues.coarse.inFlight).toBe(1);
+      expect(queues.detail.pending).toBe(1);
+      expect(queues.coarse.pending).toBe(1);
+    });
+
+    it("logs sparse detail after sustained low coverage", () => {
+      vi.mocked(debugLog).mockClear();
+      const { cache } = createTestCache({ maxConcurrentFetches: 0 });
+      cache.submit(makePlan([
+        makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" }),
+        makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" }),
+        makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" }),
+        makeRequest({ x: 3, chunkKey: "0/0/0/0/0/3" }),
+      ]));
+
+      expect(cache.telemetry().tierDemand.sparseDetail).toBe(true);
+      cache.telemetry();
+      cache.telemetry();
+
+      expect(debugLog).toHaveBeenCalledWith(
+        "cache",
+        "cache.sparse_detail",
+        expect.objectContaining({
+          desiredDetailChunks: 4,
+          residentDetailChunks: 0,
+          pendingChunks: 4,
+          notice: expect.stringContaining("lower the detail LOD explicitly"),
+        }),
+      );
     });
 
     it("backpressure log fires at most once per second under sustained queue depth", () => {
@@ -1811,6 +2008,7 @@ describe("CpuCache", () => {
     it("eviction-burst log fires when ≥16 entries evict in one pass", async () => {
       const { cache, source } = createTestCache({
         mainBudgetBytes: 16,
+        overviewBudgetBytes: 0,
         maxConcurrentFetches: 100,
         maxBytesInFlight: 1024,
       });
@@ -1928,13 +2126,46 @@ describe("CpuCache", () => {
           overview: { count: expect.any(Number), bytes: expect.any(Number) },
           proxy: { count: expect.any(Number), bytes: expect.any(Number) },
         },
+        tierDemand: {
+          desired: {
+            detailChunks: expect.any(Number),
+            coarseChunks: expect.any(Number),
+          },
+          resident: {
+            detailChunks: expect.any(Number),
+            coarseChunks: expect.any(Number),
+            detailBytes: expect.any(Number),
+            coarseBytes: expect.any(Number),
+          },
+          detailCoverageRatio: expect.any(Number),
+          sparseDetail: expect.any(Boolean),
+        },
+        tierQueues: {
+          detail: {
+            pending: expect.any(Number),
+            inFlight: expect.any(Number),
+            inFlightBytes: expect.any(Number),
+          },
+          coarse: {
+            pending: expect.any(Number),
+            inFlight: expect.any(Number),
+            inFlightBytes: expect.any(Number),
+          },
+        },
+        tierBudgets: {
+          detailBytes: expect.any(Number),
+          coarseBytes: expect.any(Number),
+        },
       });
 
       // Load-bearing values from the known-input sequence.
       expect(tel.hitRate).toBe(0);
       expect(tel.tierResidency.activeDetail.count).toBe(1);
       expect(tel.tierResidency.activeDetail.bytes).toBe(64);
+      expect(tel.tierDemand.desired.detailChunks).toBe(1);
+      expect(tel.tierDemand.resident.detailChunks).toBe(1);
       expect(tel.mainBytes).toBe(64);
+      expect(tel.tierBudgets.detailBytes).toBeGreaterThanOrEqual(tel.mainBudget);
     });
   });
 });

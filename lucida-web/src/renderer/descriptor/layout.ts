@@ -34,7 +34,10 @@
  *   220: _pad_tail1          u32             (4)
  *   224: lods                LodInfo[8]      (512)
  *
- *   total = 736 bytes
+ *   736: detailSource        ChunkTierSource (64)
+ *   800: coarseSource        ChunkTierSource (64)
+ *
+ *   total = 864 bytes
  *
  * `LodInfo` (64B):
  *
@@ -53,11 +56,16 @@ export const DESCRIPTOR_MAX_LODS = 8;
 /** Per-LOD struct size in bytes (matches WGSL `LodInfo`). */
 export const DESCRIPTOR_LOD_INFO_SIZE = 64;
 
+/** Per explicit chunk-tier source struct size in bytes. */
+export const DESCRIPTOR_TIER_SOURCE_SIZE = 64;
+
 /** Byte offset of the `lods: array<LodInfo, 8>` field within the entry. */
 export const DESCRIPTOR_LODS_OFFSET = 224;
 
 export const DESCRIPTOR_ENTRY_SIZE =
-  DESCRIPTOR_LODS_OFFSET + DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE;
+  DESCRIPTOR_LODS_OFFSET +
+  DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE +
+  2 * DESCRIPTOR_TIER_SOURCE_SIZE;
 
 /** Shader-side sentinel for missing pool / slot. Matches `0xFFFFFFFFu`. */
 export const DESCRIPTOR_SENTINEL_INDEX = 0xffffffff;
@@ -87,6 +95,9 @@ export const OFFSET_PAD_TAIL1 = 220;             // u32 (pad)
  *  other `OFFSET_*` constants when reading layout side-by-side with the
  *  WGSL struct. */
 export const OFFSET_LODS = DESCRIPTOR_LODS_OFFSET;
+export const OFFSET_DETAIL_SOURCE =
+  DESCRIPTOR_LODS_OFFSET + DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE;
+export const OFFSET_COARSE_SOURCE = OFFSET_DETAIL_SOURCE + DESCRIPTOR_TIER_SOURCE_SIZE;
 
 // Per-LOD field offsets within a LodInfo entry (relative to LodInfo start)
 export const LOD_OFFSET_LEVEL = 0;                // u32
@@ -96,3 +107,12 @@ export const LOD_OFFSET_PAD1 = 12;                // u32 (pad)
 export const LOD_OFFSET_GRID_DIMS = 16;           // vec3<u32>+pad
 export const LOD_OFFSET_CHUNK_DIMS = 32;          // vec3<u32>+pad
 export const LOD_OFFSET_LEVEL_DIMS = 48;          // vec3<u32>+pad
+
+// Per explicit chunk-tier source field offsets within a ChunkTierSource entry.
+export const SOURCE_OFFSET_VALID = 0;              // u32
+export const SOURCE_OFFSET_LEVEL = 4;              // u32
+export const SOURCE_OFFSET_INDIRECTION_OFFSET = 8; // u32
+export const SOURCE_OFFSET_PAD0 = 12;              // u32 (pad)
+export const SOURCE_OFFSET_GRID_DIMS = 16;         // vec3<u32>+pad
+export const SOURCE_OFFSET_CHUNK_DIMS = 32;        // vec3<u32>+pad
+export const SOURCE_OFFSET_LEVEL_DIMS = 48;        // vec3<u32>+pad

@@ -455,6 +455,7 @@ function App() {
         onSetColormap={layers.handleLayerSetColormap}
         onSetBlendMode={layers.handleLayerSetBlendMode}
         onSetRenderMode={layers.handleLayerSetRenderMode}
+        onSetDetailLevelOverride={layers.handleLayerSetDetailLevelOverride}
         onAutoContrast={layers.handleLayerAutoContrast}
         onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
         onFullRangeToggle={layers.handleLayerFullRangeToggle}

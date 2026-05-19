@@ -16,6 +16,7 @@ import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint16Slice } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
+import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
 
 export function handleSliceChunkData(
@@ -71,6 +72,8 @@ export function handleSliceChunkData(
   const evictedKeys: string[] = [];
   const requeueKeys: string[] = [];
   const requeueKeySet = new Set<string>();
+  const radiusFilteredKeys: string[] = [];
+  const radiusFilteredKeySet = new Set<string>();
 
   for (const chunk of msg.chunks) {
     if (chunk.z !== targetChunkZ) {
@@ -78,6 +81,18 @@ export function handleSliceChunkData(
         requeueKeySet.add(chunk.key);
         requeueKeys.push(chunk.key);
       }
+      continue;
+    }
+    if (
+      !chunkAllowedByCurrentRenderRadius(
+        ctx.state,
+        memberId,
+        msg.tier,
+        { ...chunk, level },
+      )
+    ) {
+      radiusFilteredKeys.push(chunk.key);
+      radiusFilteredKeySet.add(chunk.key);
       continue;
     }
     const compositeKey = makeCompositeKey(memberId, chunk.key);
@@ -110,7 +125,9 @@ export function handleSliceChunkData(
       if (!evictKey) continue;
       const cam = cameraUVForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
-      if (incomingDist >= farthestDist) continue;
+      // Equal-distance replacement matters for T/C scrubbing: the new
+      // timepoint often maps to the same spatial cell as the old one.
+      if (incomingDist > farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);
@@ -146,13 +163,14 @@ export function handleSliceChunkData(
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
     if (requeueKeySet.has(chunk.key)) continue;
+    if (radiusFilteredKeySet.has(chunk.key)) continue;
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (!atlas.slots.has(compositeKey)) {
       skippedKeys.push(chunk.key);
     }
   }
 
-  if (evictedKeys.length > 0 || requeueKeys.length > 0 || skippedKeys.length > 0) {
+  if (evictedKeys.length > 0 || requeueKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0) {
     const evictedByMember = new Map<string, string[]>();
     for (const ck of evictedKeys) {
       const parsed = parseCompositeKey(ck);
@@ -170,6 +188,14 @@ export function handleSliceChunkData(
         memberId,
         requeueKeys.map(key => ({ key })),
         "wrong-slice",
+      );
+    }
+    if (radiusFilteredKeys.length > 0) {
+      postChunksRequeued(
+        ctx,
+        memberId,
+        radiusFilteredKeys.map(key => ({ key })),
+        "radius-filter",
       );
     }
     if (skippedKeys.length > 0) {

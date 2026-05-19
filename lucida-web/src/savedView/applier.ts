@@ -470,6 +470,11 @@ export class SavedViewApplier {
         blend_mode: s.channel_blend_mode,
       });
     }
+    this.applyViewport(scene, {
+      type: "set_dataset_detail_level_override",
+      dataset_id: id,
+      level: s.detail_level_override ?? null,
+    });
     if (s.channel_settings) {
       s.channel_settings.forEach((c, i) => this.applyChannelSettings(scene, id, i, c));
     }

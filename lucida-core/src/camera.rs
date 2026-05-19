@@ -19,6 +19,12 @@ pub struct VisibleRegion {
     pub z_range: Range<u32>,
     /// For LOD selection: screen pixels per world unit at the focal plane.
     pub effective_zoom: f64,
+    /// Radius basis in voxels for view-relative render-radius controls.
+    ///
+    /// Slice mode uses the visible view half-diagonal. 3D mode uses the
+    /// focal-plane viewport half-diagonal; the full frustum AABB can be
+    /// enormous because it includes the far plane.
+    pub radius_basis_vox: f64,
     /// Optional sort center in voxel coordinates [x, y, z] for center-out chunk loading.
     /// When `Some`, chunks are sorted by distance to this point instead of the grid midpoint.
     pub sort_center: Option<[f64; 3]>,
@@ -36,6 +42,22 @@ fn serialize_range_as_array<S: serde::Serializer>(
     tup.serialize_element(&range.start)?;
     tup.serialize_element(&range.end)?;
     tup.end()
+}
+
+fn visible_radius_basis_from_bounds(bounds: [f64; 4], z_range: &Range<u32>) -> f64 {
+    let half_x = ((bounds[2] - bounds[0]) / 2.0).max(0.0);
+    let half_y = ((bounds[3] - bounds[1]) / 2.0).max(0.0);
+    let half_z = ((z_range.end.saturating_sub(z_range.start)) as f64 / 2.0).max(0.0);
+    (half_x * half_x + half_y * half_y + half_z * half_z)
+        .sqrt()
+        .max(1.0)
+}
+
+fn focal_plane_radius_basis(viewport: [u32; 2], zoom_per_voxel: f64) -> f64 {
+    let zoom = zoom_per_voxel.abs().max(1e-12);
+    let half_x = viewport[0] as f64 / (2.0 * zoom);
+    let half_y = viewport[1] as f64 / (2.0 * zoom);
+    (half_x * half_x + half_y * half_y).sqrt().max(1.0)
 }
 
 /// Clip mode for near-clip distance: plane (perpendicular to view direction)
@@ -231,6 +253,7 @@ impl Camera {
                     xy_bounds: bounds,
                     z_range: view_z_range.clone(),
                     effective_zoom: v.zoom,
+                    radius_basis_vox: visible_radius_basis_from_bounds(bounds, view_z_range),
                     sort_center: None,
                     frustum_planes: None,
                 }
@@ -529,6 +552,7 @@ impl Arcball {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
         }
@@ -862,6 +886,7 @@ impl Fly {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
         }
@@ -1249,6 +1274,19 @@ mod tests {
         assert!(region.xy_bounds[2] >= region.xy_bounds[0]);
         assert!(region.xy_bounds[3] >= region.xy_bounds[1]);
         assert!(region.effective_zoom > 0.0);
+        assert!(region.radius_basis_vox > 0.0);
+    }
+
+    #[test]
+    fn frustum_radius_basis_uses_focal_plane_not_far_aabb() {
+        let cam = Arcball::new([800, 600]);
+        let region = cam.frustum_visible_region(None, Some(&[100, 200, 300]));
+        let half_x = (region.xy_bounds[2] - region.xy_bounds[0]) / 2.0;
+        let half_y = (region.xy_bounds[3] - region.xy_bounds[1]) / 2.0;
+        let half_z = (region.z_range.end - region.z_range.start) as f64 / 2.0;
+        let frustum_aabb_basis = (half_x * half_x + half_y * half_y + half_z * half_z).sqrt();
+
+        assert!(region.radius_basis_vox < frustum_aabb_basis);
     }
 
     #[test]
@@ -1256,6 +1294,9 @@ mod tests {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(10..20), None, None);
         assert_eq!(region.z_range, 10..20);
+        assert!(
+            (region.radius_basis_vox - (256.0_f64 * 256.0 * 2.0 + 5.0 * 5.0).sqrt()).abs() < 1e-10
+        );
     }
 
     #[test]

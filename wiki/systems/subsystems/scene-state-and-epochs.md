@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-19
 ---
 
 # Scene State and Epochs
@@ -15,9 +15,9 @@ How the WASM Scene exposes "what changed since you last asked." Owns one of the 
 - `layout` — spatial layout changed (`RegisterLayout`, `SetActiveLayout`)
 - `view` — camera moved (`Pan`, `Zoom`, `Rotate`, `Fly`, `SetCenter`, `SetViewport`, mode switch)
 - `selection` — selection-like state changed (`SetT`, `SetC`, `SetZ`, `SetMultiChannel`, channel visibility/settings, render mode, contrast, gamma)
-- `asset` — asset catalog changed (proxy availability published or revoked)
+- `asset` — runtime asset/generated availability changed (legacy proxy availability or generated coarse metadata/readiness)
 
-Every command that mutates the scene bumps exactly the right epoch(s). `Pan` bumps only `view`. `SetT` bumps only `selection`. `DatasetOpened` bumps both `content` and `layout`. `ApplyAssetCatalogDelta` bumps only `asset`. The bumps happen inside `Scene::apply`; nothing else writes them.
+Every command that mutates the scene bumps exactly the right epoch(s). `Pan` bumps only `view`. `SetT` bumps only `selection`. `DatasetOpened` bumps both `content` and `layout`. Legacy `ApplyAssetCatalogDelta` bumps only `asset`. Generated coarse availability is server runtime state and is tracked outside document commands on the server/client bridge. The bumps happen inside `Scene::apply`; nothing else writes them.
 
 ## Why typed epochs over a single dirty flag
 
@@ -43,7 +43,7 @@ Three layers of "what is the scene right now":
 
 - **Producer**: `Scene::apply` in [[lucida-core]]. Single mutator, single epoch bumper.
 - **Consumers**:
-  - [[chunk-pipeline|tick coordinator]] reads epochs every tick to short-circuit; passes them in chunk/proxy deliveries to [[gpu-residency|the worker]] for staleness checks.
+  - [[chunk-pipeline|tick coordinator]] reads epochs every tick to short-circuit; passes them in chunk deliveries to [[gpu-residency|the worker]] for staleness checks. Legacy proxy deliveries carry epochs too.
   - The web client passes `Scene::apply_command` for every incoming `CommandBroadcast` so all clients converge on the same document state and bump the same epochs.
   - [[lucida-server]] doesn't read epochs directly — it owns its own seq counter for command ordering. Epochs are a renderer concern.
 
@@ -52,7 +52,7 @@ Three layers of "what is the scene right now":
 - **Epochs only increase.** Fresh `Scene` starts at zero; `Scene::apply` is the only writer.
 - **`Scene::apply` is the conventional mutation path.** Helpers like `Scene::register_dataset`, `remove_dataset`, and `ensure_channel` are also `pub fn (&mut self)` and can be called directly from anywhere in the workspace — but doing so bypasses `apply`'s epoch bumps and derived-state rebuilds, which is invisible until the renderer goes stale. The discipline is enforced by code review, not the type system.
 - **Derived state is a function of document state + active layout.** Always reconstructable; never serialized. The CLI takes a snapshot and calls `Scene::rebuild_derived` to recompute it locally.
-- **The same command applied twice produces the same Scene** when the command is idempotent. `ApplyAssetCatalogDelta` is the explicit case — repeated application of the same delta merges idempotently. `DatasetOpened` is not idempotent (it would bump epochs twice), and the server's reuse path catches the duplicate before re-applying.
+- **The same command applied twice produces the same Scene** when the command is idempotent. Legacy `ApplyAssetCatalogDelta` is the explicit case — repeated application of the same delta merges idempotently. `DatasetOpened` is not idempotent (it would bump epochs twice), and the server's reuse path catches the duplicate before re-applying.
 
 ## Gotchas
 

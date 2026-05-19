@@ -6,6 +6,7 @@
 
 import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
+import { chunkWithinRenderRadius } from "../renderRadius.ts";
 import { chunkWorldDims, iterateChunks, iterateChunksAtLodRange } from "./chunks.ts";
 import type { PlanningConfig } from "./config.ts";
 import type {
@@ -70,6 +71,7 @@ export function emitMinimapLane(
         y: coord.y,
         x: coord.x,
         lane: "minimap",
+        tier: "coarse",
         priority: config.minimapLaneOffset,
         chunkKey: coord.key,
       });
@@ -123,17 +125,30 @@ export function emitDetailLane(
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
-    const chunks = iterateChunks(
-      entity,
-      entry,
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-      datasetId,
-    );
+    const chunks = entry.detailLevel !== undefined
+      ? iterateChunksAtLodRange(
+          entity,
+          [entry.detailLevel, entry.detailLevel],
+          snapshot.visibleRegion,
+          snapshot.selection,
+          stats,
+          datasetId,
+        )
+      : iterateChunks(
+          entity,
+          entry,
+          snapshot.visibleRegion,
+          snapshot.selection,
+          stats,
+          datasetId,
+        );
     for (const req of chunks) {
+      if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
+        continue;
+      }
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "detail";
+      req.tier = "detail";
       req.priority = computePriority(
         config.detailLaneOffset,
         entity.importance,
@@ -216,17 +231,30 @@ export function emitPrefetchLane(
         t: nextT,
       };
 
-      const chunks = iterateChunks(
-        entity,
-        entry,
-        snapshot.visibleRegion,
-        prefetchSelection,
-        stats,
-        datasetId,
-      );
+      const chunks = entry.detailLevel !== undefined
+        ? iterateChunksAtLodRange(
+            entity,
+            [entry.detailLevel, entry.detailLevel],
+            snapshot.visibleRegion,
+            prefetchSelection,
+            stats,
+            datasetId,
+          )
+        : iterateChunks(
+            entity,
+            entry,
+            snapshot.visibleRegion,
+            prefetchSelection,
+            stats,
+            datasetId,
+          );
       for (const req of chunks) {
+        if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
+          continue;
+        }
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
         req.lane = "prefetch";
+        req.tier = "detail";
         req.priority = computePriority(
           config.prefetchLaneOffset + dt * 100,
           entity.importance,
@@ -235,6 +263,54 @@ export function emitPrefetchLane(
         );
         allRequests.push(req);
       }
+    }
+  }
+}
+
+/**
+ * Coarse lane — source-backed chunk-only fallback. Emits exactly the
+ * coarse level selected on each field entry, independent of the detail
+ * lane. Intermediate pyramid levels are intentionally skipped.
+ */
+export function emitCoarseLane(
+  activeSet: ActiveSetEntry[],
+  snapshot: PlanningSnapshot,
+  entityById: Map<string, EntitySnapshot>,
+  stats: PlanStats,
+  allRequests: ChunkRequest[],
+  config: PlanningConfig,
+): void {
+  const datasetId = snapshot.datasetId;
+  for (const entry of activeSet) {
+    if (entry.kind !== "field") continue;
+    if (entry.coarseLevel === undefined || entry.coarseLevel === null) continue;
+    if (entry.coarseLevel === entry.detailLevel) continue;
+
+    const entity = entityById.get(entry.entityId);
+    if (entity === undefined) continue;
+
+    const chunks = iterateChunksAtLodRange(
+      entity,
+      [entry.coarseLevel, entry.coarseLevel],
+      snapshot.visibleRegion,
+      snapshot.selection,
+      stats,
+      datasetId,
+    );
+    for (const req of chunks) {
+      if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.coarseRenderRadiusView)) {
+        continue;
+      }
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      req.lane = "coarse";
+      req.tier = "coarse";
+      req.priority = computePriority(
+        config.coarseLaneOffset,
+        entity.importance,
+        dist,
+        config,
+      );
+      allRequests.push(req);
     }
   }
 }
@@ -271,6 +347,7 @@ export function emitOverviewLane(
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "overview";
+      req.tier = "coarse";
       req.priority = computePriority(
         config.overviewLaneOffset,
         entity.importance,
@@ -327,4 +404,38 @@ function chunkDistanceFromCenter(
   const dy = (req.y + 0.5) * cwY - centerY;
   const dz = (req.z + 0.5) * cwZ - centerZ;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function requestWithinRenderRadius(
+  req: ChunkRequest,
+  region: VisibleRegion,
+  entity: EntitySnapshot,
+  radiusView: number,
+): boolean {
+  const level0 = entity.levels[0];
+  const level = entity.levels[req.level];
+  if (!level0 || !level) return true;
+  return chunkWithinRenderRadius({
+    region,
+    radiusView,
+    layoutPositionVox: entity.layoutPositionVox,
+    geometry: {
+      fullDims: [
+        level0.shape[Axis.X],
+        level0.shape[Axis.Y],
+        level0.shape[Axis.Z],
+      ],
+      levelDims: [
+        level.shape[Axis.X],
+        level.shape[Axis.Y],
+        level.shape[Axis.Z],
+      ],
+      chunkDims: [
+        level.chunk_shape[Axis.X],
+        level.chunk_shape[Axis.Y],
+        level.chunk_shape[Axis.Z],
+      ],
+    },
+    chunk: { x: req.x, y: req.y, z: req.z },
+  });
 }

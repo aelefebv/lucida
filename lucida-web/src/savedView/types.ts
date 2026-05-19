@@ -88,6 +88,7 @@ export interface DatasetDisplaySettings {
   render_mode?: RenderMode;
   channel_settings?: ChannelSettings[];
   channel_blend_mode?: BlendMode;
+  detail_level_override?: number | null;
 }
 
 export type DatasetId = string;

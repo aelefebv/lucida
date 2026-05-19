@@ -8,12 +8,13 @@ struct Uniforms {
   // stepInfo.y=stepSize, stepInfo.z=renderMode (0=translucent,1=MIP),
   // stepInfo.w=reserved.
   stepInfo: vec4f,            // offset 96  (16 bytes)
-  atlasSlotDims: vec4u,       // offset 112 (16 bytes) — xyz=slots per axis
-  viewProj: mat4x4f,          // offset 128 (64 bytes)
-  camForward: vec4f,          // offset 192 (16 bytes) — xyz=camera forward dir
-  clipParams: vec4f,          // offset 208 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
-  lodParams: vec4u,           // offset 224 (16 bytes) — x=targetLodIdx
-  // total = 240 bytes
+  detailAtlasSlotDims: vec4u, // offset 112 (16 bytes) — xyz=slots per axis
+  coarseAtlasSlotDims: vec4u, // offset 128 (16 bytes) — xyz=slots per axis
+  viewProj: mat4x4f,          // offset 144 (64 bytes)
+  camForward: vec4f,          // offset 208 (16 bytes) — xyz=camera forward dir
+  clipParams: vec4f,          // offset 224 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
+  lodParams: vec4u,           // offset 240 (16 bytes) — x=targetLodIdx
+  // total = 256 bytes
 };
 
 struct EntityRef { index: vec4u }; // x = entity index
@@ -30,6 +31,19 @@ struct LodInfo {
   _pad3: u32,
   levelDims: vec3<u32>,
   _pad4: u32,
+};
+
+struct ChunkTierSource {
+  valid: u32,
+  level: u32,
+  indirectionOffset: u32,
+  _pad0: u32,
+  gridDims: vec3<u32>,
+  _pad1: u32,
+  chunkDims: vec3<u32>,
+  _pad2: u32,
+  levelDims: vec3<u32>,
+  _pad3: u32,
 };
 
 struct EntityDescriptor {
@@ -56,19 +70,23 @@ struct EntityDescriptor {
   _pad_tail0: u32,
   _pad_tail1: u32,
   lods: array<LodInfo, 8>,
+  detailSource: ChunkTierSource,
+  coarseSource: ChunkTierSource,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var volumeTex: texture_3d<u32>;
-@group(0) @binding(2) var<storage, read> indirection: array<u32>;
+@group(0) @binding(1) var detailTex: texture_3d<u32>;
+@group(0) @binding(2) var<storage, read> detailIndirection: array<u32>;
 @group(0) @binding(3) var lutTex: texture_2d<f32>;
 @group(0) @binding(4) var lutSampler: sampler;
+@group(0) @binding(5) var coarseTex: texture_3d<u32>;
+@group(0) @binding(6) var<storage, read> coarseIndirection: array<u32>;
 // Proxy textures. Same r16uint format as the chunk atlas. Slots occupy
 // a 3-D grid in the texture; the grid shape is derived from
 // textureDimensions(tex) / slot dims, matching `proxySlotOrigin()` in
 // proxyAtlas.ts.
-@group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
-@group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
+@group(0) @binding(7) var fieldProxyTex: texture_3d<u32>;
+@group(0) @binding(8) var wellProxyTex: texture_3d<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -140,12 +158,111 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
   return textureLoad(tex, coord, 0).r;
 }
 
-// Unified semantic fallback chain (DOMAINS §6.5):
-//   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
+fn sampleDetailVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
+  if (
+    source.valid == 0u ||
+    u.detailAtlasSlotDims.x == 0u ||
+    u.detailAtlasSlotDims.y == 0u ||
+    u.detailAtlasSlotDims.z == 0u
+  ) {
+    return 0xFFFFFFFFu;
+  }
+
+  let levelDims = vec3f(f32(source.levelDims.x), f32(source.levelDims.y), f32(source.levelDims.z));
+  let chunkDims = source.chunkDims;
+  let gridDims = source.gridDims;
+
+  let texCoord = vec3i(
+    clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
+    clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
+    clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
+  );
+  let chunkCoord = vec3u(
+    u32(texCoord.x) / chunkDims.x,
+    u32(texCoord.y) / chunkDims.y,
+    u32(texCoord.z) / chunkDims.z,
+  );
+  let gridIdx = source.indirectionOffset + chunkCoord.z * gridDims.y * gridDims.x
+              + chunkCoord.y * gridDims.x
+              + chunkCoord.x;
+  let slot = detailIndirection[gridIdx];
+  if (slot == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+
+  let slotCoord = vec3u(
+    slot % u.detailAtlasSlotDims.x,
+    (slot / u.detailAtlasSlotDims.x) % u.detailAtlasSlotDims.y,
+    slot / (u.detailAtlasSlotDims.x * u.detailAtlasSlotDims.y),
+  );
+  let localTexel = vec3u(
+    u32(texCoord.x) % chunkDims.x,
+    u32(texCoord.y) % chunkDims.y,
+    u32(texCoord.z) % chunkDims.z,
+  );
+  let atlasCoord = vec3i(
+    i32(slotCoord.x * chunkDims.x + localTexel.x),
+    i32(slotCoord.y * chunkDims.y + localTexel.y),
+    i32(slotCoord.z * chunkDims.z + localTexel.z),
+  );
+  return textureLoad(detailTex, atlasCoord, 0).r;
+}
+
+fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
+  if (
+    source.valid == 0u ||
+    u.coarseAtlasSlotDims.x == 0u ||
+    u.coarseAtlasSlotDims.y == 0u ||
+    u.coarseAtlasSlotDims.z == 0u
+  ) {
+    return 0xFFFFFFFFu;
+  }
+
+  let levelDims = vec3f(f32(source.levelDims.x), f32(source.levelDims.y), f32(source.levelDims.z));
+  let chunkDims = source.chunkDims;
+  let gridDims = source.gridDims;
+
+  let texCoord = vec3i(
+    clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
+    clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
+    clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
+  );
+  let chunkCoord = vec3u(
+    u32(texCoord.x) / chunkDims.x,
+    u32(texCoord.y) / chunkDims.y,
+    u32(texCoord.z) / chunkDims.z,
+  );
+  let gridIdx = source.indirectionOffset + chunkCoord.z * gridDims.y * gridDims.x
+              + chunkCoord.y * gridDims.x
+              + chunkCoord.x;
+  let slot = coarseIndirection[gridIdx];
+  if (slot == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+
+  let slotCoord = vec3u(
+    slot % u.coarseAtlasSlotDims.x,
+    (slot / u.coarseAtlasSlotDims.x) % u.coarseAtlasSlotDims.y,
+    slot / (u.coarseAtlasSlotDims.x * u.coarseAtlasSlotDims.y),
+  );
+  let localTexel = vec3u(
+    u32(texCoord.x) % chunkDims.x,
+    u32(texCoord.y) % chunkDims.y,
+    u32(texCoord.z) % chunkDims.z,
+  );
+  let atlasCoord = vec3i(
+    i32(slotCoord.x * chunkDims.x + localTexel.x),
+    i32(slotCoord.y * chunkDims.y + localTexel.y),
+    i32(slotCoord.z * chunkDims.z + localTexel.z),
+  );
+  return textureLoad(coarseTex, atlasCoord, 0).r;
+}
+
+// Source-backed fallback chain:
+//   selected detail → configured coarse → empty
 //
-// pos is in [0,1]³ local space. Sentinels make unavailable steps no-ops:
-// when `lodCount == 0` the detail loop is a no-op; when a proxy slot is
-// `0xFFFFFFFFu` the proxy step returns the sentinel and we move on.
+// Legacy fallback chain when no tier sources are present:
+//   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
 //
 // Well-proxy sample uses the field's local `pos` (no field-to-well
 // transform yet). The well-proxy fallback in field entries displays
@@ -156,6 +273,15 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
 // and the well-proxy step samples the well's own proxy at well-local
 // coords.
 fn sampleWithFallback(pos: vec3f) -> u32 {
+  let hasTierSources = activeEntity.detailSource.valid != 0u || activeEntity.coarseSource.valid != 0u;
+  if (hasTierSources) {
+    let detail = sampleDetailVolume(activeEntity.detailSource, pos);
+    if (detail != 0xFFFFFFFFu) {
+      return detail;
+    }
+    return sampleCoarseVolume(activeEntity.coarseSource, pos);
+  }
+
   let numLods = activeEntity.lodCount;
   let targetIdx = u.lodParams.x;
 
@@ -181,13 +307,13 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
     let gridIdx = offset + chunkCoord.z * gridDims.y * gridDims.x
                 + chunkCoord.y * gridDims.x
                 + chunkCoord.x;
-    let slot = indirection[gridIdx];
+    let slot = detailIndirection[gridIdx];
 
     if (slot != 0xFFFFFFFFu) {
       let slotCoord = vec3u(
-        slot % u.atlasSlotDims.x,
-        (slot / u.atlasSlotDims.x) % u.atlasSlotDims.y,
-        slot / (u.atlasSlotDims.x * u.atlasSlotDims.y),
+        slot % u.detailAtlasSlotDims.x,
+        (slot / u.detailAtlasSlotDims.x) % u.detailAtlasSlotDims.y,
+        slot / (u.detailAtlasSlotDims.x * u.detailAtlasSlotDims.y),
       );
       let localTexel = vec3u(
         u32(texCoord.x) % chunkDims.x,
@@ -199,7 +325,7 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
         i32(slotCoord.y * chunkDims.y + localTexel.y),
         i32(slotCoord.z * chunkDims.z + localTexel.z),
       );
-      return textureLoad(volumeTex, atlasCoord, 0).r;
+      return textureLoad(detailTex, atlasCoord, 0).r;
     }
   }
 

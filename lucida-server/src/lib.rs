@@ -10,6 +10,7 @@ pub mod binding;
 pub mod bookmarks;
 pub mod browse;
 pub mod decode;
+pub mod generated;
 pub mod handler;
 pub mod health;
 pub mod proxy;
@@ -47,6 +48,8 @@ pub enum BroadcastItem {
     FollowChanged { json: String },
     /// Dataset presence update from a client.
     DatasetPresenceUpdate { sender: ClientId, json: String },
+    /// Server-authored generated level metadata/readiness update.
+    GeneratedAvailabilityUpdate { json: String },
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).
@@ -81,11 +84,23 @@ pub struct ProxyConfig {
     /// Root directory under which per-dataset proxy caches are written.
     /// `{root}/{url_hash hex}/...` — see [`proxy::ProxyCache`].
     pub cache_dir: PathBuf,
+    /// Temporary bridge flag for the retired proxy fallback path. The
+    /// default server path leaves this false so DatasetOpened carries no
+    /// proxy catalog and asset requests are ignored.
+    pub legacy_proxy_enabled: bool,
     /// Maximum concurrent proxy generations across all datasets *per
     /// `ProxyGenerator` instance*. Each opened dataset gets its own
     /// generator with this many permits; total system concurrency scales
     /// with the number of opened datasets, which is acceptable for now.
     pub concurrency: usize,
+    pub generated_enabled: bool,
+    pub generated_cache_dir: PathBuf,
+    pub generated_concurrency: usize,
+    pub generated_background_chunk_limit: usize,
+    pub generated_target_long_axis: u64,
+    pub generated_chunk_long_axis: u64,
+    pub generated_max_chunk_bytes: u64,
+    pub generated_disk_budget_bytes: Option<u64>,
 }
 
 impl ProxyConfig {
@@ -103,10 +118,24 @@ impl ProxyConfig {
         (num_cpus::get() / 2).max(1)
     }
 
+    pub fn default_generated_cache_dir() -> PathBuf {
+        Self::default_cache_dir().join("generated-coarse")
+    }
+
     pub fn defaults() -> Self {
+        let cache_dir = Self::default_cache_dir();
         Self {
-            cache_dir: Self::default_cache_dir(),
+            generated_cache_dir: cache_dir.join("generated-coarse"),
+            cache_dir,
+            legacy_proxy_enabled: false,
             concurrency: Self::default_concurrency(),
+            generated_enabled: true,
+            generated_concurrency: 1,
+            generated_background_chunk_limit: 32,
+            generated_target_long_axis: 512,
+            generated_chunk_long_axis: 256,
+            generated_max_chunk_bytes: 2 * 1024 * 1024,
+            generated_disk_budget_bytes: None,
         }
     }
 }

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-19
 ---
 
 # lucida-web
@@ -16,8 +16,8 @@ The web client doesn't reimplement the Scene model. It doesn't decide what's vis
 Practically, the web client owns:
 
 - **Networking** — WebSocket bridge, presence throttling, binary chunk routing
-- **Fetch** — content source, decode pool, CPU cache
-- **GPU** — atlases, indirection, descriptor buffers, shaders, render loop
+- **Fetch** — content source, generated availability catalog, decode pool, CPU cache
+- **GPU** — tiered atlases, indirection, descriptor buffers, shaders, render loop
 - **DOM** — React components, layer panel, debug overlay, layout switcher
 
 WASM owns:
@@ -30,9 +30,10 @@ WASM owns:
 ## Subsystem map
 
 - [[chunk-pipeline]] — end-to-end overview pointing into the deep dive
-- [[planning-domain]] — wanted-set computation, LOD promotion, hysteresis, lane-based priorities
+- [[planning-domain]] — wanted-set computation, detail/coarse tier selection, lane-based priorities
 - [[cpu-cache]] — fetch scheduling, decode pool, tiered LRU, drain to GPU
-- [[gpu-residency]] — atlas pools, indirection buffers, descriptor buffer, semantic fallback chain
+- [[generated-coarse]] — server-generated coarse metadata/readiness consumed by planning and fetch
+- [[gpu-residency]] — tiered atlas pools, indirection buffers, descriptor buffer, semantic fallback chain
 - [[worker-protocol]] — main-thread ↔ render-worker message contract
 - [[scene-state-and-epochs]] — how WASM state is pulled into JS
 - [[presence-and-follow-mode]] — peer-to-peer presence, transitive follow chains

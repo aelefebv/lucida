@@ -7,6 +7,7 @@ import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
   buildPlanningSnapshot,
+  resolveCoarseLevel,
   type BuildPlanningSnapshotArgs,
   type SnapshotDatasetEntry,
 } from "./snapshot.ts";
@@ -37,6 +38,7 @@ interface VisibleRegionJson {
   xy_bounds: [number, number, number, number];
   z_range: [number, number];
   effective_zoom: number;
+  radius_basis_vox?: number;
   sort_center: [number, number, number] | null;
   frustum_planes: [number, number, number, number][] | null;
 }
@@ -117,11 +119,11 @@ function makeLevels(): LevelGeometry[] {
   ];
 }
 
-function makeImageSpec(imageId: string): ImageSpec {
+function makeImageSpec(imageId: string, overrides?: Partial<ImageSpec["multiscale"]>): ImageSpec {
   return {
     image_id: imageId,
     owner: imageId,
-    multiscale: { axes: [], data_type: "uint16", levels: makeLevels() },
+    multiscale: { axes: [], data_type: "uint16", levels: makeLevels(), ...overrides },
   };
 }
 
@@ -351,6 +353,7 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
         xy_bounds: [10, 20, 30, 40],
         z_range: [5, 6],
         effective_zoom: 2.5,
+        radius_basis_vox: 12.5,
         sort_center: [1, 2, 3],
         frustum_planes: [
           [1, 0, 0, 0],
@@ -363,6 +366,7 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
       xyBoundsVox: [10, 20, 30, 40],
       zRangeVox: [5, 6],
       effectiveZoom: 2.5,
+      radiusBasisVox: 12.5,
       sortCenterVox: [1, 2, 3],
       frustumPlanes: [
         [1, 0, 0, 0],
@@ -437,6 +441,89 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
   it("returns the same visibleRegion object embedded in the snapshot", () => {
     const built = buildPlanningSnapshot(makeArgs());
     expect(built!.snapshot.visibleRegion).toBe(built!.visibleRegion);
+  });
+});
+
+describe("buildPlanningSnapshot — coarse/detail metadata", () => {
+  it("defaults detail to source level 0 when no override is present", () => {
+    const built = buildPlanningSnapshot(makeArgs());
+    expect(built!.entities[0].detailLevel).toBe(0);
+  });
+
+  it("clamps stale detail overrides to selectable source levels", () => {
+    const levels = [
+      ...makeLevels(),
+      {
+        level_index: 2,
+        shape: [1, 1, 1, 256, 256],
+        chunk_shape: [1, 1, 1, 256, 256],
+        grid_shape: [1, 1, 1, 1, 1],
+        scale: [1, 1, 1, 4, 4],
+      },
+    ];
+    const dataset = makeDataset({
+      images: [makeImageSpec("img-0", { levels })],
+    });
+    const built = buildPlanningSnapshot(makeArgs({
+      dataset,
+      dsSettings: makeDsSettings({ detail_level_override: 99 }),
+    }));
+    expect(built!.entities[0].detailLevel).toBe(2);
+  });
+
+  it("excludes generated levels from detail selection and clamps below them", () => {
+    const levels = [
+      ...makeLevels(),
+      {
+        level_index: 2,
+        shape: [1, 1, 1, 256, 256],
+        chunk_shape: [1, 1, 1, 256, 256],
+        grid_shape: [1, 1, 1, 1, 1],
+        scale: [1, 1, 1, 4, 4],
+      },
+    ];
+    const dataset = makeDataset({
+      images: [
+        makeImageSpec("img-0", {
+          levels,
+          generated_levels: [{ level_index: 2, role: "coarse" }],
+        }),
+      ],
+    });
+    const built = buildPlanningSnapshot(makeArgs({
+      dataset,
+      dsSettings: makeDsSettings({ detail_level_override: 2 }),
+    }));
+    expect(built!.entities[0].detailLevel).toBe(1);
+  });
+
+  it("uses an explicit valid coarse pointer", () => {
+    const dataset = makeDataset({
+      images: [makeImageSpec("img-0", { coarse_level_index: 1 })],
+    });
+    const built = buildPlanningSnapshot(makeArgs({ dataset }));
+    expect(built!.entities[0].coarseLevel).toBe(1);
+  });
+
+  it("does not guess a coarse level when metadata omits the pointer", () => {
+    const built = buildPlanningSnapshot(makeArgs());
+    expect(built!.entities[0].coarseLevel).toBeNull();
+  });
+
+  it("does not use an invalid coarse pointer", () => {
+    const img = makeImageSpec("img-0", { coarse_level_index: 99 });
+    expect(resolveCoarseLevel(img)).toBeNull();
+  });
+
+  it("treats absent generated metadata as an empty generated-level set", () => {
+    const dataset = makeDataset({
+      images: [makeImageSpec("img-0", { generated_levels: undefined })],
+    });
+    const built = buildPlanningSnapshot(makeArgs({
+      dataset,
+      dsSettings: makeDsSettings({ detail_level_override: 1 }),
+    }));
+    expect(built!.entities[0].detailLevel).toBe(1);
   });
 });
 

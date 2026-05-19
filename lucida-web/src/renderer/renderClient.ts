@@ -62,7 +62,7 @@ export class RenderClient implements UploadClient {
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
-      this.onWantedSetDelta(msg.epochs, msg.missing);
+      this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }
@@ -85,6 +85,7 @@ export class RenderClient implements UploadClient {
     chunkY: number,
     chunkZ: number,
     epochs: SceneEpochs,
+    tier?: "detail" | "coarse",
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
@@ -102,6 +103,7 @@ export class RenderClient implements UploadClient {
       {
         type: "volumeChunkData",
         epochs,
+        tier,
         memberId,
         chunks: workerChunks,
         level, t, c,
@@ -128,6 +130,7 @@ export class RenderClient implements UploadClient {
     levelDepth: number,
     fullResZ: number,
     epochs: SceneEpochs,
+    tier?: "detail" | "coarse",
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
@@ -141,6 +144,7 @@ export class RenderClient implements UploadClient {
       {
         type: "sliceChunkData",
         epochs,
+        tier,
         memberId,
         chunks: workerChunks,
         level, z, t, c,

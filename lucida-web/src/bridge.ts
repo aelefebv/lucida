@@ -1,4 +1,8 @@
 import { isDebugEnabled } from "./debug/logging.ts";
+import type {
+  GeneratedChunkStatus,
+  WireGeneratedAvailabilityByDataset,
+} from "./pipeline/generatedAvailability.ts";
 
 export type ClientId = number;
 
@@ -25,7 +29,13 @@ export interface PresenceState {
 }
 
 export interface BridgeHandlers {
-  onSnapshot: (seq: number, documentJson: string, peers: PresenceState[], yourId: ClientId) => void;
+  onSnapshot: (
+    seq: number,
+    documentJson: string,
+    peers: PresenceState[],
+    yourId: ClientId,
+    generatedAvailability: WireGeneratedAvailabilityByDataset,
+  ) => void;
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
   /**
@@ -47,6 +57,14 @@ export interface BridgeHandlers {
    * The server may emit an empty `delta.added` as a sanity check (no-op).
    */
   onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
+  onGeneratedAvailabilityUpdate?: (datasetId: string, deltaJson: string) => void;
+  onGeneratedChunkStatus?: (
+    datasetId: string,
+    imageId: string,
+    key: string,
+    status: GeneratedChunkStatus,
+    message?: string | null,
+  ) => void;
   /**
    * Cross-peer bookmark-sidebar updates. Fired when the server
    * broadcasts a `bookmark_changed` message because some client
@@ -136,6 +154,7 @@ export class Bridge {
               JSON.stringify(msg.document),
               msg.peers ?? [],
               msg.your_id ?? 0,
+              msg.generated_availability ?? {},
             );
             break;
           case "command_broadcast":
@@ -169,6 +188,21 @@ export class Bridge {
             this.handlers.onAssetCatalogUpdate?.(
               msg.dataset_id,
               JSON.stringify(msg.delta ?? { added: [] }),
+            );
+            break;
+          case "generated_availability_update":
+            this.handlers.onGeneratedAvailabilityUpdate?.(
+              msg.dataset_id,
+              JSON.stringify(msg.delta ?? { levels: [], chunks: [] }),
+            );
+            break;
+          case "generated_chunk_status":
+            this.handlers.onGeneratedChunkStatus?.(
+              msg.dataset_id,
+              msg.image_id,
+              msg.key,
+              msg.status,
+              msg.message ?? null,
             );
             break;
           case "bookmark_changed": {
@@ -276,6 +310,10 @@ export class Bridge {
   sendOpenRemoteDataset(url: string) {
     bridgeLog("open_remote_dataset.send", { url }, this.ws?.readyState);
     this.send(JSON.stringify({ type: "open_remote_dataset", url }));
+  }
+
+  sendViewerInterest(interest: unknown) {
+    this.send(JSON.stringify({ type: "viewer_interest", interest }));
   }
 
   sendFollow(target: ClientId | null) {

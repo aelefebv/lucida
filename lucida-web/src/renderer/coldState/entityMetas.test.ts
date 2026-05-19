@@ -44,6 +44,9 @@ function makeEntry(
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
     wellProxyAvailable: opts.wellProxyAvailable ?? false,
+    detailLevel: opts.detailLevel,
+    coarseLevel: opts.coarseLevel,
+    wantedLodLevels: opts.wantedLodLevels,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
@@ -93,6 +96,24 @@ describe("computeEntityMetas — volume (3D arity)", () => {
     expect(metas[0].offset).toBe(100);
     expect(metas[1].offset).toBe(100 + 2 * 4 * 4); // 132
     expect(nextOffset).toBe(100 + 2 * 4 * 4 + 1 * 2 * 2); // 136
+  });
+
+  it("wantedLodLevels allocates only selected detail/coarse levels", () => {
+    const entry = makeEntry({
+      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      detailOwnedLodRange: [0, 2],
+      wantedLodLevels: [0, 2],
+      levels: [
+        { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+        { level: 1, chunkShape: [32, 64, 64], gridShape: [1, 2, 2], levelDims: [32, 128, 128] },
+        { level: 2, chunkShape: [32, 64, 64], gridShape: [1, 1, 1], levelDims: [32, 64, 64] },
+      ],
+    });
+    const { metas, nextOffset } = computeEntityMetas(entry, [32, 64, 64], 10, 3);
+    expect(metas.map((m) => m.level)).toEqual([0, 2]);
+    expect(metas[0].offset).toBe(10);
+    expect(metas[1].offset).toBe(10 + 2 * 4 * 4);
+    expect(nextOffset).toBe(10 + 2 * 4 * 4 + 1);
   });
 
   it("LODs with mismatched chunk dims are skipped", () => {

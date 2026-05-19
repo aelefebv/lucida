@@ -25,6 +25,17 @@
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import { parseChunkKey, parseCompositeKey } from "./chunkKeys.ts";
+import type { VisibleRegion } from "../pipeline/viewport.ts";
+import { chunkWithinRenderRadius } from "../pipeline/renderRadius.ts";
+
+export interface RemapEntryInfo {
+  layoutPositionVox?: [number, number];
+  levels: Array<{
+    level: number;
+    chunkShape: [number, number, number];
+    levelDims: [number, number, number];
+  }>;
+}
 
 export interface RemapParams {
   /** Composite slot keys → slot indices. */
@@ -39,6 +50,10 @@ export interface RemapParams {
   currentT: number;
   /** Current channel. */
   currentC: number;
+  /** Optional render-radius filter; omitted keeps legacy remap behavior. */
+  visibleRegion?: VisibleRegion;
+  renderRadiusView?: number;
+  entryByMember?: Map<string, RemapEntryInfo>;
   /**
    * Slice mode: per-entity target chunk-Z (computed from currentZ +
    * the entity's Z metadata). Chunks whose `chunk.z !==` the returned
@@ -86,6 +101,19 @@ export function remapSharedIndirection(params: RemapParams): void {
 
     const meta = lodMetas.find(m => m.level === chunk.level);
     if (!meta) continue;
+    if (
+      params.visibleRegion &&
+      params.renderRadiusView !== undefined &&
+      params.entryByMember &&
+      !chunkPassesRenderRadius(
+        params.visibleRegion,
+        params.renderRadiusView,
+        params.entryByMember.get(parsedComp.memberId),
+        chunk,
+      )
+    ) {
+      continue;
+    }
 
     const [, gridY, gridX] = meta.gridDims;
     const globalIdx = isVolumeMode
@@ -96,4 +124,36 @@ export function remapSharedIndirection(params: RemapParams): void {
       params.slotGridIdx[slotIndex] = globalIdx;
     }
   }
+}
+
+function chunkPassesRenderRadius(
+  region: VisibleRegion,
+  radiusView: number,
+  entry: RemapEntryInfo | undefined,
+  chunk: { level: number; x: number; y: number; z: number },
+): boolean {
+  if (!entry) return true;
+  const level = entry.levels.find((l) => l.level === chunk.level);
+  const level0 = entry.levels.find((l) => l.level === 0) ?? level;
+  if (!level || !level0) return true;
+  const [chunkZ, chunkY, chunkX] = level.chunkShape;
+  return chunkWithinRenderRadius({
+    region,
+    radiusView,
+    layoutPositionVox: entry.layoutPositionVox ?? [0, 0],
+    geometry: {
+      fullDims: [
+        level0.levelDims[2],
+        level0.levelDims[1],
+        level0.levelDims[0],
+      ],
+      levelDims: [
+        level.levelDims[2],
+        level.levelDims[1],
+        level.levelDims[0],
+      ],
+      chunkDims: [chunkX, chunkY, chunkZ],
+    },
+    chunk,
+  });
 }

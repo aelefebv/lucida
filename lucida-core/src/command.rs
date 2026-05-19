@@ -143,6 +143,10 @@ pub enum ViewportCommand {
         dataset_id: String,
         render_mode: RenderMode,
     },
+    SetDatasetDetailLevelOverride {
+        dataset_id: String,
+        level: Option<u32>,
+    },
     // Multi-channel
     SetMultiChannel {
         enabled: bool,
@@ -481,6 +485,14 @@ impl Scene {
                 }
                 self.epochs.selection += 1;
             }
+            ViewportCommand::SetDatasetDetailLevelOverride { dataset_id, level } => {
+                let ds_id = DatasetId(dataset_id);
+                let clamped = level.and_then(|l| self.clamp_detail_level_override(&ds_id, l));
+                if let Some(s) = self.dataset_settings.get_mut(&ds_id) {
+                    s.detail_level_override = clamped;
+                }
+                self.epochs.selection += 1;
+            }
             ViewportCommand::SetMultiChannel { enabled } => {
                 self.view.multi_channel = enabled;
                 self.epochs.selection += 1;
@@ -538,6 +550,29 @@ impl Scene {
                 self.epochs.selection += 1;
             }
         }
+    }
+
+    fn clamp_detail_level_override(&self, dataset_id: &DatasetId, requested: u32) -> Option<u32> {
+        let levels = self
+            .document
+            .manifests
+            .get(dataset_id)?
+            .images()
+            .first()?
+            .multiscale
+            .selectable_detail_levels();
+        if levels.is_empty() {
+            return None;
+        }
+        if levels.contains(&requested) {
+            return Some(requested);
+        }
+        levels
+            .iter()
+            .copied()
+            .filter(|level| *level <= requested)
+            .max()
+            .or_else(|| levels.first().copied())
     }
 }
 
@@ -822,6 +857,27 @@ mod tests {
     }
 
     #[test]
+    fn set_dataset_detail_level_override_round_trips() {
+        let cmd = ViewportCommand::SetDatasetDetailLevelOverride {
+            dataset_id: "ds1".into(),
+            level: Some(2),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"set_dataset_detail_level_override","dataset_id":"ds1","level":2}"#
+        );
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetDatasetDetailLevelOverride { dataset_id, level } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(level, Some(2));
+            }
+            _ => panic!("expected SetDatasetDetailLevelOverride"),
+        }
+    }
+
+    #[test]
     fn apply_set_dataset_visible_updates_settings() {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
@@ -856,6 +912,81 @@ mod tests {
         assert_eq!(
             scene.dataset_settings[&DatasetId("ds1".into())].opacity,
             0.5
+        );
+    }
+
+    #[test]
+    fn apply_set_dataset_detail_level_override_updates_settings() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 8, 512, 512],
+            [1, 1, 1, 128, 128],
+            3,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(
+            ViewportCommand::SetDatasetDetailLevelOverride {
+                dataset_id: "ds1".into(),
+                level: Some(2),
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&DatasetId("ds1".into())].detail_level_override,
+            Some(2)
+        );
+        scene.apply(
+            ViewportCommand::SetDatasetDetailLevelOverride {
+                dataset_id: "ds1".into(),
+                level: None,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&DatasetId("ds1".into())].detail_level_override,
+            None
+        );
+    }
+
+    #[test]
+    fn detail_level_override_clamps_to_selectable_source_levels() {
+        let mut scene = Scene::new([800, 600]);
+        let mut reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 8, 512, 512],
+            [1, 1, 1, 128, 128],
+            4,
+        );
+        let multiscale = &mut reg.manifest.images_mut()[0].multiscale;
+        multiscale.coarse_level_index = Some(3);
+        multiscale
+            .generated_levels
+            .push(lucida_content::GeneratedLevelInfo {
+                level_index: 3,
+                role: lucida_content::GeneratedLevelRole::Coarse,
+                provenance: lucida_content::GeneratedLevelProvenance {
+                    generator: "test".into(),
+                    config_id: "coarse".into(),
+                    source_content_id: None,
+                },
+            });
+
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(
+            ViewportCommand::SetDatasetDetailLevelOverride {
+                dataset_id: "ds1".into(),
+                level: Some(3),
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&DatasetId("ds1".into())].detail_level_override,
+            Some(2)
         );
     }
 
@@ -1403,6 +1534,7 @@ mod tests {
         }"#;
         let settings: crate::scene::DatasetDisplaySettings = serde_json::from_str(json).unwrap();
         assert!(settings.channel_settings.is_empty());
+        assert_eq!(settings.detail_level_override, None);
         assert_eq!(
             settings.channel_blend_mode,
             crate::scene::BlendMode::Additive

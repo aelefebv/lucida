@@ -334,6 +334,44 @@ describe("Uploader unified delivery", () => {
     expect(ret).toBe(true);
   });
 
+  it("splits upload budget across detail and coarse when both tiers have deliverables", () => {
+    const largeDetail = makeChunkDelivery({
+      data: new ArrayBuffer(700),
+      priority: 1,
+      residencyTier: "detail",
+      lane: "detail",
+    });
+    const secondDetail = makeChunkDelivery({
+      chunkKey: "0/0/0/0/0/1",
+      data: new ArrayBuffer(100),
+      priority: 2,
+      residencyTier: "detail",
+      lane: "detail",
+    });
+    const coarse = makeChunkDelivery({
+      chunkKey: "0/0/0/0/0/2",
+      data: new ArrayBuffer(100),
+      priority: 100,
+      residencyTier: "coarse",
+      lane: "coarse",
+    });
+    const cpuCache = makeCpuCache([largeDetail, secondDetail, coarse]);
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+
+    new Uploader().deliverToWorker(ctx, 1000, 0);
+
+    expect(sliceChunkData).toHaveBeenCalledTimes(2);
+    expect(sliceChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
+      largeDetail.chunkKey,
+      coarse.chunkKey,
+    ]);
+    expect((cpuCache.markSent as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual([
+      largeDetail,
+      coarse,
+    ]);
+  });
+
   it("tracks worker member ids for lifecycle cleanup without using delivery state", () => {
     const cpuCache = makeCpuCache([makeChunkDelivery({ c: 2 })]);
     const sliceChunkData = vi.fn();
@@ -389,7 +427,7 @@ describe("Uploader worker feedback", () => {
       c: 2,
     };
 
-    new Uploader().handleWantedSetDelta([missing], cpuCache);
+    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
 
     expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
       "ds1|field-0|FieldProxy3D|0|2",
@@ -400,13 +438,14 @@ describe("Uploader worker feedback", () => {
     const cpuCache = makeCpuCache();
     const missing: MissingChunk = {
       kind: "chunk",
+      datasetId: "ds1",
       entityId: "field-0",
       memberId: "img-0:ch2",
       c: 2,
       chunkKey: "0/0/2/0/0/0",
     };
 
-    new Uploader().handleWantedSetDelta([missing], cpuCache);
+    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
 
     expect(cpuCache.markChunkMissing).toHaveBeenCalledWith(
       "img-0",

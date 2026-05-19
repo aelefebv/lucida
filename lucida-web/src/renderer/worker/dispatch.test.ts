@@ -77,4 +77,43 @@ describe("worker dispatch upload feedback", () => {
       },
     ]);
   });
+
+  it("does not route coarse chunk uploads through the detail pool fallback", async () => {
+    const { ctx, posts } = makeCtx();
+    ctx.state.memberToPool.set("img-0", "detail-pool");
+    ctx.state.memberTierToPool.set("img-0|detail", "detail-pool");
+    ctx.state.volumeAtlases.set("detail-pool", {
+      chunkX: 1,
+      chunkY: 1,
+      chunkZ: 1,
+      entityMetas: new Map(),
+    } as never);
+
+    await dispatchMessage(ctx, {
+      type: "volumeChunkData",
+      tier: "coarse",
+      memberId: "img-0",
+      chunks: [{ data: new ArrayBuffer(8), dataType: "uint16", x: 0, y: 0, z: 0, key: "2/0/0/0/0/0" }],
+      level: 2,
+      t: 0,
+      c: 0,
+      levelWidth: 1,
+      levelHeight: 1,
+      levelDepth: 1,
+      chunkX: 1,
+      chunkY: 1,
+      chunkZ: 1,
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    });
+
+    expect(posts).toEqual([
+      {
+        type: "chunksEvicted",
+        memberId: "img-0",
+        keys: ["2/0/0/0/0/0"],
+        skipped: [],
+        reason: "missing-pool",
+      },
+    ]);
+  });
 });

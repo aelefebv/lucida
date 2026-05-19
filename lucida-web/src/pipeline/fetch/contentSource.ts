@@ -2,6 +2,7 @@
 // not decode, normalize, or cache.
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
+import type { GeneratedChunkStatus } from "../generatedAvailability.ts";
 import type { ProxyKind } from "../assetCatalog.ts";
 import { parseProxyHeader, proxyResponseKey, type ProxyHeaderJs } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
@@ -100,6 +101,22 @@ export class ProxiedContentSource implements ContentSource {
     } else {
       this.handleChunkData(key, data);
     }
+  }
+
+  handleChunkStatus(
+    datasetId: string,
+    imageId: string,
+    chunkKey: string,
+    status: GeneratedChunkStatus,
+    message?: string | null,
+  ): void {
+    const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
+    const entry = this.pending.get(compositeKey);
+    if (!entry) return;
+
+    clearTimeout(entry.timeoutId);
+    this.pending.delete(compositeKey);
+    entry.reject(generatedStatusToFetchError(status, chunkKey, message));
   }
 
   handleChunkData(key: string, data: ArrayBuffer): void {
@@ -239,5 +256,32 @@ export class ProxiedContentSource implements ContentSource {
         reject(new DOMException("Aborted", "AbortError"));
       });
     });
+  }
+}
+
+function generatedStatusToFetchError(
+  status: GeneratedChunkStatus,
+  chunkKey: string,
+  message?: string | null,
+): FetchError {
+  const detail = message ? `: ${message}` : "";
+  switch (status) {
+    case "pending":
+      return new FetchError(`Generated chunk ${chunkKey} pending${detail}`, {
+        kind: "pending",
+      });
+    case "failed_transient":
+      return new FetchError(`Generated chunk ${chunkKey} transient failure${detail}`, {
+        kind: "transient",
+      });
+    case "unavailable":
+    case "failed_permanent":
+      return new FetchError(`Generated chunk ${chunkKey} unavailable${detail}`, {
+        kind: "permanent",
+      });
+    case "ready":
+      return new FetchError(`Generated chunk ${chunkKey} reported ready without bytes${detail}`, {
+        kind: "transient",
+      });
   }
 }

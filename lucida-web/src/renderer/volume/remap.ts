@@ -6,7 +6,8 @@
  * (b) select volume index arithmetic (Z multiplier included).
  */
 
-import { remapSharedIndirection } from "../remap.ts";
+import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
+import type { VisibleRegion } from "../../pipeline/viewport.ts";
 import type { AtlasState } from "./atlas.ts";
 
 /**
@@ -19,6 +20,11 @@ export function remapIndirection(
   atlas: AtlasState,
   currentT: number,
   currentC: number,
+  options: {
+    visibleRegion?: VisibleRegion;
+    renderRadiusView?: number;
+    entryByMember?: Map<string, RemapEntryInfo>;
+  } = {},
 ): void {
   remapSharedIndirection({
     slots: atlas.slots,
@@ -27,6 +33,9 @@ export function remapIndirection(
     entityMetas: atlas.entityMetas,
     currentT,
     currentC,
+    visibleRegion: options.visibleRegion,
+    renderRadiusView: options.renderRadiusView,
+    entryByMember: options.entryByMember,
     targetChunkZForMember: null,
   });
   atlas.indirectionDirty = true;

@@ -28,6 +28,7 @@ export interface DatasetSettings {
   render_mode?: string;
   channel_settings: ChannelSettingsJS[];
   channel_blend_mode: string;
+  detail_level_override?: number | null;
 }
 
 export interface SceneSettings {

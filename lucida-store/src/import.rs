@@ -13,6 +13,7 @@ use lucida_content::*;
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
+use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
 use crate::codec::parse_codec_chain;
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
@@ -53,6 +54,8 @@ async fn import_single_image(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+    let coarse_level_index =
+        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
     let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
@@ -79,6 +82,8 @@ async fn import_single_image(
         multiscale: MultiscaleInfo {
             axes,
             levels,
+            coarse_level_index,
+            generated_levels: Vec::new(),
             data_type,
             pinned_axes: layout.pinned.clone(),
         },
@@ -425,6 +430,12 @@ async fn import_plate(
                 multiscale: MultiscaleInfo {
                     axes: axes.clone(),
                     levels: levels.clone(),
+                    coarse_level_index: select_source_coarse_level(
+                        &levels,
+                        data_type,
+                        SourceCoarseConfig::default(),
+                    ),
+                    generated_levels: Vec::new(),
                     data_type,
                     pinned_axes: layout.pinned.clone(),
                 },

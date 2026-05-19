@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chunkPoolKey, proxyPoolKey } from "./poolKeys.ts";
+import { chunkPoolKey, chunkTierPoolKey, memberTierKey, proxyPoolKey } from "./poolKeys.ts";
 
 describe("chunkPoolKey", () => {
   it("single-channel 3D volume", () => {
@@ -53,6 +53,24 @@ describe("chunkPoolKey", () => {
     // Slice multi-channel (line 666): `${datasetId}:ch${channel}:${chunkX}x${chunkY}`
     expect(chunkPoolKey(datasetId, channel, [chunkX, chunkY], true))
       .toBe(`${datasetId}:ch${channel}:${chunkX}x${chunkY}`);
+  });
+});
+
+describe("chunkTierPoolKey", () => {
+  it("adds a tier suffix after the dataset/channel/chunk-shape key", () => {
+    expect(chunkTierPoolKey("ds1", "detail", 0, [64, 64, 32], false)).toBe(
+      "ds1:64x64x32:detail",
+    );
+    expect(chunkTierPoolKey("ds1", "coarse", 2, [128, 128], true)).toBe(
+      "ds1:ch2:128x128:coarse",
+    );
+  });
+});
+
+describe("memberTierKey", () => {
+  it("separates detail and coarse routing for one member", () => {
+    expect(memberTierKey("img-0:ch2", "detail")).toBe("img-0:ch2|detail");
+    expect(memberTierKey("img-0:ch2", "coarse")).toBe("img-0:ch2|coarse");
   });
 });
 

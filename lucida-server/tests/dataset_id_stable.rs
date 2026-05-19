@@ -33,6 +33,7 @@ use lucida_protocol::{
     DatasetOpened, FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat,
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
+use lucida_server::generated::DerivedChunkCache;
 use lucida_server::handler::dataset_id_for_url;
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
@@ -188,12 +189,18 @@ fn make_binding(
         Arc::new(register.manifest.clone()),
         1,
     ));
+    let derived_chunks = Arc::new(DerivedChunkCache::default());
     ServerBinding {
         source_url: url.to_string(),
         store,
         resolver,
         cache,
         dataset_opened: register.clone(),
+        derived_chunks: derived_chunks.clone(),
+        generated_service: Arc::new(lucida_server::generated::GeneratedCoarseService::inert(
+            derived_chunks,
+        )),
+        legacy_proxy_enabled: false,
         proxy_cache,
         proxy_generator,
     }
@@ -241,6 +248,8 @@ fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
                     grid_shape: [1, 1, 8, 2, 2],
                     scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                 }],
+                coarse_level_index: None,
+                generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
             },

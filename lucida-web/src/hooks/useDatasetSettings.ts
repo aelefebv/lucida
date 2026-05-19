@@ -6,11 +6,26 @@ import type { DatasetState } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { Axis } from "../axes.ts";
 
 /** Apply a settings command and invalidate the settings cache. */
 function applySettingsCommand(scene: WasmScene, cmd: Record<string, unknown>): void {
   scene.apply_command(JSON.stringify(cmd));
   bumpSettingsGeneration();
+}
+
+function detailLevelOptions(ds: DatasetState | undefined): { level: number; label: string }[] {
+  const multiscale = ds?.manifest.images[0]?.multiscale;
+  if (!multiscale) return [];
+  const generated = new Set(
+    (multiscale.generated_levels ?? []).map((level) => level.level_index),
+  );
+  return multiscale.levels
+    .filter((level) => level.level_index !== 0 && !generated.has(level.level_index))
+    .map((level) => ({
+      level: level.level_index,
+      label: `${level.shape[Axis.X]} x ${level.shape[Axis.Y]}`,
+    }));
 }
 
 export interface BridgeCallbacks {
@@ -219,6 +234,17 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
+  const handleLayerSetDetailLevelOverride = useCallback((id: string, level: number | null) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_dataset_detail_level_override", dataset_id: id, level });
+      loopRef.current?.markInteractiveDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
   const handleLayerAutoContrast = useCallback((id: string) => {
     const dr = dataRangeMap.get(id);
     if (dr) {
@@ -323,6 +349,7 @@ export function useDatasetSettings({
       render_mode: string;
       channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
       channel_blend_mode?: string;
+      detail_level_override?: number | null;
     }>;
     try {
       layerOrder = JSON.parse(scene.dataset_order());
@@ -358,6 +385,8 @@ export function useDatasetSettings({
         fullRangeMax: frMax,
         channelSettings: settings?.channel_settings,
         channelBlendMode: settings?.channel_blend_mode ?? "additive",
+        detailLevelOverride: settings?.detail_level_override ?? null,
+        detailLevelOptions: detailLevelOptions(ds),
       };
     });
   };
@@ -401,6 +430,7 @@ export function useDatasetSettings({
     handleChannelSetBlendMode,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
+    handleLayerSetDetailLevelOverride,
     handleLayerAutoContrast,
     handleLayerAutoContrastToggle,
     handleLayerFullRangeToggle,

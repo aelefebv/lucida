@@ -18,15 +18,18 @@ import volumeSrc from "../volume.wgsl?raw";
 import {
   DESCRIPTOR_LOD_INFO_SIZE,
   DESCRIPTOR_LODS_OFFSET,
+  DESCRIPTOR_TIER_SOURCE_SIZE,
   LOD_OFFSET_CHUNK_DIMS,
   LOD_OFFSET_GRID_DIMS,
   LOD_OFFSET_INDIRECTION_OFFSET,
   LOD_OFFSET_LEVEL,
   LOD_OFFSET_LEVEL_DIMS,
   OFFSET_CHANNEL_MASK,
+  OFFSET_COARSE_SOURCE,
   OFFSET_COLORMAP_LUT_INDEX,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
+  OFFSET_DETAIL_SOURCE,
   OFFSET_FIELD_PROXY_DIMS,
   OFFSET_FIELD_PROXY_POOL_INDEX,
   OFFSET_FIELD_PROXY_SLOT_INDEX,
@@ -39,6 +42,12 @@ import {
   OFFSET_WELL_PROXY_DIMS,
   OFFSET_WELL_PROXY_POOL_INDEX,
   OFFSET_WELL_PROXY_SLOT_INDEX,
+  SOURCE_OFFSET_CHUNK_DIMS,
+  SOURCE_OFFSET_GRID_DIMS,
+  SOURCE_OFFSET_INDIRECTION_OFFSET,
+  SOURCE_OFFSET_LEVEL,
+  SOURCE_OFFSET_LEVEL_DIMS,
+  SOURCE_OFFSET_VALID,
 } from "./layout.ts";
 
 // ---------------------------------------------------------------------------
@@ -102,6 +111,7 @@ function fieldSize(type: string): number {
     }
     return DESCRIPTOR_LOD_INFO_SIZE * count;
   }
+  if (type === "ChunkTierSource") return DESCRIPTOR_TIER_SOURCE_SIZE;
   throw new Error(`unknown type: ${type}`);
 }
 
@@ -111,6 +121,7 @@ function fieldAlign(type: string): number {
   if (type.startsWith("vec3")) return 16; // WGSL host-shareable
   if (type.startsWith("vec4")) return 16;
   if (type.startsWith("array<")) return 16;
+  if (type === "ChunkTierSource") return 16;
   throw new Error(`unknown align: ${type}`);
 }
 
@@ -146,6 +157,11 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
       .toBe(extractStruct(volumeSrc, "LodInfo"));
   });
 
+  it("slice.wgsl and volume.wgsl declare an identical ChunkTierSource struct", () => {
+    expect(extractStruct(sliceSrc, "ChunkTierSource"))
+      .toBe(extractStruct(volumeSrc, "ChunkTierSource"));
+  });
+
   it("WGSL EntityDescriptor field offsets match TS layout constants", () => {
     const fields = parseFields(extractStruct(volumeSrc, "EntityDescriptor"));
     const offsets = computeOffsets(fields);
@@ -167,6 +183,8 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.lodCount).toBe(OFFSET_LOD_COUNT);
     expect(offsets.lods).toBe(OFFSET_LODS);
     expect(offsets.lods).toBe(DESCRIPTOR_LODS_OFFSET);
+    expect(offsets.detailSource).toBe(OFFSET_DETAIL_SOURCE);
+    expect(offsets.coarseSource).toBe(OFFSET_COARSE_SOURCE);
   });
 
   it("WGSL LodInfo field offsets match TS LOD_OFFSET_* constants", () => {
@@ -178,5 +196,17 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.gridDims).toBe(LOD_OFFSET_GRID_DIMS);
     expect(offsets.chunkDims).toBe(LOD_OFFSET_CHUNK_DIMS);
     expect(offsets.levelDims).toBe(LOD_OFFSET_LEVEL_DIMS);
+  });
+
+  it("WGSL ChunkTierSource field offsets match TS SOURCE_OFFSET_* constants", () => {
+    const fields = parseFields(extractStruct(volumeSrc, "ChunkTierSource"));
+    const offsets = computeOffsets(fields);
+
+    expect(offsets.valid).toBe(SOURCE_OFFSET_VALID);
+    expect(offsets.level).toBe(SOURCE_OFFSET_LEVEL);
+    expect(offsets.indirectionOffset).toBe(SOURCE_OFFSET_INDIRECTION_OFFSET);
+    expect(offsets.gridDims).toBe(SOURCE_OFFSET_GRID_DIMS);
+    expect(offsets.chunkDims).toBe(SOURCE_OFFSET_CHUNK_DIMS);
+    expect(offsets.levelDims).toBe(SOURCE_OFFSET_LEVEL_DIMS);
   });
 });

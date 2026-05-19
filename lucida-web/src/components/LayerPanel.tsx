@@ -21,6 +21,8 @@ export interface LayerInfo {
   fullRangeMax: number;
   channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
   channelBlendMode: string;
+  detailLevelOverride: number | null;
+  detailLevelOptions: { level: number; label: string }[];
 }
 
 interface Props {
@@ -37,6 +39,7 @@ interface Props {
   onSetColormap: (id: string, colormap: string) => void;
   onSetBlendMode: (id: string, mode: string) => void;
   onSetRenderMode: (id: string, mode: string) => void;
+  onSetDetailLevelOverride: (id: string, level: number | null) => void;
   onAutoContrast: (id: string) => void;
   onAutoContrastToggle: (id: string) => void;
   onFullRangeToggle: (id: string) => void;
@@ -71,6 +74,7 @@ export function LayerPanel({
   onSetColormap,
   onSetBlendMode,
   onSetRenderMode,
+  onSetDetailLevelOverride,
   onAutoContrast,
   onAutoContrastToggle,
   onFullRangeToggle,
@@ -260,6 +264,25 @@ export function LayerPanel({
                       <option value="max_intensity">Max Intensity</option>
                     </select>
                   </div>
+                  {layer.detailLevelOptions.length > 0 && (
+                    <div className="layer-detail-row">
+                      <label>Detail</label>
+                      <select
+                        value={layer.detailLevelOverride ?? ""}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          onSetDetailLevelOverride(layer.id, value === "" ? null : Number(value));
+                        }}
+                      >
+                        <option value="">Highest res</option>
+                        {layer.detailLevelOptions.map((option) => (
+                          <option key={option.level} value={option.level}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <div className="layer-actions">
                     <button
                       onClick={() => onMoveLayer(layer.id, "up")}

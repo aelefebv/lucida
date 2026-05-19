@@ -4,11 +4,13 @@
  * Reads from existing scene + orchestrator + cache state — no new
  * production-side state added for it to work.
  *
- * Two overlays, each gated by its own toggle in the Logging tab:
- *  - wellModes: per-well badge with tier mode + LOD
- *  - chunkGrid: LOD chunk grid for every visible field, colored by
- *    status. Capped at MAX_CHUNK_RECTS per tick as a backstop for
+ * Primary overlays, each gated by its own toggle in the Logging tab:
+ *  - wellModes: per-well badge with detail/coarse worker-delivered coverage
+ *  - chunkGrid: planned LOD chunk grid for every visible field, colored
+ *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
+ *  - renderRadius: actual detail/coarse render-radius boundary, projected
+ *    through the same voxel→world→screen path as chunk overlays.
  *
  * Both modes (slice + volume) share the same projection pipeline:
  *
@@ -26,6 +28,20 @@ import { Axis } from "../axes.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+import {
+  chunkWithinRenderRadius,
+  renderRadiusEnabled,
+  renderRadiusLimitVox,
+  visibleRegionCenterVox,
+  type ChunkRadiusGeometry,
+} from "../pipeline/renderRadius.ts";
+import type { VisibleRegion } from "../pipeline/viewport.ts";
+import type {
+  CacheStateSnapshot,
+  ChunkRequest,
+  RequestPlan,
+} from "../pipeline/planning/index.ts";
 import {
   DEBUG_OVERLAYS,
   isOverlayEnabled,
@@ -49,6 +65,9 @@ const MODE_COLOR: Record<string, string> = {
   "well-as-proxy": "#88f",
   "fields-with-proxy-fallback": "#fb4",
   "fields-with-detail": "#4f4",
+  "render-detail": "#4f4",
+  "render-coarse": "#6cf",
+  "render-waiting": "#fb4",
 };
 
 const MODE_LABEL: Record<string, string> = {
@@ -63,7 +82,30 @@ interface WellBadge {
   centerY: number;
   mode: string;
   label: string;
-  lod: number | null;
+  title: string;
+}
+
+type OverlayTier = "detail" | "coarse";
+type DisplayTier = OverlayTier | "missing";
+
+export interface TierCoverageCounts {
+  /** Chunks requested by the current plan for this tier. */
+  wanted: number;
+  /**
+   * Chunks available for this tier. Counts worker-delivered chunks plus
+   * CPU-ready chunks so cold-state rebuilds during pan/zoom do not make
+   * the overlay flash D0/N while the atlas still visibly contains data.
+   */
+  shown: number;
+  /** Chunks currently decoded in the CPU cache, whether uploaded or not. */
+  ready: number;
+  /** Chunks currently being fetched/decoded. */
+  inFlight: number;
+}
+
+export interface WellTierCoverage {
+  detail: TierCoverageCounts;
+  coarse: TierCoverageCounts;
 }
 
 interface ChunkRect {
@@ -73,6 +115,8 @@ interface ChunkRect {
   w: number;
   h: number;
   status: "cached" | "in-flight" | "planned";
+  /** Current render tier visible to the shader, or missing fallback. */
+  sourceTier?: DisplayTier;
   /**
    * For `status === "planned"`: zero-based rank in the pending fetch
    * queue (0 = next to fetch). `undefined` means "in plan but not in
@@ -92,9 +136,39 @@ interface ChunkRect {
   tier?: import("../pipeline/fetch/index.ts").EvictionTier | null;
 }
 
+interface RadiusPath {
+  key: string;
+  tier: OverlayTier;
+  plane: "xy" | "xz" | "yz";
+  d: string;
+  title: string;
+}
+
 const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
 const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
 const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
+const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
+const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
+const TIER_MISSING = "rgba(245, 70, 70, 0.38)";
+const RADIUS_DETAIL_STROKE = "rgba(80, 255, 130, 0.90)";
+const RADIUS_COARSE_STROKE = "rgba(255, 220, 70, 0.90)";
+const RADIUS_SAMPLE_COUNT = 96;
+
+function tierColor(tier: DisplayTier | undefined): string | null {
+  switch (tier) {
+    case "detail": return TIER_DETAIL;
+    case "coarse": return TIER_COARSE;
+    case "missing": return TIER_MISSING;
+    default: return null;
+  }
+}
+
+function tierDrawOrder(rect: ChunkRect): number {
+  if (rect.sourceTier === "missing") return 0;
+  if (rect.sourceTier === "coarse") return 0;
+  if (rect.sourceTier === "detail") return 1;
+  return 2;
+}
 
 /**
  * Color for a planned chunk based on its position in the pending fetch
@@ -128,6 +202,185 @@ function cachedColor(
     case "prefetch":       return "rgba(70, 200, 200, 0.32)";
     default:               return SOLID_CACHED;
   }
+}
+
+function emptyTierCoverageCounts(): TierCoverageCounts {
+  return { wanted: 0, shown: 0, ready: 0, inFlight: 0 };
+}
+
+function emptyWellTierCoverage(): WellTierCoverage {
+  return {
+    detail: emptyTierCoverageCounts(),
+    coarse: emptyTierCoverageCounts(),
+  };
+}
+
+function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
+  if (req.lane === "detail") return "detail";
+  if (req.lane === "coarse" || req.lane === "overview") return "coarse";
+  return null;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildWellTierCoverage(
+  plan: Pick<RequestPlan, "requests">,
+  parentByEntity: ReadonlyMap<string, string | null>,
+  cpuCache: Pick<CpuCache, "deliveryState"> | null,
+  cacheSnap: CacheStateSnapshot | null,
+): Map<string, WellTierCoverage> {
+  const out = new Map<string, WellTierCoverage>();
+  for (const req of plan.requests) {
+    const tier = overlayTierForRequest(req);
+    if (!tier) continue;
+
+    const wellId = parentByEntity.get(req.entityId) ?? req.entityId;
+    let coverage = out.get(wellId);
+    if (!coverage) {
+      coverage = emptyWellTierCoverage();
+      out.set(wellId, coverage);
+    }
+
+    const counts = coverage[tier];
+    counts.wanted++;
+    const ready = cacheSnap?.cached.get(req.entityId)?.has(req.chunkKey) ?? false;
+    if (ready) {
+      counts.ready++;
+    }
+    if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
+      counts.inFlight++;
+    }
+    if (ready || cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey)) {
+      counts.shown++;
+    }
+  }
+  return out;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function formatTierCoverageLabel(
+  coverage: WellTierCoverage,
+  fallbackLabel: string,
+  fallbackLod: number | null,
+): string {
+  const detail = `D${coverage.detail.shown}/${coverage.detail.wanted}`;
+  const coarse = `C${coverage.coarse.shown}/${coverage.coarse.wanted}`;
+  const detailComplete =
+    coverage.detail.wanted > 0 && coverage.detail.shown >= coverage.detail.wanted;
+  const coarseActive =
+    coverage.coarse.wanted > 0 && coverage.coarse.shown > 0 && !detailComplete;
+  const parts: string[] = coarseActive
+    ? [
+        coarse,
+        ...(coverage.detail.wanted > 0 ? [detail] : []),
+      ]
+    : [
+        ...(coverage.detail.wanted > 0 ? [detail] : []),
+        ...(coverage.coarse.wanted > 0 ? [coarse] : []),
+      ];
+  if (parts.length > 0) return parts.join(" ");
+  return `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function tierCoverageMode(
+  coverage: WellTierCoverage,
+  fallbackMode: string,
+): string {
+  const detailComplete =
+    coverage.detail.wanted > 0 && coverage.detail.shown >= coverage.detail.wanted;
+  if (detailComplete) return "render-detail";
+  if (coverage.coarse.shown > 0) return "render-coarse";
+  if (coverage.detail.shown > 0) return "render-detail";
+  if (coverage.detail.wanted > 0 || coverage.coarse.wanted > 0) {
+    return "render-waiting";
+  }
+  return fallbackMode;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function formatTierCoverageTitle(
+  coverage: WellTierCoverage,
+  fallbackLabel: string,
+  fallbackLod: number | null,
+): string {
+  const parts: string[] = [];
+  if (coverage.detail.wanted > 0) {
+    parts.push(
+      `detail available ${coverage.detail.shown}/${coverage.detail.wanted}, ready ${coverage.detail.ready}, in-flight ${coverage.detail.inFlight}`,
+    );
+  }
+  if (coverage.coarse.wanted > 0) {
+    parts.push(
+      `coarse available ${coverage.coarse.shown}/${coverage.coarse.wanted}, ready ${coverage.coarse.ready}, in-flight ${coverage.coarse.inFlight}`,
+    );
+  }
+  const modePart = `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
+  if (parts.length === 0) return modePart;
+  return `${parts.join("; ")}; planner ${modePart}`;
+}
+
+function parseVisibleRegion(ws: WasmScene, dsId: string): VisibleRegion | null {
+  let raw: string | null = null;
+  try {
+    raw = ws.visible_region(dsId);
+  } catch {
+    return null;
+  }
+  if (!raw || raw === "null") return null;
+  try {
+    const vr = JSON.parse(raw) as {
+      xy_bounds: [number, number, number, number];
+      z_range: [number, number];
+      effective_zoom: number;
+      radius_basis_vox?: number;
+      sort_center: [number, number, number] | null;
+      frustum_planes: [number, number, number, number][] | null;
+    };
+    return {
+      xyBoundsVox: vr.xy_bounds,
+      zRangeVox: vr.z_range,
+      effectiveZoom: vr.effective_zoom,
+      ...(vr.radius_basis_vox !== undefined ? { radiusBasisVox: vr.radius_basis_vox } : {}),
+      sortCenterVox: vr.sort_center,
+      frustumPlanes: vr.frustum_planes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function chunkKeyFor(
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): string {
+  return `${level}/${t}/${c}/${z}/${y}/${x}`;
+}
+
+function geometryForLevels(
+  lvl0: { shape: number[] },
+  lvl: { shape: number[]; chunk_shape: number[] },
+): ChunkRadiusGeometry {
+  return {
+    fullDims: [
+      lvl0.shape[Axis.X],
+      lvl0.shape[Axis.Y],
+      lvl0.shape[Axis.Z],
+    ],
+    levelDims: [
+      lvl.shape[Axis.X],
+      lvl.shape[Axis.Y],
+      lvl.shape[Axis.Z],
+    ],
+    chunkDims: [
+      lvl.chunk_shape[Axis.X],
+      lvl.chunk_shape[Axis.Y],
+      lvl.chunk_shape[Axis.Z],
+    ],
+  };
 }
 
 /**
@@ -222,6 +475,70 @@ function projectVoxelAabb(
   return { x: sxMin, y: syMin, w: sxMax - sxMin, h: syMax - syMin };
 }
 
+function distanceToVoxelAabbSq(
+  point: [number, number, number],
+  min: [number, number, number],
+  max: [number, number, number],
+): number {
+  let out = 0;
+  for (let i = 0; i < 3; i++) {
+    if (point[i] < min[i]) out += (min[i] - point[i]) ** 2;
+    else if (point[i] > max[i]) out += (point[i] - max[i]) ** 2;
+  }
+  return out;
+}
+
+function pathFromProjectedPoints(points: Array<{ x: number; y: number }>): string {
+  return points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+    .join(" ");
+}
+
+function projectRadiusCircle(
+  ws: WasmScene,
+  frame: FieldFrame,
+  centerLocalVox: [number, number, number],
+  radiusVox: number,
+  plane: RadiusPath["plane"],
+  dpr: number,
+): string[] {
+  const paths: string[] = [];
+  let segment: Array<{ x: number; y: number }> = [];
+  const flush = () => {
+    if (segment.length >= 2) paths.push(pathFromProjectedPoints(segment));
+    segment = [];
+  };
+
+  for (let i = 0; i <= RADIUS_SAMPLE_COUNT; i++) {
+    const theta = (i / RADIUS_SAMPLE_COUNT) * Math.PI * 2;
+    const cos = Math.cos(theta) * radiusVox;
+    const sin = Math.sin(theta) * radiusVox;
+    let vx = centerLocalVox[0];
+    let vy = centerLocalVox[1];
+    let vz = centerLocalVox[2];
+    if (plane === "xy") {
+      vx += cos;
+      vy += sin;
+    } else if (plane === "xz") {
+      vx += cos;
+      vz += sin;
+    } else {
+      vy += cos;
+      vz += sin;
+    }
+
+    const [wx, wy, wz] = voxelToWorld(frame, vx, vy, vz);
+    const projected = projectWorld(ws, wx, wy, wz, dpr);
+    if (!projected || !Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+      flush();
+      continue;
+    }
+    segment.push(projected);
+  }
+  flush();
+  return paths;
+}
+
 export function DebugOverlays({
   wasmSceneRef,
   canvasRef,
@@ -244,6 +561,7 @@ export function DebugOverlays({
 
   const [badges, setBadges] = useState<WellBadge[]>([]);
   const [chunks, setChunks] = useState<ChunkRect[]>([]);
+  const [radiusPaths, setRadiusPaths] = useState<RadiusPath[]>([]);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
   useEffect(() => {
@@ -253,6 +571,7 @@ export function DebugOverlays({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
       setChunks([]);
+      setRadiusPaths([]);
       return;
     }
 
@@ -303,6 +622,109 @@ export function DebugOverlays({
         };
       };
 
+      if (enabled.renderRadius && plans) {
+        const out: RadiusPath[] = [];
+        const planningConfig = configStore.get();
+        const allRadiusSpecs: Array<{ tier: OverlayTier; radiusView: number }> = [
+          { tier: "coarse", radiusView: planningConfig.coarseRenderRadiusView },
+          { tier: "detail", radiusView: planningConfig.detailRenderRadiusView },
+        ];
+        const radiusSpecs = allRadiusSpecs.filter((spec) => renderRadiusEnabled(spec.radiusView));
+
+        if (radiusSpecs.length > 0) {
+          for (const [dsId, plan] of plans) {
+            const ds = datasets.get(dsId);
+            if (!ds) continue;
+            const visibleRegion = parseVisibleRegion(ws, dsId);
+            if (!visibleRegion) continue;
+
+            let positions: Record<string, [number, number]> = {};
+            try {
+              positions = JSON.parse(ws.member_positions(dsId));
+            } catch {
+              positions = {};
+            }
+            const centerGlobal = visibleRegionCenterVox(visibleRegion);
+            let frame: FieldFrame | null = null;
+            let centerLocal: [number, number, number] = centerGlobal;
+
+            if (is3D) {
+              const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
+              let best: {
+                score: number;
+                frame: FieldFrame;
+                pos: [number, number];
+              } | null = null;
+              for (const entry of plan.activeSet) {
+                if (entry.kind !== "field") continue;
+                const pos = positions[entry.entityId];
+                const img = imgById.get(entry.imageId);
+                const lvl0 = img?.multiscale.levels[0];
+                if (!pos || !lvl0) continue;
+                const candidate = getFrame(dsId, entry.imageId, lvl0.shape);
+                if (!candidate.model) continue;
+                candidate.pos = pos;
+                const score = distanceToVoxelAabbSq(
+                  centerGlobal,
+                  [pos[0], pos[1], 0],
+                  [
+                    pos[0] + lvl0.shape[Axis.X],
+                    pos[1] + lvl0.shape[Axis.Y],
+                    lvl0.shape[Axis.Z],
+                  ],
+                );
+                if (!best || score < best.score) {
+                  best = { score, frame: candidate, pos };
+                }
+              }
+              if (!best) continue;
+              frame = best.frame;
+              centerLocal = [
+                centerGlobal[0] - best.pos[0],
+                centerGlobal[1] - best.pos[1],
+                centerGlobal[2],
+              ];
+            } else {
+              frame = {
+                pos: [0, 0],
+                fullVoxel: [1, 1, 1],
+                model: null,
+              };
+            }
+            if (!frame) continue;
+
+            const planes: RadiusPath["plane"][] = is3D ? ["xy", "xz", "yz"] : ["xy"];
+            for (const spec of radiusSpecs) {
+              const radiusVox = renderRadiusLimitVox(visibleRegion, spec.radiusView);
+              if (!Number.isFinite(radiusVox)) continue;
+              const title = `${spec.tier} render radius ${spec.radiusView.toFixed(2)}x (${radiusVox.toFixed(1)} vox)`;
+              for (const plane of planes) {
+                const paths = projectRadiusCircle(
+                  ws,
+                  frame,
+                  centerLocal,
+                  radiusVox,
+                  plane,
+                  dpr,
+                );
+                for (let i = 0; i < paths.length; i++) {
+                  out.push({
+                    key: `${dsId}/${spec.tier}/${plane}/${i}`,
+                    tier: spec.tier,
+                    plane,
+                    d: paths[i],
+                    title,
+                  });
+                }
+              }
+            }
+          }
+        }
+        setRadiusPaths(out);
+      } else if (radiusPaths.length > 0) {
+        setRadiusPaths([]);
+      }
+
       // Well badges
       if (enabled.wellModes && plans) {
         const out: WellBadge[] = [];
@@ -320,11 +742,19 @@ export function DebugOverlays({
             positions = {};
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
+          const cacheSnap = cpuCache?.snapshot() ?? null;
+          const coverageByWell = buildWellTierCoverage(
+            plan,
+            parentByEntity,
+            cpuCache,
+            cacheSnap,
+          );
 
           // Per-well aggregator carrying world centroids of fields.
           const wells = new Map<string, {
             mode: string;
             lod: number | null;
+            coverage: WellTierCoverage;
             worldCentroids: Array<[number, number, number]>;
           }>();
 
@@ -344,7 +774,12 @@ export function DebugOverlays({
             const worldCenter = fieldWorldCenter(frame);
             let agg = wells.get(wellId);
             if (!agg) {
-              agg = { mode, lod, worldCentroids: [] };
+              agg = {
+                mode,
+                lod,
+                coverage: coverageByWell.get(wellId) ?? emptyWellTierCoverage(),
+                worldCentroids: [],
+              };
               wells.set(wellId, agg);
             }
             agg.worldCentroids.push(worldCenter);
@@ -389,9 +824,17 @@ export function DebugOverlays({
               key: `${dsId}/${wellId}`,
               centerX: screen.x,
               centerY: screen.y,
-              mode: agg.mode,
-              label: MODE_LABEL[agg.mode] ?? agg.mode,
-              lod: agg.lod,
+              mode: tierCoverageMode(agg.coverage, agg.mode),
+              label: formatTierCoverageLabel(
+                agg.coverage,
+                MODE_LABEL[agg.mode] ?? agg.mode,
+                agg.lod,
+              ),
+              title: formatTierCoverageTitle(
+                agg.coverage,
+                MODE_LABEL[agg.mode] ?? agg.mode,
+                agg.lod,
+              ),
             });
           }
         }
@@ -407,6 +850,7 @@ export function DebugOverlays({
         const out: ChunkRect[] = [];
         const t = ws.t();
         const c = ws.c();
+        const planningConfig = configStore.get();
         const snap = cpuCache.snapshot();
         // Rank lookup for "planned" color gradient. Built once per
         // tick: pending queue is in priority order, so array index ==
@@ -436,28 +880,7 @@ export function DebugOverlays({
             positions = {};
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
-
-          // Per-dataset visible region — drives clipping for every
-          // field. visible_region is in dataset (plate) voxel coords;
-          // we subtract each field's pos to get field-local bounds.
-          let vrJson: string | null = null;
-          try {
-            vrJson = ws.visible_region(dsId);
-          } catch {
-            vrJson = null;
-          }
-          let xyBounds: [number, number, number, number] | null = null;
-          let zRange: [number, number] | null = null;
-          if (vrJson && vrJson !== "null") {
-            try {
-              const vr = JSON.parse(vrJson);
-              xyBounds = vr.xy_bounds;
-              zRange = vr.z_range;
-            } catch {
-              xyBounds = null;
-              zRange = null;
-            }
-          }
+          const visibleRegion = parseVisibleRegion(ws, dsId);
 
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
@@ -541,106 +964,173 @@ export function DebugOverlays({
               });
               continue;
             }
+            if (!visibleRegion) continue;
             const pos = positions[entry.entityId];
             const img = imgById.get(entry.imageId);
             if (!pos || !img) continue;
             const lvl0 = img.multiscale.levels[0];
-            const lvl = img.multiscale.levels[entry.targetLod];
-            if (!lvl0 || !lvl) continue;
-
+            if (!lvl0) continue;
             const frame = getFrame(dsId, entry.imageId, lvl0.shape);
             frame.pos = pos;
-
             const fullX = lvl0.shape[Axis.X];
             const fullY = lvl0.shape[Axis.Y];
-            const fullZ = lvl0.shape[Axis.Z];
-            const lvlX = lvl.shape[Axis.X];
-            const lvlY = lvl.shape[Axis.Y];
-            const lvlZ = lvl.shape[Axis.Z];
-            const chunkPxX = lvl.chunk_shape[Axis.X];
-            const chunkPxY = lvl.chunk_shape[Axis.Y];
-            const chunkPxZ = lvl.chunk_shape[Axis.Z];
-            const scaleX = fullX / lvlX;
-            const scaleY = fullY / lvlY;
-            const scaleZ = fullZ / lvlZ;
-            const chunkWorldX = chunkPxX * scaleX;
-            const chunkWorldY = chunkPxY * scaleY;
-            const chunkWorldZ = chunkPxZ * scaleZ;
-            const maxCol = Math.ceil(lvlX / chunkPxX);
-            const maxRow = Math.ceil(lvlY / chunkPxY);
-            const maxZ = Math.ceil(lvlZ / chunkPxZ);
-
-            // Default: this field's full extent.
-            const fieldXyBounds: [number, number, number, number] =
-              xyBounds ?? [pos[0], pos[1], pos[0] + fullX, pos[1] + fullY];
-            const fieldZRange: [number, number] = zRange ?? [0, fullZ];
-
-            const localMinX = fieldXyBounds[0] - pos[0];
-            const localMaxX = fieldXyBounds[2] - pos[0];
-            const localMinY = fieldXyBounds[1] - pos[1];
-            const localMaxY = fieldXyBounds[3] - pos[1];
-            if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) continue;
-
-            const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
-            const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
-            const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
-            const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
-            const zStart = Math.max(0, Math.floor(fieldZRange[0] / chunkWorldZ));
-            const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(fieldZRange[1] / chunkWorldZ)));
 
             const cachedSet = snap.cached.get(entry.entityId);
             const inFlightSet = snap.inFlight.get(entry.entityId);
 
-            for (let iz = zStart; iz < zEnd; iz++) {
-              if (out.length >= MAX_CHUNK_RECTS) break;
-              for (let row = rowStart; row < rowEnd; row++) {
-                if (out.length >= MAX_CHUNK_RECTS) break;
-                for (let col = colStart; col < colEnd; col++) {
-                  if (out.length >= MAX_CHUNK_RECTS) break;
-                  const key = `${entry.targetLod}/${t}/${c}/${iz}/${row}/${col}`;
-                  const vMin: [number, number, number] = [
-                    col * chunkWorldX,
-                    row * chunkWorldY,
-                    iz * chunkWorldZ,
-                  ];
-                  const vMax: [number, number, number] = [
-                    (col + 1) * chunkWorldX,
-                    (row + 1) * chunkWorldY,
-                    (iz + 1) * chunkWorldZ,
-                  ];
-                  const rect = projectVoxelAabb(ws, frame, vMin, vMax, dpr);
-                  if (!rect) continue;
-                  if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
-                    continue;
-                  }
-                  let status: ChunkRect["status"] = "planned";
-                  let priorityRank: number | undefined;
-                  let tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined;
-                  if (cachedSet?.has(key)) {
-                    status = "cached";
-                    if (enabled.cachedTier) {
-                      tier = cpuCache.getCachedChunkTier(entry.entityId, key);
+            const residency = (
+              key: string,
+              tier: OverlayTier,
+              geometry: ChunkRadiusGeometry,
+              chunk: { x: number; y: number; z: number },
+            ): boolean => {
+              const radiusView = tier === "detail"
+                ? planningConfig.detailRenderRadiusView
+                : planningConfig.coarseRenderRadiusView;
+              if (!chunkWithinRenderRadius({
+                region: visibleRegion,
+                radiusView,
+                layoutPositionVox: pos,
+                geometry,
+                chunk,
+              })) {
+                return false;
+              }
+              const worker = renderLoopRef.current?.workerChunkResidency(dsId, entry.imageId, c, key) ?? "unknown";
+              if (worker === "resident") return true;
+              if (worker === "missing") return false;
+              return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key);
+            };
+
+            const statusFor = (key: string): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
+              if (cachedSet?.has(key)) {
+                return {
+                  status: "cached",
+                  tier: enabled.cachedTier ? cpuCache.getCachedChunkTier(entry.entityId, key) : undefined,
+                };
+              }
+              if (inFlightSet?.has(key)) return { status: "in-flight" };
+              return {
+                status: "planned",
+                priorityRank: enabled.plannedRank ? rankByKey.get(`${entry.entityId}/${key}`) : undefined,
+              };
+            };
+
+            const coarseLevel = entry.coarseLevel ?? null;
+            const coarseLvl = coarseLevel !== null ? img.multiscale.levels[coarseLevel] : undefined;
+            const coarseGeometry = coarseLvl ? geometryForLevels(lvl0, coarseLvl) : null;
+            const coarseChunkAt = (vx: number, vy: number, vz: number): {
+              key: string;
+              x: number;
+              y: number;
+              z: number;
+            } | null => {
+              if (coarseLevel === null || !coarseLvl || !coarseGeometry) return null;
+              const [cwX, cwY, cwZ] = coarseGeometry.chunkDims.map((chunkDim, i) =>
+                chunkDim * (coarseGeometry.fullDims[i] / Math.max(1, coarseGeometry.levelDims[i])),
+              ) as [number, number, number];
+              const maxXIdx = Math.ceil(coarseLvl.shape[Axis.X] / coarseLvl.chunk_shape[Axis.X]);
+              const maxYIdx = Math.ceil(coarseLvl.shape[Axis.Y] / coarseLvl.chunk_shape[Axis.Y]);
+              const maxZIdx = Math.ceil(coarseLvl.shape[Axis.Z] / coarseLvl.chunk_shape[Axis.Z]);
+              const xIdx = Math.max(0, Math.min(maxXIdx - 1, Math.floor(vx / cwX)));
+              const yIdx = Math.max(0, Math.min(maxYIdx - 1, Math.floor(vy / cwY)));
+              const zIdx = Math.max(0, Math.min(maxZIdx - 1, Math.floor(vz / cwZ)));
+              return {
+                key: chunkKeyFor(coarseLevel, t, c, zIdx, yIdx, xIdx),
+                x: xIdx,
+                y: yIdx,
+                z: zIdx,
+              };
+            };
+
+            const appendSource = (level: number, sourceTier: OverlayTier): void => {
+              const lvl = img.multiscale.levels[level];
+              if (!lvl) return;
+              const geometry = geometryForLevels(lvl0, lvl);
+              const [chunkWorldX, chunkWorldY, chunkWorldZ] = geometry.chunkDims.map((chunkDim, i) =>
+                chunkDim * (geometry.fullDims[i] / Math.max(1, geometry.levelDims[i])),
+              ) as [number, number, number];
+              const maxCol = Math.ceil(lvl.shape[Axis.X] / lvl.chunk_shape[Axis.X]);
+              const maxRow = Math.ceil(lvl.shape[Axis.Y] / lvl.chunk_shape[Axis.Y]);
+              const maxZ = Math.ceil(lvl.shape[Axis.Z] / lvl.chunk_shape[Axis.Z]);
+
+              const localMinX = visibleRegion.xyBoundsVox[0] - pos[0];
+              const localMaxX = visibleRegion.xyBoundsVox[2] - pos[0];
+              const localMinY = visibleRegion.xyBoundsVox[1] - pos[1];
+              const localMaxY = visibleRegion.xyBoundsVox[3] - pos[1];
+              if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) return;
+
+              const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
+              const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
+              const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
+              const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
+              const zStart = Math.max(0, Math.floor(visibleRegion.zRangeVox[0] / chunkWorldZ));
+              const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(visibleRegion.zRangeVox[1] / chunkWorldZ)));
+
+              for (let iz = zStart; iz < zEnd; iz++) {
+                if (out.length >= MAX_CHUNK_RECTS) return;
+                for (let row = rowStart; row < rowEnd; row++) {
+                  if (out.length >= MAX_CHUNK_RECTS) return;
+                  for (let col = colStart; col < colEnd; col++) {
+                    if (out.length >= MAX_CHUNK_RECTS) return;
+                    const key = chunkKeyFor(level, t, c, iz, row, col);
+                    const rect = projectVoxelAabb(
+                      ws,
+                      frame,
+                      [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ],
+                      [(col + 1) * chunkWorldX, (row + 1) * chunkWorldY, (iz + 1) * chunkWorldZ],
+                      dpr,
+                    );
+                    if (!rect) continue;
+                    if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
+                      continue;
                     }
-                  } else if (inFlightSet?.has(key)) {
-                    status = "in-flight";
-                  } else if (enabled.plannedRank) {
-                    priorityRank = rankByKey.get(`${entry.entityId}/${key}`);
+
+                    let displayTier: DisplayTier = "missing";
+                    let statusKey = key;
+                    if (sourceTier === "detail") {
+                      if (residency(key, "detail", geometry, { x: col, y: row, z: iz })) {
+                        displayTier = "detail";
+                      } else {
+                        const coarseChunk = coarseChunkAt(
+                          (col + 0.5) * chunkWorldX,
+                          (row + 0.5) * chunkWorldY,
+                          (iz + 0.5) * chunkWorldZ,
+                        );
+                        if (
+                          coarseChunk &&
+                          coarseGeometry &&
+                          residency(coarseChunk.key, "coarse", coarseGeometry, coarseChunk)
+                        ) {
+                          displayTier = "coarse";
+                          statusKey = coarseChunk.key;
+                        }
+                      }
+                    } else if (residency(key, "coarse", geometry, { x: col, y: row, z: iz })) {
+                      displayTier = "coarse";
+                    }
+
+                    out.push({
+                      key: `${dsId}/${entry.entityId}/${sourceTier}/${key}`,
+                      x: rect.x,
+                      y: rect.y,
+                      w: rect.w,
+                      h: rect.h,
+                      sourceTier: displayTier,
+                      ...statusFor(statusKey),
+                    });
                   }
-                  out.push({
-                    key: `${dsId}/${entry.entityId}/${key}`,
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    status,
-                    priorityRank,
-                    tier,
-                  });
                 }
               }
+            };
+
+            if (coarseLevel !== null && coarseLevel !== entry.detailLevel) {
+              appendSource(coarseLevel, "coarse");
             }
+            appendSource(entry.detailLevel ?? entry.targetLod, "detail");
           }
         }
+        out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));
         setChunks(out);
       } else if (chunks.length > 0) {
         setChunks([]);
@@ -671,13 +1161,15 @@ export function DebugOverlays({
         // Each color band gates on its own toggle so the simple
         // 3-color view (cached/in-flight/planned) is recoverable by
         // turning off both sub-toggles.
+        const tierBg = enabled.chunkTier ? tierColor(c.sourceTier) : null;
         const bg =
-          c.status === "cached"
+          tierBg ??
+          (c.status === "cached"
             ? enabled.cachedTier ? cachedColor(c.tier) : SOLID_CACHED
             : c.status === "in-flight"
               ? SOLID_IN_FLIGHT
-              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED;
-        const tooltip = c.status === "cached"
+              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED);
+        const statusTooltip = c.status === "cached"
           ? enabled.cachedTier && c.tier
             ? `cached · tier ${c.tier}`
             : "cached"
@@ -688,6 +1180,7 @@ export function DebugOverlays({
               : enabled.plannedRank
                 ? "planned · not in pending queue"
                 : "planned";
+        const tooltip = c.sourceTier ? `${c.sourceTier} · ${statusTooltip}` : statusTooltip;
         return (
           <div
             key={c.key}
@@ -705,6 +1198,41 @@ export function DebugOverlays({
           />
         );
       })}
+      {enabled.renderRadius && radiusPaths.length > 0 && (
+        <svg
+          width={size.w}
+          height={size.h}
+          viewBox={`0 0 ${size.w} ${size.h}`}
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            overflow: "hidden",
+          }}
+        >
+          {radiusPaths.map(r => {
+            const stroke = r.tier === "detail" ? RADIUS_DETAIL_STROKE : RADIUS_COARSE_STROKE;
+            const isPrimaryPlane = r.plane === "xy";
+            const dash = r.tier === "coarse"
+              ? isPrimaryPlane ? "8 5" : "4 6"
+              : isPrimaryPlane ? undefined : "2 6";
+            return (
+              <path
+                key={r.key}
+                d={r.d}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={isPrimaryPlane ? 2.25 : 1.5}
+                strokeDasharray={dash}
+                opacity={isPrimaryPlane ? 1 : 0.72}
+                vectorEffect="non-scaling-stroke"
+              >
+                <title>{`${r.title}; ${r.plane.toUpperCase()} plane`}</title>
+              </path>
+            );
+          })}
+        </svg>
+      )}
       {enabled.wellModes && badges.map(b => (
         <div
           key={b.key}
@@ -723,8 +1251,9 @@ export function DebugOverlays({
             lineHeight: 1.2,
             whiteSpace: "nowrap",
           }}
+          title={b.title}
         >
-          {b.label}{b.lod !== null && ` L${b.lod}`}
+          {b.label}
         </div>
       ))}
     </div>

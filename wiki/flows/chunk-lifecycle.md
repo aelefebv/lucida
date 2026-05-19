@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-19
 ---
 
 # Flow: Chunk Lifecycle
@@ -11,17 +11,17 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 ### 1. Planning decides "wanted"
 
-[[planning-domain]] — `planning.ts:732-900`. For each visible entity in the active set, iterate grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a `ChunkRequest` with priority `laneOffset + (1-importance)*500 + distance*10`.
+[[planning-domain]] resolves each visible field/image to an explicit `detail` level and optional `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest` with priority `laneOffset + (1-importance)*500 + distance*10`.
 
 ### 2. CPU cache submits + schedules
 
-[[cpu-cache]] — `cpuCache.ts:306-369` (submit), `:617-750` (scheduler). Demote stale entities, dedup, push to `pendingRequests`. Sort by priority, launch up to ≈9 concurrent fetches bounded by 32 MB in-flight.
+[[cpu-cache]] demotes stale detail entities, dedups by chunk key, interleaves detail/coarse requests when both lanes have work, and pushes survivors to the scheduler. Fetches launch up to about 9 concurrent requests bounded by 32 MB in-flight.
 
 ### 3. Network fetch
 
-`contentSource.ts::fetch(req)` → `bridge.ts` sends a `chunk_request` JSON over WebSocket → server's `serve_chunk_from_store` → binary frame back over the unicast channel.
+`contentSource.ts::fetch(req)` → `bridge.ts` sends a `chunk_request` JSON over WebSocket. Source chunks route to `serve_chunk_from_store`; generated coarse chunks route to `serve_generated_chunk_request`.
 
-Frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `bridge.ts::handleBinary` parses, routes by composite key (`{datasetId}/{imageId}/{chunkKey}` for chunks, `proxy/...` prefix for proxies).
+Ready source and generated chunks both use the normal chunk frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `bridge.ts::handleBinary` parses and routes by composite key (`{datasetId}/{imageId}/{chunkKey}`). If a generated chunk is not ready, the server sends `GeneratedChunkStatus`; `pending` clears in-flight state without entering failure tracking.
 
 ### 4. Decode
 
@@ -29,19 +29,19 @@ Frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `b
 
 ### 5. Cache insertion
 
-Decoded chunk inserted into the appropriate tier of [[cpu-cache]] (active-detail / demoted-detail / prefetch / proxy / overview), stamped with priority and wanted generation.
+Decoded chunk inserted into the appropriate [[cpu-cache]] bucket (`detail` or `coarse/minimap`), stamped with priority, residency tier, and wanted generation.
 
 ### 6. Deliverability
 
-`CpuCache.getDeliverable()` yields cached, currently-wanted, not-rejected, not-sent chunks/proxies in priority order. The [[upload-pipeline|Uploader]] consumes that iterable within the upload budget (8 MB main view, 2 MB minimap).
+`CpuCache.getDeliverable()` yields cached, currently-wanted, not-rejected, not-sent chunks in priority order. The [[upload-pipeline|Uploader]] consumes that iterable within the upload budget (8 MB main view, 2 MB minimap). Legacy proxy deliveries participate only when the proxy bridge is enabled.
 
 ### 7. Post to worker
 
-`client.sliceChunkData(...)` or `client.volumeChunkData(...)` — typed array transfer (zero-copy) over [[worker-protocol]].
+`client.sliceChunkData(...)` or `client.volumeChunkData(...)` — typed array transfer (zero-copy) over [[worker-protocol]], carrying `tier: "detail" | "coarse"`.
 
 ### 8. Worker writes atlas + updates indirection
 
-[[gpu-residency]] — `gpu.worker.ts`. Picks a slot in the appropriate atlas pool (per `(dataset, channel, chunk dims)` for proxies; per-entity-LOD section for volume; X-Y grid for slice). Writes the texture. Updates the indirection buffer entry mapping `(entity, lod, z, y, x) → slot coords`. Indirection writes are batched and flushed only on residency change.
+[[gpu-residency]] picks a slot in the appropriate atlas pool keyed by dataset, channel, chunk dimensions, and tier. Writes the texture. Updates the indirection buffer entry mapping `(entity, lod, z, y, x) → slot coords`. Indirection writes are batched and flushed only on residency change.
 
 ### 9. Render
 
@@ -50,7 +50,7 @@ Slice or volume shader runs:
 2. Project fragment to entity-local voxel coords.
 3. Compute cell within the chosen LOD.
 4. `indirection[lod.indirectionOffset + cellIndex]` → atlas slot.
-5. **Fallback chain**: detail target LOD → coarser detail LODs → field proxy → well proxy → blank.
+5. **Fallback chain**: explicit detail tier → explicit coarse tier → legacy field/well proxy if bridge-enabled and resident → blank.
 6. Apply contrast → gamma → LUT sample → opacity.
 
 ### 10. Composite

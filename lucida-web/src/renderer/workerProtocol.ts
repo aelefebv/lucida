@@ -40,6 +40,7 @@ export interface Chunk {
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
+  tier?: "detail" | "coarse";
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
@@ -64,6 +65,7 @@ export interface SliceChunkDataMessage {
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
+  tier?: "detail" | "coarse";
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
   chunks: Chunk[];
@@ -260,8 +262,13 @@ export interface DestroyMessage {
  */
 interface ColdStateActiveEntryBase {
   entityId: string;
+  /** Layout placement in full-resolution voxel coordinates. */
+  layoutPositionVox?: [number, number];
   targetLod: number;
   detailOwnedLodRange: [number, number]; // [finest, coarsest]
+  detailLevel?: number;
+  coarseLevel?: number | null;
+  wantedLodLevels?: number[];
   levels: Array<{
     level: number;
     chunkShape: [number, number, number]; // [Z, Y, X]
@@ -389,6 +396,11 @@ export interface ColdStateMessage {
   multiChannel: boolean;
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
+  /** Per-tier render radius as visible-region half-diagonal multipliers. */
+  renderRadiusView?: {
+    detail: number;
+    coarse: number;
+  };
   /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
   desiredProxyKeys?: string[];
   activeSet: ColdStateActiveEntry[];
@@ -455,6 +467,7 @@ export type ChunkFeedbackReason =
   | "missing-pool"
   | "missing-entity-meta"
   | "missing-lod-meta"
+  | "radius-filter"
   | "atlas-policy";
 
 export interface ChunksEvictedMessage {
@@ -481,6 +494,8 @@ export interface ChunksEvictedMessage {
 /** A chunk that the worker is missing from its atlas. */
 export type MissingChunk = {
   kind: "chunk";
+  datasetId: string;
+  tier?: "detail" | "coarse";
   entityId: string;
   /**
    * Worker-side member id that owns the missing chunk. Single-channel
@@ -510,6 +525,7 @@ export type MissingProxy = {
 
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
+  datasetId: string;
   epochs: SceneEpochs;
   /**
    * Discriminated union over chunks and proxies. Existing chunk

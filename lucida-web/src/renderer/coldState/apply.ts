@@ -42,7 +42,8 @@ import {
 } from "../slice/index.ts";
 import { reconcileProxyResidency } from "../proxy/residency.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
-import { computeEntityMetas } from "./entityMetas.ts";
+import { computeEntityTierMeta } from "./entityMetas.ts";
+import { memberTierKey } from "../poolKeys.ts";
 
 /**
  * Apply a cold-state message: refresh well→fields, register
@@ -89,6 +90,13 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.proxyStats.evictedPolicy += evicted;
   }
 
+  for (const [memberId, datasetId] of state.memberToDataset) {
+    if (datasetId !== msg.datasetId) continue;
+    state.memberToPool.delete(memberId);
+    state.memberTierToPool.delete(memberTierKey(memberId, "detail"));
+    state.memberTierToPool.delete(memberTierKey(memberId, "coarse"));
+  }
+
   // 2. Register member→dataset mappings for every (entry, channel)
   // combo. Canonical iteration walks activeSet × visibleChannels and
   // produces the same memberId scheme used elsewhere in the pipeline
@@ -116,17 +124,35 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   for (const group of groups.values()) {
     const [pcZ, pcY, pcX] = group.chunkDims;
     const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
+    const entryByMember = new Map<string, {
+      layoutPositionVox?: [number, number];
+      levels: Array<{
+        level: number;
+        chunkShape: [number, number, number];
+        levelDims: [number, number, number];
+      }>;
+    }>();
     let offset = 0;
 
-    for (const { entry, memberId } of group.entries) {
-      state.memberToPool.set(memberId, group.poolKey);
-      const { metas, nextOffset } = computeEntityMetas(
+    for (const { entry, memberId, tier, level } of group.entries) {
+      entryByMember.set(memberId, {
+        layoutPositionVox: entry.layoutPositionVox,
+        levels: entry.levels,
+      });
+      state.memberTierToPool.set(memberTierKey(memberId, tier), group.poolKey);
+      if (tier === "detail") state.memberToPool.set(memberId, group.poolKey);
+      const { meta, nextOffset } = computeEntityTierMeta(
         entry,
+        level,
         group.chunkDims,
         offset,
         dimArity,
       );
-      newEntityMetas.set(memberId, metas);
+      if (meta) {
+        newEntityMetas.set(memberId, [meta]);
+        const existing = currentEntityMetas.get(memberId) ?? [];
+        currentEntityMetas.set(memberId, [...existing, meta]);
+      }
       offset = nextOffset;
     }
 
@@ -136,19 +162,26 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       );
       atlas.entityMetas = newEntityMetas;
       resizeIndirection(ctx, atlas, offset);
-      remapIndirection(atlas, msg.currentT, group.channel);
+      remapIndirection(atlas, msg.currentT, group.channel, {
+        visibleRegion: msg.visibleRegion,
+        renderRadiusView: msg.renderRadiusView?.[group.tier],
+        entryByMember,
+      });
     } else {
       const atlas = getOrCreateSlicePool(
         ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
       );
       atlas.entityMetas = newEntityMetas;
       resizeSliceIndirection(ctx, atlas, offset);
-      remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ);
+      remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ, {
+        visibleRegion: msg.visibleRegion,
+        renderRadiusView: msg.renderRadiusView?.[group.tier],
+        entryByMember,
+      });
     }
 
-    for (const [memberId, metas] of newEntityMetas) {
-      currentEntityMetas.set(memberId, metas);
-    }
+    // `currentEntityMetas` was populated above so one member can carry both
+    // detail and coarse source metadata from different tier pools.
   }
 
   // 5. Capture per-dataset entity-metas snapshot.

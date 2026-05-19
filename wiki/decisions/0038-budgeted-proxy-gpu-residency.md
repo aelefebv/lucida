@@ -5,7 +5,9 @@ modified: 2026-05-18
 
 # Budgeted proxy GPU residency
 
-Status: Accepted
+Status: Superseded for the chunk-only coarse/detail path by
+[[decisions/0039-chunk-only-coarse-detail-residency]]. Historical proxy-path
+behavior remains documented here.
 
 ## Decision
 

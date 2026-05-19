@@ -6,6 +6,7 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
 use lucida_core::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use lucida_core::view::ViewState;
+use lucida_protocol::{GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot};
 
 use crate::binding::ServerBinding;
 
@@ -17,6 +18,10 @@ pub struct Session {
     history: VecDeque<(u64, DocumentCommand)>,
     /// Server-hosted datasets: dataset_id → operational binding (store + resolver + cache).
     pub server_bindings: HashMap<DatasetId, ServerBinding>,
+    /// Server-authored runtime generated coarse metadata/readiness.
+    /// Kept outside `DocumentState` so it is never treated as a user
+    /// document command or saved-view payload.
+    pub generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
 }
@@ -34,6 +39,7 @@ impl Session {
             seq: 0,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
             server_bindings: HashMap::new(),
+            generated_availability: HashMap::new(),
             clients: HashMap::new(),
         }
     }
@@ -44,11 +50,15 @@ impl Session {
             document: self.document.clone(),
             peers: self.clients.values().cloned().collect(),
             your_id,
+            generated_availability: self.generated_availability.clone(),
         }
     }
 
     /// Apply a document command. Returns the new seq number.
     pub fn apply(&mut self, cmd: DocumentCommand) -> u64 {
+        if let DocumentCommand::RemoveDataset { id } = &cmd {
+            self.generated_availability.remove(id);
+        }
         self.document.apply(cmd.clone());
 
         self.seq += 1;
@@ -57,6 +67,17 @@ impl Session {
         }
         self.history.push_back((self.seq, cmd));
         self.seq
+    }
+
+    pub fn apply_generated_availability_delta(
+        &mut self,
+        dataset_id: DatasetId,
+        delta: GeneratedAvailabilityDelta,
+    ) {
+        self.generated_availability
+            .entry(dataset_id)
+            .or_default()
+            .apply_delta(delta);
     }
 
     pub fn add_client(&mut self, id: ClientId) -> PresenceState {
@@ -224,6 +245,8 @@ mod tests {
                         grid_shape: [1, 1, 10, 2, 2],
                         scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                     }],
+                    coarse_level_index: None,
+                    generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
                 },
@@ -293,6 +316,66 @@ mod tests {
             }
             _ => panic!("expected Snapshot"),
         }
+    }
+
+    #[test]
+    fn generated_availability_is_runtime_snapshot_state() {
+        let mut session = Session::new();
+        session.apply_generated_availability_delta(
+            DatasetId("ds1".into()),
+            GeneratedAvailabilityDelta {
+                levels: vec![],
+                chunks: vec![GeneratedChunkStatusUpdate {
+                    image_id: ImageId("ds1-image".into()),
+                    level_index: 1,
+                    key: "1/0/0/0/0/0".into(),
+                    status: GeneratedChunkStatus::Ready,
+                    message: None,
+                }],
+            },
+        );
+
+        let msg = session.snapshot(7);
+        match msg {
+            ServerMessage::Snapshot {
+                generated_availability,
+                ..
+            } => {
+                let snapshot = generated_availability
+                    .get(&DatasetId("ds1".into()))
+                    .expect("generated availability snapshot");
+                assert_eq!(snapshot.chunks.len(), 1);
+                assert_eq!(snapshot.chunks[0].status, GeneratedChunkStatus::Ready);
+            }
+            _ => panic!("expected Snapshot"),
+        }
+        assert!(session.document.manifests.is_empty());
+    }
+
+    #[test]
+    fn remove_dataset_clears_generated_availability() {
+        let mut session = Session::new();
+        let reg = make_register("ds1", "test");
+        session.apply(DocumentCommand::DatasetOpened(reg));
+        session.apply_generated_availability_delta(
+            DatasetId("ds1".into()),
+            GeneratedAvailabilityDelta::default(),
+        );
+        assert!(
+            session
+                .generated_availability
+                .contains_key(&DatasetId("ds1".into()))
+        );
+
+        session.apply(DocumentCommand::RemoveDataset {
+            id: DatasetId("ds1".into()),
+        });
+
+        assert!(
+            !session
+                .generated_availability
+                .contains_key(&DatasetId("ds1".into()))
+        );
     }
 
     #[test]

@@ -34,6 +34,8 @@ export function createSyntheticEntity(
     projectedAreaPx2: overrides?.projectedAreaPx2 ?? 10000,
     centroidWorld: overrides?.centroidWorld ?? [0, 0, 0],
     idealTargetLod: overrides?.idealTargetLod ?? 0,
+    detailLevel: overrides?.detailLevel ?? overrides?.idealTargetLod ?? 0,
+    coarseLevel: overrides?.coarseLevel ?? null,
     importance: overrides?.importance ?? 1,
     layoutPositionVox: overrides?.layoutPositionVox ?? [0, 0],
     levels: overrides?.levels ?? [],

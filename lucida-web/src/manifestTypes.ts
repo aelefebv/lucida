@@ -30,6 +30,8 @@ export interface TransformEdge {
 export interface MultiscaleInfo {
   axes: { name: string; kind: string }[];
   levels: LevelGeometry[];
+  coarse_level_index?: number | null;
+  generated_levels?: GeneratedLevelInfo[];
   data_type: string;
   /**
    * Non-canonical axes (anything outside `{t,c,z,y,x}`) that were dropped
@@ -37,6 +39,18 @@ export interface MultiscaleInfo {
    * chunks. Optional/absent on payloads from older servers.
    */
   pinned_axes?: PinnedAxis[];
+}
+
+export interface GeneratedLevelInfo {
+  level_index: number;
+  role?: "coarse";
+  provenance?: GeneratedLevelProvenance;
+}
+
+export interface GeneratedLevelProvenance {
+  generator?: string;
+  config_id?: string;
+  source_content_id?: string | null;
 }
 
 export interface PinnedAxis {

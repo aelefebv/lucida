@@ -42,6 +42,9 @@ function makeEntry(
     entityId: opts.entityId,
     targetLod: opts.targetLod ?? 0,
     detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
+    detailLevel: opts.detailLevel,
+    coarseLevel: opts.coarseLevel,
+    wantedLodLevels: opts.wantedLodLevels,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
@@ -110,7 +113,8 @@ describe("groupEntriesByPool — volume", () => {
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(1);
     const [g] = groups.values();
-    expect(g.poolKey).toBe("ds1:64x64x32");
+    expect(g.poolKey).toBe("ds1:64x64x32:detail");
+    expect(g.tier).toBe("detail");
     expect(g.channel).toBe(0);
     expect(g.chunkDims).toEqual([32, 64, 64]);
     expect(g.entries.map(e => e.memberId)).toEqual(["imgA", "imgB"]);
@@ -129,7 +133,7 @@ describe("groupEntriesByPool — volume", () => {
     ]);
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(2);
-    expect(Array.from(groups.keys()).sort()).toEqual(["ds1:32x32x16", "ds1:64x64x32"]);
+    expect(Array.from(groups.keys()).sort()).toEqual(["ds1:32x32x16:detail", "ds1:64x64x32:detail"]);
   });
 
   it("multi-channel → channel-suffixed pool keys + ch-suffixed memberIds", () => {
@@ -144,8 +148,8 @@ describe("groupEntriesByPool — volume", () => {
     );
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(2);
-    expect(groups.get("ds1:ch0:64x64x32")?.entries[0].memberId).toBe("imgA:ch0");
-    expect(groups.get("ds1:ch2:64x64x32")?.entries[0].memberId).toBe("imgA:ch2");
+    expect(groups.get("ds1:ch0:64x64x32:detail")?.entries[0].memberId).toBe("imgA:ch0");
+    expect(groups.get("ds1:ch2:64x64x32:detail")?.entries[0].memberId).toBe("imgA:ch2");
   });
 
   it("multi-channel mode with one visible channel still uses channel-suffixed keys", () => {
@@ -163,8 +167,8 @@ describe("groupEntriesByPool — volume", () => {
 
     const groups = groupEntriesByPool(cold, "volume");
 
-    expect(Array.from(groups.keys())).toEqual(["ds1:ch2:64x64x32"]);
-    expect(groups.get("ds1:ch2:64x64x32")?.entries[0].memberId).toBe("imgA:ch2");
+    expect(Array.from(groups.keys())).toEqual(["ds1:ch2:64x64x32:detail"]);
+    expect(groups.get("ds1:ch2:64x64x32:detail")?.entries[0].memberId).toBe("imgA:ch2");
   });
 
   it("well-as-proxy entry (empty levels) is skipped", () => {
@@ -180,7 +184,34 @@ describe("groupEntriesByPool — volume", () => {
     ]);
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(1);
-    expect(groups.get("ds1:64x64x32")?.entries.map(e => e.memberId)).toEqual(["imgB"]);
+    expect(groups.get("ds1:64x64x32:detail")?.entries.map(e => e.memberId)).toEqual(["imgB"]);
+  });
+
+  it("detail and coarse sources use separate tiered pool groups even with mismatched chunk dims", () => {
+    const cold = makeCold([
+      makeEntry({
+        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        detailLevel: 0,
+        coarseLevel: 2,
+        wantedLodLevels: [0, 2],
+        levels: [
+          { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+          { level: 2, chunkShape: [8, 128, 128], gridShape: [8, 2, 2], levelDims: [64, 256, 256] },
+        ],
+      }),
+    ]);
+    const groups = groupEntriesByPool(cold, "volume");
+    expect(Array.from(groups.keys()).sort()).toEqual([
+      "ds1:128x128x8:coarse",
+      "ds1:64x64x32:detail",
+    ]);
+    expect(groups.get("ds1:64x64x32:detail")?.level).toBe(0);
+    expect(groups.get("ds1:128x128x8:coarse")?.level).toBe(2);
+    expect(groups.get("ds1:128x128x8:coarse")?.entries[0]).toMatchObject({
+      memberId: "imgA",
+      tier: "coarse",
+      level: 2,
+    });
   });
 });
 
@@ -199,7 +230,7 @@ describe("groupEntriesByPool — slice", () => {
     const groups = groupEntriesByPool(cold, "slice");
     expect(groups.size).toBe(1);
     const [g] = groups.values();
-    expect(g.poolKey).toBe("ds1:128x128");
+    expect(g.poolKey).toBe("ds1:128x128:detail");
     expect(g.chunkDims).toEqual([1, 128, 128]);
   });
 
@@ -216,7 +247,7 @@ describe("groupEntriesByPool — slice", () => {
     );
     const groups = groupEntriesByPool(cold, "slice");
     expect(groups.size).toBe(2);
-    expect(groups.get("ds1:ch0:128x128")?.entries[0].memberId).toBe("imgA:ch0");
-    expect(groups.get("ds1:ch1:128x128")?.entries[0].memberId).toBe("imgA:ch1");
+    expect(groups.get("ds1:ch0:128x128:detail")?.entries[0].memberId).toBe("imgA:ch0");
+    expect(groups.get("ds1:ch1:128x128:detail")?.entries[0].memberId).toBe("imgA:ch1");
   });
 });

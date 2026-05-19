@@ -53,6 +53,8 @@ import {
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_LOD_COUNT,
+  OFFSET_COARSE_SOURCE,
+  OFFSET_DETAIL_SOURCE,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
   OFFSET_PAD_PROXY0,
@@ -63,6 +65,13 @@ import {
   OFFSET_WELL_PROXY_DIMS,
   OFFSET_WELL_PROXY_POOL_INDEX,
   OFFSET_WELL_PROXY_SLOT_INDEX,
+  SOURCE_OFFSET_CHUNK_DIMS,
+  SOURCE_OFFSET_GRID_DIMS,
+  SOURCE_OFFSET_INDIRECTION_OFFSET,
+  SOURCE_OFFSET_LEVEL,
+  SOURCE_OFFSET_LEVEL_DIMS,
+  SOURCE_OFFSET_PAD0,
+  SOURCE_OFFSET_VALID,
 } from "./descriptor/layout.ts";
 
 // Re-export size/sentinel constants so existing consumers don't break.
@@ -428,4 +437,53 @@ export function serializeEntityDescriptor(
       }
     }
   }
+
+  const hasTierSources = entry.kind === "field" && entry.detailLevel !== undefined;
+  const detailMeta = hasTierSources
+    ? lodMetas.find((m) => m.level === entry.detailLevel)
+    : undefined;
+  const coarseMeta = hasTierSources && entry.coarseLevel !== undefined && entry.coarseLevel !== null
+    ? lodMetas.find((m) => m.level === entry.coarseLevel)
+    : undefined;
+  writeChunkTierSource(u32, OFFSET_DETAIL_SOURCE, detailMeta);
+  writeChunkTierSource(u32, OFFSET_COARSE_SOURCE, coarseMeta);
+}
+
+function writeChunkTierSource(
+  u32: Uint32Array,
+  offsetBytes: number,
+  meta: LodIndirectionMeta | undefined,
+): void {
+  const base = offsetBytes / 4;
+  if (!meta) {
+    for (let i = 0; i < 16; i++) u32[base + i] = 0;
+    return;
+  }
+
+  const [gZ, gY, gX] = meta.gridDims;
+  const [cZ, cY, cX] = meta.chunkDims;
+  const [lZ, lY, lX] = meta.levelDims;
+
+  u32[base + SOURCE_OFFSET_VALID / 4] = 1;
+  u32[base + SOURCE_OFFSET_LEVEL / 4] = meta.level;
+  u32[base + SOURCE_OFFSET_INDIRECTION_OFFSET / 4] = meta.offset;
+  u32[base + SOURCE_OFFSET_PAD0 / 4] = 0;
+
+  const gridBase = base + SOURCE_OFFSET_GRID_DIMS / 4;
+  u32[gridBase + 0] = gX;
+  u32[gridBase + 1] = gY;
+  u32[gridBase + 2] = gZ;
+  u32[gridBase + 3] = 0;
+
+  const chunkBase = base + SOURCE_OFFSET_CHUNK_DIMS / 4;
+  u32[chunkBase + 0] = cX;
+  u32[chunkBase + 1] = cY;
+  u32[chunkBase + 2] = cZ;
+  u32[chunkBase + 3] = 0;
+
+  const levelBase = base + SOURCE_OFFSET_LEVEL_DIMS / 4;
+  u32[levelBase + 0] = lX;
+  u32[levelBase + 1] = lY;
+  u32[levelBase + 2] = lZ;
+  u32[levelBase + 3] = 0;
 }

@@ -1,9 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-18
 ---
 
 # Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)
+
+Status: Superseded for the chunk-only coarse/detail path by
+[[decisions/0039-chunk-only-coarse-detail-residency]]. Historical proxy-atlas
+behavior remains documented here.
 
 ## Decision
 

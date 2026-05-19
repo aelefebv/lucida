@@ -63,8 +63,12 @@ export function buildColdActiveEntry(
     return {
       kind: "well-as-proxy",
       entityId: entry.entityId,
+      layoutPositionVox: entity?.layoutPositionVox,
       targetLod: 0,
       detailOwnedLodRange: [0, 0],
+      detailLevel: 0,
+      coarseLevel: null,
+      wantedLodLevels: [0],
       levels,
       mode: "well-as-proxy",
       proxyKind: "WellProxy3D",
@@ -82,9 +86,13 @@ export function buildColdActiveEntry(
     return {
       kind: "field",
       entityId: entry.entityId,
+      layoutPositionVox: entity?.layoutPositionVox,
       imageId: entry.imageId,
       targetLod: entry.coarsestLod,
       detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
+      detailLevel: entry.coarsestLod,
+      coarseLevel: null,
+      wantedLodLevels: [entry.coarsestLod],
       levels,
       // Invisibles surface as `fields-with-detail` so the wanted-set
       // rules don't ask for proxies for an entity that won't render.
@@ -102,9 +110,13 @@ export function buildColdActiveEntry(
   return {
     kind: "field",
     entityId: entry.entityId,
+    layoutPositionVox: entity?.layoutPositionVox,
     imageId: entry.imageId,
     targetLod: entry.targetLod,
     detailOwnedLodRange: entry.detailOwnedLodRange,
+    detailLevel: entry.detailLevel,
+    coarseLevel: entry.coarseLevel,
+    wantedLodLevels: entry.wantedLodLevels,
     levels,
     mode: entry.mode,
     proxyKind: entry.proxyKind,
@@ -129,6 +141,7 @@ export function buildColdState(args: {
   selection: SelectionState;
   multiChannel: boolean;
   visibleRegion: VisibleRegion;
+  renderRadiusView?: { detail: number; coarse: number };
   desiredProxyKeys?: Iterable<string>;
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
@@ -151,6 +164,7 @@ export function buildColdState(args: {
     multiChannel: args.multiChannel,
     visibleChannels: args.selection.visibleChannels,
     visibleRegion: args.visibleRegion,
+    renderRadiusView: args.renderRadiusView,
     desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,

@@ -172,6 +172,9 @@ function stripDatasetSettings(s: DatasetDisplaySettings): Record<string, unknown
   if (s.channel_blend_mode !== undefined && s.channel_blend_mode !== "additive") {
     out.channel_blend_mode = s.channel_blend_mode;
   }
+  if (typeof s.detail_level_override === "number") {
+    out.detail_level_override = s.detail_level_override;
+  }
   // `channel_settings` length is structural — preserve it exactly so
   // roundtrip identity holds. Empty per-channel objects (`{}`) signal
   // "all defaults at this index" and are restored via `defaultChannel`.
@@ -248,7 +251,7 @@ function restoreDatasetSettingsMap(
 function restoreDatasetSettings(p: unknown): DatasetDisplaySettings {
   const partial = (p as Partial<DatasetDisplaySettings> | undefined) ?? {};
   const channels = partial.channel_settings;
-  return {
+  const out: DatasetDisplaySettings = {
     visible: partial.visible ?? true,
     opacity: partial.opacity ?? 1.0,
     contrast_min: partial.contrast_min ?? 0,
@@ -259,6 +262,10 @@ function restoreDatasetSettings(p: unknown): DatasetDisplaySettings {
     channel_blend_mode: partial.channel_blend_mode ?? "additive",
     channel_settings: channels ? channels.map((c, i) => restoreChannel(c, i)) : [],
   };
+  if (typeof partial.detail_level_override === "number") {
+    out.detail_level_override = partial.detail_level_override;
+  }
+  return out;
 }
 
 function restoreChannel(p: Partial<ChannelSettings>, index: number): ChannelSettings {

@@ -11,6 +11,7 @@ import type {
   MissingProxy,
 } from "../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../epochs.ts";
+import type { ResidencyTier } from "../fetch/types.ts";
 
 /**
  * Worker `chunksEvicted` callback. `memberId` is the worker-side member
@@ -24,6 +25,7 @@ export type ChunksEvictedHandler = (
 ) => void;
 
 export type WantedSetHandler = (
+  datasetId: string,
   epochs: SceneEpochs,
   missing: Array<MissingChunk | MissingProxy>,
 ) => void;
@@ -60,6 +62,7 @@ export interface UploadClient {
     levelDepth: number,
     fullResZ: number,
     epochs: SceneEpochs,
+    tier?: ResidencyTier,
   ): void;
 
   volumeChunkData(
@@ -82,6 +85,7 @@ export interface UploadClient {
     chunkY: number,
     chunkZ: number,
     epochs: SceneEpochs,
+    tier?: ResidencyTier,
   ): void;
 
   proxyAssetData(

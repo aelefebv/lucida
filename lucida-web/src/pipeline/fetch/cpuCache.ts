@@ -53,6 +53,7 @@ import type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
+  ResidencyTier,
 } from "./types.ts";
 
 // Re-exported so existing `./cpuCache.ts` imports keep working.
@@ -65,6 +66,7 @@ export type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
+  ResidencyTier,
   TierCounters,
   TierResidencyEntry,
 } from "./types.ts";
@@ -77,6 +79,10 @@ export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
 export const INTERACTION_MODE_WINDOW = 10;
+const SPARSE_DETAIL_MIN_DESIRED_CHUNKS = 4;
+const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
+const SPARSE_DETAIL_STREAK_THRESHOLD = 3;
+const SPARSE_DETAIL_LOG_RATE_LIMIT_MS = 5000;
 
 interface FailedEntry {
   failedUntilContentEpoch: number;
@@ -86,11 +92,13 @@ interface FailedEntry {
 interface InFlightChunkMeta {
   request: ChunkRequest;
   lastSeenTick: number;
+  epochs: SceneEpochs;
 }
 
 interface InFlightProxyMeta {
   request: ProxyRequest;
   lastSeenTick: number;
+  epochs: SceneEpochs;
 }
 
 export class CpuCache {
@@ -131,6 +139,10 @@ export class CpuCache {
 
   /** Plan-rebuild generation stamped onto wanted cache entries. */
   private currentSubmitTick = 0;
+  private desiredDetailKeysThisTick = new Set<string>();
+  private desiredCoarseKeysThisTick = new Set<string>();
+  private sparseDetailStreak = 0;
+  private lastSparseDetailLogAt = -Infinity;
 
   /**
    * Latest wanted metadata for in-flight fetches. The request object
@@ -210,8 +222,9 @@ export class CpuCache {
       },
       (req) => this.inFlightKey(req),
       (req, controller, _estimate, key) => {
-        this.rememberInFlightChunk(key, req);
-        this.fetchAndDecode(req, controller, key).catch(() => {});
+        const startedEpochs = { ...this.currentEpochs };
+        this.rememberInFlightChunk(key, req, startedEpochs);
+        this.fetchAndDecode(req, controller, key, 0, startedEpochs).catch(() => {});
       },
     );
     this.proxyScheduler = new Scheduler<ProxyRequest>(
@@ -225,7 +238,7 @@ export class CpuCache {
       },
       (req) => this.inFlightProxyKey(req),
       (req, controller, _estimate, key) => {
-        this.rememberInFlightProxy(key, req);
+        this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
         this.fetchProxy(req, controller, key).catch(() => {});
       },
     );
@@ -234,8 +247,10 @@ export class CpuCache {
   // Public API
 
   /**
-   * Purely additive. Re-submitting an unchanged plan is a no-op for
-   * the fetch queue; cancellation goes through {@link cancelDataset}.
+   * Submit the current request plan. Re-submitting an unchanged plan is
+   * still a no-op, but work for active entities that disappeared from
+   * the new plan is preempted so scrubbed-away T/Z/channel work does not
+   * block current requests behind the scheduler caps.
    */
   submit(plan: RequestPlan): void {
     this.currentEpochs = plan.epochs;
@@ -244,6 +259,10 @@ export class CpuCache {
 
     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
     for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
+    const plannedChunkKeys = new Set(plan.requests.map(req => this.inFlightKey(req)));
+    this.recordTierDemand(plan.requests);
+    this.applyElasticTierBudgets();
+    this.cancelOmittedChunkWork(newActiveIds, plannedChunkKeys);
 
     const pendingChunks: ChunkRequest[] = [];
     const enqueueNow = performance.now();
@@ -264,6 +283,7 @@ export class CpuCache {
       if (cachedEntry) {
         this.counters.recordHit();
         cachedEntry.lane = req.lane;
+        cachedEntry.residencyTier = this.requestResidencyTier(req);
         cachedEntry.tier = this.laneToTier(req.lane);
         cachedEntry.priority = req.priority;
         cachedEntry.lastSeenTick = this.currentSubmitTick;
@@ -271,7 +291,7 @@ export class CpuCache {
       }
 
       if (this.chunkScheduler.hasInFlight(key)) {
-        this.rememberInFlightChunk(key, req);
+        this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
         continue;
       }
 
@@ -280,7 +300,7 @@ export class CpuCache {
 
       pendingChunks.push(req);
     }
-    this.chunkScheduler.enqueue(pendingChunks, enqueueNow);
+    this.chunkScheduler.enqueue(this.orderChunkRequestsForTierAllocation(pendingChunks), enqueueNow);
 
     const proxyRequests = plan.proxyRequests ?? [];
     const pendingProxies: ProxyRequest[] = [];
@@ -295,7 +315,7 @@ export class CpuCache {
       }
 
       if (this.proxyScheduler.hasInFlight(key)) {
-        this.rememberInFlightProxy(key, req);
+        this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
         continue;
       }
 
@@ -304,6 +324,20 @@ export class CpuCache {
     this.proxyScheduler.enqueue(pendingProxies, enqueueNow);
 
     this.drainSchedulers();
+  }
+
+  private cancelOmittedChunkWork(
+    activeEntityIds: Set<string>,
+    plannedChunkKeys: Set<string>,
+  ): void {
+    if (activeEntityIds.size === 0) return;
+    const cancelled = this.chunkScheduler.cancelWhere((entry) => (
+      activeEntityIds.has(entry.request.entityId) &&
+      !plannedChunkKeys.has(this.inFlightKey(entry.request))
+    ));
+    for (const key of cancelled) {
+      this.inFlightChunkMeta.delete(key);
+    }
   }
 
   /**
@@ -377,6 +411,9 @@ export class CpuCache {
     this.activeEntityIds = this.activeEntityIdsThisRebuild;
     this.activeEntityIdsThisRebuild = new Set();
     this.currentSubmitTick++;
+    this.desiredDetailKeysThisTick.clear();
+    this.desiredCoarseKeysThisTick.clear();
+    this.sparseDetailStreak = 0;
     this.rejectionTracker.clear();
     this.deliveryState.onPlanRebuildStart();
   }
@@ -386,6 +423,16 @@ export class CpuCache {
 
     for (const entry of this.chunkStore.iterateTier("active-detail")) {
       if (entry.lane !== "detail") continue;
+      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
+      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey)) {
+        continue;
+      }
+      if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
+      candidates.push(this.chunkEntryToDelivery(entry));
+    }
+
+    for (const entry of this.overviewStore.allEntries()) {
+      if (entry.lane !== "coarse") continue;
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
       if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey)) {
         continue;
@@ -424,7 +471,9 @@ export class CpuCache {
     }
     for (const key of skipped) {
       this.deliveryState.clearChunkSent(imageId, c, key);
-      const entry = this.chunkStore.findByImageChunk(imageId, c, key);
+      const entry =
+        this.chunkStore.findByImageChunk(imageId, c, key) ??
+        this.overviewStore.findByImageChunk(imageId, c, key);
       this.markRejected(entry?.entityId ?? imageId, key);
     }
   }
@@ -476,6 +525,9 @@ export class CpuCache {
     };
 
     const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
+    const tierDemand = this.computeTierDemandTelemetry();
+    const tierQueues = this.computeTierQueueTelemetry();
+    this.maybeLogSparseDetail(now, tierDemand);
 
     return {
       mainBytes: this.chunkStore.bytes,
@@ -510,11 +562,18 @@ export class CpuCache {
       decodeP50Ms: counters.decodeP50Ms,
       decodeP95Ms: counters.decodeP95Ms,
       tierResidency,
+      tierDemand,
+      tierQueues,
+      tierBudgets: {
+        detailBytes: this.chunkStore.budgetBytes,
+        coarseBytes: this.overviewStore.budgetBytes,
+      },
     };
   }
 
   updateConfig(partial: Partial<CpuCacheConfig>): void {
     Object.assign(this.config, partial);
+    this.applyElasticTierBudgets();
   }
 
   /** Searches detail then overview; proxies use {@link getCachedProxy}. */
@@ -643,6 +702,8 @@ export class CpuCache {
     this.inFlightProxyMeta.clear();
     this.lruCounter = 0;
     this.currentSubmitTick = 0;
+    this.chunkStore.setBudgetBytes(this.config.mainBudgetBytes);
+    this.overviewStore.setBudgetBytes(this.config.overviewBudgetBytes);
 
     this.listeners = [];
 
@@ -657,6 +718,7 @@ export class CpuCache {
     controller: AbortController,
     key: string,
     retryCount = 0,
+    startedEpochs: SceneEpochs = { ...this.currentEpochs },
   ): Promise<void> {
     let result: FetchResult;
     try {
@@ -667,16 +729,17 @@ export class CpuCache {
     } catch (err: unknown) {
       const fe = classifyFetchError(err);
 
-      if (fe.kind === "abort") {
+      if (fe.kind === "abort" || fe.kind === "pending") {
         this.chunkScheduler.markInFlightDone(key);
         this.inFlightChunkMeta.delete(key);
+        if (fe.kind === "pending") this.drainSchedulers();
         return;
       }
 
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
-        return this.fetchAndDecode(req, controller, key, retryCount + 1);
+        return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs);
       }
 
       const isPermanent = fe.kind === "permanent";
@@ -710,7 +773,12 @@ export class CpuCache {
 
     const latestMeta = this.inFlightChunkMeta.get(key);
     const effectiveReq = latestMeta?.request ?? req;
-    const lastSeenTick = latestMeta?.lastSeenTick ?? this.currentSubmitTick;
+    const metaEpochs = latestMeta?.epochs ?? startedEpochs;
+    const stale =
+      latestMeta === undefined ||
+      latestMeta.lastSeenTick !== this.currentSubmitTick ||
+      isEpochStale(metaEpochs, this.currentEpochs);
+    const lastSeenTick = stale ? -1 : latestMeta.lastSeenTick;
 
     this.chunkScheduler.markInFlightDone(key);
     if (this.inFlightChunkMeta.get(key) === latestMeta) {
@@ -719,7 +787,7 @@ export class CpuCache {
 
     // Cache even if cancelled during decode — the work is done.
     const lane = effectiveReq.lane;
-    const tier = this.laneToTier(lane);
+    const tier = stale ? "demoted-detail" : this.laneToTier(lane);
     const cacheEntry: CacheEntry = {
       data: decoded,
       sizeBytes: decoded.byteLength,
@@ -735,16 +803,25 @@ export class CpuCache {
       x: effectiveReq.x,
       chunkKey: effectiveReq.chunkKey,
       insertedAt: this.lruCounter++,
-      epochs: { ...this.currentEpochs },
+      epochs: { ...metaEpochs },
       dataType: result.dataType,
-      priority: effectiveReq.priority,
+      residencyTier: this.requestResidencyTier(effectiveReq),
+      priority: stale ? Number.MAX_SAFE_INTEGER : effectiveReq.priority,
       lastSeenTick,
     };
 
-    // minimap routes to overview cache (ADR 0023).
-    if (lane === "overview" || lane === "minimap") {
+    // minimap/overview/coarse route to the overview/coarse bucket (ADR 0023 + coarse/detail bridge).
+    if (lane === "overview" || lane === "minimap" || lane === "coarse") {
+      if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
+        this.drainSchedulers();
+        return;
+      }
       this.overviewStore.insert(cacheEntry);
     } else {
+      if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
+        this.drainSchedulers();
+        return;
+      }
       this.chunkStore.insert(cacheEntry);
     }
 
@@ -836,17 +913,72 @@ export class CpuCache {
     this.chunkScheduler.drain(estimateBytes);
   }
 
-  private rememberInFlightChunk(key: string, req: ChunkRequest): void {
+  private orderChunkRequestsForTierAllocation(requests: ChunkRequest[]): ChunkRequest[] {
+    const detail: ChunkRequest[] = [];
+    const coarse: ChunkRequest[] = [];
+    const other: ChunkRequest[] = [];
+
+    for (const req of requests) {
+      const tier = this.requestResidencyTier(req);
+      if (tier === "detail") detail.push(req);
+      else if (tier === "coarse") coarse.push(req);
+      else other.push(req);
+    }
+
+    if (detail.length === 0 || coarse.length === 0) {
+      return [...detail, ...coarse, ...other];
+    }
+
+    const ordered: ChunkRequest[] = [];
+    const max = Math.max(detail.length, coarse.length);
+    for (let i = 0; i < max; i++) {
+      if (i < detail.length) ordered.push(detail[i]);
+      if (i < coarse.length) ordered.push(coarse[i]);
+    }
+    ordered.push(...other);
+    return ordered;
+  }
+
+  private applyElasticTierBudgets(): void {
+    const detailDemand = this.desiredDetailKeysThisTick.size > 0;
+    const coarseDemand = this.desiredCoarseKeysThisTick.size > 0;
+    const protectedDetail = this.config.mainBudgetBytes;
+    const protectedCoarse = this.config.overviewBudgetBytes;
+
+    let detailBudget = protectedDetail;
+    let coarseBudget = protectedCoarse;
+
+    if (detailDemand && !coarseDemand) {
+      detailBudget += Math.max(0, protectedCoarse - this.overviewStore.bytes);
+    } else if (coarseDemand && !detailDemand) {
+      coarseBudget += Math.max(0, protectedDetail - this.chunkStore.bytes);
+    }
+
+    this.chunkStore.setBudgetBytes(detailBudget);
+    this.overviewStore.setBudgetBytes(coarseBudget);
+  }
+
+  private rememberInFlightChunk(
+    key: string,
+    req: ChunkRequest,
+    epochs: SceneEpochs,
+  ): void {
     this.inFlightChunkMeta.set(key, {
       request: req,
       lastSeenTick: this.currentSubmitTick,
+      epochs,
     });
   }
 
-  private rememberInFlightProxy(key: string, req: ProxyRequest): void {
+  private rememberInFlightProxy(
+    key: string,
+    req: ProxyRequest,
+    epochs: SceneEpochs,
+  ): void {
     this.inFlightProxyMeta.set(key, {
       request: req,
       lastSeenTick: this.currentSubmitTick,
+      epochs,
     });
   }
 
@@ -894,6 +1026,7 @@ export class CpuCache {
       dataType: entry.dataType,
       epochs: entry.epochs,
       lane: entry.lane,
+      residencyTier: entry.residencyTier,
       priority: entry.priority,
     };
   }
@@ -943,8 +1076,9 @@ export class CpuCache {
   // Cache Management
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
-    // minimap shares the overview cache (ADR 0023).
-    const usesOverviewCache = req.lane === "overview" || req.lane === "minimap";
+    // minimap/overview/coarse share the overview/coarse cache.
+    const usesOverviewCache =
+      req.lane === "overview" || req.lane === "minimap" || req.lane === "coarse";
     const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
     return store.get(req.entityId, req.chunkKey);
   }
@@ -952,11 +1086,126 @@ export class CpuCache {
   private laneToTier(lane: Lane): EvictionTier {
     if (lane === "prefetch") return "prefetch";
     // overview/minimap use LRU; tier is a no-op label there.
-    if (lane === "overview" || lane === "minimap") return "prefetch";
+    if (lane === "overview" || lane === "minimap" || lane === "coarse") return "prefetch";
     return "active-detail";
+  }
+
+  private requestResidencyTier(req: ChunkRequest): ResidencyTier {
+    if (req.tier) return req.tier;
+    return req.lane === "coarse" || req.lane === "overview" || req.lane === "minimap"
+      ? "coarse"
+      : "detail";
+  }
+
+  private recordTierDemand(requests: ChunkRequest[]): void {
+    for (const req of requests) {
+      if (this.requestResidencyTier(req) === "detail") {
+        this.desiredDetailKeysThisTick.add(this.inFlightKey(req));
+      } else if (this.requestResidencyTier(req) === "coarse") {
+        this.desiredCoarseKeysThisTick.add(this.inFlightKey(req));
+      }
+    }
+  }
+
+  private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
+    let residentDetailChunks = 0;
+    let residentDetailBytes = 0;
+    let residentCoarseChunks = 0;
+    let residentCoarseBytes = 0;
+
+    for (const entry of this.chunkStore.allEntries()) {
+      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
+      if (entry.residencyTier === "detail" || entry.lane === "detail") {
+        residentDetailChunks++;
+        residentDetailBytes += entry.sizeBytes;
+      }
+    }
+    for (const entry of this.overviewStore.allEntries()) {
+      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
+      if (entry.residencyTier === "coarse" || entry.lane === "coarse") {
+        residentCoarseChunks++;
+        residentCoarseBytes += entry.sizeBytes;
+      }
+    }
+
+    const desiredDetail = this.desiredDetailKeysThisTick.size;
+    const detailCoverageRatio =
+      desiredDetail > 0 ? residentDetailChunks / desiredDetail : 1;
+    const sparseDetail =
+      desiredDetail >= SPARSE_DETAIL_MIN_DESIRED_CHUNKS &&
+      detailCoverageRatio < SPARSE_DETAIL_COVERAGE_RATIO &&
+      (
+        this.chunkScheduler.pendingSize > 0 ||
+        this.chunkScheduler.inFlightSize > 0 ||
+        this.chunkStore.bytes >= this.config.mainBudgetBytes * 0.95
+      );
+
+    return {
+      desired: {
+        detailChunks: desiredDetail,
+        coarseChunks: this.desiredCoarseKeysThisTick.size,
+      },
+      resident: {
+        detailChunks: residentDetailChunks,
+        coarseChunks: residentCoarseChunks,
+        detailBytes: residentDetailBytes,
+        coarseBytes: residentCoarseBytes,
+      },
+      detailCoverageRatio,
+      sparseDetail,
+    };
+  }
+
+  private computeTierQueueTelemetry(): CacheTelemetry["tierQueues"] {
+    const queues: CacheTelemetry["tierQueues"] = {
+      detail: { pending: 0, inFlight: 0, inFlightBytes: 0 },
+      coarse: { pending: 0, inFlight: 0, inFlightBytes: 0 },
+    };
+
+    for (const req of this.chunkScheduler.pendingSnapshot()) {
+      queues[this.requestResidencyTier(req)].pending++;
+    }
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      const tier = this.requestResidencyTier(entry.request);
+      queues[tier].inFlight++;
+      queues[tier].inFlightBytes += entry.estimatedBytes;
+    }
+    return queues;
+  }
+
+  private maybeLogSparseDetail(
+    now: number,
+    tierDemand: CacheTelemetry["tierDemand"],
+  ): void {
+    if (!tierDemand.sparseDetail) {
+      this.sparseDetailStreak = 0;
+      return;
+    }
+    this.sparseDetailStreak++;
+    if (this.sparseDetailStreak < SPARSE_DETAIL_STREAK_THRESHOLD) return;
+    if (now - this.lastSparseDetailLogAt < SPARSE_DETAIL_LOG_RATE_LIMIT_MS) return;
+
+    this.lastSparseDetailLogAt = now;
+    debugLog("cache", "cache.sparse_detail", {
+      desiredDetailChunks: tierDemand.desired.detailChunks,
+      residentDetailChunks: tierDemand.resident.detailChunks,
+      detailCoverageRatio: tierDemand.detailCoverageRatio,
+      pendingChunks: this.chunkScheduler.pendingSize,
+      inFlightChunks: this.chunkScheduler.inFlightSize,
+      mainBytes: this.chunkStore.bytes,
+      mainBudget: this.config.mainBudgetBytes,
+      notice: "Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.",
+    });
   }
 
   private inFlightKey(req: ChunkRequest): string {
     return `${req.entityId}/${req.chunkKey}`;
   }
+}
+
+function isEpochStale(deliveryEpochs: SceneEpochs, currentEpochs: SceneEpochs): boolean {
+  return (
+    deliveryEpochs.selection < currentEpochs.selection ||
+    deliveryEpochs.content < currentEpochs.content
+  );
 }

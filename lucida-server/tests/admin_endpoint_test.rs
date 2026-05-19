@@ -76,6 +76,7 @@ fn build_router(
         proxy_config: ProxyConfig {
             cache_dir: cache_dir.to_path_buf(),
             concurrency: 1,
+            ..ProxyConfig::defaults()
         },
     };
 

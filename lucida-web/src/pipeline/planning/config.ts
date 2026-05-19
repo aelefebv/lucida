@@ -42,8 +42,21 @@ export const PREFETCH_LANE_OFFSET = 1500;
  */
 export const OVERVIEW_LANE_OFFSET = 2500;
 
+/**
+ * Coarse lane offset for the chunk-only bridge. Kept near the old
+ * overview lane so minimap/detail stay ahead of whole-context fill.
+ */
+export const COARSE_LANE_OFFSET = 2400;
+
 /** Number of future timepoints to prefetch (length of the prefetch lane). */
 export const PREFETCH_DEPTH = 2;
+
+/**
+ * Render-radius slider value that disables radius filtering. Values
+ * below this are interpreted as a multiplier of the current visible
+ * region's half-diagonal.
+ */
+export const RENDER_RADIUS_DISABLED_VIEW = 2;
 
 /**
  * Coefficient on `(1 - importance)`. Tuned so a one-importance-step gap
@@ -90,6 +103,23 @@ export interface PlanningConfig {
   /** Worker-global GPU proxy residency budget, in bytes. */
   proxyResidencyBudgetBytes: number;
 
+  // -- residency model ------------------------------------------------
+  /**
+   * Internal bridge flag for chunk-only coarse/detail residency. False
+   * preserves the proxy-era planner until the new path reaches parity.
+   */
+  coarseDetailEnabled: boolean;
+  /**
+   * Detail render radius as a multiplier of the visible-region
+   * half-diagonal. The default max value disables filtering.
+   */
+  detailRenderRadiusView: number;
+  /**
+   * Coarse render radius as a multiplier of the visible-region
+   * half-diagonal. The default max value disables filtering.
+   */
+  coarseRenderRadiusView: number;
+
   // -- lane offsets ---------------------------------------------------
   /** Minimap lane (highest urgency). See {@link MINIMAP_LANE_OFFSET}. */
   minimapLaneOffset: number;
@@ -101,6 +131,8 @@ export interface PlanningConfig {
   prefetchLaneOffset: number;
   /** Overview requests (lowest urgency). */
   overviewLaneOffset: number;
+  /** Coarse requests for the chunk-only bridge. */
+  coarseLaneOffset: number;
 }
 
 /** Canonical defaults. Sourced from the module-level constants so the two cannot drift. */
@@ -113,11 +145,15 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   distanceWeight: DISTANCE_WEIGHT,
   wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
   proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
+  coarseDetailEnabled: true,
+  detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
+  coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,
   prefetchLaneOffset: PREFETCH_LANE_OFFSET,
   overviewLaneOffset: OVERVIEW_LANE_OFFSET,
+  coarseLaneOffset: COARSE_LANE_OFFSET,
 };
 
 /** Merge a partial config over {@link DEFAULT_PLANNING_CONFIG}; returns a fresh object. */

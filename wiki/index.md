@@ -17,7 +17,7 @@ Welcome to the Lucida repo wiki. Start with [[CLAUDE]] if you're an agent or new
 - [[systems/index|Systems]] — split into `crates/` (Cargo workspace members: `lucida-core`, `lucida-server`, `lucida-store`, etc.) and `subsystems/` (web-internal modules and cross-cutting concepts: chunk pipeline, planning, CPU cache, GPU residency, worker protocol, scene state and epochs, presence and follow, layouts, multichannel and colormaps)
 - [[principles/index|Principles]] — stable claims about what each subsystem optimizes for; the framework ADRs live within
 - [[decisions/index|Decisions]] — numbered ADRs (`0001-…` onward) recording architectural choices
-- [[flows/index|Flows]] — end-to-end traces: dataset opening, chunk lifecycle, presence propagation, follow chain resolution, document command application, proxy generation
+- [[flows/index|Flows]] — end-to-end traces: dataset opening, chunk lifecycle, presence propagation, follow chain resolution, document command application, historical proxy generation
 - [[gotchas/index|Gotchas]] — tribal knowledge, footguns, build-system quirks
 
 ## Topics

@@ -133,6 +133,8 @@ pub fn single_image_graph(
             multiscale: MultiscaleInfo {
                 axes: standard_axes(),
                 levels,
+                coarse_level_index: None,
+                generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
             },
@@ -196,6 +198,8 @@ pub fn well_graph_with_fields(
             multiscale: MultiscaleInfo {
                 axes: standard_axes(),
                 levels: levels.clone(),
+                coarse_level_index: None,
+                generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
             },

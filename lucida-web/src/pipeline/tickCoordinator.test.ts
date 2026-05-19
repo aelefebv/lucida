@@ -335,11 +335,13 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("submits only budget-admitted proxies while preserving detail requests", async () => {
+  it("submits only budget-admitted legacy proxies while preserving detail requests", async () => {
     const { debugStats } = await import("../debug/debugStats.ts");
+    const { configStore } = await import("./planning/configStore.ts");
     const previousDebugEnabled = debugStats.enabled;
     debugStats.enabled = true;
     debugStats.orch = null;
+    configStore.set("coarseDetailEnabled", false);
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();

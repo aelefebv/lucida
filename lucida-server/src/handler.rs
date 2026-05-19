@@ -6,7 +6,8 @@ use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, AssetMessage, DatasetOpened, ProxyAvailability, ProxyFootprint,
+    AssetCatalog, AssetMessage, DatasetOpened, GeneratedAvailabilityDelta, GeneratedChunkStatus,
+    ProxyAvailability, ProxyFootprint,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
 use lucida_store::cache::CachedStore;
@@ -15,6 +16,10 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::decode::decode_storage_bytes;
+use crate::generated::{
+    DerivedChunkCache, DerivedChunkLookup, GeneratedCoarseConfig, GeneratedCoarseService,
+    GeneratedSchedulingConfig, plan_generated_coarse_for_manifest,
+};
 use crate::proxy::{ProxyCache, ProxyGenerator};
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
@@ -100,6 +105,7 @@ pub async fn handle_client(
                                     if *sender == id { continue; }
                                     json
                                 }
+                                BroadcastItem::GeneratedAvailabilityUpdate { json } => json,
                             };
                             if ws_tx
                                 .send(Message::Text(json.clone().into()))
@@ -247,6 +253,17 @@ pub async fn handle_client(
                                 .await;
                             });
                         }
+                        ClientMessage::ViewerInterest { interest } => {
+                            let service = {
+                                let sess = session.lock().await;
+                                sess.server_bindings
+                                    .get(&interest.dataset_id)
+                                    .map(|binding| binding.generated_service.clone())
+                            };
+                            if let Some(service) = service {
+                                service.apply_viewer_interest(id, interest).await;
+                            }
+                        }
                         ClientMessage::DatasetPresence {
                             dataset_order,
                             dataset_settings,
@@ -288,36 +305,73 @@ pub async fn handle_client(
                             // serve_chunk_from_store will fail-fast at
                             // resolve time.
                             let level = parse_level_from_chunk_key(&key);
-                            let binding = {
+                            let dispatch = {
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).map(|b| {
-                                    let level_info = b.resolver.level_info(&image_id, level);
-                                    (
-                                        b.resolver.resolve(&image_id, &key),
-                                        level_info,
-                                        b.cache.clone(),
-                                    )
+                                    if b.is_generated_level(&image_id, level) {
+                                        ChunkDispatch::Generated {
+                                            level,
+                                            derived_chunks: b.derived_chunks.clone(),
+                                            generated_service: b.generated_service.clone(),
+                                        }
+                                    } else {
+                                        let level_info = b.resolver.level_info(&image_id, level);
+                                        ChunkDispatch::Source {
+                                            resolved: b.resolver.resolve(&image_id, &key),
+                                            level_info,
+                                            cache: b.cache.clone(),
+                                        }
+                                    }
                                 })
                             };
-                            if let Some((resolved, level_info, cache)) = binding {
-                                let unicast_routes_clone = Arc::clone(&unicast_routes);
-                                tokio::spawn(async move {
-                                    serve_chunk_from_store(
-                                        id,
-                                        &dataset_id,
-                                        &image_id,
-                                        &key,
-                                        resolved.as_deref(),
-                                        level_info,
-                                        &cache,
-                                        &unicast_routes_clone,
-                                    )
-                                    .await;
-                                });
-                            } else {
-                                eprintln!(
-                                    "server: no binding for dataset {dataset_id} (chunk {key} dropped)"
-                                );
+                            match dispatch {
+                                Some(ChunkDispatch::Source {
+                                    resolved,
+                                    level_info,
+                                    cache,
+                                }) => {
+                                    let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                    tokio::spawn(async move {
+                                        serve_chunk_from_store(
+                                            id,
+                                            &dataset_id,
+                                            &image_id,
+                                            &key,
+                                            resolved.as_deref(),
+                                            level_info,
+                                            &cache,
+                                            &unicast_routes_clone,
+                                        )
+                                        .await;
+                                    });
+                                }
+                                Some(ChunkDispatch::Generated {
+                                    level,
+                                    derived_chunks,
+                                    generated_service,
+                                }) => {
+                                    let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                    tokio::spawn(async move {
+                                        generated_service
+                                            .enqueue_chunk_request(&image_id, level, &key)
+                                            .await;
+                                        serve_generated_chunk_request(
+                                            id,
+                                            &dataset_id,
+                                            &image_id,
+                                            level,
+                                            &key,
+                                            &derived_chunks,
+                                            &unicast_routes_clone,
+                                        )
+                                        .await;
+                                    });
+                                }
+                                None => {
+                                    eprintln!(
+                                        "server: no binding for dataset {dataset_id} (chunk {key} dropped)"
+                                    );
+                                }
                             }
                         }
                         ChunkMessage::ChunkFetch { .. } => {
@@ -339,9 +393,9 @@ pub async fn handle_client(
                         } => {
                             let generator = {
                                 let sess = session.lock().await;
-                                sess.server_bindings
-                                    .get(&dataset_id)
-                                    .map(|b| b.proxy_generator.clone())
+                                sess.server_bindings.get(&dataset_id).and_then(|b| {
+                                    b.legacy_proxy_enabled.then(|| b.proxy_generator.clone())
+                                })
                             };
                             let Some(generator) = generator else {
                                 eprintln!(
@@ -388,6 +442,16 @@ pub async fn handle_client(
     // Cleanup on disconnect.
     outbound.abort();
     unicast_routes.lock().await.remove(&id);
+    let generated_services: Vec<_> = {
+        let sess = session.lock().await;
+        sess.server_bindings
+            .values()
+            .map(|binding| binding.generated_service.clone())
+            .collect()
+    };
+    for service in generated_services {
+        service.remove_client_interest(id).await;
+    }
 
     // Remove client from session, get affected followers.
     let (affected_followers, peer_left_json) = {
@@ -545,41 +609,22 @@ async fn handle_open_remote_dataset(
     // Build operational binding.
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
+    let generated_config = GeneratedCoarseConfig {
+        target_long_axis: proxy_config.generated_target_long_axis,
+        chunk_long_axis: proxy_config.generated_chunk_long_axis,
+        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+    };
+    let generated_plans = if proxy_config.generated_enabled {
+        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    } else {
+        vec![]
+    };
 
-    // Build the initial proxy availability catalog by enumerating
-    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
-    // and bare Images advertise FieldProxy3D (the proxy generator falls
-    // back to FieldProxy semantics for non-Well entities — see
-    // `build_server_proxy_source`). Entities without a contributing image
-    // are skipped — Planning has nothing to fetch for them.
-    let catalog_entries: Vec<ProxyAvailability> = result
-        .manifest
-        .entities()
-        .iter()
-        .filter_map(|entity| {
-            let kinds = match entity.kind {
-                EntityKind::Well => vec![ProxyKind::WellProxy3D],
-                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
-            };
-            // Only advertise entities that own an image (Wells aggregate
-            // their fields' images downstream, so we keep all Wells).
-            let has_image = matches!(entity.kind, EntityKind::Well)
-                || result
-                    .manifest
-                    .images()
-                    .iter()
-                    .any(|img| img.owner == entity.id);
-            if !has_image {
-                return None;
-            }
-            let footprints = proxy_footprints_for_entity(&result.manifest, &entity.id, &kinds);
-            Some(ProxyAvailability {
-                entity_id: entity.id.clone(),
-                kinds,
-                footprints,
-            })
-        })
-        .collect();
+    // Legacy proxy fallback is opt-in after the coarse/detail default
+    // flip. The default DatasetOpened catalog is empty so fallback
+    // availability comes from chunk tier metadata instead of proxies.
+    let catalog_entries =
+        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
 
     let dataset_opened = DatasetOpened {
         manifest: result.manifest.clone(),
@@ -594,7 +639,51 @@ async fn handle_open_remote_dataset(
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
     let url_hash16 = dataset_url_hash16(&url);
+    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
+        proxy_config.generated_cache_dir.clone(),
+        url_hash16,
+        proxy_config.generated_disk_budget_bytes,
+    ));
+    let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
+    for plan in &generated_plans {
+        match derived_chunks.register_generated_plan(plan) {
+            Ok(delta) => {
+                generated_initial_delta.levels.extend(delta.levels);
+                generated_initial_delta.chunks.extend(delta.chunks);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    dataset_id = %dataset_id,
+                    image = %plan.image_id.0,
+                    error = %e,
+                    "generated coarse derived-cache registration failed"
+                );
+                derived_chunks.upsert_level(plan.availability.clone());
+                generated_initial_delta
+                    .levels
+                    .push(plan.availability.clone());
+            }
+        }
+    }
     let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
+    let generated_manifest = Arc::new(result.manifest.clone());
+    let generated_store = cached.clone();
+    let generated_resolver = resolver.clone();
+    let generated_service = Arc::new(GeneratedCoarseService::new(
+        generated_plans.clone(),
+        generated_manifest,
+        generated_store,
+        generated_resolver,
+        derived_chunks.clone(),
+        session.clone(),
+        tx.clone(),
+        GeneratedSchedulingConfig {
+            concurrency: proxy_config.generated_concurrency,
+            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            ..GeneratedSchedulingConfig::default()
+        },
+    ));
+    generated_service.start();
     let proxy_generator = Arc::new(ProxyGenerator::new(
         proxy_cache.clone(),
         cached.clone(),
@@ -613,6 +702,9 @@ async fn handle_open_remote_dataset(
         resolver,
         cache: cached,
         dataset_opened: dataset_opened.clone(),
+        derived_chunks: derived_chunks.clone(),
+        generated_service: generated_service.clone(),
+        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
         proxy_cache,
         proxy_generator,
     };
@@ -646,6 +738,12 @@ async fn handle_open_remote_dataset(
             return;
         }
         let seq = sess.apply(command.clone());
+        if !generated_initial_delta.levels.is_empty() {
+            sess.apply_generated_availability_delta(
+                dataset_id_key.clone(),
+                generated_initial_delta.clone(),
+            );
+        }
         sess.server_bindings.insert(dataset_id_key, binding);
         seq
     };
@@ -662,11 +760,25 @@ async fn handle_open_remote_dataset(
         ack_json: String::new(), // unused — no client will match
     });
 
+    if !generated_initial_delta.levels.is_empty() {
+        let msg = ServerMessage::GeneratedAvailabilityUpdate {
+            dataset_id: DatasetId(dataset_id.clone()),
+            delta: generated_initial_delta.clone(),
+        };
+        let _ = tx.send(BroadcastItem::GeneratedAvailabilityUpdate {
+            json: serde_json::to_string(&msg).unwrap(),
+        });
+    }
+
     tracing::info!(
         dataset_id = %dataset_id,
         seq,
         "open_remote_dataset.broadcast_sent"
     );
+
+    if !generated_plans.is_empty() {
+        generated_service.enqueue_background_fill().await;
+    }
 
     // Kick off background generation for the initial (T=0, C=0) view
     // of every advertised entity at the lowest priority. Errors are logged
@@ -704,6 +816,58 @@ async fn handle_open_remote_dataset(
 /// `(entity, kind, t, c)` only, not the target) stays in lockstep with the
 /// pre-generation task.
 const PROXY_TARGET_LONG_AXIS: u32 = 128;
+
+fn proxy_catalog_entries_for_manifest(
+    manifest: &lucida_content::DatasetManifest,
+    legacy_proxy_enabled: bool,
+) -> Vec<ProxyAvailability> {
+    if !legacy_proxy_enabled {
+        return vec![];
+    }
+
+    // Build the legacy proxy availability catalog by enumerating
+    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
+    // and bare Images advertise FieldProxy3D (the proxy generator falls
+    // back to FieldProxy semantics for non-Well entities — see
+    // `build_server_proxy_source`). Entities without a contributing image
+    // are skipped — Planning has nothing to fetch for them.
+    manifest
+        .entities()
+        .iter()
+        .filter_map(|entity| {
+            let kinds = match entity.kind {
+                EntityKind::Well => vec![ProxyKind::WellProxy3D],
+                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
+            };
+            // Only advertise entities that own an image (Wells aggregate
+            // their fields' images downstream, so we keep all Wells).
+            let has_image = matches!(entity.kind, EntityKind::Well)
+                || manifest.images().iter().any(|img| img.owner == entity.id);
+            if !has_image {
+                return None;
+            }
+            let footprints = proxy_footprints_for_entity(manifest, &entity.id, &kinds);
+            Some(ProxyAvailability {
+                entity_id: entity.id.clone(),
+                kinds,
+                footprints,
+            })
+        })
+        .collect()
+}
+
+enum ChunkDispatch {
+    Source {
+        resolved: Option<String>,
+        level_info: Option<crate::binding::LevelInfo>,
+        cache: Arc<CachedStore>,
+    },
+    Generated {
+        level: u32,
+        derived_chunks: Arc<DerivedChunkCache>,
+        generated_service: Arc<GeneratedCoarseService>,
+    },
+}
 
 fn proxy_footprints_for_entity(
     manifest: &DatasetManifest,
@@ -845,7 +1009,77 @@ async fn serve_chunk_from_store(
         bytes = bytes[offset..offset + size].to_vec();
     }
 
-    // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
+    let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
+
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Binary(buf.into()));
+    }
+}
+
+async fn serve_generated_chunk_request(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    level: u32,
+    chunk_key: &str,
+    derived_chunks: &Arc<DerivedChunkCache>,
+    unicast_routes: &UnicastRoutes,
+) {
+    match derived_chunks.lookup(image_id, level, chunk_key) {
+        DerivedChunkLookup::Ready(bytes) => {
+            let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
+            let senders = unicast_routes.lock().await;
+            if let Some(sender) = senders.get(&client_id) {
+                let _ = sender.send(Message::Binary(buf.into()));
+            }
+        }
+        DerivedChunkLookup::Status { status, message } => {
+            send_generated_chunk_status(
+                client_id,
+                dataset_id,
+                image_id,
+                chunk_key,
+                status,
+                message,
+                unicast_routes,
+            )
+            .await;
+        }
+    }
+}
+
+async fn send_generated_chunk_status(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    chunk_key: &str,
+    status: GeneratedChunkStatus,
+    message: Option<String>,
+    unicast_routes: &UnicastRoutes,
+) {
+    let msg = ServerMessage::GeneratedChunkStatus {
+        dataset_id: dataset_id.clone(),
+        image_id: image_id.clone(),
+        key: chunk_key.to_string(),
+        status,
+        message,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
+    }
+}
+
+fn encode_chunk_frame(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    chunk_key: &str,
+    bytes: &[u8],
+) -> Vec<u8> {
+    // Binary response: [client_id: u32 LE][key_len: u16 LE][key][data].
     // The composite key is "{dataset_id}/{image_id}/{chunk_key}".
     let composite_key = format!("{dataset_id}/{image_id}/{chunk_key}");
     let key_bytes = composite_key.as_bytes();
@@ -855,12 +1089,8 @@ async fn serve_chunk_from_store(
     buf.extend_from_slice(&(client_id as u32).to_le_bytes());
     buf.extend_from_slice(&key_len.to_le_bytes());
     buf.extend_from_slice(key_bytes);
-    buf.extend_from_slice(&bytes);
-
-    let senders = unicast_routes.lock().await;
-    if let Some(sender) = senders.get(&client_id) {
-        let _ = sender.send(Message::Binary(buf.into()));
-    }
+    buf.extend_from_slice(bytes);
+    buf
 }
 
 /// Generate (or fetch from cache) a proxy asset and send it to the
@@ -1014,8 +1244,68 @@ async fn send_open_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lucida_content::EntityId;
+    use lucida_content::{
+        Axis, AxisKind, DataType, DatasetKind, Entity, EntityId, EntityKind, EntityLabels,
+        LevelGeometry, MultiscaleInfo,
+    };
     use lucida_proxy::{ProxyDtype, ProxyHeader};
+
+    fn single_image_manifest() -> lucida_content::DatasetManifest {
+        let entity_id = EntityId("entity-1".into());
+        lucida_content::DatasetManifest::new(
+            DatasetId("ds-1".into()),
+            "test".into(),
+            DatasetKind::Single,
+            vec![Entity {
+                id: entity_id.clone(),
+                kind: EntityKind::Image,
+                parent: None,
+                labels: EntityLabels::default(),
+            }],
+            vec![],
+            vec![lucida_content::ImageSpec {
+                image_id: ImageId("img-1".into()),
+                owner: entity_id,
+                multiscale: MultiscaleInfo {
+                    axes: vec![
+                        Axis {
+                            name: "t".into(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".into(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".into(),
+                            kind: AxisKind::Space,
+                        },
+                    ],
+                    levels: vec![LevelGeometry {
+                        level_index: 0,
+                        shape: [1, 1, 1, 256, 256],
+                        chunk_shape: [1, 1, 1, 128, 128],
+                        grid_shape: [1, 1, 1, 2, 2],
+                        scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                    }],
+                    coarse_level_index: None,
+                    generated_levels: vec![],
+                    data_type: DataType::Uint16,
+                    pinned_axes: vec![],
+                },
+            }],
+            vec![],
+            None,
+        )
+    }
 
     fn sample_asset(zyx: [u32; 3]) -> ProxyAsset {
         let count = zyx.iter().fold(1usize, |a, b| a * (*b as usize));
@@ -1044,6 +1334,21 @@ mod tests {
     fn proxy_kind_str_pins_variant_names() {
         assert_eq!(proxy_kind_str(ProxyKind::WellProxy3D), "WellProxy3D");
         assert_eq!(proxy_kind_str(ProxyKind::FieldProxy3D), "FieldProxy3D");
+    }
+
+    #[test]
+    fn proxy_catalog_is_empty_on_default_path() {
+        let manifest = single_image_manifest();
+        let entries = proxy_catalog_entries_for_manifest(&manifest, false);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn proxy_catalog_is_available_only_for_legacy_bridge() {
+        let manifest = single_image_manifest();
+        let entries = proxy_catalog_entries_for_manifest(&manifest, true);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
     }
 
     #[test]
@@ -1079,5 +1384,87 @@ mod tests {
             .map(|p| u16::from_le_bytes([p[0], p[1]]))
             .collect();
         assert_eq!(parsed, asset.voxels);
+    }
+
+    #[test]
+    fn encode_chunk_frame_uses_normal_chunk_key_envelope() {
+        let dataset_id = DatasetId("ds1".into());
+        let image_id = ImageId("img1".into());
+        let buf = encode_chunk_frame(9, &dataset_id, &image_id, "2/0/0/0/0/0", &[1, 2, 3]);
+
+        let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(client_id, 9);
+        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
+        let key = std::str::from_utf8(&buf[6..6 + key_len]).unwrap();
+        assert_eq!(key, "ds1/img1/2/0/0/0/0/0");
+        assert_eq!(&buf[6 + key_len..], &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn generated_ready_chunk_is_served_with_normal_chunk_frame() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+
+        let cache = Arc::new(DerivedChunkCache::default());
+        cache.seed_ready_chunk(
+            ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0".into(),
+            vec![9, 8, 7, 6],
+        );
+
+        serve_generated_chunk_request(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0",
+            &cache,
+            &routes,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("message");
+        let Message::Binary(buf) = msg else {
+            panic!("expected binary chunk frame");
+        };
+        let buf = buf.as_ref();
+        let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(client_id, 5);
+        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
+        let key = std::str::from_utf8(&buf[6..6 + key_len]).unwrap();
+        assert_eq!(key, "ds1/img1/2/0/0/0/0/0");
+        assert_eq!(&buf[6 + key_len..], &[9, 8, 7, 6]);
+    }
+
+    #[tokio::test]
+    async fn generated_pending_status_is_sent_as_text() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(3, tx);
+
+        send_generated_chunk_status(
+            3,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            "2/0/0/0/0/0",
+            GeneratedChunkStatus::Pending,
+            None,
+            &routes,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("message");
+        let Message::Text(json) = msg else {
+            panic!("expected text message");
+        };
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::GeneratedChunkStatus { status, .. } => {
+                assert_eq!(status, GeneratedChunkStatus::Pending);
+            }
+            _ => panic!("expected GeneratedChunkStatus"),
+        }
     }
 }

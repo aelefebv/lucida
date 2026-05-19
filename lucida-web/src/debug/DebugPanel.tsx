@@ -21,6 +21,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
 import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
+import type { GeneratedStatusCountsByDataset } from "../pipeline/generatedAvailability.ts";
 import type { Session } from "../session.ts";
 import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
@@ -66,8 +67,10 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  wellModes: "Per-well badge over the canvas: tier mode (WP/FP/FD) + target LOD.",
+  wellModes: "Per-well badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
   chunkGrid: "LOD chunk grid for every visible field, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
+  chunkTier: "Sub-color field chunks by displayed render tier (detail = green, coarse = yellow, missing = red). Requires chunkGrid.",
+  renderRadius: "Draw the active detail/coarse render-radius boundary. 2D shows circles; 3D shows projected sphere/ellipsoid rings.",
   cachedTier: "Sub-color cached chunks by eviction tier (active = bright green, demoted = pale sage, prefetch = teal). Requires chunkGrid.",
   plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
 };
@@ -228,15 +231,16 @@ function PlanningTabBody({
       const lanes: Record<string, typeof plan.requests> = {
         minimap: [],
         detail: [],
+        coarse: [],
         proxy: [],
         prefetch: [],
         overview: [],
       };
       for (const r of plan.requests) lanes[r.lane].push(r);
       console.group(
-        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
+        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.coarse.length} C / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
       );
-      for (const lane of ["minimap", "detail", "proxy", "prefetch", "overview"] as const) {
+      for (const lane of ["minimap", "detail", "coarse", "proxy", "prefetch", "overview"] as const) {
         if (lanes[lane].length === 0) continue;
         console.groupCollapsed(`${lane}: ${lanes[lane].length}`);
         console.table(
@@ -364,6 +368,7 @@ function PlanningDatasetSection({
         <div>
           <span style={{ color: "#fa4" }}>M:{p.lanes.minimap}</span>{" "}
           <span style={{ color: "#4f4" }}>D:{p.lanes.detail}</span>{" "}
+          <span style={{ color: "#6cf" }}>C:{p.lanes.coarse}</span>{" "}
           <span style={{ color: "#ff4" }}>P:{p.lanes.prefetch}</span>{" "}
           <span style={{ color: "#88f" }}>O:{p.lanes.overview}</span>{" "}
           <span style={{ color: "#aaa" }}>· proxies:{p.proxyCount}</span>{" "}
@@ -487,6 +492,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
   // Cache tab state
   const [cacheTelemetry, setCacheTelemetry] = useState<CacheTelemetry | null>(null);
+  const [generatedStatusSnap, setGeneratedStatusSnap] = useState<GeneratedStatusCountsByDataset[]>([]);
 
   // Catalog tab state
   const [catalogSnap, setCatalogSnap] = useState<CatalogSnap | null>(null);
@@ -505,6 +511,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       // Poll cache telemetry
       const cache = sessionRef?.current?.cpuCache ?? null;
       if (cache) setCacheTelemetry(cache.telemetry());
+      setGeneratedStatusSnap(
+        sessionRef?.current?.generatedAvailability.statusCountsByDataset() ?? [],
+      );
 
       // Poll asset catalog (per-dataset proxy availability + cache stats)
       {
@@ -935,7 +944,49 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       </span>
                     )}
                   </div>
+                  <div>
+                    Detail coverage: {cacheTelemetry.tierDemand.resident.detailChunks}/
+                    {cacheTelemetry.tierDemand.desired.detailChunks}
+                    {cacheTelemetry.tierDemand.sparseDetail && (
+                      <span style={{ color: "#fb4", marginLeft: 6 }}>
+                        (sparse)
+                      </span>
+                    )}
+                  </div>
+                  {cacheTelemetry.tierDemand.sparseDetail && (
+                    <div style={{ color: "#fb4" }}>
+                      Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.
+                    </div>
+                  )}
+                  <div>
+                    Coarse resident: {cacheTelemetry.tierDemand.resident.coarseChunks}/
+                    {cacheTelemetry.tierDemand.desired.coarseChunks}
+                  </div>
                 </div>
+
+                {generatedStatusSnap.length > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-title">Generated coarse</div>
+                    <div className="debug-member-list">
+                      {generatedStatusSnap.map(({ datasetId: generatedDatasetId, counts }) => {
+                        const dsName = datasets.get(generatedDatasetId)?.manifest.name ?? generatedDatasetId;
+                        return (
+                          <div key={generatedDatasetId} className="debug-member-row">
+                            <span className="debug-member-id" title={generatedDatasetId}>
+                              {shortId(dsName)}
+                            </span>
+                            <span title="ready">{counts.ready} ready</span>
+                            <span title="pending">{counts.pending} pending</span>
+                            <span title="unavailable">{counts.unavailable} unavailable</span>
+                            <span title={`transient: ${counts.failedTransient}, permanent: ${counts.failedPermanent}`}>
+                              {counts.failed} failed
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Hit Rate */}
                 <div className="debug-section">
@@ -1395,6 +1446,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div>
                     <span style={{ color: "#4f4" }}>detail: {snap.orch.laneCount.detail}</span>
                     {" "}
+                    <span style={{ color: "#6cf" }}>coarse: {snap.orch.laneCount.coarse}</span>
+                    {" "}
                     <span style={{ color: "#ff4" }}>prefetch: {snap.orch.laneCount.prefetch}</span>
                     {" "}
                     <span style={{ color: "#88f" }}>overview: {snap.orch.laneCount.overview}</span>
@@ -1441,10 +1494,10 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       {snap.orch.topRequests.map((r, i) => (
                         <div key={`${r.chunkKey}-${i}`} className="debug-member-row">
                           <span style={{
-                            color: r.lane === "detail" ? "#4f4" : r.lane === "prefetch" ? "#ff4" : "#88f",
+                            color: r.lane === "detail" ? "#4f4" : r.lane === "coarse" ? "#6cf" : r.lane === "prefetch" ? "#ff4" : "#88f",
                             width: 14,
                           }}>
-                            {r.lane === "detail" ? "D" : r.lane === "prefetch" ? "P" : "O"}
+                            {r.lane === "detail" ? "D" : r.lane === "coarse" ? "C" : r.lane === "prefetch" ? "P" : "O"}
                           </span>
                           <span>L{r.level}</span>
                           <span className="debug-member-id" title={r.chunkKey}>

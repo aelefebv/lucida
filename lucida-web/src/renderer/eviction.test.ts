@@ -14,6 +14,8 @@
  *    delivery tracking depends on this.
  *  - Incoming chunks farther than the farthest cached are rejected and
  *    reported as `skipped` (NOT as evictions).
+ *  - Equal-distance uploads replace the current slot, which lets T/C
+ *    scrubbing refresh same-position chunks instead of waiting for pan.
  *  - Stale-epoch batches report every chunk as re-eligible `keys`, not
  *    `skipped`, so they clear optimistic sent state without rejection.
  *  - Empty `chunks: []` is a no-op; no posts.
@@ -327,6 +329,48 @@ describe("handleVolumeChunkData — eviction policy", () => {
     expect(atlas.slots.size).toBe(1);
   });
 
+  it("equal-distance upload replaces the cached chunk for same-position T scrubs", () => {
+    const { ctx, posts } = makeMockCtx();
+    const poolKey = "ds1";
+    const memberA = "imgA";
+
+    const atlas = getOrCreateVolumePool(ctx, poolKey, 32, 32, 32, 0, 0);
+    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
+    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    atlas.freeSlots = [0];
+
+    applyViewHotState(ctx, {
+      type: "viewHotState",
+      epochs: epochs(),
+      datasetId: poolKey,
+      rayHitsByEntity: [[memberA, [0.0, 0.0, 0.0]]],
+    });
+
+    const oldChunk = makeChunk(0, 0, 0, 0, 0, 0);
+    const newChunk = makeChunk(0, 1, 0, 0, 0, 0);
+    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [oldChunk]), epochs(), poolKey, memberA);
+    expect(atlas.slots.has(`${memberA}|${oldChunk.key}`)).toBe(true);
+
+    posts.length = 0;
+    handleVolumeChunkData(
+      ctx,
+      makeVolumeMsg(memberA, [newChunk], { t: 1 }),
+      epochs(),
+      poolKey,
+      memberA,
+    );
+
+    expect(atlas.slots.has(`${memberA}|${oldChunk.key}`)).toBe(false);
+    expect(atlas.slots.has(`${memberA}|${newChunk.key}`)).toBe(true);
+    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
+    const withKeys = evictions.find(e => e.keys.length > 0);
+    expect(withKeys).toBeDefined();
+    expect(withKeys!.memberId).toBe(memberA);
+    expect(withKeys!.keys).toEqual([oldChunk.key]);
+    const skipped = evictions.find(e => e.skipped?.includes(newChunk.key));
+    expect(skipped).toBeUndefined();
+  });
+
   it("stale-epoch batch → entire batch reported as re-eligible, no work done", () => {
     const { ctx, posts } = makeMockCtx();
     const poolKey = "ds1";
@@ -431,6 +475,41 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     expect(evictions[0].memberId).toBe(memberA);
     expect(evictions[0].keys).toEqual([chunkAtZ0.key]);
     expect(evictions[0].skipped).toEqual([]);
+  });
+
+  it("equal-distance upload replaces the cached slice chunk for same-position T scrubs", () => {
+    const { ctx, posts } = makeMockCtx();
+    const poolKey = "ds1";
+    const memberA = "imgA";
+
+    const atlas = getOrCreateSlicePool(ctx, poolKey, 32, 32, 0, 0, 0);
+    atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
+    atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
+    atlas.freeSlots = [0];
+
+    const oldChunk = makeSliceChunk(0, 0, 0, 0, 0, 0);
+    const newChunk = makeSliceChunk(0, 1, 0, 0, 0, 0);
+    handleSliceChunkData(ctx, makeSliceMsg(memberA, [oldChunk]), epochs(), poolKey, memberA);
+    expect(atlas.slots.has(`${memberA}|${oldChunk.key}`)).toBe(true);
+
+    posts.length = 0;
+    handleSliceChunkData(
+      ctx,
+      makeSliceMsg(memberA, [newChunk], { t: 1 }),
+      epochs(),
+      poolKey,
+      memberA,
+    );
+
+    expect(atlas.slots.has(`${memberA}|${oldChunk.key}`)).toBe(false);
+    expect(atlas.slots.has(`${memberA}|${newChunk.key}`)).toBe(true);
+    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
+    const withKeys = evictions.find(e => e.keys.length > 0);
+    expect(withKeys).toBeDefined();
+    expect(withKeys!.memberId).toBe(memberA);
+    expect(withKeys!.keys).toEqual([oldChunk.key]);
+    const skipped = evictions.find(e => e.skipped?.includes(newChunk.key));
+    expect(skipped).toBeUndefined();
   });
 
   it("missing slice atlas → batch reported as re-eligible", () => {

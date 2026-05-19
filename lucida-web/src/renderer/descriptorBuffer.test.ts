@@ -43,6 +43,17 @@ import {
 } from "./descriptorBuffer.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import {
+  OFFSET_COARSE_SOURCE,
+  OFFSET_DETAIL_SOURCE,
+  SOURCE_OFFSET_CHUNK_DIMS,
+  SOURCE_OFFSET_GRID_DIMS,
+  SOURCE_OFFSET_INDIRECTION_OFFSET,
+  SOURCE_OFFSET_LEVEL,
+  SOURCE_OFFSET_LEVEL_DIMS,
+  SOURCE_OFFSET_VALID,
+  DESCRIPTOR_TIER_SOURCE_SIZE,
+} from "./descriptor/layout.ts";
+import {
   proxyDescriptorKey,
   type EntityProxyDescriptor,
 } from "./workerContext.ts";
@@ -127,6 +138,9 @@ function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
     entityId: opts.entityId,
     targetLod: opts.targetLod ?? 0,
     detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
+    detailLevel: opts.detailLevel,
+    coarseLevel: opts.coarseLevel,
+    wantedLodLevels: opts.wantedLodLevels,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
@@ -499,6 +513,73 @@ describe("EntityDescriptor byte layout", () => {
       for (let s = 0; s < DESCRIPTOR_LOD_INFO_SIZE / 4; s++) {
         expect(u32[base + s]).toBe(0);
       }
+    }
+  });
+
+  it("writes explicit detail and coarse tier sources from matching lod metas", () => {
+    const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const entry = makeEntry({
+      entityId: "e1", imageId: "img-0", mode: "fields-with-detail",
+      detailLevel: 0,
+      coarseLevel: 2,
+      wantedLodLevels: [0, 2],
+      levels: [
+        { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+        { level: 2, chunkShape: [8, 128, 128], gridShape: [8, 2, 2], levelDims: [64, 256, 256] },
+      ],
+    });
+    const metas: LodIndirectionMeta[] = [
+      {
+        level: 0,
+        gridDims: [2, 4, 4],
+        chunkDims: [32, 64, 64],
+        levelDims: [64, 256, 256],
+        offset: 5,
+      },
+      {
+        level: 2,
+        gridDims: [8, 2, 2],
+        chunkDims: [8, 128, 128],
+        levelDims: [64, 256, 256],
+        offset: 37,
+      },
+    ];
+    serializeEntityDescriptor(buf, 0, entry, metas, defaultDisplayState(), new Map(), new Map(), [], new Map());
+
+    const u32 = new Uint32Array(buf);
+    const detail = OFFSET_DETAIL_SOURCE / 4;
+    const coarse = OFFSET_COARSE_SOURCE / 4;
+    expect(u32[detail + SOURCE_OFFSET_VALID / 4]).toBe(1);
+    expect(u32[detail + SOURCE_OFFSET_LEVEL / 4]).toBe(0);
+    expect(u32[detail + SOURCE_OFFSET_INDIRECTION_OFFSET / 4]).toBe(5);
+    expect(u32[detail + SOURCE_OFFSET_GRID_DIMS / 4 + 0]).toBe(4);
+    expect(u32[detail + SOURCE_OFFSET_GRID_DIMS / 4 + 1]).toBe(4);
+    expect(u32[detail + SOURCE_OFFSET_GRID_DIMS / 4 + 2]).toBe(2);
+    expect(u32[detail + SOURCE_OFFSET_CHUNK_DIMS / 4 + 0]).toBe(64);
+    expect(u32[detail + SOURCE_OFFSET_CHUNK_DIMS / 4 + 1]).toBe(64);
+    expect(u32[detail + SOURCE_OFFSET_CHUNK_DIMS / 4 + 2]).toBe(32);
+    expect(u32[detail + SOURCE_OFFSET_LEVEL_DIMS / 4 + 0]).toBe(256);
+    expect(u32[detail + SOURCE_OFFSET_LEVEL_DIMS / 4 + 1]).toBe(256);
+    expect(u32[detail + SOURCE_OFFSET_LEVEL_DIMS / 4 + 2]).toBe(64);
+
+    expect(u32[coarse + SOURCE_OFFSET_VALID / 4]).toBe(1);
+    expect(u32[coarse + SOURCE_OFFSET_LEVEL / 4]).toBe(2);
+    expect(u32[coarse + SOURCE_OFFSET_INDIRECTION_OFFSET / 4]).toBe(37);
+    expect(u32[coarse + SOURCE_OFFSET_GRID_DIMS / 4 + 0]).toBe(2);
+    expect(u32[coarse + SOURCE_OFFSET_GRID_DIMS / 4 + 1]).toBe(2);
+    expect(u32[coarse + SOURCE_OFFSET_GRID_DIMS / 4 + 2]).toBe(8);
+    expect(u32[coarse + SOURCE_OFFSET_CHUNK_DIMS / 4 + 0]).toBe(128);
+    expect(u32[coarse + SOURCE_OFFSET_CHUNK_DIMS / 4 + 1]).toBe(128);
+    expect(u32[coarse + SOURCE_OFFSET_CHUNK_DIMS / 4 + 2]).toBe(8);
+  });
+
+  it("keeps tier sources invalid for legacy entries without detailLevel", () => {
+    const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "fields-with-detail" });
+    serializeEntityDescriptor(buf, 0, entry, metasFromEntry(entry), defaultDisplayState(), new Map(), new Map(), [], new Map());
+    const u32 = new Uint32Array(buf);
+    for (let i = 0; i < (2 * DESCRIPTOR_TIER_SOURCE_SIZE) / 4; i++) {
+      expect(u32[OFFSET_DETAIL_SOURCE / 4 + i]).toBe(0);
     }
   });
 });

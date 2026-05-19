@@ -7,6 +7,7 @@ use lucida_store::cache::CachedStore;
 use lucida_store::import_types::{LevelBindingInfo, ServerBindingSeed};
 use object_store::ObjectStore;
 
+use crate::generated::{DerivedChunkCache, GeneratedCoarseService};
 use crate::proxy::{ProxyCache, ProxyGenerator};
 
 /// Operational storage binding. Owns live resources.
@@ -27,6 +28,9 @@ pub struct ServerBinding {
     pub resolver: Arc<ChunkResolver>,
     pub cache: Arc<CachedStore>,
     pub dataset_opened: DatasetOpened,
+    pub derived_chunks: Arc<DerivedChunkCache>,
+    pub generated_service: Arc<GeneratedCoarseService>,
+    pub legacy_proxy_enabled: bool,
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
 }
@@ -95,6 +99,19 @@ impl ChunkResolver {
             Some(prefix) => format!("{prefix}/{store_path}"),
             None => store_path,
         })
+    }
+}
+
+impl ServerBinding {
+    pub fn is_generated_level(&self, image_id: &ImageId, level: u32) -> bool {
+        self.derived_chunks.is_generated_level(image_id, level)
+            || self
+                .dataset_opened
+                .manifest
+                .images()
+                .iter()
+                .find(|image| image.image_id == *image_id)
+                .is_some_and(|image| image.multiscale.is_generated_level(level))
     }
 }
 
