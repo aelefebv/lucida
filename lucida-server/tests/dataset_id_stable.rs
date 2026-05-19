@@ -200,6 +200,7 @@ fn make_binding(
         generated_service: Arc::new(lucida_server::generated::GeneratedCoarseService::inert(
             derived_chunks,
         )),
+        legacy_proxy_enabled: false,
         proxy_cache,
         proxy_generator,
     }

@@ -128,7 +128,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   distanceWeight: DISTANCE_WEIGHT,
   wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
   proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
-  coarseDetailEnabled: false,
+  coarseDetailEnabled: true,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,

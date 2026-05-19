@@ -30,6 +30,7 @@ pub struct ServerBinding {
     pub dataset_opened: DatasetOpened,
     pub derived_chunks: Arc<DerivedChunkCache>,
     pub generated_service: Arc<GeneratedCoarseService>,
+    pub legacy_proxy_enabled: bool,
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
 }

@@ -84,6 +84,10 @@ pub struct ProxyConfig {
     /// Root directory under which per-dataset proxy caches are written.
     /// `{root}/{url_hash hex}/...` — see [`proxy::ProxyCache`].
     pub cache_dir: PathBuf,
+    /// Temporary bridge flag for the retired proxy fallback path. The
+    /// default server path leaves this false so DatasetOpened carries no
+    /// proxy catalog and asset requests are ignored.
+    pub legacy_proxy_enabled: bool,
     /// Maximum concurrent proxy generations across all datasets *per
     /// `ProxyGenerator` instance*. Each opened dataset gets its own
     /// generator with this many permits; total system concurrency scales
@@ -123,6 +127,7 @@ impl ProxyConfig {
         Self {
             generated_cache_dir: cache_dir.join("generated-coarse"),
             cache_dir,
+            legacy_proxy_enabled: false,
             concurrency: Self::default_concurrency(),
             generated_enabled: true,
             generated_concurrency: 1,

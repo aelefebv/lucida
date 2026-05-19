@@ -393,9 +393,9 @@ pub async fn handle_client(
                         } => {
                             let generator = {
                                 let sess = session.lock().await;
-                                sess.server_bindings
-                                    .get(&dataset_id)
-                                    .map(|b| b.proxy_generator.clone())
+                                sess.server_bindings.get(&dataset_id).and_then(|b| {
+                                    b.legacy_proxy_enabled.then(|| b.proxy_generator.clone())
+                                })
                             };
                             let Some(generator) = generator else {
                                 eprintln!(
@@ -620,40 +620,11 @@ async fn handle_open_remote_dataset(
         vec![]
     };
 
-    // Build the initial proxy availability catalog by enumerating
-    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
-    // and bare Images advertise FieldProxy3D (the proxy generator falls
-    // back to FieldProxy semantics for non-Well entities — see
-    // `build_server_proxy_source`). Entities without a contributing image
-    // are skipped — Planning has nothing to fetch for them.
-    let catalog_entries: Vec<ProxyAvailability> = result
-        .manifest
-        .entities()
-        .iter()
-        .filter_map(|entity| {
-            let kinds = match entity.kind {
-                EntityKind::Well => vec![ProxyKind::WellProxy3D],
-                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
-            };
-            // Only advertise entities that own an image (Wells aggregate
-            // their fields' images downstream, so we keep all Wells).
-            let has_image = matches!(entity.kind, EntityKind::Well)
-                || result
-                    .manifest
-                    .images()
-                    .iter()
-                    .any(|img| img.owner == entity.id);
-            if !has_image {
-                return None;
-            }
-            let footprints = proxy_footprints_for_entity(&result.manifest, &entity.id, &kinds);
-            Some(ProxyAvailability {
-                entity_id: entity.id.clone(),
-                kinds,
-                footprints,
-            })
-        })
-        .collect();
+    // Legacy proxy fallback is opt-in after the coarse/detail default
+    // flip. The default DatasetOpened catalog is empty so fallback
+    // availability comes from chunk tier metadata instead of proxies.
+    let catalog_entries =
+        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
 
     let dataset_opened = DatasetOpened {
         manifest: result.manifest.clone(),
@@ -733,6 +704,7 @@ async fn handle_open_remote_dataset(
         dataset_opened: dataset_opened.clone(),
         derived_chunks: derived_chunks.clone(),
         generated_service: generated_service.clone(),
+        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
         proxy_cache,
         proxy_generator,
     };
@@ -844,6 +816,45 @@ async fn handle_open_remote_dataset(
 /// `(entity, kind, t, c)` only, not the target) stays in lockstep with the
 /// pre-generation task.
 const PROXY_TARGET_LONG_AXIS: u32 = 128;
+
+fn proxy_catalog_entries_for_manifest(
+    manifest: &lucida_content::DatasetManifest,
+    legacy_proxy_enabled: bool,
+) -> Vec<ProxyAvailability> {
+    if !legacy_proxy_enabled {
+        return vec![];
+    }
+
+    // Build the legacy proxy availability catalog by enumerating
+    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
+    // and bare Images advertise FieldProxy3D (the proxy generator falls
+    // back to FieldProxy semantics for non-Well entities — see
+    // `build_server_proxy_source`). Entities without a contributing image
+    // are skipped — Planning has nothing to fetch for them.
+    manifest
+        .entities()
+        .iter()
+        .filter_map(|entity| {
+            let kinds = match entity.kind {
+                EntityKind::Well => vec![ProxyKind::WellProxy3D],
+                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
+            };
+            // Only advertise entities that own an image (Wells aggregate
+            // their fields' images downstream, so we keep all Wells).
+            let has_image = matches!(entity.kind, EntityKind::Well)
+                || manifest.images().iter().any(|img| img.owner == entity.id);
+            if !has_image {
+                return None;
+            }
+            let footprints = proxy_footprints_for_entity(manifest, &entity.id, &kinds);
+            Some(ProxyAvailability {
+                entity_id: entity.id.clone(),
+                kinds,
+                footprints,
+            })
+        })
+        .collect()
+}
 
 enum ChunkDispatch {
     Source {
@@ -1233,8 +1244,68 @@ async fn send_open_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lucida_content::EntityId;
+    use lucida_content::{
+        Axis, AxisKind, DataType, DatasetKind, Entity, EntityId, EntityKind, EntityLabels,
+        LevelGeometry, MultiscaleInfo,
+    };
     use lucida_proxy::{ProxyDtype, ProxyHeader};
+
+    fn single_image_manifest() -> lucida_content::DatasetManifest {
+        let entity_id = EntityId("entity-1".into());
+        lucida_content::DatasetManifest::new(
+            DatasetId("ds-1".into()),
+            "test".into(),
+            DatasetKind::Single,
+            vec![Entity {
+                id: entity_id.clone(),
+                kind: EntityKind::Image,
+                parent: None,
+                labels: EntityLabels::default(),
+            }],
+            vec![],
+            vec![lucida_content::ImageSpec {
+                image_id: ImageId("img-1".into()),
+                owner: entity_id,
+                multiscale: MultiscaleInfo {
+                    axes: vec![
+                        Axis {
+                            name: "t".into(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".into(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".into(),
+                            kind: AxisKind::Space,
+                        },
+                    ],
+                    levels: vec![LevelGeometry {
+                        level_index: 0,
+                        shape: [1, 1, 1, 256, 256],
+                        chunk_shape: [1, 1, 1, 128, 128],
+                        grid_shape: [1, 1, 1, 2, 2],
+                        scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                    }],
+                    coarse_level_index: None,
+                    generated_levels: vec![],
+                    data_type: DataType::Uint16,
+                    pinned_axes: vec![],
+                },
+            }],
+            vec![],
+            None,
+        )
+    }
 
     fn sample_asset(zyx: [u32; 3]) -> ProxyAsset {
         let count = zyx.iter().fold(1usize, |a, b| a * (*b as usize));
@@ -1263,6 +1334,21 @@ mod tests {
     fn proxy_kind_str_pins_variant_names() {
         assert_eq!(proxy_kind_str(ProxyKind::WellProxy3D), "WellProxy3D");
         assert_eq!(proxy_kind_str(ProxyKind::FieldProxy3D), "FieldProxy3D");
+    }
+
+    #[test]
+    fn proxy_catalog_is_empty_on_default_path() {
+        let manifest = single_image_manifest();
+        let entries = proxy_catalog_entries_for_manifest(&manifest, false);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn proxy_catalog_is_available_only_for_legacy_bridge() {
+        let manifest = single_image_manifest();
+        let entries = proxy_catalog_entries_for_manifest(&manifest, true);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
     }
 
     #[test]

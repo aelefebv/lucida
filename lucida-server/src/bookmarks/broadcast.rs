@@ -255,6 +255,7 @@ mod tests {
             dataset_opened,
             derived_chunks: derived_chunks.clone(),
             generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
+            legacy_proxy_enabled: false,
             proxy_cache,
             proxy_generator,
         }

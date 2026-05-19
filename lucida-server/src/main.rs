@@ -64,6 +64,9 @@ struct ServeArgs {
     /// Also readable from `LUCIDA_PROXY_CONCURRENCY`. CLI flag wins.
     #[arg(long, env = "LUCIDA_PROXY_CONCURRENCY")]
     proxy_concurrency: Option<usize>,
+    /// Re-enable retired proxy fallback catalogs and asset generation.
+    #[arg(long, env = "LUCIDA_LEGACY_PROXY_ENABLED", default_value_t = false)]
+    legacy_proxy_enabled: bool,
     /// Enable server-generated coarse chunks.
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_ENABLED", default_value_t = true)]
     generated_coarse_enabled: bool,
@@ -190,6 +193,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             .unwrap_or_else(|| proxy_cache_dir.join("generated-coarse")),
         cache_dir: proxy_cache_dir,
         concurrency: proxy_concurrency,
+        legacy_proxy_enabled: args.legacy_proxy_enabled,
         generated_enabled: args.generated_coarse_enabled,
         generated_concurrency: args
             .generated_coarse_concurrency
@@ -208,6 +212,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     tracing::info!(
         cache_dir = %proxy_config.cache_dir.display(),
         concurrency = proxy_config.concurrency,
+        legacy_enabled = proxy_config.legacy_proxy_enabled,
         "proxy.config",
     );
     tracing::info!(
@@ -518,6 +523,7 @@ mod cli_tests {
         assert!(cli.command.is_none(), "bare invocation has no subcommand");
         assert!(cli.serve_args.data_dir.is_none());
         assert!(cli.serve_args.proxy_cache_dir.is_none());
+        assert!(!cli.serve_args.legacy_proxy_enabled);
     }
 
     #[test]
@@ -539,6 +545,17 @@ mod cli_tests {
                     args.data_dir.as_deref(),
                     Some(std::path::Path::new("/tmp/foo"))
                 );
+            }
+            _ => panic!("expected Serve"),
+        }
+    }
+
+    #[test]
+    fn legacy_proxy_flag_parses() {
+        let cli = parse(&["serve", "--legacy-proxy-enabled"]);
+        match cli.command.expect("serve subcommand") {
+            Commands::Serve(args) => {
+                assert!(args.legacy_proxy_enabled);
             }
             _ => panic!("expected Serve"),
         }

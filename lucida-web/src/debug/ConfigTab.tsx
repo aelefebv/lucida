@@ -170,7 +170,7 @@ function CoarseDetailToggle({ cfg }: { cfg: PlanningConfig }) {
   return (
     <div className="debug-config-tunable-row">
       <label className="debug-config-tunable-label" htmlFor="cfg-coarse-detail-enabled">
-        Coarse/detail bridge
+        Coarse/detail path
       </label>
       <div className="debug-config-tunable-controls">
         <input
@@ -184,7 +184,7 @@ function CoarseDetailToggle({ cfg }: { cfg: PlanningConfig }) {
             type="button"
             className="debug-config-reset"
             title="Reset to default"
-            aria-label="Reset coarse/detail bridge"
+            aria-label="Reset coarse/detail path"
             onClick={() => configStore.reset("coarseDetailEnabled")}
           >
             ↩

@@ -21,7 +21,7 @@ import {
 const STORAGE_KEY = "lucida.planning.config";
 
 /** Schema version for the persisted envelope. Bump on breaking changes. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 type Listener = () => void;
 
