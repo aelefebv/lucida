@@ -110,7 +110,9 @@ export function handleSliceChunkData(
       if (!evictKey) continue;
       const cam = cameraUVForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
-      if (incomingDist >= farthestDist) continue;
+      // Equal-distance replacement matters for T/C scrubbing: the new
+      // timepoint often maps to the same spatial cell as the old one.
+      if (incomingDist > farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);

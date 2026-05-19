@@ -73,7 +73,9 @@ export function handleVolumeChunkData(
       if (!evictKey) continue;
       const cam = rayHitForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
-      if (incomingDist >= farthestDist) continue;
+      // Equal-distance replacement matters for T/C scrubbing: the new
+      // timepoint often maps to the same spatial cell as the old one.
+      if (incomingDist > farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);
