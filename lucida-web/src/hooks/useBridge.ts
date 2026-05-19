@@ -95,6 +95,45 @@ export function useBridge({
   // are in flight — overwritten by each send.
   const lastOpenSendTimeRef = useRef<number | null>(null);
 
+  function applyGeneratedAvailabilitySnapshots(
+    snapshots: WireGeneratedAvailabilityByDataset,
+  ): void {
+    for (const [datasetId, snapshot] of Object.entries(snapshots)) {
+      applyGeneratedAvailabilitySnapshot(datasetId, snapshot);
+    }
+  }
+
+  function applyGeneratedAvailabilitySnapshot(
+    datasetId: string,
+    snapshot: WireGeneratedAvailabilitySnapshot,
+  ): void {
+    const session = sessionRef.current;
+    if (!session) return;
+    session.generatedAvailability.applySnapshot(datasetId, snapshot);
+    refreshRuntimeGeneratedManifest(datasetId);
+  }
+
+  function applyGeneratedAvailabilityDelta(
+    datasetId: string,
+    delta: WireGeneratedAvailabilityDelta,
+  ): void {
+    const session = sessionRef.current;
+    if (!session) return;
+    session.generatedAvailability.applyDelta(datasetId, delta);
+    refreshRuntimeGeneratedManifest(datasetId);
+  }
+
+  function refreshRuntimeGeneratedManifest(datasetId: string): void {
+    const session = sessionRef.current;
+    const entry = datasetsRef.current.get(datasetId);
+    if (!session || !entry) return;
+    const merged = session.generatedAvailability.mergeManifest(datasetId, entry.manifest);
+    datasetsRef.current.set(datasetId, { ...entry, manifest: merged });
+    loopRef.current?.updateDatasetManifest(datasetId, merged);
+    bumpDatasetsVersion();
+    loopRef.current?.markResidencyDirty("generated_availability_update");
+  }
+
   useEffect(() => {
     if (!wasmReady || sessionRef.current) return;
 
@@ -451,45 +490,6 @@ export function useBridge({
     // listed callback/ref/state-bumper deps would re-mount the entire
     // WebSocket session and tear down all in-flight downloads.
   }, [wasmReady]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function applyGeneratedAvailabilitySnapshots(
-    snapshots: WireGeneratedAvailabilityByDataset,
-  ): void {
-    for (const [datasetId, snapshot] of Object.entries(snapshots)) {
-      applyGeneratedAvailabilitySnapshot(datasetId, snapshot);
-    }
-  }
-
-  function applyGeneratedAvailabilitySnapshot(
-    datasetId: string,
-    snapshot: WireGeneratedAvailabilitySnapshot,
-  ): void {
-    const session = sessionRef.current;
-    if (!session) return;
-    session.generatedAvailability.applySnapshot(datasetId, snapshot);
-    refreshRuntimeGeneratedManifest(datasetId);
-  }
-
-  function applyGeneratedAvailabilityDelta(
-    datasetId: string,
-    delta: WireGeneratedAvailabilityDelta,
-  ): void {
-    const session = sessionRef.current;
-    if (!session) return;
-    session.generatedAvailability.applyDelta(datasetId, delta);
-    refreshRuntimeGeneratedManifest(datasetId);
-  }
-
-  function refreshRuntimeGeneratedManifest(datasetId: string): void {
-    const session = sessionRef.current;
-    const entry = datasetsRef.current.get(datasetId);
-    if (!session || !entry) return;
-    const merged = session.generatedAvailability.mergeManifest(datasetId, entry.manifest);
-    datasetsRef.current.set(datasetId, { ...entry, manifest: merged });
-    loopRef.current?.updateDatasetManifest(datasetId, merged);
-    bumpDatasetsVersion();
-    loopRef.current?.markResidencyDirty("generated_availability_update");
-  }
 
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
     const datasetId = manifest.dataset_id;
