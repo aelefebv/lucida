@@ -308,10 +308,6 @@ export class TickCoordinator {
         assetCatalog: ctx.assetCatalog.snapshot(),
         minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
-        viewportPx: [
-          Math.round(ctx.canvas.clientWidth * (globalThis.devicePixelRatio || 1)),
-          Math.round(ctx.canvas.clientHeight * (globalThis.devicePixelRatio || 1)),
-        ],
         multiChannel,
         currentEpochs,
         requestEpoch: this.requestEpoch,

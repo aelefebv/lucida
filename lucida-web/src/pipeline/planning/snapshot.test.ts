@@ -176,7 +176,6 @@ interface MakeArgsOverrides {
   multiChannel?: boolean;
   assetCatalog?: AssetCatalogSnapshot;
   mode?: "slice" | "volume";
-  viewportPx?: [number, number];
 }
 
 function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
@@ -190,7 +189,6 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
       ({ byEntity: new Map() } as AssetCatalogSnapshot),
     minimapPending: new Map(),
     mode: overrides?.mode ?? "slice",
-    viewportPx: overrides?.viewportPx,
     multiChannel: overrides?.multiChannel ?? false,
     currentEpochs: makeEpochs(),
     requestEpoch: 0,
@@ -375,24 +373,6 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
         [0, 1, 0, 0],
       ],
     });
-  });
-
-  it("derives volume radius basis when older WASM visible region omits it", () => {
-    const scene = makeStubScene({
-      visibleRegion: {
-        xy_bounds: [10, 20, 30, 40],
-        z_range: [5, 6],
-        effective_zoom: 4,
-        sort_center: [1, 2, 3],
-        frustum_planes: [[1, 0, 0, 0]],
-      },
-    });
-    const built = buildPlanningSnapshot(makeArgs({
-      scene,
-      mode: "volume",
-      viewportPx: [800, 600],
-    }));
-    expect(built!.visibleRegion.radiusBasisVox).toBe(125);
   });
 });
 

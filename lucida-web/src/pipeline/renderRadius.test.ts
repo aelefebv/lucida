@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { VisibleRegion } from "./viewport.ts";
-import {
-  deriveFocalPlaneRadiusBasisVox,
-  renderRadiusLimitVox,
-  withDerivedRadiusBasis,
-} from "./renderRadius.ts";
+import { renderRadiusLimitVox } from "./renderRadius.ts";
 
 function visibleRegion(overrides?: Partial<VisibleRegion>): VisibleRegion {
   return {
@@ -25,14 +21,5 @@ describe("renderRadiusLimitVox", () => {
   it("falls back to visible-region half diagonal for older region shapes", () => {
     const limit = renderRadiusLimitVox(visibleRegion(), 0.05);
     expect(limit).toBeCloseTo(Math.sqrt(500 * 500 + 500 * 500 + 50 * 50) * 0.05);
-  });
-
-  it("derives a focal-plane basis for older 3-D visible regions", () => {
-    const region = visibleRegion({
-      effectiveZoom: 4,
-      frustumPlanes: [[1, 0, 0, 0]],
-    });
-    expect(deriveFocalPlaneRadiusBasisVox(region, [800, 600])).toBe(125);
-    expect(renderRadiusLimitVox(withDerivedRadiusBasis(region, [800, 600]), 0.05)).toBe(6.25);
   });
 });
