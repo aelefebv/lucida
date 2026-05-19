@@ -12,6 +12,10 @@ import type {
   MissingProxy,
 } from "./workerProtocol.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
+import {
+  RENDER_RADIUS_DISABLED,
+  chunkWithinRenderRadius,
+} from "../pipeline/renderRadius.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 import { memberTierKey, type ChunkTier } from "./poolKeys.ts";
@@ -243,14 +247,33 @@ export function computeWantedSet(
 
           const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
           const [gridZ, gridY, gridX] = levelMeta.gridShape;
+          const level0Meta = entry.levels.find((l) => l.level === 0);
+          const fullDims = [
+            level0Meta?.levelDims[2] ?? levelMeta.levelDims[2],
+            level0Meta?.levelDims[1] ?? levelMeta.levelDims[1],
+            level0Meta?.levelDims[0] ?? levelMeta.levelDims[0],
+          ] as [number, number, number];
+          const levelDims = [
+            levelMeta.levelDims[2],
+            levelMeta.levelDims[1],
+            levelMeta.levelDims[0],
+          ] as [number, number, number];
+          const chunkWorldX = chunkX * (fullDims[0] / Math.max(1, levelDims[0]));
+          const chunkWorldY = chunkY * (fullDims[1] / Math.max(1, levelDims[1]));
+          const chunkWorldZ = chunkZ * (fullDims[2] / Math.max(1, levelDims[2]));
 
           const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
             coldState.visibleRegion.xyBoundsVox;
+          const layoutPositionVox = entry.layoutPositionVox ?? ([0, 0] as [number, number]);
+          const localMinVoxX = minVoxX - layoutPositionVox[0];
+          const localMinVoxY = minVoxY - layoutPositionVox[1];
+          const localMaxVoxX = maxVoxX - layoutPositionVox[0];
+          const localMaxVoxY = maxVoxY - layoutPositionVox[1];
 
-          const colStart = Math.max(0, Math.floor(minVoxX / chunkX));
-          const colEnd = Math.min(gridX, Math.ceil(maxVoxX / chunkX));
-          const rowStart = Math.max(0, Math.floor(minVoxY / chunkY));
-          const rowEnd = Math.min(gridY, Math.ceil(maxVoxY / chunkY));
+          const colStart = Math.max(0, Math.floor(localMinVoxX / chunkWorldX));
+          const colEnd = Math.min(gridX, Math.ceil(localMaxVoxX / chunkWorldX));
+          const rowStart = Math.max(0, Math.floor(localMinVoxY / chunkWorldY));
+          const rowEnd = Math.min(gridY, Math.ceil(localMaxVoxY / chunkWorldY));
 
           let zStart: number;
           let zEnd: number;
@@ -261,18 +284,35 @@ export function computeWantedSet(
             zStart = Math.max(0, chunkIdx);
             zEnd = Math.min(gridZ, chunkIdx + 1);
           } else {
-            zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRangeVox[0] / chunkZ));
-            zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRangeVox[1] / chunkZ));
+            zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRangeVox[0] / chunkWorldZ));
+            zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRangeVox[1] / chunkWorldZ));
           }
 
+          const radiusView = renderRadiusForTier(coldState, source.tier);
           for (let iz = zStart; iz < zEnd; iz++) {
             for (let iy = rowStart; iy < rowEnd; iy++) {
               for (let ix = colStart; ix < colEnd; ix++) {
+                if (
+                  !chunkWithinRenderRadius({
+                    region: coldState.visibleRegion,
+                    radiusView,
+                    layoutPositionVox,
+                    geometry: {
+                      fullDims,
+                      levelDims,
+                      chunkDims: [chunkX, chunkY, chunkZ],
+                    },
+                    chunk: { x: ix, y: iy, z: iz },
+                  })
+                ) {
+                  continue;
+                }
                 const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
                 const slotKey = useCompositeKey ? makeCompositeKey(memberId, chunkKey) : chunkKey;
                 if (!atlas.slots.has(slotKey)) {
                   missing.push({
                     kind: "chunk",
+                    datasetId: coldState.datasetId,
                     tier: source.tier,
                     entityId: entry.entityId,
                     memberId,
@@ -289,6 +329,13 @@ export function computeWantedSet(
   }
 
   return { missing };
+}
+
+function renderRadiusForTier(
+  coldState: ColdStateMessage,
+  tier: ChunkTier,
+): number {
+  return coldState.renderRadiusView?.[tier] ?? RENDER_RADIUS_DISABLED;
 }
 
 function chunkSourcesForEntry(

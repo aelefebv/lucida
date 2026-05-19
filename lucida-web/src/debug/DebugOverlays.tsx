@@ -26,6 +26,12 @@ import { Axis } from "../axes.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+import {
+  chunkWithinRenderRadius,
+  type ChunkRadiusGeometry,
+} from "../pipeline/renderRadius.ts";
+import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type {
   CacheStateSnapshot,
   ChunkRequest,
@@ -75,6 +81,7 @@ interface WellBadge {
 }
 
 type OverlayTier = "detail" | "coarse";
+type DisplayTier = OverlayTier | "missing";
 
 export interface TierCoverageCounts {
   /** Chunks requested by the current plan for this tier. */
@@ -103,8 +110,8 @@ interface ChunkRect {
   w: number;
   h: number;
   status: "cached" | "in-flight" | "planned";
-  /** Current render tier that produced the planned request. */
-  sourceTier?: OverlayTier;
+  /** Current render tier visible to the shader, or missing fallback. */
+  sourceTier?: DisplayTier;
   /**
    * For `status === "planned"`: zero-based rank in the pending fetch
    * queue (0 = next to fetch). `undefined` means "in plan but not in
@@ -129,16 +136,19 @@ const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
 const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
 const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
 const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
+const TIER_MISSING = "rgba(245, 70, 70, 0.38)";
 
-function tierColor(tier: OverlayTier | undefined): string | null {
+function tierColor(tier: DisplayTier | undefined): string | null {
   switch (tier) {
     case "detail": return TIER_DETAIL;
     case "coarse": return TIER_COARSE;
+    case "missing": return TIER_MISSING;
     default: return null;
   }
 }
 
 function tierDrawOrder(rect: ChunkRect): number {
+  if (rect.sourceTier === "missing") return 0;
   if (rect.sourceTier === "coarse") return 0;
   if (rect.sourceTier === "detail") return 1;
   return 2;
@@ -291,6 +301,68 @@ export function formatTierCoverageTitle(
   const modePart = `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
   if (parts.length === 0) return modePart;
   return `${parts.join("; ")}; planner ${modePart}`;
+}
+
+function parseVisibleRegion(ws: WasmScene, dsId: string): VisibleRegion | null {
+  let raw: string | null = null;
+  try {
+    raw = ws.visible_region(dsId);
+  } catch {
+    return null;
+  }
+  if (!raw || raw === "null") return null;
+  try {
+    const vr = JSON.parse(raw) as {
+      xy_bounds: [number, number, number, number];
+      z_range: [number, number];
+      effective_zoom: number;
+      sort_center: [number, number, number] | null;
+      frustum_planes: [number, number, number, number][] | null;
+    };
+    return {
+      xyBoundsVox: vr.xy_bounds,
+      zRangeVox: vr.z_range,
+      effectiveZoom: vr.effective_zoom,
+      sortCenterVox: vr.sort_center,
+      frustumPlanes: vr.frustum_planes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function chunkKeyFor(
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): string {
+  return `${level}/${t}/${c}/${z}/${y}/${x}`;
+}
+
+function geometryForLevels(
+  lvl0: { shape: number[] },
+  lvl: { shape: number[]; chunk_shape: number[] },
+): ChunkRadiusGeometry {
+  return {
+    fullDims: [
+      lvl0.shape[Axis.X],
+      lvl0.shape[Axis.Y],
+      lvl0.shape[Axis.Z],
+    ],
+    levelDims: [
+      lvl.shape[Axis.X],
+      lvl.shape[Axis.Y],
+      lvl.shape[Axis.Z],
+    ],
+    chunkDims: [
+      lvl.chunk_shape[Axis.X],
+      lvl.chunk_shape[Axis.Y],
+      lvl.chunk_shape[Axis.Z],
+    ],
+  };
 }
 
 /**
@@ -591,6 +663,7 @@ export function DebugOverlays({
         const out: ChunkRect[] = [];
         const t = ws.t();
         const c = ws.c();
+        const planningConfig = configStore.get();
         const snap = cpuCache.snapshot();
         // Rank lookup for "planned" color gradient. Built once per
         // tick: pending queue is in priority order, so array index ==
@@ -620,7 +693,7 @@ export function DebugOverlays({
             positions = {};
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
-          const fieldEntries = new Map<string, Extract<RequestPlan["activeSet"][number], { kind: "field" }>>();
+          const visibleRegion = parseVisibleRegion(ws, dsId);
 
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
@@ -704,88 +777,170 @@ export function DebugOverlays({
               });
               continue;
             }
-            fieldEntries.set(entry.entityId, entry);
-          }
-
-          // Field chunks are rendered from the actual current plan
-          // requests, not from `entry.targetLod`. That keeps the grid
-          // honest for the two-source renderer: detail and coarse can
-          // have independent LODs, chunk sizes, and residency state.
-          for (const req of plan.requests) {
-            if (out.length >= MAX_CHUNK_RECTS) break outer;
-            const sourceTier = overlayTierForRequest(req);
-            if (!sourceTier) continue;
-            if (req.t !== t || req.c !== c) continue;
-
-            const entry = fieldEntries.get(req.entityId);
-            const pos = positions[req.entityId];
-            const img = imgById.get(req.imageId);
-            if (!entry || !pos || !img) continue;
+            if (!visibleRegion) continue;
+            const pos = positions[entry.entityId];
+            const img = imgById.get(entry.imageId);
+            if (!pos || !img) continue;
             const lvl0 = img.multiscale.levels[0];
-            const lvl = img.multiscale.levels[req.level];
-            if (!lvl0 || !lvl) continue;
-
-            const frame = getFrame(dsId, req.imageId, lvl0.shape);
+            if (!lvl0) continue;
+            const frame = getFrame(dsId, entry.imageId, lvl0.shape);
             frame.pos = pos;
-
             const fullX = lvl0.shape[Axis.X];
             const fullY = lvl0.shape[Axis.Y];
-            const fullZ = lvl0.shape[Axis.Z];
-            const lvlX = lvl.shape[Axis.X];
-            const lvlY = lvl.shape[Axis.Y];
-            const lvlZ = lvl.shape[Axis.Z];
-            const chunkPxX = lvl.chunk_shape[Axis.X];
-            const chunkPxY = lvl.chunk_shape[Axis.Y];
-            const chunkPxZ = lvl.chunk_shape[Axis.Z];
-            const scaleX = fullX / lvlX;
-            const scaleY = fullY / lvlY;
-            const scaleZ = fullZ / lvlZ;
-            const chunkWorldX = chunkPxX * scaleX;
-            const chunkWorldY = chunkPxY * scaleY;
-            const chunkWorldZ = chunkPxZ * scaleZ;
 
-            const vMin: [number, number, number] = [
-              req.x * chunkWorldX,
-              req.y * chunkWorldY,
-              req.z * chunkWorldZ,
-            ];
-            const vMax: [number, number, number] = [
-              (req.x + 1) * chunkWorldX,
-              (req.y + 1) * chunkWorldY,
-              (req.z + 1) * chunkWorldZ,
-            ];
-            const rect = projectVoxelAabb(ws, frame, vMin, vMax, dpr);
-            if (!rect) continue;
-            if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
-              continue;
-            }
+            const cachedSet = snap.cached.get(entry.entityId);
+            const inFlightSet = snap.inFlight.get(entry.entityId);
 
-            const cachedSet = snap.cached.get(req.entityId);
-            const inFlightSet = snap.inFlight.get(req.entityId);
-            let status: ChunkRect["status"] = "planned";
-            let priorityRank: number | undefined;
-            let tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined;
-            if (cachedSet?.has(req.chunkKey)) {
-              status = "cached";
-              if (enabled.cachedTier) {
-                tier = cpuCache.getCachedChunkTier(req.entityId, req.chunkKey);
+            const residency = (
+              key: string,
+              tier: OverlayTier,
+              geometry: ChunkRadiusGeometry,
+              chunk: { x: number; y: number; z: number },
+            ): boolean => {
+              const radiusView = tier === "detail"
+                ? planningConfig.detailRenderRadiusView
+                : planningConfig.coarseRenderRadiusView;
+              if (!chunkWithinRenderRadius({
+                region: visibleRegion,
+                radiusView,
+                layoutPositionVox: pos,
+                geometry,
+                chunk,
+              })) {
+                return false;
               }
-            } else if (inFlightSet?.has(req.chunkKey)) {
-              status = "in-flight";
-            } else if (enabled.plannedRank) {
-              priorityRank = rankByKey.get(`${req.entityId}/${req.chunkKey}`);
+              const worker = renderLoopRef.current?.workerChunkResidency(dsId, entry.imageId, c, key) ?? "unknown";
+              if (worker === "resident") return true;
+              if (worker === "missing") return false;
+              return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key);
+            };
+
+            const statusFor = (key: string): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
+              if (cachedSet?.has(key)) {
+                return {
+                  status: "cached",
+                  tier: enabled.cachedTier ? cpuCache.getCachedChunkTier(entry.entityId, key) : undefined,
+                };
+              }
+              if (inFlightSet?.has(key)) return { status: "in-flight" };
+              return {
+                status: "planned",
+                priorityRank: enabled.plannedRank ? rankByKey.get(`${entry.entityId}/${key}`) : undefined,
+              };
+            };
+
+            const coarseLevel = entry.coarseLevel ?? null;
+            const coarseLvl = coarseLevel !== null ? img.multiscale.levels[coarseLevel] : undefined;
+            const coarseGeometry = coarseLvl ? geometryForLevels(lvl0, coarseLvl) : null;
+            const coarseChunkAt = (vx: number, vy: number, vz: number): {
+              key: string;
+              x: number;
+              y: number;
+              z: number;
+            } | null => {
+              if (coarseLevel === null || !coarseLvl || !coarseGeometry) return null;
+              const [cwX, cwY, cwZ] = coarseGeometry.chunkDims.map((chunkDim, i) =>
+                chunkDim * (coarseGeometry.fullDims[i] / Math.max(1, coarseGeometry.levelDims[i])),
+              ) as [number, number, number];
+              const maxXIdx = Math.ceil(coarseLvl.shape[Axis.X] / coarseLvl.chunk_shape[Axis.X]);
+              const maxYIdx = Math.ceil(coarseLvl.shape[Axis.Y] / coarseLvl.chunk_shape[Axis.Y]);
+              const maxZIdx = Math.ceil(coarseLvl.shape[Axis.Z] / coarseLvl.chunk_shape[Axis.Z]);
+              const xIdx = Math.max(0, Math.min(maxXIdx - 1, Math.floor(vx / cwX)));
+              const yIdx = Math.max(0, Math.min(maxYIdx - 1, Math.floor(vy / cwY)));
+              const zIdx = Math.max(0, Math.min(maxZIdx - 1, Math.floor(vz / cwZ)));
+              return {
+                key: chunkKeyFor(coarseLevel, t, c, zIdx, yIdx, xIdx),
+                x: xIdx,
+                y: yIdx,
+                z: zIdx,
+              };
+            };
+
+            const appendSource = (level: number, sourceTier: OverlayTier): void => {
+              const lvl = img.multiscale.levels[level];
+              if (!lvl) return;
+              const geometry = geometryForLevels(lvl0, lvl);
+              const [chunkWorldX, chunkWorldY, chunkWorldZ] = geometry.chunkDims.map((chunkDim, i) =>
+                chunkDim * (geometry.fullDims[i] / Math.max(1, geometry.levelDims[i])),
+              ) as [number, number, number];
+              const maxCol = Math.ceil(lvl.shape[Axis.X] / lvl.chunk_shape[Axis.X]);
+              const maxRow = Math.ceil(lvl.shape[Axis.Y] / lvl.chunk_shape[Axis.Y]);
+              const maxZ = Math.ceil(lvl.shape[Axis.Z] / lvl.chunk_shape[Axis.Z]);
+
+              const localMinX = visibleRegion.xyBoundsVox[0] - pos[0];
+              const localMaxX = visibleRegion.xyBoundsVox[2] - pos[0];
+              const localMinY = visibleRegion.xyBoundsVox[1] - pos[1];
+              const localMaxY = visibleRegion.xyBoundsVox[3] - pos[1];
+              if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) return;
+
+              const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
+              const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
+              const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
+              const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
+              const zStart = Math.max(0, Math.floor(visibleRegion.zRangeVox[0] / chunkWorldZ));
+              const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(visibleRegion.zRangeVox[1] / chunkWorldZ)));
+
+              for (let iz = zStart; iz < zEnd; iz++) {
+                if (out.length >= MAX_CHUNK_RECTS) return;
+                for (let row = rowStart; row < rowEnd; row++) {
+                  if (out.length >= MAX_CHUNK_RECTS) return;
+                  for (let col = colStart; col < colEnd; col++) {
+                    if (out.length >= MAX_CHUNK_RECTS) return;
+                    const key = chunkKeyFor(level, t, c, iz, row, col);
+                    const rect = projectVoxelAabb(
+                      ws,
+                      frame,
+                      [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ],
+                      [(col + 1) * chunkWorldX, (row + 1) * chunkWorldY, (iz + 1) * chunkWorldZ],
+                      dpr,
+                    );
+                    if (!rect) continue;
+                    if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
+                      continue;
+                    }
+
+                    let displayTier: DisplayTier = "missing";
+                    let statusKey = key;
+                    if (sourceTier === "detail") {
+                      if (residency(key, "detail", geometry, { x: col, y: row, z: iz })) {
+                        displayTier = "detail";
+                      } else {
+                        const coarseChunk = coarseChunkAt(
+                          (col + 0.5) * chunkWorldX,
+                          (row + 0.5) * chunkWorldY,
+                          (iz + 0.5) * chunkWorldZ,
+                        );
+                        if (
+                          coarseChunk &&
+                          coarseGeometry &&
+                          residency(coarseChunk.key, "coarse", coarseGeometry, coarseChunk)
+                        ) {
+                          displayTier = "coarse";
+                          statusKey = coarseChunk.key;
+                        }
+                      }
+                    } else if (residency(key, "coarse", geometry, { x: col, y: row, z: iz })) {
+                      displayTier = "coarse";
+                    }
+
+                    out.push({
+                      key: `${dsId}/${entry.entityId}/${sourceTier}/${key}`,
+                      x: rect.x,
+                      y: rect.y,
+                      w: rect.w,
+                      h: rect.h,
+                      sourceTier: displayTier,
+                      ...statusFor(statusKey),
+                    });
+                  }
+                }
+              }
+            };
+
+            if (coarseLevel !== null && coarseLevel !== entry.detailLevel) {
+              appendSource(coarseLevel, "coarse");
             }
-            out.push({
-              key: `${dsId}/${req.entityId}/${req.lane}/${req.chunkKey}`,
-              x: rect.x,
-              y: rect.y,
-              w: rect.w,
-              h: rect.h,
-              status,
-              sourceTier,
-              priorityRank,
-              tier,
-            });
+            appendSource(entry.detailLevel ?? entry.targetLod, "detail");
           }
         }
         out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));

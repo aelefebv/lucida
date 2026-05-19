@@ -74,6 +74,20 @@ const PRIORITY_WEIGHTS: TunableSpec[] = [
 
 const RESIDENCY_BUDGETS: TunableSpec[] = [
   {
+    field: "detailRenderRadiusView",
+    label: "Detail render radius (view)",
+    min: 0,
+    max: 2,
+    step: 0.05,
+  },
+  {
+    field: "coarseRenderRadiusView",
+    label: "Coarse render radius (view)",
+    min: 0,
+    max: 2,
+    step: 0.05,
+  },
+  {
     field: "proxyResidencyBudgetBytes",
     label: "Proxy GPU budget (bytes)",
     min: 16 * 1024 * 1024,
@@ -348,6 +362,9 @@ export function ConfigTab() {
 
       <div className="debug-section">
         <div className="debug-title">Residency budgets</div>
+        <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
+          Render radius is a visible-view multiplier; max disables radius filtering.
+        </div>
         <CoarseDetailToggle cfg={cfg} />
         {RESIDENCY_BUDGETS.map((spec) => (
           <TunableRow

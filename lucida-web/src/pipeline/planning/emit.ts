@@ -6,6 +6,7 @@
 
 import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
+import { chunkWithinRenderRadius } from "../renderRadius.ts";
 import { chunkWorldDims, iterateChunks, iterateChunksAtLodRange } from "./chunks.ts";
 import type { PlanningConfig } from "./config.ts";
 import type {
@@ -142,6 +143,9 @@ export function emitDetailLane(
           datasetId,
         );
     for (const req of chunks) {
+      if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
+        continue;
+      }
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "detail";
       req.tier = "detail";
@@ -245,6 +249,9 @@ export function emitPrefetchLane(
             datasetId,
           );
       for (const req of chunks) {
+        if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
+          continue;
+        }
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
         req.lane = "prefetch";
         req.tier = "detail";
@@ -291,6 +298,9 @@ export function emitCoarseLane(
       datasetId,
     );
     for (const req of chunks) {
+      if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.coarseRenderRadiusView)) {
+        continue;
+      }
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "coarse";
       req.tier = "coarse";
@@ -394,4 +404,38 @@ function chunkDistanceFromCenter(
   const dy = (req.y + 0.5) * cwY - centerY;
   const dz = (req.z + 0.5) * cwZ - centerZ;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function requestWithinRenderRadius(
+  req: ChunkRequest,
+  region: VisibleRegion,
+  entity: EntitySnapshot,
+  radiusView: number,
+): boolean {
+  const level0 = entity.levels[0];
+  const level = entity.levels[req.level];
+  if (!level0 || !level) return true;
+  return chunkWithinRenderRadius({
+    region,
+    radiusView,
+    layoutPositionVox: entity.layoutPositionVox,
+    geometry: {
+      fullDims: [
+        level0.shape[Axis.X],
+        level0.shape[Axis.Y],
+        level0.shape[Axis.Z],
+      ],
+      levelDims: [
+        level.shape[Axis.X],
+        level.shape[Axis.Y],
+        level.shape[Axis.Z],
+      ],
+      chunkDims: [
+        level.chunk_shape[Axis.X],
+        level.chunk_shape[Axis.Y],
+        level.chunk_shape[Axis.Z],
+      ],
+    },
+    chunk: { x: req.x, y: req.y, z: req.z },
+  });
 }

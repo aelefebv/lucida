@@ -52,6 +52,13 @@ export const COARSE_LANE_OFFSET = 2400;
 export const PREFETCH_DEPTH = 2;
 
 /**
+ * Render-radius slider value that disables radius filtering. Values
+ * below this are interpreted as a multiplier of the current visible
+ * region's half-diagonal.
+ */
+export const RENDER_RADIUS_DISABLED_VIEW = 2;
+
+/**
  * Coefficient on `(1 - importance)`. Tuned so a one-importance-step gap
  * roughly equals a 50-voxel distance gap.
  */
@@ -102,6 +109,16 @@ export interface PlanningConfig {
    * preserves the proxy-era planner until the new path reaches parity.
    */
   coarseDetailEnabled: boolean;
+  /**
+   * Detail render radius as a multiplier of the visible-region
+   * half-diagonal. The default max value disables filtering.
+   */
+  detailRenderRadiusView: number;
+  /**
+   * Coarse render radius as a multiplier of the visible-region
+   * half-diagonal. The default max value disables filtering.
+   */
+  coarseRenderRadiusView: number;
 
   // -- lane offsets ---------------------------------------------------
   /** Minimap lane (highest urgency). See {@link MINIMAP_LANE_OFFSET}. */
@@ -129,6 +146,8 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
   proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   coarseDetailEnabled: true,
+  detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
+  coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,

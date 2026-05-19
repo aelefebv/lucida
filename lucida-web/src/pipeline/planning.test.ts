@@ -26,6 +26,7 @@ import {
   IMPORTANCE_WEIGHT,
   DISTANCE_WEIGHT,
   WELL_PROXY_PRIORITY_BUMP,
+  RENDER_RADIUS_DISABLED_VIEW,
   DEFAULT_PLANNING_CONFIG,
   mergeConfig,
 } from "./planning/index.ts";
@@ -1271,6 +1272,8 @@ describe("plan() — coarse/detail bridge", () => {
     const result = plan(snapshot, createSyntheticState());
 
     expect(DEFAULT_PLANNING_CONFIG.coarseDetailEnabled).toBe(true);
+    expect(DEFAULT_PLANNING_CONFIG.detailRenderRadiusView).toBe(RENDER_RADIUS_DISABLED_VIEW);
+    expect(DEFAULT_PLANNING_CONFIG.coarseRenderRadiusView).toBe(RENDER_RADIUS_DISABLED_VIEW);
     expect(result.proxyRequests).toHaveLength(0);
     expect(result.activeSet.map((entry) => entry.kind)).toEqual(["field"]);
     expect(asField(result.activeSet[0]).proxyAvailable).toBe(false);
@@ -1349,6 +1352,39 @@ describe("plan() — coarse/detail bridge", () => {
     const coarse = result.requests.filter((r) => r.lane === "coarse");
     expect(new Set(detail.map((r) => r.level))).toEqual(new Set([1]));
     expect(new Set(coarse.map((r) => r.level))).toEqual(new Set([2]));
+  });
+
+  it("filters detail and coarse lanes with independent render radius knobs", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
+    const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "field-a",
+      imageId: "img-a",
+      kind: "Image",
+      levels: [level0, level1, level2],
+      detailLevel: 0,
+      coarseLevel: 1,
+      layoutPositionVox: [0, 0],
+    });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }),
+      selection: makeSelection(),
+    });
+
+    const result = plan(
+      snapshot,
+      createSyntheticState(),
+      mergeConfig({
+        prefetchDepth: 0,
+        detailRenderRadiusView: 0.26,
+        coarseRenderRadiusView: 0,
+      }),
+    );
+
+    expect(result.requests.filter((r) => r.lane === "detail")).toHaveLength(4);
+    expect(result.requests.filter((r) => r.lane === "coarse")).toHaveLength(0);
   });
 });
 
@@ -2183,6 +2219,8 @@ describe("PlanningConfig", () => {
       DEFAULT_PLANNING_CONFIG.overviewLaneOffset,
     );
     expect(merged.coarseDetailEnabled).toBe(DEFAULT_PLANNING_CONFIG.coarseDetailEnabled);
+    expect(merged.detailRenderRadiusView).toBe(DEFAULT_PLANNING_CONFIG.detailRenderRadiusView);
+    expect(merged.coarseRenderRadiusView).toBe(DEFAULT_PLANNING_CONFIG.coarseRenderRadiusView);
   });
 
   it("mergeConfig doesn't mutate the input partial", () => {

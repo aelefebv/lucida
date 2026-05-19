@@ -124,9 +124,21 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   for (const group of groups.values()) {
     const [pcZ, pcY, pcX] = group.chunkDims;
     const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
+    const entryByMember = new Map<string, {
+      layoutPositionVox?: [number, number];
+      levels: Array<{
+        level: number;
+        chunkShape: [number, number, number];
+        levelDims: [number, number, number];
+      }>;
+    }>();
     let offset = 0;
 
     for (const { entry, memberId, tier, level } of group.entries) {
+      entryByMember.set(memberId, {
+        layoutPositionVox: entry.layoutPositionVox,
+        levels: entry.levels,
+      });
       state.memberTierToPool.set(memberTierKey(memberId, tier), group.poolKey);
       if (tier === "detail") state.memberToPool.set(memberId, group.poolKey);
       const { meta, nextOffset } = computeEntityTierMeta(
@@ -150,14 +162,22 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       );
       atlas.entityMetas = newEntityMetas;
       resizeIndirection(ctx, atlas, offset);
-      remapIndirection(atlas, msg.currentT, group.channel);
+      remapIndirection(atlas, msg.currentT, group.channel, {
+        visibleRegion: msg.visibleRegion,
+        renderRadiusView: msg.renderRadiusView?.[group.tier],
+        entryByMember,
+      });
     } else {
       const atlas = getOrCreateSlicePool(
         ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
       );
       atlas.entityMetas = newEntityMetas;
       resizeSliceIndirection(ctx, atlas, offset);
-      remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ);
+      remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ, {
+        visibleRegion: msg.visibleRegion,
+        renderRadiusView: msg.renderRadiusView?.[group.tier],
+        entryByMember,
+      });
     }
 
     // `currentEntityMetas` was populated above so one member can carry both

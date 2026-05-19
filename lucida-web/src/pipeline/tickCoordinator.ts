@@ -411,6 +411,10 @@ export class TickCoordinator {
         selection,
         multiChannel,
         visibleRegion,
+        renderRadiusView: {
+          detail: planningConfig.detailRenderRadiusView,
+          coarse: planningConfig.coarseRenderRadiusView,
+        },
         epochs: result.epochs,
         desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
         matricesByEntity,

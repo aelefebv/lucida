@@ -25,6 +25,7 @@ export type ChunksEvictedHandler = (
 ) => void;
 
 export type WantedSetHandler = (
+  datasetId: string,
   epochs: SceneEpochs,
   missing: Array<MissingChunk | MissingProxy>,
 ) => void;

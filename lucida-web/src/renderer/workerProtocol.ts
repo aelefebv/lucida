@@ -262,6 +262,8 @@ export interface DestroyMessage {
  */
 interface ColdStateActiveEntryBase {
   entityId: string;
+  /** Layout placement in full-resolution voxel coordinates. */
+  layoutPositionVox?: [number, number];
   targetLod: number;
   detailOwnedLodRange: [number, number]; // [finest, coarsest]
   detailLevel?: number;
@@ -394,6 +396,11 @@ export interface ColdStateMessage {
   multiChannel: boolean;
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
+  /** Per-tier render radius as visible-region half-diagonal multipliers. */
+  renderRadiusView?: {
+    detail: number;
+    coarse: number;
+  };
   /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
   desiredProxyKeys?: string[];
   activeSet: ColdStateActiveEntry[];
@@ -460,6 +467,7 @@ export type ChunkFeedbackReason =
   | "missing-pool"
   | "missing-entity-meta"
   | "missing-lod-meta"
+  | "radius-filter"
   | "atlas-policy";
 
 export interface ChunksEvictedMessage {
@@ -486,6 +494,7 @@ export interface ChunksEvictedMessage {
 /** A chunk that the worker is missing from its atlas. */
 export type MissingChunk = {
   kind: "chunk";
+  datasetId: string;
   tier?: "detail" | "coarse";
   entityId: string;
   /**
@@ -516,6 +525,7 @@ export type MissingProxy = {
 
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
+  datasetId: string;
   epochs: SceneEpochs;
   /**
    * Discriminated union over chunks and proxies. Existing chunk

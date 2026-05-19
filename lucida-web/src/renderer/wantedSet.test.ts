@@ -408,6 +408,58 @@ describe("computeWantedSet", () => {
     ]);
   });
 
+  it("applies independent render radii to detail and coarse wanted-set lanes", () => {
+    const coldState = makeColdState({
+      renderRadiusView: { detail: 0.26, coarse: 0 },
+      visibleRegion: makeVisibleRegion({
+        xyBoundsVox: [0, 0, 1024, 1024],
+        zRangeVox: [0, 1],
+      }),
+      activeSet: [
+        makeActiveEntry({
+          detailLevel: 0,
+          coarseLevel: 1,
+          wantedLodLevels: [0, 1],
+          levels: [
+            { level: 0, chunkShape: [1, 256, 256], gridShape: [1, 4, 4], levelDims: [1, 1024, 1024] },
+            { level: 1, chunkShape: [1, 256, 256], gridShape: [1, 2, 2], levelDims: [1, 512, 512] },
+          ],
+        }),
+      ],
+    });
+    const detailAtlas = makeVolumePool("img", [
+      { level: 0, gridDims: [1, 4, 4], chunkDims: [1, 256, 256], offset: 0 },
+    ]);
+    const coarseAtlas = makeVolumePool("img", [
+      { level: 1, gridDims: [1, 2, 2], chunkDims: [1, 256, 256], offset: 0 },
+    ]);
+    const volumeAtlases = new Map<string, AtlasSnapshot>([
+      ["ds-0:256x256x1:detail", detailAtlas],
+      ["ds-0:256x256x1:coarse", coarseAtlas],
+    ]);
+
+    const result = computeWantedSet(
+      coldState,
+      volumeAtlases,
+      new Map(),
+      tierPool([
+        ["img", "detail", "ds-0:256x256x1:detail"],
+        ["img", "coarse", "ds-0:256x256x1:coarse"],
+      ]),
+    );
+
+    const detail = chunks(result.missing).filter((m) => m.tier === "detail");
+    const coarse = chunks(result.missing).filter((m) => m.tier === "coarse");
+    expect(detail.map((m) => m.chunkKey).sort()).toEqual([
+      "0/0/0/0/1/1",
+      "0/0/0/0/1/2",
+      "0/0/0/0/2/1",
+      "0/0/0/0/2/2",
+    ]);
+    expect(detail.every((m) => m.datasetId === "ds-0")).toBe(true);
+    expect(coarse).toHaveLength(0);
+  });
+
   it("slice mode maps full-res Z independently for detail and coarse tier chunk shapes", () => {
     const coldState = makeColdState({
       viewMode: "slice",

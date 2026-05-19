@@ -62,7 +62,7 @@ export class RenderClient implements UploadClient {
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
-      this.onWantedSetDelta(msg.epochs, msg.missing);
+      this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }

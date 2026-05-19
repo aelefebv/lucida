@@ -16,9 +16,10 @@ describe("WorkerFeedback residency reconciliation", () => {
     const feedback = new WorkerFeedback();
     const cpuCache = makeCpuCache();
 
-    feedback.handleWantedSetDelta([
+    feedback.handleWantedSetDelta("ds-0", [
       {
         kind: "chunk",
+        datasetId: "ds-0",
         entityId: "field-0",
         memberId: "img-0:ch2",
         c: 2,
@@ -38,7 +39,7 @@ describe("WorkerFeedback residency reconciliation", () => {
     const feedback = new WorkerFeedback();
     const cpuCache = makeCpuCache();
 
-    feedback.handleWantedSetDelta([
+    feedback.handleWantedSetDelta("ds-0", [
       {
         kind: "proxy",
         datasetId: "ds-0",

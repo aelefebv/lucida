@@ -73,6 +73,7 @@ export class Uploader {
     selection: SelectionState;
     multiChannel: boolean;
     visibleRegion: VisibleRegion;
+    renderRadiusView?: { detail: number; coarse: number };
     desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
@@ -85,6 +86,7 @@ export class Uploader {
       selection: args.selection,
       multiChannel: args.multiChannel,
       visibleRegion: args.visibleRegion,
+      renderRadiusView: args.renderRadiusView,
       desiredProxyKeys: args.desiredProxyKeys,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
@@ -270,10 +272,20 @@ export class Uploader {
   }
 
   handleWantedSetDelta(
+    datasetId: string,
     missing: Array<MissingChunk | MissingProxy>,
     cpuCache: CpuCache,
   ): void {
-    this.workerFeedback.handleWantedSetDelta(missing, cpuCache);
+    this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);
+  }
+
+  workerChunkResidency(
+    datasetId: string,
+    imageId: string,
+    c: number,
+    chunkKey: string,
+  ): "resident" | "missing" | "unknown" {
+    return this.workerFeedback.chunkResidency(datasetId, imageId, c, chunkKey);
   }
 
   // Lifecycle (dataset removal, multi-channel transitions)

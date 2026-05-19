@@ -427,7 +427,7 @@ describe("Uploader worker feedback", () => {
       c: 2,
     };
 
-    new Uploader().handleWantedSetDelta([missing], cpuCache);
+    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
 
     expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
       "ds1|field-0|FieldProxy3D|0|2",
@@ -438,13 +438,14 @@ describe("Uploader worker feedback", () => {
     const cpuCache = makeCpuCache();
     const missing: MissingChunk = {
       kind: "chunk",
+      datasetId: "ds1",
       entityId: "field-0",
       memberId: "img-0:ch2",
       c: 2,
       chunkKey: "0/0/2/0/0/0",
     };
 
-    new Uploader().handleWantedSetDelta([missing], cpuCache);
+    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
 
     expect(cpuCache.markChunkMissing).toHaveBeenCalledWith(
       "img-0",

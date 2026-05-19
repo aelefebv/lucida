@@ -83,7 +83,12 @@ export async function bootstrapWorker(
       state.memberTierToPool,
       proxySnap,
     );
-    post({ type: "wantedSetDelta", epochs: state.currentEpochs, missing: result.missing });
+    post({
+      type: "wantedSetDelta",
+      datasetId: state.currentColdState.datasetId,
+      epochs: state.currentEpochs,
+      missing: result.missing,
+    });
   }
 
   const ctx: WorkerCtx = {
