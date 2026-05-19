@@ -109,3 +109,25 @@ export function onOverlaysChanged(fn: () => void): () => void {
     overlayListeners.delete(fn);
   };
 }
+
+export type RenderRadiusPreviewTier = "detail" | "coarse";
+
+let renderRadiusPreviewTier: RenderRadiusPreviewTier | null = null;
+const renderRadiusPreviewListeners = new Set<() => void>();
+
+export function getRenderRadiusPreviewTier(): RenderRadiusPreviewTier | null {
+  return renderRadiusPreviewTier;
+}
+
+export function setRenderRadiusPreviewTier(tier: RenderRadiusPreviewTier | null): void {
+  if (renderRadiusPreviewTier === tier) return;
+  renderRadiusPreviewTier = tier;
+  for (const fn of renderRadiusPreviewListeners) fn();
+}
+
+export function onRenderRadiusPreviewChanged(fn: () => void): () => void {
+  renderRadiusPreviewListeners.add(fn);
+  return () => {
+    renderRadiusPreviewListeners.delete(fn);
+  };
+}

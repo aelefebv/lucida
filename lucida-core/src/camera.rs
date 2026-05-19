@@ -370,7 +370,8 @@ impl Arcball {
 
     /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
     /// Returns the intersection point in unit space, or the closest point on the
-    /// box surface if the ray misses (so distance calculations remain meaningful).
+    /// box to the view ray if the ray misses (so distance calculations remain
+    /// aligned with where the user is looking).
     pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
         let eye_unit = transform_point(self.eye_position(), inv_model);
         let target_unit = transform_point(self.target, inv_model);
@@ -379,8 +380,9 @@ impl Arcball {
             target_unit[1] - eye_unit[1],
             target_unit[2] - eye_unit[2],
         ];
-        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-            .unwrap_or_else(|| closest_point_on_aabb(eye_unit, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).unwrap_or_else(|| {
+            closest_point_on_aabb_to_ray(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+        })
     }
 
     /// Effective zoom: screen pixels per world unit at the target plane.
@@ -752,7 +754,7 @@ impl Fly {
     }
 
     /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
-    /// Returns the closest point on the box surface if the ray misses.
+    /// Returns the closest point on the box to the view ray if the ray misses.
     pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
         let eye_unit = transform_point(self.position, inv_model);
         let target = self.target();
@@ -762,8 +764,9 @@ impl Fly {
             target_unit[1] - eye_unit[1],
             target_unit[2] - eye_unit[2],
         ];
-        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-            .unwrap_or_else(|| closest_point_on_aabb(eye_unit, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).unwrap_or_else(|| {
+            closest_point_on_aabb_to_ray(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+        })
     }
 
     /// Compute the visible region in voxel coordinates by unprojecting the frustum.
@@ -1087,13 +1090,85 @@ fn unproject_screen_ray(
     crate::ray::Ray::new(near_world, dir)
 }
 
-/// Closest point on an AABB to a given point (clamped to the box surface).
+/// Closest point on an AABB to a given point (clamped to the box bounds).
 fn closest_point_on_aabb(point: [f64; 3], box_min: [f64; 3], box_max: [f64; 3]) -> [f64; 3] {
     [
         point[0].clamp(box_min[0], box_max[0]),
         point[1].clamp(box_min[1], box_max[1]),
         point[2].clamp(box_min[2], box_max[2]),
     ]
+}
+
+fn closest_point_on_aabb_to_ray(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    box_min: [f64; 3],
+    box_max: [f64; 3],
+) -> [f64; 3] {
+    let dir_len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+    if dir_len_sq <= 1e-24 {
+        return closest_point_on_aabb(origin, box_min, box_max);
+    }
+
+    if point_aabb_distance_derivative_along_ray(origin, dir, box_min, box_max, 0.0) >= 0.0 {
+        return closest_point_on_aabb(origin, box_min, box_max);
+    }
+
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    while point_aabb_distance_derivative_along_ray(origin, dir, box_min, box_max, hi) < 0.0 {
+        lo = hi;
+        hi *= 2.0;
+        if !hi.is_finite() {
+            return closest_point_on_aabb(
+                [
+                    origin[0] + lo * dir[0],
+                    origin[1] + lo * dir[1],
+                    origin[2] + lo * dir[2],
+                ],
+                box_min,
+                box_max,
+            );
+        }
+    }
+
+    for _ in 0..80 {
+        let mid = (lo + hi) * 0.5;
+        if point_aabb_distance_derivative_along_ray(origin, dir, box_min, box_max, mid) < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    closest_point_on_aabb(
+        [
+            origin[0] + hi * dir[0],
+            origin[1] + hi * dir[1],
+            origin[2] + hi * dir[2],
+        ],
+        box_min,
+        box_max,
+    )
+}
+
+fn point_aabb_distance_derivative_along_ray(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    box_min: [f64; 3],
+    box_max: [f64; 3],
+    t: f64,
+) -> f64 {
+    let mut derivative = 0.0;
+    for i in 0..3 {
+        let p = origin[i] + t * dir[i];
+        if p < box_min[i] {
+            derivative += (p - box_min[i]) * dir[i];
+        } else if p > box_max[i] {
+            derivative += (p - box_max[i]) * dir[i];
+        }
+    }
+    derivative
 }
 
 /// Ray-AABB intersection using the slab method.
@@ -1287,6 +1362,34 @@ mod tests {
         let frustum_aabb_basis = (half_x * half_x + half_y * half_y + half_z * half_z).sqrt();
 
         assert!(region.radius_basis_vox < frustum_aabb_basis);
+    }
+
+    #[test]
+    fn ray_miss_fallback_uses_closest_point_to_view_ray() {
+        let point = closest_point_on_aabb_to_ray(
+            [2.0, -2.0, 0.5],
+            [0.0, 1.0, 0.2],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        );
+
+        assert!((point[0] - 1.0).abs() < 1e-12, "x: {}", point[0]);
+        assert!(point[1].abs() < 1e-12, "y: {}", point[1]);
+        assert!((point[2] - 0.9).abs() < 1e-12, "z: {}", point[2]);
+    }
+
+    #[test]
+    fn ray_miss_fallback_clamps_eye_when_ray_points_away() {
+        let point = closest_point_on_aabb_to_ray(
+            [2.0, -2.0, 0.5],
+            [0.0, -1.0, 0.2],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        );
+
+        assert!((point[0] - 1.0).abs() < 1e-12, "x: {}", point[0]);
+        assert!(point[1].abs() < 1e-12, "y: {}", point[1]);
+        assert!((point[2] - 0.5).abs() < 1e-12, "z: {}", point[2]);
     }
 
     #[test]
