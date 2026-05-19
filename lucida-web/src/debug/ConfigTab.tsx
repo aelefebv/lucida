@@ -87,6 +87,7 @@ const LANE_OFFSETS: TunableSpec[] = [
   { field: "detailLaneOffset", label: "DETAIL lane offset", min: 0, max: 5000, step: 50 },
   { field: "proxyLaneOffset", label: "PROXY lane offset", min: 0, max: 5000, step: 50 },
   { field: "prefetchLaneOffset", label: "PREFETCH lane offset", min: 0, max: 5000, step: 50 },
+  { field: "coarseLaneOffset", label: "COARSE lane offset", min: 0, max: 5000, step: 50 },
   { field: "overviewLaneOffset", label: "OVERVIEW lane offset", min: 0, max: 5000, step: 50 },
 ];
 
@@ -97,6 +98,7 @@ const LANE_ORDER: (keyof PlanningConfig)[] = [
   "detailLaneOffset",
   "proxyLaneOffset",
   "prefetchLaneOffset",
+  "coarseLaneOffset",
   "overviewLaneOffset",
 ];
 
@@ -160,6 +162,38 @@ function usePlanningConfig(): PlanningConfig {
     (cb) => configStore.subscribe(cb),
     () => configStore.get(),
     () => configStore.get(),
+  );
+}
+
+function CoarseDetailToggle({ cfg }: { cfg: PlanningConfig }) {
+  const dirty = cfg.coarseDetailEnabled !== DEFAULT_PLANNING_CONFIG.coarseDetailEnabled;
+  return (
+    <div className="debug-config-tunable-row">
+      <label className="debug-config-tunable-label" htmlFor="cfg-coarse-detail-enabled">
+        Coarse/detail bridge
+      </label>
+      <div className="debug-config-tunable-controls">
+        <input
+          id="cfg-coarse-detail-enabled"
+          type="checkbox"
+          checked={cfg.coarseDetailEnabled}
+          onChange={(e) => configStore.set("coarseDetailEnabled", e.target.checked)}
+        />
+        {dirty ? (
+          <button
+            type="button"
+            className="debug-config-reset"
+            title="Reset to default"
+            aria-label="Reset coarse/detail bridge"
+            onClick={() => configStore.reset("coarseDetailEnabled")}
+          >
+            ↩
+          </button>
+        ) : (
+          <span className="debug-config-reset-placeholder" aria-hidden="true" />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -314,6 +348,7 @@ export function ConfigTab() {
 
       <div className="debug-section">
         <div className="debug-title">Residency budgets</div>
+        <CoarseDetailToggle cfg={cfg} />
         {RESIDENCY_BUDGETS.map((spec) => (
           <TunableRow
             key={spec.field}
@@ -342,7 +377,7 @@ export function ConfigTab() {
             <div className="debug-config-warn" role="note">
               Structural knobs: changing lane offsets reorders the queue
               priorities across the system. The canonical order is
-              MINIMAP &lt; DETAIL &lt; PROXY &lt; PREFETCH &lt; OVERVIEW.
+              MINIMAP &lt; DETAIL &lt; PROXY &lt; PREFETCH &lt; COARSE &lt; OVERVIEW.
             </div>
             {LANE_OFFSETS.map((spec) => (
               <TunableRow

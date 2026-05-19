@@ -228,15 +228,16 @@ function PlanningTabBody({
       const lanes: Record<string, typeof plan.requests> = {
         minimap: [],
         detail: [],
+        coarse: [],
         proxy: [],
         prefetch: [],
         overview: [],
       };
       for (const r of plan.requests) lanes[r.lane].push(r);
       console.group(
-        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
+        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.coarse.length} C / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
       );
-      for (const lane of ["minimap", "detail", "proxy", "prefetch", "overview"] as const) {
+      for (const lane of ["minimap", "detail", "coarse", "proxy", "prefetch", "overview"] as const) {
         if (lanes[lane].length === 0) continue;
         console.groupCollapsed(`${lane}: ${lanes[lane].length}`);
         console.table(
@@ -364,6 +365,7 @@ function PlanningDatasetSection({
         <div>
           <span style={{ color: "#fa4" }}>M:{p.lanes.minimap}</span>{" "}
           <span style={{ color: "#4f4" }}>D:{p.lanes.detail}</span>{" "}
+          <span style={{ color: "#6cf" }}>C:{p.lanes.coarse}</span>{" "}
           <span style={{ color: "#ff4" }}>P:{p.lanes.prefetch}</span>{" "}
           <span style={{ color: "#88f" }}>O:{p.lanes.overview}</span>{" "}
           <span style={{ color: "#aaa" }}>· proxies:{p.proxyCount}</span>{" "}
@@ -1395,6 +1397,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div>
                     <span style={{ color: "#4f4" }}>detail: {snap.orch.laneCount.detail}</span>
                     {" "}
+                    <span style={{ color: "#6cf" }}>coarse: {snap.orch.laneCount.coarse}</span>
+                    {" "}
                     <span style={{ color: "#ff4" }}>prefetch: {snap.orch.laneCount.prefetch}</span>
                     {" "}
                     <span style={{ color: "#88f" }}>overview: {snap.orch.laneCount.overview}</span>
@@ -1441,10 +1445,10 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       {snap.orch.topRequests.map((r, i) => (
                         <div key={`${r.chunkKey}-${i}`} className="debug-member-row">
                           <span style={{
-                            color: r.lane === "detail" ? "#4f4" : r.lane === "prefetch" ? "#ff4" : "#88f",
+                            color: r.lane === "detail" ? "#4f4" : r.lane === "coarse" ? "#6cf" : r.lane === "prefetch" ? "#ff4" : "#88f",
                             width: 14,
                           }}>
-                            {r.lane === "detail" ? "D" : r.lane === "prefetch" ? "P" : "O"}
+                            {r.lane === "detail" ? "D" : r.lane === "coarse" ? "C" : r.lane === "prefetch" ? "P" : "O"}
                           </span>
                           <span>L{r.level}</span>
                           <span className="debug-member-id" title={r.chunkKey}>

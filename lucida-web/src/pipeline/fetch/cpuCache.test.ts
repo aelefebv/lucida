@@ -413,6 +413,33 @@ describe("CpuCache", () => {
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
+    it("delivers coarse chunks from the overview/coarse bucket when wanted", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const coarse = makeRequest({
+        entityId: "image-1",
+        imageId: "image-1",
+        level: 2,
+        chunkKey: "2/0/0/0/0/0",
+        lane: "coarse",
+        tier: "coarse",
+      });
+      cache.submit(makePlan([coarse], [makeActiveEntry("image-1", "image-1")]));
+      await flush();
+
+      expect(cache.telemetry().overviewBytes).toBe(64);
+      const deliveries = Array.from(cache.getDeliverable());
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({
+        kind: "chunk",
+        lane: "coarse",
+        residencyTier: "coarse",
+        chunkKey: "2/0/0/0/0/0",
+      });
+    });
+
     it("resolves skipped chunk feedback from imageId back to entityId", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;

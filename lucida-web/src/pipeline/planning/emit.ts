@@ -70,6 +70,7 @@ export function emitMinimapLane(
         y: coord.y,
         x: coord.x,
         lane: "minimap",
+        tier: "coarse",
         priority: config.minimapLaneOffset,
         chunkKey: coord.key,
       });
@@ -123,17 +124,27 @@ export function emitDetailLane(
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
-    const chunks = iterateChunks(
-      entity,
-      entry,
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-      datasetId,
-    );
+    const chunks = entry.detailLevel !== undefined
+      ? iterateChunksAtLodRange(
+          entity,
+          [entry.detailLevel, entry.detailLevel],
+          snapshot.visibleRegion,
+          snapshot.selection,
+          stats,
+          datasetId,
+        )
+      : iterateChunks(
+          entity,
+          entry,
+          snapshot.visibleRegion,
+          snapshot.selection,
+          stats,
+          datasetId,
+        );
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "detail";
+      req.tier = "detail";
       req.priority = computePriority(
         config.detailLaneOffset,
         entity.importance,
@@ -216,17 +227,27 @@ export function emitPrefetchLane(
         t: nextT,
       };
 
-      const chunks = iterateChunks(
-        entity,
-        entry,
-        snapshot.visibleRegion,
-        prefetchSelection,
-        stats,
-        datasetId,
-      );
+      const chunks = entry.detailLevel !== undefined
+        ? iterateChunksAtLodRange(
+            entity,
+            [entry.detailLevel, entry.detailLevel],
+            snapshot.visibleRegion,
+            prefetchSelection,
+            stats,
+            datasetId,
+          )
+        : iterateChunks(
+            entity,
+            entry,
+            snapshot.visibleRegion,
+            prefetchSelection,
+            stats,
+            datasetId,
+          );
       for (const req of chunks) {
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
         req.lane = "prefetch";
+        req.tier = "detail";
         req.priority = computePriority(
           config.prefetchLaneOffset + dt * 100,
           entity.importance,
@@ -235,6 +256,51 @@ export function emitPrefetchLane(
         );
         allRequests.push(req);
       }
+    }
+  }
+}
+
+/**
+ * Coarse lane — source-backed chunk-only fallback. Emits exactly the
+ * coarse level selected on each field entry, independent of the detail
+ * lane. Intermediate pyramid levels are intentionally skipped.
+ */
+export function emitCoarseLane(
+  activeSet: ActiveSetEntry[],
+  snapshot: PlanningSnapshot,
+  entityById: Map<string, EntitySnapshot>,
+  stats: PlanStats,
+  allRequests: ChunkRequest[],
+  config: PlanningConfig,
+): void {
+  const datasetId = snapshot.datasetId;
+  for (const entry of activeSet) {
+    if (entry.kind !== "field") continue;
+    if (entry.coarseLevel === undefined || entry.coarseLevel === null) continue;
+    if (entry.coarseLevel === entry.detailLevel) continue;
+
+    const entity = entityById.get(entry.entityId);
+    if (entity === undefined) continue;
+
+    const chunks = iterateChunksAtLodRange(
+      entity,
+      [entry.coarseLevel, entry.coarseLevel],
+      snapshot.visibleRegion,
+      snapshot.selection,
+      stats,
+      datasetId,
+    );
+    for (const req of chunks) {
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      req.lane = "coarse";
+      req.tier = "coarse";
+      req.priority = computePriority(
+        config.coarseLaneOffset,
+        entity.importance,
+        dist,
+        config,
+      );
+      allRequests.push(req);
     }
   }
 }
@@ -271,6 +337,7 @@ export function emitOverviewLane(
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "overview";
+      req.tier = "coarse";
       req.priority = computePriority(
         config.overviewLaneOffset,
         entity.importance,

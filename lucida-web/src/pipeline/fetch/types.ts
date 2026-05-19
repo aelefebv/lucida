@@ -34,7 +34,9 @@ export interface CpuCacheConfig {
  * the overview store (see ADR 0023); `detail` and `prefetch` live in
  * the main chunk store.
  */
-export type Lane = "minimap" | "detail" | "prefetch" | "overview";
+export type ResidencyTier = "detail" | "coarse";
+
+export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
 
 /**
  * Eviction tier label stamped on each main-store entry. Drives the
@@ -68,6 +70,7 @@ export interface ReadyChunkDelivery {
   dataType: string;
   epochs: SceneEpochs;
   lane: Lane;
+  residencyTier?: ResidencyTier;
   /** Lower numbers are delivered first when present on CpuCache output. */
   priority?: number;
 }
@@ -101,6 +104,7 @@ export interface CacheEntry {
   data: ArrayBuffer;
   sizeBytes: number;
   lane: Lane;
+  residencyTier?: ResidencyTier;
   tier: EvictionTier;
   entityId: string;
   imageId: string;

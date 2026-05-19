@@ -81,6 +81,9 @@ function makeActiveEntry(
     proxyKind: overrides?.proxyKind,
     proxyAvailable: overrides?.proxyAvailable ?? false,
     wellProxyAvailable: overrides?.wellProxyAvailable ?? false,
+    detailLevel: overrides?.detailLevel,
+    coarseLevel: overrides?.coarseLevel,
+    wantedLodLevels: overrides?.wantedLodLevels,
     modelMatrix: overrides?.modelMatrix ?? identity,
     invModelMatrix: overrides?.invModelMatrix ?? identity,
     displayStateByChannel: overrides?.displayStateByChannel ?? {
@@ -412,6 +415,37 @@ describe("computeWantedSet", () => {
     const onlyChunks = chunks(result.missing);
     expect(onlyChunks).toHaveLength(1);
     expect(onlyChunks[0].chunkKey).toBe("2/0/0/0/0/0");
+  });
+
+  it("wantedLodLevels limits multi-LOD wanted-set to selected detail/coarse levels", () => {
+    const coldState = makeColdState({
+      visibleRegion: makeVisibleRegion({
+        xyBoundsVox: [0, 0, 32, 32],
+        zRangeVox: [0, 32],
+      }),
+      activeSet: [
+        makeActiveEntry({
+          detailOwnedLodRange: [0, 2],
+          wantedLodLevels: [0, 2],
+          levels: [
+            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 2, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+          ],
+        }),
+      ],
+    });
+    const atlas = makeVolumePool("img", [
+      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+      { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 32 },
+      { level: 2, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 64 },
+    ]);
+    const volumeAtlases = new Map([["ds-0", atlas]]);
+
+    const result = computeWantedSet(coldState, volumeAtlases, new Map(), buildMemberToPool(volumeAtlases));
+
+    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
+    expect(keys).toEqual(["0/0/0/0/0/0", "2/0/0/0/0/0"]);
   });
 
   it("single-LOD fallback: only target LOD in wanted-set", () => {

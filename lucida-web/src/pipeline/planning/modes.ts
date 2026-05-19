@@ -8,6 +8,7 @@
 
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import { snapshotHasProxy } from "../assetCatalog.ts";
+import { Axis } from "../../axes.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 import type {
   ActiveSetEntry,
@@ -309,6 +310,31 @@ export function assignModes(
   return out;
 }
 
+/**
+ * Chunk-only bridge mode assignment. Ignores proxy catalog and radius
+ * promotion: every visible image/field renders as field-mode chunks
+ * with an explicit detail level and, when compatible with the current
+ * atlas layout, one source-backed coarse level in the fallback range.
+ */
+export function assignCoarseDetailModes(
+  entities: EntitySnapshot[],
+): ActiveSetEntry[] {
+  const out: ActiveSetEntry[] = [];
+
+  for (const group of groupByWell(entities)) {
+    for (const field of group.fields) {
+      out.push(makeCoarseDetailFieldEntry(field));
+    }
+  }
+
+  for (const entity of entities) {
+    if (entity.visible) continue;
+    out.push(makeInvisibleEntry(entity));
+  }
+
+  return out;
+}
+
 function makeWellAsProxyEntry(group: WellGroup): WellAsProxyEntry {
   return {
     kind: "well-as-proxy",
@@ -343,6 +369,61 @@ function makeFieldEntry(
     proxyAvailable: fieldProxyAvailable,
     wellProxyAvailable,
   };
+}
+
+function makeCoarseDetailFieldEntry(entity: EntitySnapshot): FieldEntry {
+  const detailLevel = clampLevel(entity, entity.detailLevel);
+  const coarseLevel = compatibleCoarseLevel(entity, detailLevel);
+  const coarsestDetailLod =
+    coarseLevel !== null && coarseLevel >= detailLevel ? coarseLevel : detailLevel;
+  const wantedLodLevels =
+    coarseLevel !== null && coarseLevel !== detailLevel
+      ? [detailLevel, coarseLevel]
+      : [detailLevel];
+
+  return {
+    kind: "field",
+    entityId: entity.entityId,
+    imageId: entity.imageId,
+    mode: "fields-with-detail",
+    targetLod: detailLevel,
+    coarsestDetailLod,
+    detailOwnedLodRange: [detailLevel, coarsestDetailLod],
+    detailLevel,
+    coarseLevel,
+    wantedLodLevels,
+    proxyKind: undefined,
+    proxyAvailable: false,
+    wellProxyAvailable: false,
+  };
+}
+
+function clampLevel(entity: EntitySnapshot, level: number): number {
+  if (entity.levels.length === 0) return 0;
+  if (!Number.isFinite(level)) return 0;
+  return Math.max(0, Math.min(entity.levels.length - 1, Math.floor(level)));
+}
+
+function compatibleCoarseLevel(
+  entity: EntitySnapshot,
+  detailLevel: number,
+): number | null {
+  if (entity.coarseLevel === null) return null;
+  const coarseLevel = clampLevel(entity, entity.coarseLevel);
+  if (coarseLevel < detailLevel) return null;
+  if (coarseLevel === detailLevel) return coarseLevel;
+
+  const detailGeo = entity.levels[detailLevel];
+  const coarseGeo = entity.levels[coarseLevel];
+  if (!detailGeo || !coarseGeo) return null;
+
+  const axes = [Axis.X, Axis.Y, Axis.Z];
+  for (const axis of axes) {
+    if (detailGeo.chunk_shape[axis] !== coarseGeo.chunk_shape[axis]) {
+      return null;
+    }
+  }
+  return coarseLevel;
 }
 
 function makeInvisibleEntry(entity: EntitySnapshot): InvisibleEntry {

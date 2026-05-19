@@ -85,6 +85,7 @@ export class RenderClient implements UploadClient {
     chunkY: number,
     chunkZ: number,
     epochs: SceneEpochs,
+    tier?: "detail" | "coarse",
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
@@ -102,6 +103,7 @@ export class RenderClient implements UploadClient {
       {
         type: "volumeChunkData",
         epochs,
+        tier,
         memberId,
         chunks: workerChunks,
         level, t, c,
@@ -128,6 +130,7 @@ export class RenderClient implements UploadClient {
     levelDepth: number,
     fullResZ: number,
     epochs: SceneEpochs,
+    tier?: "detail" | "coarse",
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
@@ -141,6 +144,7 @@ export class RenderClient implements UploadClient {
       {
         type: "sliceChunkData",
         epochs,
+        tier,
         memberId,
         chunks: workerChunks,
         level, z, t, c,

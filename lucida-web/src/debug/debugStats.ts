@@ -50,6 +50,7 @@ export interface PlanningDatasetDebug {
   lanes: {
     minimap: number;
     detail: number;
+    coarse: number;
     proxy: number;
     prefetch: number;
     overview: number;
@@ -120,7 +121,7 @@ export interface OrchDebug {
     detailOwnedLodRange: [number, number];
   }>;
   /** Request counts by lane */
-  laneCount: { detail: number; prefetch: number; overview: number };
+  laneCount: { detail: number; coarse: number; prefetch: number; overview: number };
   /** Request counts by level */
   chunksByLevel: Record<number, number>;
   /** First N requests for inspection */

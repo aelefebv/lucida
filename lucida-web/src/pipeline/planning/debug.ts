@@ -58,7 +58,7 @@ export function buildPlanningDatasetDebug(
   cpuCache: CpuCache,
   config: PlanningConfig,
 ): PlanningDatasetDebug {
-  const lanes = { minimap: 0, detail: 0, proxy: 0, prefetch: 0, overview: 0 };
+  const lanes = { minimap: 0, detail: 0, coarse: 0, proxy: 0, prefetch: 0, overview: 0 };
   const chunksByLevel: Record<number, number> = {};
   for (const r of result.requests) {
     lanes[r.lane]++;

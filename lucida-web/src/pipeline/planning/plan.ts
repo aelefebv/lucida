@@ -6,12 +6,13 @@
 import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 import {
+  emitCoarseLane,
   emitDetailLane,
   emitMinimapLane,
   emitOverviewLane,
   emitPrefetchLane,
 } from "./emit.ts";
-import { assignModes } from "./modes.ts";
+import { assignCoarseDetailModes, assignModes } from "./modes.ts";
 import {
   emptyPlanStats,
   type ChunkRequest,
@@ -77,14 +78,17 @@ export function plan(
 
   const stats = emptyPlanStats();
 
-  // Step 1: Promote (three-tier).
-  const activeSet = assignModes(
-    snapshot.entities,
-    state.previousActiveSet,
-    snapshot.assetCatalog,
-    stats,
-    config,
-  );
+  // Step 1: Resolve residency entries. The coarse/detail bridge bypasses
+  // proxy promotion while the legacy path preserves the three-tier model.
+  const activeSet = config.coarseDetailEnabled
+    ? assignCoarseDetailModes(snapshot.entities)
+    : assignModes(
+        snapshot.entities,
+        state.previousActiveSet,
+        snapshot.assetCatalog,
+        stats,
+        config,
+      );
 
   // Step 2: Build entity lookup.
   const entityById = new Map<string, EntitySnapshot>();
@@ -126,8 +130,13 @@ export function plan(
   // Step 5: Prefetch lane — for field-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
-  // Step 6: Overview lane.
-  emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
+  // Step 6: Context fallback lane. The bridge emits explicit coarse
+  // tier chunks; the legacy path keeps the old overview migration lane.
+  if (config.coarseDetailEnabled) {
+    emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  } else {
+    emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
+  }
 
   // Step 7: Merge and sort by priority (ascending — lower = more urgent).
   // Equal-priority chunk ties are spatial-first, channel-second so

@@ -40,6 +40,7 @@ export interface Chunk {
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
+  tier?: "detail" | "coarse";
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
@@ -64,6 +65,7 @@ export interface SliceChunkDataMessage {
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
+  tier?: "detail" | "coarse";
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
   chunks: Chunk[];
@@ -262,6 +264,9 @@ interface ColdStateActiveEntryBase {
   entityId: string;
   targetLod: number;
   detailOwnedLodRange: [number, number]; // [finest, coarsest]
+  detailLevel?: number;
+  coarseLevel?: number | null;
+  wantedLodLevels?: number[];
   levels: Array<{
     level: number;
     chunkShape: [number, number, number]; // [Z, Y, X]

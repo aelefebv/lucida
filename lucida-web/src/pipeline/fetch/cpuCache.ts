@@ -53,6 +53,7 @@ import type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
+  ResidencyTier,
 } from "./types.ts";
 
 // Re-exported so existing `./cpuCache.ts` imports keep working.
@@ -65,6 +66,7 @@ export type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
+  ResidencyTier,
   TierCounters,
   TierResidencyEntry,
 } from "./types.ts";
@@ -264,6 +266,7 @@ export class CpuCache {
       if (cachedEntry) {
         this.counters.recordHit();
         cachedEntry.lane = req.lane;
+        cachedEntry.residencyTier = this.requestResidencyTier(req);
         cachedEntry.tier = this.laneToTier(req.lane);
         cachedEntry.priority = req.priority;
         cachedEntry.lastSeenTick = this.currentSubmitTick;
@@ -394,6 +397,16 @@ export class CpuCache {
       candidates.push(this.chunkEntryToDelivery(entry));
     }
 
+    for (const entry of this.overviewStore.allEntries()) {
+      if (entry.lane !== "coarse") continue;
+      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
+      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey)) {
+        continue;
+      }
+      if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
+      candidates.push(this.chunkEntryToDelivery(entry));
+    }
+
     for (const entry of this.proxyStore.iterateSeenAt(this.currentSubmitTick)) {
       if (this.deliveryState.wasProxySent(this.proxyKeyFromEntry(entry))) continue;
       candidates.push(this.proxyEntryToDelivery(entry));
@@ -424,7 +437,9 @@ export class CpuCache {
     }
     for (const key of skipped) {
       this.deliveryState.clearChunkSent(imageId, c, key);
-      const entry = this.chunkStore.findByImageChunk(imageId, c, key);
+      const entry =
+        this.chunkStore.findByImageChunk(imageId, c, key) ??
+        this.overviewStore.findByImageChunk(imageId, c, key);
       this.markRejected(entry?.entityId ?? imageId, key);
     }
   }
@@ -737,12 +752,13 @@ export class CpuCache {
       insertedAt: this.lruCounter++,
       epochs: { ...this.currentEpochs },
       dataType: result.dataType,
+      residencyTier: this.requestResidencyTier(effectiveReq),
       priority: effectiveReq.priority,
       lastSeenTick,
     };
 
-    // minimap routes to overview cache (ADR 0023).
-    if (lane === "overview" || lane === "minimap") {
+    // minimap/overview/coarse route to the overview/coarse bucket (ADR 0023 + coarse/detail bridge).
+    if (lane === "overview" || lane === "minimap" || lane === "coarse") {
       this.overviewStore.insert(cacheEntry);
     } else {
       this.chunkStore.insert(cacheEntry);
@@ -894,6 +910,7 @@ export class CpuCache {
       dataType: entry.dataType,
       epochs: entry.epochs,
       lane: entry.lane,
+      residencyTier: entry.residencyTier,
       priority: entry.priority,
     };
   }
@@ -943,8 +960,9 @@ export class CpuCache {
   // Cache Management
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
-    // minimap shares the overview cache (ADR 0023).
-    const usesOverviewCache = req.lane === "overview" || req.lane === "minimap";
+    // minimap/overview/coarse share the overview/coarse cache.
+    const usesOverviewCache =
+      req.lane === "overview" || req.lane === "minimap" || req.lane === "coarse";
     const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
     return store.get(req.entityId, req.chunkKey);
   }
@@ -952,8 +970,15 @@ export class CpuCache {
   private laneToTier(lane: Lane): EvictionTier {
     if (lane === "prefetch") return "prefetch";
     // overview/minimap use LRU; tier is a no-op label there.
-    if (lane === "overview" || lane === "minimap") return "prefetch";
+    if (lane === "overview" || lane === "minimap" || lane === "coarse") return "prefetch";
     return "active-detail";
+  }
+
+  private requestResidencyTier(req: ChunkRequest): ResidencyTier {
+    if (req.tier) return req.tier;
+    return req.lane === "coarse" || req.lane === "overview" || req.lane === "minimap"
+      ? "coarse"
+      : "detail";
   }
 
   private inFlightKey(req: ChunkRequest): string {

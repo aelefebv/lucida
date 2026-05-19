@@ -27,6 +27,19 @@ export interface BaseEntitySnapshot {
   projectedAreaPx2: number;
   centroidWorld: [number, number, number];
   idealTargetLod: number;
+  /**
+   * Source pyramid level selected for the detail tier. Defaults to level
+   * 0 unless the dataset settings carry an explicit lower-resolution
+   * override. Generated coarse levels are not valid detail choices.
+   */
+  detailLevel: number;
+  /**
+   * Pyramid level selected for the coarse tier. Null means this image
+   * has no currently usable coarse level. The first bridge only emits
+   * source-backed coarse chunks; generated coarse levels become usable
+   * once readiness metadata marks them available.
+   */
+  coarseLevel: number | null;
   importance: number;
   /**
    * Layout placement position, in voxel coordinates. Distinct from
@@ -277,7 +290,13 @@ export interface ChunkRequest {
    * paths route per-lane (see [[cpu-cache]] for the eviction-tier
    * mapping).
    */
-  lane: "minimap" | "detail" | "prefetch" | "overview";
+  lane: "minimap" | "detail" | "coarse" | "prefetch" | "overview";
+  /**
+   * Canonical residency tier this request fills. Kept optional for
+   * migration compatibility with older tests/helpers; the planner emits
+   * it on every request.
+   */
+  tier?: "detail" | "coarse";
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
@@ -389,6 +408,16 @@ export interface FieldEntry {
   coarsestDetailLod: number;
   /** [finest, coarsest] inclusive. */
   detailOwnedLodRange: [number, number];
+  /** Explicit detail tier level for the chunk-only coarse/detail path. */
+  detailLevel?: number;
+  /** Explicit coarse tier level for the chunk-only coarse/detail path. */
+  coarseLevel?: number | null;
+  /**
+   * When present, worker wanted-set should only ask for these LODs even
+   * if `detailOwnedLodRange` spans intermediate levels for shader
+   * fallback ordering.
+   */
+  wantedLodLevels?: number[];
   /**
    * Which proxy kind this entry would prefer, if any. Always
    * `FieldProxy3D` when set; `undefined` if the catalog has no field

@@ -12,6 +12,7 @@ import {
   DETAIL_THRESHOLD_PX,
   HYSTERESIS_PX,
   MINIMAP_LANE_OFFSET,
+  COARSE_LANE_OFFSET,
   PROXY_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
   OVERVIEW_LANE_OFFSET,
@@ -1245,6 +1246,81 @@ describe("plan()", () => {
   });
 });
 
+describe("plan() — coarse/detail bridge", () => {
+  it("emits selected detail plus explicit coarse chunks and no proxy/overview work", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
+    const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "field-a",
+      imageId: "img-a",
+      kind: "Image",
+      projectedDiagonalPx: 40,
+      levels: [level0, level1, level2],
+      detailLevel: 0,
+      coarseLevel: 2,
+      layoutPositionVox: [0, 0],
+    });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }),
+      selection: makeSelection({ t: 0 }),
+    });
+
+    const result = plan(
+      snapshot,
+      createSyntheticState(),
+      mergeConfig({ coarseDetailEnabled: true, prefetchDepth: 0 }),
+    );
+
+    const entry = asField(result.activeSet[0]);
+    expect(entry.targetLod).toBe(0);
+    expect(entry.coarseLevel).toBe(2);
+    expect(entry.detailOwnedLodRange).toEqual([0, 2]);
+    expect(entry.wantedLodLevels).toEqual([0, 2]);
+    expect(result.proxyRequests).toHaveLength(0);
+    expect(result.requests.some((r) => r.lane === "overview")).toBe(false);
+
+    const detail = result.requests.filter((r) => r.lane === "detail");
+    const coarse = result.requests.filter((r) => r.lane === "coarse");
+    expect(detail).toHaveLength(16);
+    expect(new Set(detail.map((r) => r.level))).toEqual(new Set([0]));
+    expect(detail.every((r) => r.tier === "detail")).toBe(true);
+    expect(coarse).toHaveLength(1);
+    expect(coarse[0]).toMatchObject({ level: 2, tier: "coarse" });
+  });
+
+  it("uses an explicit lower source detail level while keeping the coarse tier separate", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
+    const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "field-a",
+      imageId: "img-a",
+      kind: "Image",
+      levels: [level0, level1, level2],
+      detailLevel: 1,
+      coarseLevel: 2,
+    });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }),
+      selection: makeSelection(),
+    });
+
+    const result = plan(
+      snapshot,
+      createSyntheticState(),
+      mergeConfig({ coarseDetailEnabled: true, prefetchDepth: 0 }),
+    );
+
+    const detail = result.requests.filter((r) => r.lane === "detail");
+    const coarse = result.requests.filter((r) => r.lane === "coarse");
+    expect(new Set(detail.map((r) => r.level))).toEqual(new Set([1]));
+    expect(new Set(coarse.map((r) => r.level))).toEqual(new Set([2]));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Three-tier proxy request emission
 // ---------------------------------------------------------------------------
@@ -2026,17 +2102,20 @@ describe("PlanningConfig", () => {
     expect(DEFAULT_PLANNING_CONFIG.prefetchLaneOffset).toBe(
       PREFETCH_LANE_OFFSET,
     );
+    expect(DEFAULT_PLANNING_CONFIG.coarseLaneOffset).toBe(COARSE_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.overviewLaneOffset).toBe(
       OVERVIEW_LANE_OFFSET,
     );
+    expect(DEFAULT_PLANNING_CONFIG.coarseDetailEnabled).toBe(false);
   });
 
-  it("lane offsets: 0 / 500 / 1000 / 1500 / 2500", () => {
+  it("lane offsets: 0 / 500 / 1000 / 1500 / 2400 / 2500", () => {
     // Hard-pinned values so a future re-number is loud.
     expect(MINIMAP_LANE_OFFSET).toBe(0);
     expect(DETAIL_LANE_OFFSET).toBe(500);
     expect(PROXY_LANE_OFFSET).toBe(1000);
     expect(PREFETCH_LANE_OFFSET).toBe(1500);
+    expect(COARSE_LANE_OFFSET).toBe(2400);
     expect(OVERVIEW_LANE_OFFSET).toBe(2500);
   });
 
@@ -2064,9 +2143,11 @@ describe("PlanningConfig", () => {
     expect(merged.prefetchLaneOffset).toBe(
       DEFAULT_PLANNING_CONFIG.prefetchLaneOffset,
     );
+    expect(merged.coarseLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.coarseLaneOffset);
     expect(merged.overviewLaneOffset).toBe(
       DEFAULT_PLANNING_CONFIG.overviewLaneOffset,
     );
+    expect(merged.coarseDetailEnabled).toBe(DEFAULT_PLANNING_CONFIG.coarseDetailEnabled);
   });
 
   it("mergeConfig doesn't mutate the input partial", () => {

@@ -32,6 +32,7 @@ export {
 } from "./types.ts";
 
 export {
+  assignCoarseDetailModes,
   assignModes,
   buildPrevModeByWell,
   chooseEntityMode,
@@ -48,6 +49,7 @@ export {
 } from "./chunks.ts";
 
 export {
+  emitCoarseLane,
   emitDetailLane,
   emitMinimapLane,
   emitOverviewLane,
@@ -58,6 +60,7 @@ export { plan } from "./plan.ts";
 
 export {
   DEFAULT_PLANNING_CONFIG,
+  COARSE_LANE_OFFSET,
   DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   DETAIL_LANE_OFFSET,
   DETAIL_THRESHOLD_PX,

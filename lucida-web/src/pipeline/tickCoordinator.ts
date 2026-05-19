@@ -433,7 +433,7 @@ export class TickCoordinator {
     if (debugStats.enabled) {
       const orchDebug: OrchDebug = {
         activeSet: [],
-        laneCount: { detail: 0, prefetch: 0, overview: 0 },
+        laneCount: { detail: 0, coarse: 0, prefetch: 0, overview: 0 },
         chunksByLevel: {},
         topRequests: [],
         members: [],
@@ -511,6 +511,7 @@ export class TickCoordinator {
       if (this._lastRequests) {
         for (const r of this._lastRequests) {
           if (r.lane === "detail") orchDebug.laneCount.detail++;
+          else if (r.lane === "coarse") orchDebug.laneCount.coarse++;
           else if (r.lane === "prefetch") orchDebug.laneCount.prefetch++;
           else orchDebug.laneCount.overview++;
           orchDebug.chunksByLevel[r.level] = (orchDebug.chunksByLevel[r.level] ?? 0) + 1;

@@ -375,6 +375,7 @@ function makeChunkRequest(
     y,
     x,
     lane: "detail",
+    tier: "detail",
     priority: 0,
     chunkKey: chunkKey(level, t, c, z, y, x),
   };

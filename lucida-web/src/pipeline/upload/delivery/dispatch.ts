@@ -77,6 +77,7 @@ export function dispatchChunk(
       levelDepth,
       sliceZ!,
       epochs,
+      delivery.residencyTier,
     );
   } else {
     client.volumeChunkData(
@@ -92,6 +93,7 @@ export function dispatchChunk(
       chunkY,
       chunkZ,
       epochs,
+      delivery.residencyTier,
     );
   }
 }

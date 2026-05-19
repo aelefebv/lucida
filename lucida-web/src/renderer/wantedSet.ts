@@ -232,8 +232,10 @@ export function computeWantedSet(
 
       const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));
 
-      const [finest, coarsest] = entry.detailOwnedLodRange;
-      for (let lvl = finest; lvl <= coarsest; lvl++) {
+      const wantedLevels = entry.wantedLodLevels && entry.wantedLodLevels.length > 0
+        ? [...new Set(entry.wantedLodLevels)].sort((a, b) => a - b)
+        : levelsFromRange(entry.detailOwnedLodRange);
+      for (const lvl of wantedLevels) {
         if (!atlasLodByLevel.has(lvl)) continue;
 
         const levelMeta = entry.levels.find((l) => l.level === lvl);
@@ -285,6 +287,12 @@ export function computeWantedSet(
   }
 
   return { missing };
+}
+
+function levelsFromRange([finest, coarsest]: [number, number]): number[] {
+  const out: number[] = [];
+  for (let lvl = finest; lvl <= coarsest; lvl++) out.push(lvl);
+  return out;
 }
 
 /**
