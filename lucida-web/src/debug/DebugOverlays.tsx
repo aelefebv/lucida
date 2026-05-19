@@ -79,7 +79,11 @@ type OverlayTier = "detail" | "coarse";
 export interface TierCoverageCounts {
   /** Chunks requested by the current plan for this tier. */
   wanted: number;
-  /** Chunks optimistically delivered to the worker and not reported missing/evicted. */
+  /**
+   * Chunks available for this tier. Counts worker-delivered chunks plus
+   * CPU-ready chunks so cold-state rebuilds during pan/zoom do not make
+   * the overlay flash D0/N while the atlas still visibly contains data.
+   */
   shown: number;
   /** Chunks currently decoded in the CPU cache, whether uploaded or not. */
   ready: number;
@@ -193,13 +197,14 @@ export function buildWellTierCoverage(
 
     const counts = coverage[tier];
     counts.wanted++;
-    if (cacheSnap?.cached.get(req.entityId)?.has(req.chunkKey)) {
+    const ready = cacheSnap?.cached.get(req.entityId)?.has(req.chunkKey) ?? false;
+    if (ready) {
       counts.ready++;
     }
     if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
       counts.inFlight++;
     }
-    if (cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey)) {
+    if (ready || cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey)) {
       counts.shown++;
     }
   }
@@ -211,13 +216,21 @@ export function formatTierCoverageLabel(
   fallbackLabel: string,
   fallbackLod: number | null,
 ): string {
-  const parts: string[] = [];
-  if (coverage.detail.wanted > 0) {
-    parts.push(`D${coverage.detail.shown}/${coverage.detail.wanted}`);
-  }
-  if (coverage.coarse.wanted > 0) {
-    parts.push(`C${coverage.coarse.shown}/${coverage.coarse.wanted}`);
-  }
+  const detail = `D${coverage.detail.shown}/${coverage.detail.wanted}`;
+  const coarse = `C${coverage.coarse.shown}/${coverage.coarse.wanted}`;
+  const detailComplete =
+    coverage.detail.wanted > 0 && coverage.detail.shown >= coverage.detail.wanted;
+  const coarseActive =
+    coverage.coarse.wanted > 0 && coverage.coarse.shown > 0 && !detailComplete;
+  const parts: string[] = coarseActive
+    ? [
+        coarse,
+        ...(coverage.detail.wanted > 0 ? [detail] : []),
+      ]
+    : [
+        ...(coverage.detail.wanted > 0 ? [detail] : []),
+        ...(coverage.coarse.wanted > 0 ? [coarse] : []),
+      ];
   if (parts.length > 0) return parts.join(" ");
   return `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
 }
@@ -226,8 +239,11 @@ export function tierCoverageMode(
   coverage: WellTierCoverage,
   fallbackMode: string,
 ): string {
-  if (coverage.detail.shown > 0) return "render-detail";
+  const detailComplete =
+    coverage.detail.wanted > 0 && coverage.detail.shown >= coverage.detail.wanted;
+  if (detailComplete) return "render-detail";
   if (coverage.coarse.shown > 0) return "render-coarse";
+  if (coverage.detail.shown > 0) return "render-detail";
   if (coverage.detail.wanted > 0 || coverage.coarse.wanted > 0) {
     return "render-waiting";
   }
@@ -242,12 +258,12 @@ export function formatTierCoverageTitle(
   const parts: string[] = [];
   if (coverage.detail.wanted > 0) {
     parts.push(
-      `detail shown ${coverage.detail.shown}/${coverage.detail.wanted}, ready ${coverage.detail.ready}, in-flight ${coverage.detail.inFlight}`,
+      `detail available ${coverage.detail.shown}/${coverage.detail.wanted}, ready ${coverage.detail.ready}, in-flight ${coverage.detail.inFlight}`,
     );
   }
   if (coverage.coarse.wanted > 0) {
     parts.push(
-      `coarse shown ${coverage.coarse.shown}/${coverage.coarse.wanted}, ready ${coverage.coarse.ready}, in-flight ${coverage.coarse.inFlight}`,
+      `coarse available ${coverage.coarse.shown}/${coverage.coarse.wanted}, ready ${coverage.coarse.ready}, in-flight ${coverage.coarse.inFlight}`,
     );
   }
   const modePart = `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
