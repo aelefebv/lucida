@@ -1401,6 +1401,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_ready_chunk_is_served_with_normal_chunk_frame() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+
+        let cache = Arc::new(DerivedChunkCache::default());
+        cache.seed_ready_chunk(
+            ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0".into(),
+            vec![9, 8, 7, 6],
+        );
+
+        serve_generated_chunk_request(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0",
+            &cache,
+            &routes,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("message");
+        let Message::Binary(buf) = msg else {
+            panic!("expected binary chunk frame");
+        };
+        let buf = buf.as_ref();
+        let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(client_id, 5);
+        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
+        let key = std::str::from_utf8(&buf[6..6 + key_len]).unwrap();
+        assert_eq!(key, "ds1/img1/2/0/0/0/0/0");
+        assert_eq!(&buf[6 + key_len..], &[9, 8, 7, 6]);
+    }
+
+    #[tokio::test]
     async fn generated_pending_status_is_sent_as_text() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = mpsc::unbounded_channel();

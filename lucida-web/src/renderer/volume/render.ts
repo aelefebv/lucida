@@ -115,9 +115,9 @@ export function handleVolumeRenderMultiPass(
       }
     }
 
-    // Skip when the layer has nothing renderable: no detail chunks AND
-    // no resident proxy. Entities with detail OR a resident proxy
-    // continue rendering — the unified fallback chain handles the rest.
+    // Skip when the layer has nothing renderable: no detail/coarse chunks
+    // AND no resident proxy. Entities with either chunk tier or a resident
+    // proxy continue rendering; the shader fallback chain handles the rest.
     if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) {
       continue;
     }

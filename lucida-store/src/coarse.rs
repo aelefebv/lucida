@@ -111,11 +111,7 @@ mod tests {
         ];
 
         assert_eq!(
-            select_source_coarse_level(
-                &levels,
-                DataType::Uint16,
-                SourceCoarseConfig::default(),
-            ),
+            select_source_coarse_level(&levels, DataType::Uint16, SourceCoarseConfig::default()),
             Some(2),
         );
     }
@@ -128,11 +124,7 @@ mod tests {
         ];
 
         assert_eq!(
-            select_source_coarse_level(
-                &levels,
-                DataType::Uint16,
-                SourceCoarseConfig::default(),
-            ),
+            select_source_coarse_level(&levels, DataType::Uint16, SourceCoarseConfig::default()),
             None,
         );
     }

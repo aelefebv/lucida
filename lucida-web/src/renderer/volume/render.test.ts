@@ -129,6 +129,98 @@ describe("handleVolumeRenderMultiPass", () => {
     expect(composite.mock.calls[0][3]).toBe(true);
   });
 
+  it("renders a layer backed only by a resident coarse chunk tier", () => {
+    const device = makeDevice();
+    const renderTo = vi.fn();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const coarseAtlas = getOrCreateVolumePool(
+      { device, state } as unknown as WorkerCtx,
+      "coarse-pool",
+      64,
+      64,
+      16,
+      0,
+      0,
+    );
+    coarseAtlas.indirectionDirty = false;
+    coarseAtlas.entityMetas.set("img-a", [
+      {
+        level: 2,
+        gridDims: [1, 2, 2],
+        chunkDims: [16, 64, 64],
+        levelDims: [16, 128, 128],
+        offset: 0,
+      },
+    ]);
+
+    const descIndex: EntityDescriptorIndex = {
+      buffer: {} as GPUBuffer,
+      indexByMember: new Map([["img-a", 0]]),
+      proxyPoolIndexByKey: new Map(),
+      proxyPoolsByIndex: [],
+      entityCount: 1,
+      colormapLutIndices: new Map([["gray", 0]]),
+      colormapNameByMember: new Map([["img-a", "gray"]]),
+      proxyDescriptorByMember: new Map(),
+    };
+
+    const setTierAtlases = vi.fn();
+    const ctx = {
+      device,
+      context: {
+        canvas: { width: 0, height: 0 },
+        getCurrentTexture: () => ({ createView: () => ({}) }),
+      },
+      state,
+      getVolumeRenderer: () => ({
+        setColormapTexture: vi.fn(),
+        setProxyTextures: vi.fn(),
+        setAtlas: vi.fn(),
+        setTierAtlases,
+        setRenderMode: vi.fn(),
+        setMatrices: vi.fn(),
+        setDescriptorBinding: vi.fn(),
+        renderTo,
+      }),
+      getCompositor: () => ({ composite }),
+      getCursorRenderer: () => ({ hasData: () => false }),
+      ensureOffscreenPool: () => [{ createView: () => ({}) }],
+      getOrCreateLUT: () => ({}),
+      lookupEntityDescriptor: () => descIndex,
+      lookupProxyDescriptor: () => null,
+      getDummy3DTexture: () => ({}),
+    } as unknown as WorkerCtx;
+
+    handleVolumeRenderMultiPass(
+      ctx,
+      {
+        type: "volumeRenderMultiPass",
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        layers: [
+          { datasetId: "img-a", entityId: "entity-a", entityIndex: 0, blendMode: "alpha", renderMode: "translucent" },
+        ],
+        invViewProj: new Float32Array(16),
+        eye: new Float32Array(3),
+        canvasW: 64,
+        canvasH: 64,
+        fullW: 64,
+        fullH: 64,
+      },
+      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
+    );
+
+    expect(renderTo).toHaveBeenCalledTimes(1);
+    const args = setTierAtlases.mock.calls[0];
+    expect(args[0]).toBe(coarseAtlas.texture);
+    expect(args[2]).toEqual([0, 0, 0]);
+    expect(args[3]).toBe(coarseAtlas.texture);
+    expect(args[4]).toBe(coarseAtlas.indirectionBuf);
+    expect(args[5]).toEqual([coarseAtlas.slotsX, coarseAtlas.slotsY, coarseAtlas.slotsZ]);
+    expect(args[6]).toEqual([128, 128, 16]);
+    expect(composite).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a layer backed only by a resident field proxy", () => {
     const device = makeDevice();
     const renderTo = vi.fn();

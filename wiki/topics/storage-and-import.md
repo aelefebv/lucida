@@ -1,6 +1,6 @@
 ---
 created: 2026-05-07
-modified: 2026-05-07
+modified: 2026-05-19
 ---
 
 # Topic: Storage and Import
@@ -17,7 +17,8 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 ## Crate ownership
 
 - [[lucida-store]] — import pipeline, codec abstraction, server-side chunk serving (per the in-flight redesign in PRD #148)
-- [[lucida-proxy]] — pure-compute proxy generation; no I/O, no async (used by the server's proxy generator)
+- [[generated-coarse]] — server-managed derived coarse pyramid levels cached outside source storage
+- [[lucida-proxy]] — historical/legacy pure-compute proxy generation; no I/O, no async
 - [[lucida-protocol]] — wire types: `DatasetOpened`, `FetchSource`, `AssetCatalog`, `AssetMessage`
 - [[lucida-content]] — pure data model for `DatasetManifest` (entities, transforms, images, layouts)
 

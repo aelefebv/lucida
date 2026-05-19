@@ -1,6 +1,6 @@
 ---
 created: 2026-05-16
-modified: 2026-05-17
+modified: 2026-05-19
 ---
 
 # Upload Pipeline
@@ -22,8 +22,8 @@ The directory's collaborators (each one a focused, separately-testable unit):
 - `uploader.ts` — coordinator. Wires the collaborators in its constructor; the planner-facing public surface is `sendColdState`, `sendViewHotStateIfAdvanced`, and `deliverToWorker`. Worker-feedback and resource-lifecycle methods remain, but they are wire-boundary delegations rather than planner-staging hooks.
 - `index.ts` — barrel re-export. External callers import from `pipeline/upload/` only.
 - `constants.ts` — `MAIN_VIEW_UPLOAD_BUDGET_BYTES` (8 MB) plus the two telemetry-tuning families (`COLD_STATE_*` and `UPLOAD_*`).
-- `proxyKeys.ts` — three free-function composers (`proxyKeyFromDelivery`, `proxyKeyFromMissing`, `proxyKeyFromRequest`) that build the `${datasetId}|${entityId}|${kind}|${t}|${c}` composite key used to dedupe proxy uploads.
-- `uploadClient.ts` — `UploadClient` interface (narrow facet of `RenderClient`: cold/hot state, chunk and proxy dispatch, layer-resource removal, the two worker → main feedback callback fields). Render-side methods stay on the full `RenderClient`.
+- `proxyKeys.ts` — legacy bridge helpers that build the `${datasetId}|${entityId}|${kind}|${t}|${c}` composite key used to dedupe proxy uploads.
+- `uploadClient.ts` — `UploadClient` interface (narrow facet of `RenderClient`: cold/hot state, tier-labeled chunk dispatch, legacy proxy dispatch, layer-resource removal, the two worker → main feedback callback fields). Render-side methods stay on the full `RenderClient`.
 - `scissor.ts` — pure `computeScissorRect` helper, extracted to land in unit-test territory.
 - `coldState/` — pure builders. `build.ts` is the top-level `buildColdState` + `buildColdActiveEntry`; `hotState.ts` is `buildViewHotState`; `roster.ts` is `buildRoster` + `synthesizeWellRosterEntry`; `displayState.ts` is `buildDisplayStateByChannel`; `identity.ts` is the `identityMatrix` factory.
 - `delivery/` — wire-boundary helpers. `dispatch.ts` is `dispatchChunk` + `dispatchProxy` plus worker-member-id construction/parsing helpers; `manifestIndex.ts` is the per-tick `buildManifestByImage` memo; `feedback.ts` parses worker feedback and delegates to [[cpu-cache]]; `resources.ts` tracks worker member IDs for cleanup.
@@ -35,7 +35,7 @@ The TickCoordinator drives one Uploader per render loop and feeds it through thr
 
 1. **`sendColdState(...)`** — per dataset on the rebuild path. Builds the cold-state message via the pure builders, posts it to the worker, and snapshots `epochs` for the subsequent `deliverToWorker` call.
 2. **`sendViewHotStateIfAdvanced(...)`** — per dataset, conditional on `viewEpoch` advancing. Collects the per-dataset ray hit from the WASM scene and emits a view-only hot-state message; short-circuits if the camera hasn't moved.
-3. **`deliverToWorker(ctx, budget, sliceZ)`** — called by `slicePath.ts` / `volumePath.ts`. Walks `cpuCache.getDeliverable()` in strict priority order, dispatches each chunk/proxy, then calls `cpuCache.markSent(delivery)` only after the dispatch succeeds.
+3. **`deliverToWorker(ctx, budget, sliceZ)`** — called by `slicePath.ts` / `volumePath.ts`. Walks `cpuCache.getDeliverable()` in strict priority order, dispatches each chunk with its `detail` or `coarse` residency tier, then calls `cpuCache.markSent(delivery)` only after the dispatch succeeds. Legacy proxy deliveries follow the same loop only when enabled.
 
 ## Collaborators
 
@@ -45,13 +45,13 @@ The TickCoordinator drives one Uploader per render loop and feeds it through thr
 
 **Pure cold-state builders** (`buildColdState`, `buildViewHotState`, `buildRoster`, `buildDisplayStateByChannel`, `synthesizeWellRosterEntry`, `identityMatrix`) are side-effect-free functions that take a planner snapshot and return a wire message. Extracting them gave the cold-state assembly its own test surface and unblocked the `sendColdState` wrapper shrinking to a few lines.
 
-**Dispatch** is a single priority loop. `CpuCache.getDeliverable()` owns the filters (`cached`, wanted this rebuild, not sent, not rejected, detail lane for chunks) and ordering. `Uploader.deliverToWorker` owns only manifest lookup, wire-format construction, telemetry, and the one-item soft budget cap.
+**Dispatch** is a single priority loop. `CpuCache.getDeliverable()` owns the filters (`cached`, wanted this rebuild, not sent, not rejected) and ordering. `Uploader.deliverToWorker` owns manifest lookup, tier-aware wire-message construction, telemetry, and the one-item soft budget cap.
 
 ## Interactions
 
 - **Upstream**: [[planning-domain]] produces the `RequestPlan`; `TickCoordinator` submits it directly to [[cpu-cache]]. The Uploader no longer stores planner snapshots.
 - **Sideways**: [[cpu-cache]]'s `getDeliverable()` output is the input to `deliverToWorker`.
-- **Downstream**: [[worker-protocol]] is the wire shape. The Uploader consumes the narrow `UploadClient` facet of `RenderClient` (cold/hot state, chunk and proxy dispatch, layer-resource removal, the two feedback callback fields). The render-side methods on `RenderClient` (`volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimap*`, `updateCursorData`, `destroy`) are not part of `UploadClient`. The worker side that consumes those messages is [[gpu-residency]].
+- **Downstream**: [[worker-protocol]] is the wire shape. The Uploader consumes the narrow `UploadClient` facet of `RenderClient` (cold/hot state, tier-labeled chunk dispatch, legacy proxy dispatch, layer-resource removal, the two feedback callback fields). The render-side methods on `RenderClient` (`volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimap*`, `updateCursorData`, `destroy`) are not part of `UploadClient`. The worker side that consumes those messages is [[gpu-residency]].
 - **Worker → main feedback** loops back through `WorkerFeedback` into [[cpu-cache]]. The TickCoordinator owns no upload state.
 
 ## Invariants
@@ -60,7 +60,7 @@ The TickCoordinator drives one Uploader per render loop and feeds it through thr
 - **Planner-facing Uploader surface is three methods.** `recordPlanForDataset` and `onPlanRebuildStart` are gone; request snapshots and sent/rejected state live in [[cpu-cache]].
 - **`MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 MB` is a soft cap.** `deliverToWorker` may overshoot by up to one chunk's size before setting `budgetExhausted`, since the byte accounting happens after dispatch. The minimap path uses a separate 2 MB budget (still in `renderLoopTypes.ts`).
 - **The slice-vs-volume branch lives only in `dispatchChunk`.** The Uploader reads `viewMode` from `TickContext.mode` and threads it into the dispatch call. If you find a second site branching on view mode, it's a leak.
-- **Proxy sent state survives cold state, chunk sent state does not.** Worker proxy pools persist across atlas rebuilds (created lazily, destroyed only on dataset removal), so proxy state clears per-entry on `wantedSetDelta` — never wholesale at rebuild.
+- **Chunk sent state clears on cold-state rebuild.** Detail/coarse chunks are part of the current cold-state atlas plan, so a rebuild makes old optimistic sends re-eligible. Legacy proxy sent state survives cold state because proxy pools persist across atlas rebuilds.
 
 ## Gotchas
 
@@ -68,7 +68,7 @@ The TickCoordinator drives one Uploader per render loop and feeds it through thr
 - **No `workerWantedSet` filter exists.** `deliverToWorker` does NOT filter against any worker-wanted-set; deliverability is owned by `CpuCache.getDeliverable()`. If you see references to a `workerWantedSet` filter in old code, old docs, or your muscle memory, fix them.
 - **Worker resource tracking is not delivery tracking.** `delivery/resources.ts` exists only so dataset removal and multi-channel transitions can call `removeLayerResources` for stale member IDs. Do not use it to decide whether a chunk or proxy should be sent.
 - **`sendColdState` happens on the rebuild path; `deliverToWorker` happens every tick.** On cache-hit ticks the Uploader does not need planner snapshots — it asks `CpuCache` for deliverables directly.
-- **`multiChannel` is explicit in cold state.** Do not infer member-id shape from `visibleChannels.length`; multi-channel mode with one visible channel still uses `imageId:chN` residency keys.
+- **`multiChannel` is explicit in cold state.** Do not infer member-id shape from `visibleChannels.length`; multi-channel mode with one visible channel still uses `imageId:chN` residency keys. Tier routing is a second dimension on top of that member key.
 
 ## Design rationale
 

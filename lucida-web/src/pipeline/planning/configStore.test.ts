@@ -40,7 +40,7 @@ describe("configStore — set", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!);
-    expect(parsed.schemaVersion).toBe(1);
+    expect(parsed.schemaVersion).toBe(2);
     expect(parsed.config.farThresholdPx).toBe(99);
   });
 
@@ -137,7 +137,7 @@ describe("configStore — localStorage round-trip on module load", () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         config: { farThresholdPx: 42 },
       }),
     );
@@ -194,7 +194,7 @@ describe("configStore — localStorage round-trip on module load", () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         config: { farThresholdPx: 42 },
       }),
     );

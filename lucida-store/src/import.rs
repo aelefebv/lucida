@@ -13,8 +13,8 @@ use lucida_content::*;
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
+use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
 use crate::codec::parse_codec_chain;
-use crate::coarse::{select_source_coarse_level, SourceCoarseConfig};
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-19
 ---
 
 # Flow: Dataset Opening
@@ -15,11 +15,13 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
    1. Compute `dataset_id` from URL hash (BLAKE3 → `ds-{16 hex}`). If a `ServerBinding` already exists for this URL, **rebroadcast the canonical `DatasetOpened` and return** (cache the import work).
    2. Otherwise, `lucida_store::backend::open(url)` → `Arc<dyn ObjectStore>`.
    3. `lucida_store::import::import_dataset(...)` → `ImportResult { manifest, fetch, binding_seed }`.
-   4. Build `AssetCatalog` from entities (Wells advertise `WellProxy3D`; Fields and bare Images advertise `FieldProxy3D`).
-   5. Build `ServerBinding` (resolver, cache, proxy cache, proxy generator) and insert into `Session::server_bindings`.
-   6. `Session::apply(DocumentCommand::DatasetOpened(...))` → `seq` increments.
-   7. Broadcast `ServerMessage::CommandBroadcast { seq, command }` to **all** clients (including the requester — sender sentinel `u64::MAX` so no client receives an `Ack`).
-   8. Spawn background pre-generation: build `(T=0, C=0)` proxies for every advertised entity at lowest priority. Best-effort; failures logged.
+   4. Build the default client-visible `AssetCatalog` as empty. Legacy proxy catalog generation only runs when `legacy_proxy_enabled` is explicitly set.
+   5. Plan generated coarse levels for images that lack a usable source coarse level. Register each plan with the derived cache; recovered ready chunks become initial generated availability deltas.
+   6. Build `ServerBinding` (resolver, source chunk cache, derived chunk cache, generated coarse scheduler, and legacy proxy infrastructure) and insert into `Session::server_bindings`.
+   7. `Session::apply(DocumentCommand::DatasetOpened(...))` → `seq` increments.
+   8. Apply and broadcast `GeneratedAvailabilityUpdate` when generated coarse metadata/readiness exists.
+   9. Broadcast `ServerMessage::CommandBroadcast { seq, command }` to **all** clients (including the requester — sender sentinel `u64::MAX` so no client receives an `Ack`).
+   10. Enqueue background generated-coarse fill. Legacy proxy pre-generation only runs when the legacy catalog is enabled.
 4. **Client receives `command_broadcast`** ([[lucida-web]] `useBridge`):
    - **WASM hand-off**: `wasmScene.apply_command(commandJson)`. Scene's `apply` matches `DocumentCommand::DatasetOpened`, builds derived state (positions, projected geometry), bumps `epochs.content` and `epochs.layout`, initializes `dataset_settings` with default `ChannelSettings` per channel.
    - **JS hand-off** (`setupFetchPipeline`, six steps in order):
@@ -28,30 +30,32 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
      3. `initLayerMaps(datasetId)`
      4. `set_channel_visible` per channel
      5. `loopRef.current.addDataset(datasetId, manifest)` and flip `interactiveDirty=true`
-     6. Pre-allocate `Uint16Array` for the coarsest level
+     6. Merge generated availability updates into the client-side generated availability catalog as they arrive
 5. **Next RAF tick** ([[chunk-pipeline]]):
    1. TickCoordinator's `planAndFetch` runs because `interactiveDirty`.
    2. WASM `view_query(dsId)` returns visible entities with `projected_diagonal_px` and `idealTargetLod`.
-   3. [[planning-domain]] decides per-well mode (proxy / fallback / detail), enumerates wanted chunks with priorities.
+   3. [[planning-domain]] resolves explicit detail/coarse levels per field/image and enumerates tier-labeled wanted chunks with priorities.
    4. [[cpu-cache]] `submit(plan)` queues unique requests.
    5. Up to ~9 fetches launch via `contentSource.fetch(req)` → server.
-6. **Server serves chunks** (`handler.rs::serve_chunk_from_store`): `cache.get_bytes` → decode storage compression → binary frame `[client_id u32 LE][key_len u16 LE][key][bytes]` to the requesting client's unicast channel.
-7. **Client receives binary frame** (`bridge.ts::handleBinary`): routes by key prefix — chunk frames go to `contentSource.fetch` resolvers; proxy frames go to a separate proxy promise table.
+6. **Server serves chunks**:
+   - Source level request: `serve_chunk_from_store` uses `CachedStore`, decodes storage compression, and sends a normal chunk frame.
+   - Generated coarse request: if bytes are ready, `serve_generated_chunk_request` sends the same normal chunk frame. If not, it sends `GeneratedChunkStatus` (`pending`, `failed_*`, or `unavailable`) so the client does not wait for a timeout.
+7. **Client receives frame/status** (`bridge.ts::handleBinary` and `GeneratedChunkStatus` handlers): normal chunk frames resolve `contentSource.fetch`; generated `pending` is treated as non-failure and retried after later readiness.
 8. **Decode pool** — 3 workers running `decode.worker.ts` decompress (Raw/Lz4/Zstd) into typed arrays.
 9. **Cache insertion** — chunk lands in CpuCache with priority and wanted-generation metadata.
 10. **Upload** (next tick): the uploader walks `cpuCache.getDeliverable()` within the 8 MB main-view upload budget and posts `sliceChunkData` or `volumeChunkData` to the GPU worker.
 11. **Worker** ([[gpu-residency]]): writes atlas slot, updates indirection buffer, recomputes wanted-set, posts `wantedSetDelta` back to main.
-12. **Render** — slice or volume shader runs, descriptor → indirection → atlas sample → fallback chain → contrast/gamma/LUT → opacity. Pixels.
+12. **Render** — slice or volume shader runs, descriptor → explicit detail/coarse tier source → indirection → atlas sample → fallback chain → contrast/gamma/LUT → opacity. Pixels.
 
 ## Where things can hang
 
 - **Server-side import** (step 3.iii) — for slow object stores or many wells, can take seconds. The handler is `tokio::spawn`'d so the connection stays responsive; the client sees nothing until the broadcast arrives.
-- **Pre-generation backlog** (step 3.viii) — proxies start landing within seconds for small plates, longer for large ones. Detail chunks are independent and arrive in parallel.
+- **Generated coarse backlog** (step 3.x) — generated coarse chunks may be advertised before bytes are ready. Detail chunks are independent and arrive in parallel; pending generated chunks surface as status messages and later readiness deltas.
 - **First chunk to GPU** (steps 5–10) — typical first-frame time is one RAF + one network round-trip + one decode + one upload, so on the order of 50–100 ms after `dataset_opened`.
 
 ## Idempotency
 
-A second `open_remote_dataset` for the same URL is **fast** — the server's URL-hash check finds the existing `ServerBinding` and rebroadcasts the canonical `DatasetOpened` without re-importing. The client may see a duplicate `command_broadcast`; `Scene::apply` for `DatasetOpened` re-applies but `dataset_settings.entry(...).or_insert_with(...)` preserves user-set channel settings.
+A second `open_remote_dataset` for the same URL is **fast** — the server's URL-hash check finds the existing `ServerBinding` and rebroadcasts the canonical `DatasetOpened` without re-importing. The derived generated-coarse cache is keyed by the same URL hash, so ready generated chunks can be recovered and advertised on reopen. The client may see a duplicate `command_broadcast`; `Scene::apply` for `DatasetOpened` re-applies but `dataset_settings.entry(...).or_insert_with(...)` preserves user-set channel settings.
 
 ## Why "remote"?
 

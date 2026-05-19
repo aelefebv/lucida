@@ -5,7 +5,7 @@
  *
  * Persistence schema (`localStorage["lucida.planning.config"]`):
  *
- *     { "schemaVersion": 1, "config": { ...PlanningConfig } }
+ *     { "schemaVersion": 2, "config": { ...PlanningConfig } }
  *
  * Missing/unparseable/version-mismatch falls back to defaults with one
  * log line; partial configs merge over defaults.
