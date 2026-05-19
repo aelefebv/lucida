@@ -14,6 +14,7 @@ import type {
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
+import { memberTierKey, type ChunkTier } from "./poolKeys.ts";
 
 /** Per-LOD metadata for an entity in a shared pool. */
 export interface AtlasLodMeta {
@@ -83,7 +84,7 @@ export function computeWantedSet(
   coldState: ColdStateMessage,
   volumeAtlases: Map<string, AtlasSnapshot>,
   sliceAtlases: Map<string, AtlasSnapshot>,
-  memberToPool?: Map<string, string>,
+  memberTierToPool?: Map<string, string>,
   proxyAtlases?: Map<string, ProxyAtlasSnapshot>,
 ): WantedSetResult {
   const missing: Array<MissingChunk | MissingProxy> = [];
@@ -208,76 +209,77 @@ export function computeWantedSet(
     }
 
     for (const { memberId, channel } of members) {
-      let atlas: AtlasSnapshot | undefined;
-      let entityLodMetas: AtlasLodMeta[] | undefined;
-      let useCompositeKey = false;
+      for (const source of chunkSourcesForEntry(entry)) {
+        let atlas: AtlasSnapshot | undefined;
+        let entityLodMetas: AtlasLodMeta[] | undefined;
+        let useCompositeKey = false;
 
-      if (coldState.viewMode === "volume") {
-        const poolKey = memberToPool?.get(memberId);
-        if (!poolKey) continue;
-        atlas = volumeAtlases.get(poolKey);
-        if (atlas === undefined) continue;
-        entityLodMetas = atlas.entityMetas?.get(memberId);
-        if (entityLodMetas === undefined) continue;
-        useCompositeKey = true;
-      } else {
-        const poolKey = memberToPool?.get(memberId);
-        if (!poolKey) continue;
-        atlas = sliceAtlases.get(poolKey);
-        if (atlas === undefined) continue;
-        entityLodMetas = atlas.entityMetas?.get(memberId);
-        if (entityLodMetas === undefined) continue;
-        useCompositeKey = true;
-      }
+        const tierPoolKey =
+          memberTierToPool?.get(memberTierKey(memberId, source.tier)) ??
+          memberTierToPool?.get(memberId);
+        if (!tierPoolKey) continue;
 
-      const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));
-
-      const wantedLevels = entry.wantedLodLevels && entry.wantedLodLevels.length > 0
-        ? [...new Set(entry.wantedLodLevels)].sort((a, b) => a - b)
-        : levelsFromRange(entry.detailOwnedLodRange);
-      for (const lvl of wantedLevels) {
-        if (!atlasLodByLevel.has(lvl)) continue;
-
-        const levelMeta = entry.levels.find((l) => l.level === lvl);
-        if (levelMeta === undefined) continue;
-
-        const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-        const [gridZ, gridY, gridX] = levelMeta.gridShape;
-
-        const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
-          coldState.visibleRegion.xyBoundsVox;
-
-        const colStart = Math.max(0, Math.floor(minVoxX / chunkX));
-        const colEnd = Math.min(gridX, Math.ceil(maxVoxX / chunkX));
-        const rowStart = Math.max(0, Math.floor(minVoxY / chunkY));
-        const rowEnd = Math.min(gridY, Math.ceil(maxVoxY / chunkY));
-
-        let zStart: number;
-        let zEnd: number;
-
-        if (coldState.viewMode === "slice") {
-          const sliceZ = atlas.z ?? 0;
-          const chunkIdx = Math.floor(sliceZ / chunkZ);
-          zStart = Math.max(0, chunkIdx);
-          zEnd = Math.min(gridZ, chunkIdx + 1);
+        if (coldState.viewMode === "volume") {
+          atlas = volumeAtlases.get(tierPoolKey);
+          if (atlas === undefined) continue;
+          entityLodMetas = atlas.entityMetas?.get(memberId);
+          if (entityLodMetas === undefined) continue;
+          useCompositeKey = true;
         } else {
-          zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRangeVox[0] / chunkZ));
-          zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRangeVox[1] / chunkZ));
+          atlas = sliceAtlases.get(tierPoolKey);
+          if (atlas === undefined) continue;
+          entityLodMetas = atlas.entityMetas?.get(memberId);
+          if (entityLodMetas === undefined) continue;
+          useCompositeKey = true;
         }
 
-        for (let iz = zStart; iz < zEnd; iz++) {
-          for (let iy = rowStart; iy < rowEnd; iy++) {
-            for (let ix = colStart; ix < colEnd; ix++) {
-              const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-              const slotKey = useCompositeKey ? makeCompositeKey(memberId, chunkKey) : chunkKey;
-              if (!atlas.slots.has(slotKey)) {
-                missing.push({
-                  kind: "chunk",
-                  entityId: entry.entityId,
-                  memberId,
-                  c: channel,
-                  chunkKey,
-                });
+        const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));
+
+        for (const lvl of source.levels) {
+          if (!atlasLodByLevel.has(lvl)) continue;
+
+          const levelMeta = entry.levels.find((l) => l.level === lvl);
+          if (levelMeta === undefined) continue;
+
+          const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+          const [gridZ, gridY, gridX] = levelMeta.gridShape;
+
+          const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
+            coldState.visibleRegion.xyBoundsVox;
+
+          const colStart = Math.max(0, Math.floor(minVoxX / chunkX));
+          const colEnd = Math.min(gridX, Math.ceil(maxVoxX / chunkX));
+          const rowStart = Math.max(0, Math.floor(minVoxY / chunkY));
+          const rowEnd = Math.min(gridY, Math.ceil(maxVoxY / chunkY));
+
+          let zStart: number;
+          let zEnd: number;
+
+          if (coldState.viewMode === "slice") {
+            const sliceZ = atlas.z ?? 0;
+            const chunkIdx = Math.floor(sliceZ / chunkZ);
+            zStart = Math.max(0, chunkIdx);
+            zEnd = Math.min(gridZ, chunkIdx + 1);
+          } else {
+            zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRangeVox[0] / chunkZ));
+            zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRangeVox[1] / chunkZ));
+          }
+
+          for (let iz = zStart; iz < zEnd; iz++) {
+            for (let iy = rowStart; iy < rowEnd; iy++) {
+              for (let ix = colStart; ix < colEnd; ix++) {
+                const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
+                const slotKey = useCompositeKey ? makeCompositeKey(memberId, chunkKey) : chunkKey;
+                if (!atlas.slots.has(slotKey)) {
+                  missing.push({
+                    kind: "chunk",
+                    tier: source.tier,
+                    entityId: entry.entityId,
+                    memberId,
+                    c: channel,
+                    chunkKey,
+                  });
+                }
               }
             }
           }
@@ -287,6 +289,29 @@ export function computeWantedSet(
   }
 
   return { missing };
+}
+
+function chunkSourcesForEntry(
+  entry: Exclude<ColdStateMessage["activeSet"][number], { kind: "well-as-proxy" }>,
+): Array<{ tier: ChunkTier; levels: number[] }> {
+  if (entry.detailLevel === undefined) {
+    const levels = entry.wantedLodLevels && entry.wantedLodLevels.length > 0
+      ? [...new Set(entry.wantedLodLevels)].sort((a, b) => a - b)
+      : levelsFromRange(entry.detailOwnedLodRange);
+    return [{ tier: "detail", levels }];
+  }
+
+  const sources: Array<{ tier: ChunkTier; levels: number[] }> = [
+    { tier: "detail", levels: [entry.detailLevel] },
+  ];
+  if (
+    entry.coarseLevel !== undefined &&
+    entry.coarseLevel !== null &&
+    entry.coarseLevel !== entry.detailLevel
+  ) {
+    sources.push({ tier: "coarse", levels: [entry.coarseLevel] });
+  }
+  return sources;
 }
 
 function levelsFromRange([finest, coarsest]: [number, number]): number[] {

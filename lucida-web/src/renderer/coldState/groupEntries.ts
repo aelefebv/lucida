@@ -17,7 +17,7 @@ import type {
   ColdStateActiveEntry,
 } from "../workerProtocol.ts";
 import { memberIdForColdEntry } from "../descriptorBuffer.ts";
-import { chunkPoolKey } from "../poolKeys.ts";
+import { chunkTierPoolKey, type ChunkTier } from "../poolKeys.ts";
 
 /**
  * One pool's worth of entries from a cold state.
@@ -30,10 +30,12 @@ import { chunkPoolKey } from "../poolKeys.ts";
  */
 export interface PoolGroup {
   poolKey: string;
+  tier: ChunkTier;
+  level: number;
   channel: number;
   /** `[Z, Y, X]`. For slice mode `Z = 1`. */
   chunkDims: [number, number, number];
-  entries: Array<{ entry: ColdStateActiveEntry; memberId: string }>;
+  entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ChunkTier; level: number }>;
 }
 
 /**
@@ -56,27 +58,41 @@ export function groupEntriesByPool(
 
   for (const channel of channels) {
     for (const entry of cold.activeSet) {
-      const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
-      if (!targetLevel) continue; // well-as-proxy (no levels) skips here
-      const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
-      // `chunkPoolKey` takes `[X, Y, Z]` for volume / `[X, Y]` for slice,
-      // matching the inline format strings in `gpu.worker.ts`. We keep
-      // `chunkDims` on the group as `[Z, Y, X]` for downstream callers.
-      const poolKey =
-        mode === "volume"
-          ? chunkPoolKey(cold.datasetId, channel, [chunkX, chunkY, chunkZ], isMultiCh)
-          : chunkPoolKey(cold.datasetId, channel, [chunkX, chunkY], isMultiCh);
-      const dims: [number, number, number] =
-        mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
       const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
+      for (const source of tierSourcesForEntry(entry)) {
+        const targetLevel = entry.levels.find(l => l.level === source.level);
+        if (!targetLevel) continue; // well-as-proxy (no levels) skips here
+        const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
+        // `chunkTierPoolKey` takes `[X, Y, Z]` for volume / `[X, Y]` for
+        // slice. Keep `chunkDims` on the group as `[Z, Y, X]` for
+        // downstream callers.
+        const poolKey =
+          mode === "volume"
+            ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ], isMultiCh)
+            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], isMultiCh);
+        const dims: [number, number, number] =
+          mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
 
-      let group = groups.get(poolKey);
-      if (!group) {
-        group = { poolKey, channel, chunkDims: dims, entries: [] };
-        groups.set(poolKey, group);
+        let group = groups.get(poolKey);
+        if (!group) {
+          group = { poolKey, tier: source.tier, level: source.level, channel, chunkDims: dims, entries: [] };
+          groups.set(poolKey, group);
+        }
+        group.entries.push({ entry, memberId, tier: source.tier, level: source.level });
       }
-      group.entries.push({ entry, memberId });
     }
   }
   return groups;
+}
+
+function tierSourcesForEntry(entry: ColdStateActiveEntry): Array<{ tier: ChunkTier; level: number }> {
+  if (entry.kind === "well-as-proxy") return [];
+  const detailLevel = entry.detailLevel ?? entry.targetLod;
+  const sources: Array<{ tier: ChunkTier; level: number }> = [
+    { tier: "detail", level: detailLevel },
+  ];
+  if (entry.coarseLevel !== undefined && entry.coarseLevel !== null && entry.coarseLevel !== detailLevel) {
+    sources.push({ tier: "coarse", level: entry.coarseLevel });
+  }
+  return sources;
 }

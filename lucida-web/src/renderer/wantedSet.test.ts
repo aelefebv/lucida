@@ -165,6 +165,10 @@ function buildMemberToPool(volumeAtlases: Map<string, AtlasSnapshot>): Map<strin
   return m;
 }
 
+function tierPool(entries: Array<[memberId: string, tier: "detail" | "coarse", poolKey: string]>): Map<string, string> {
+  return new Map(entries.map(([memberId, tier, poolKey]) => [`${memberId}|${tier}`, poolKey]));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -357,6 +361,101 @@ describe("computeWantedSet", () => {
       const parts = entry.chunkKey.split("/").map(Number);
       expect(parts[3]).toBe(0); // z chunk index
     }
+  });
+
+  it("source-backed detail/coarse wanted-set uses separate tier pools", () => {
+    const coldState = makeColdState({
+      visibleRegion: makeVisibleRegion({
+        xyBoundsVox: [0, 0, 32, 32],
+        zRangeVox: [0, 32],
+      }),
+      activeSet: [
+        makeActiveEntry({
+          detailLevel: 0,
+          coarseLevel: 2,
+          wantedLodLevels: [0, 2],
+          levels: [
+            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 2, chunkShape: [32, 64, 64], gridShape: [2, 2, 2], levelDims: [64, 128, 128] },
+          ],
+        }),
+      ],
+    });
+    const detailAtlas = makeVolumePool("img", [
+      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+    ]);
+    const coarseAtlas = makeVolumePool("img", [
+      { level: 2, gridDims: [2, 2, 2], chunkDims: [32, 64, 64], offset: 0 },
+    ]);
+    const volumeAtlases = new Map<string, AtlasSnapshot>([
+      ["ds-0:32x32x32:detail", detailAtlas],
+      ["ds-0:64x64x32:coarse", coarseAtlas],
+    ]);
+
+    const result = computeWantedSet(
+      coldState,
+      volumeAtlases,
+      new Map(),
+      tierPool([
+        ["img", "detail", "ds-0:32x32x32:detail"],
+        ["img", "coarse", "ds-0:64x64x32:coarse"],
+      ]),
+    );
+
+    expect(chunks(result.missing)).toEqual([
+      expect.objectContaining({ tier: "detail", chunkKey: "0/0/0/0/0/0" }),
+      expect.objectContaining({ tier: "coarse", chunkKey: "2/0/0/0/0/0" }),
+    ]);
+  });
+
+  it("slice mode maps full-res Z independently for detail and coarse tier chunk shapes", () => {
+    const coldState = makeColdState({
+      viewMode: "slice",
+      activeSet: [
+        makeActiveEntry({
+          detailLevel: 0,
+          coarseLevel: 2,
+          wantedLodLevels: [0, 2],
+          levels: [
+            { level: 0, chunkShape: [8, 32, 32], gridShape: [4, 4, 4], levelDims: [32, 128, 128] },
+            { level: 2, chunkShape: [16, 64, 64], gridShape: [2, 2, 2], levelDims: [32, 128, 128] },
+          ],
+        }),
+      ],
+      visibleRegion: makeVisibleRegion({
+        xyBoundsVox: [0, 0, 32, 32],
+        zRangeVox: [0, 32],
+      }),
+    });
+    const detailAtlas: AtlasSnapshot = {
+      slots: new Map(),
+      entityMetas: new Map([["img", [{ level: 0, gridDims: [4, 4, 4], chunkDims: [8, 32, 32], offset: 0 }]]]),
+      z: 18,
+    };
+    const coarseAtlas: AtlasSnapshot = {
+      slots: new Map(),
+      entityMetas: new Map([["img", [{ level: 2, gridDims: [2, 2, 2], chunkDims: [16, 64, 64], offset: 0 }]]]),
+      z: 18,
+    };
+    const sliceAtlases = new Map<string, AtlasSnapshot>([
+      ["ds-0:32x32:detail", detailAtlas],
+      ["ds-0:64x64:coarse", coarseAtlas],
+    ]);
+
+    const result = computeWantedSet(
+      coldState,
+      new Map(),
+      sliceAtlases,
+      tierPool([
+        ["img", "detail", "ds-0:32x32:detail"],
+        ["img", "coarse", "ds-0:64x64:coarse"],
+      ]),
+    );
+
+    expect(chunks(result.missing).map((m) => [m.tier, m.chunkKey]).sort()).toEqual([
+      ["coarse", "2/0/0/1/0/0"],
+      ["detail", "0/0/0/2/0/0"],
+    ]);
   });
 
   it("no active set -> empty wanted-set", () => {

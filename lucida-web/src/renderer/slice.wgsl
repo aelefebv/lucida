@@ -1,11 +1,12 @@
 // 2D slice viewer shader — GPU-side u16→u8 normalization
 
 struct Uniforms {
-  transform: mat4x4f,       // offset 0   (64 bytes) — inverse pan/zoom (screen UV → texture UV)
-  atlasSlotDims: vec4u,      // offset 64  (16 bytes) — xy=slots per axis = 128 total
-  memberScreenSize: vec4f,   // offset 80  (16 bytes) — xy=member pixel size on screen
-  lodParams: vec4u,          // offset 96  (16 bytes) — x=targetLodIdx
-  // total = 112 bytes
+  transform: mat4x4f,          // offset 0   (64 bytes) — inverse pan/zoom (screen UV → texture UV)
+  detailAtlasSlotDims: vec4u,  // offset 64  (16 bytes) — xy=slots per axis
+  coarseAtlasSlotDims: vec4u,  // offset 80  (16 bytes) — xy=slots per axis
+  memberScreenSize: vec4f,     // offset 96  (16 bytes) — xy=member pixel size on screen
+  lodParams: vec4u,            // offset 112 (16 bytes) — x=targetLodIdx
+  // total = 128 bytes
 };
 
 struct EntityRef { index: vec4u };
@@ -22,6 +23,19 @@ struct LodInfo {
   _pad3: u32,
   levelDims: vec3<u32>,
   _pad4: u32,
+};
+
+struct ChunkTierSource {
+  valid: u32,
+  level: u32,
+  indirectionOffset: u32,
+  _pad0: u32,
+  gridDims: vec3<u32>,
+  _pad1: u32,
+  chunkDims: vec3<u32>,
+  _pad2: u32,
+  levelDims: vec3<u32>,
+  _pad3: u32,
 };
 
 struct EntityDescriptor {
@@ -48,17 +62,21 @@ struct EntityDescriptor {
   _pad_tail0: u32,
   _pad_tail1: u32,
   lods: array<LodInfo, 8>,
+  detailSource: ChunkTierSource,
+  coarseSource: ChunkTierSource,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var chunkTex: texture_2d<u32>;
-@group(0) @binding(2) var<storage, read> indirection: array<u32>;
+@group(0) @binding(1) var detailTex: texture_2d<u32>;
+@group(0) @binding(2) var<storage, read> detailIndirection: array<u32>;
 @group(0) @binding(3) var lutTex: texture_2d<f32>;
 @group(0) @binding(4) var lutSampler: sampler;
+@group(0) @binding(5) var coarseTex: texture_2d<u32>;
+@group(0) @binding(6) var<storage, read> coarseIndirection: array<u32>;
 // Proxy textures are 3D (same as volume.wgsl); slice mode reads one Z
 // plane within the slot region.
-@group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
-@group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
+@group(0) @binding(7) var fieldProxyTex: texture_3d<u32>;
+@group(0) @binding(8) var wellProxyTex: texture_3d<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -108,6 +126,80 @@ fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f)
   return textureLoad(tex, coord, 0).r;
 }
 
+fn sampleDetail2D(source: ChunkTierSource, uv: vec2f) -> u32 {
+  if (source.valid == 0u || u.detailAtlasSlotDims.x == 0u || u.detailAtlasSlotDims.y == 0u) {
+    return 0xFFFFFFFFu;
+  }
+  let levelDims = vec2u(source.levelDims.x, source.levelDims.y);
+  let chunkDims = vec2u(source.chunkDims.x, source.chunkDims.y);
+  let gridDims = vec2u(source.gridDims.x, source.gridDims.y);
+
+  let texCoord = vec2i(
+    clamp(i32(uv.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+    clamp(i32(uv.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+  );
+  let chunkCoord = vec2u(
+    u32(texCoord.x) / chunkDims.x,
+    u32(texCoord.y) / chunkDims.y,
+  );
+  let gridIdx = source.indirectionOffset + chunkCoord.y * gridDims.x + chunkCoord.x;
+  let slot = detailIndirection[gridIdx];
+  if (slot == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+
+  let slotCoord = vec2u(
+    slot % u.detailAtlasSlotDims.x,
+    slot / u.detailAtlasSlotDims.x,
+  );
+  let localTexel = vec2u(
+    u32(texCoord.x) % chunkDims.x,
+    u32(texCoord.y) % chunkDims.y,
+  );
+  let atlasCoord = vec2i(
+    i32(slotCoord.x * chunkDims.x + localTexel.x),
+    i32(slotCoord.y * chunkDims.y + localTexel.y),
+  );
+  return textureLoad(detailTex, atlasCoord, 0).r;
+}
+
+fn sampleCoarse2D(source: ChunkTierSource, uv: vec2f) -> u32 {
+  if (source.valid == 0u || u.coarseAtlasSlotDims.x == 0u || u.coarseAtlasSlotDims.y == 0u) {
+    return 0xFFFFFFFFu;
+  }
+  let levelDims = vec2u(source.levelDims.x, source.levelDims.y);
+  let chunkDims = vec2u(source.chunkDims.x, source.chunkDims.y);
+  let gridDims = vec2u(source.gridDims.x, source.gridDims.y);
+
+  let texCoord = vec2i(
+    clamp(i32(uv.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+    clamp(i32(uv.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+  );
+  let chunkCoord = vec2u(
+    u32(texCoord.x) / chunkDims.x,
+    u32(texCoord.y) / chunkDims.y,
+  );
+  let gridIdx = source.indirectionOffset + chunkCoord.y * gridDims.x + chunkCoord.x;
+  let slot = coarseIndirection[gridIdx];
+  if (slot == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+
+  let slotCoord = vec2u(
+    slot % u.coarseAtlasSlotDims.x,
+    slot / u.coarseAtlasSlotDims.x,
+  );
+  let localTexel = vec2u(
+    u32(texCoord.x) % chunkDims.x,
+    u32(texCoord.y) % chunkDims.y,
+  );
+  let atlasCoord = vec2i(
+    i32(slotCoord.x * chunkDims.x + localTexel.x),
+    i32(slotCoord.y * chunkDims.y + localTexel.y),
+  );
+  return textureLoad(coarseTex, atlasCoord, 0).r;
+}
+
 @fragment
 fn fs(input: VSOut) -> @location(0) vec4f {
   // Apply inverse transform to get texture UV
@@ -138,66 +230,71 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let gamma = entity.gamma;
   let layerOpacity = entity.opacity;
 
-  // Unified semantic fallback chain (DOMAINS §6.5):
-  //   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
-  // Sentinels make unavailable steps no-ops: when `lodCount == 0` the
-  // detail loop is a no-op; when a proxy slot is `0xFFFFFFFFu` the proxy
-  // step is a no-op. Same field-to-well caveat as volume.wgsl: the
-  // well-proxy sample uses field-local UV, which is spatially incorrect
-  // for field entries but visually non-blank.
   var chunkVal = 0xFFFFFFFFu;
-  let numLods = entity.lodCount;
-  let targetIdx = u.lodParams.x;
+  let hasTierSources = entity.detailSource.valid != 0u || entity.coarseSource.valid != 0u;
 
-  for (var i = targetIdx; i < numLods; i++) {
-    let lod = entity.lods[i];
-    let levelDims = vec2u(lod.levelDims.x, lod.levelDims.y);
-    let chunkDims = vec2u(lod.chunkDims.x, lod.chunkDims.y);
-    let gridDims = vec2u(lod.gridDims.x, lod.gridDims.y);
-    let offset = lod.indirectionOffset;
-
-    let texCoord = vec2i(
-      clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
-      clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
-    );
-
-    let chunkCoord = vec2u(
-      u32(texCoord.x) / chunkDims.x,
-      u32(texCoord.y) / chunkDims.y,
-    );
-    let gridIdx = offset + chunkCoord.y * gridDims.x + chunkCoord.x;
-    let slot = indirection[gridIdx];
-
-    if (slot != 0xFFFFFFFFu) {
-      let slotCoord = vec2u(
-        slot % u.atlasSlotDims.x,
-        slot / u.atlasSlotDims.x,
-      );
-      let localTexel = vec2u(
-        u32(texCoord.x) % chunkDims.x,
-        u32(texCoord.y) % chunkDims.y,
-      );
-      let atlasCoord = vec2i(
-        i32(slotCoord.x * chunkDims.x + localTexel.x),
-        i32(slotCoord.y * chunkDims.y + localTexel.y),
-      );
-      chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
-      break;
+  if (hasTierSources) {
+    // Source-backed path: selected detail → configured coarse → blank.
+    chunkVal = sampleDetail2D(entity.detailSource, texUV);
+    if (chunkVal == 0xFFFFFFFFu) {
+      chunkVal = sampleCoarse2D(entity.coarseSource, texUV);
     }
-  }
+  } else {
+    // Legacy semantic fallback chain:
+    //   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
+    let numLods = entity.lodCount;
+    let targetIdx = u.lodParams.x;
 
-  if (chunkVal == 0xFFFFFFFFu) {
-    let fieldSlot = entity.fieldProxySlotIndex;
-    if (fieldSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy2D(fieldProxyTex, fieldSlot, entity.fieldProxyDims, texUV);
-      if (v != 0xFFFFFFFFu) { chunkVal = v; }
+    for (var i = targetIdx; i < numLods; i++) {
+      let lod = entity.lods[i];
+      let levelDims = vec2u(lod.levelDims.x, lod.levelDims.y);
+      let chunkDims = vec2u(lod.chunkDims.x, lod.chunkDims.y);
+      let gridDims = vec2u(lod.gridDims.x, lod.gridDims.y);
+      let offset = lod.indirectionOffset;
+
+      let texCoord = vec2i(
+        clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+        clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+      );
+
+      let chunkCoord = vec2u(
+        u32(texCoord.x) / chunkDims.x,
+        u32(texCoord.y) / chunkDims.y,
+      );
+      let gridIdx = offset + chunkCoord.y * gridDims.x + chunkCoord.x;
+      let slot = detailIndirection[gridIdx];
+
+      if (slot != 0xFFFFFFFFu) {
+        let slotCoord = vec2u(
+          slot % u.detailAtlasSlotDims.x,
+          slot / u.detailAtlasSlotDims.x,
+        );
+        let localTexel = vec2u(
+          u32(texCoord.x) % chunkDims.x,
+          u32(texCoord.y) % chunkDims.y,
+        );
+        let atlasCoord = vec2i(
+          i32(slotCoord.x * chunkDims.x + localTexel.x),
+          i32(slotCoord.y * chunkDims.y + localTexel.y),
+        );
+        chunkVal = textureLoad(detailTex, atlasCoord, 0).r;
+        break;
+      }
     }
-  }
-  if (chunkVal == 0xFFFFFFFFu) {
-    let wellSlot = entity.wellProxySlotIndex;
-    if (wellSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
-      if (v != 0xFFFFFFFFu) { chunkVal = v; }
+
+    if (chunkVal == 0xFFFFFFFFu) {
+      let fieldSlot = entity.fieldProxySlotIndex;
+      if (fieldSlot != 0xFFFFFFFFu) {
+        let v = sampleProxy2D(fieldProxyTex, fieldSlot, entity.fieldProxyDims, texUV);
+        if (v != 0xFFFFFFFFu) { chunkVal = v; }
+      }
+    }
+    if (chunkVal == 0xFFFFFFFFu) {
+      let wellSlot = entity.wellProxySlotIndex;
+      if (wellSlot != 0xFFFFFFFFu) {
+        let v = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
+        if (v != 0xFFFFFFFFu) { chunkVal = v; }
+      }
     }
   }
 

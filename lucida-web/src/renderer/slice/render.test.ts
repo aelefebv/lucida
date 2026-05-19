@@ -72,6 +72,7 @@ describe("handleSliceRenderMultiPass", () => {
         setColormapTexture: vi.fn(),
         setProxyTextures,
         setAtlas: vi.fn(),
+        setTierAtlases: vi.fn(),
         setTransform: vi.fn(),
         setDescriptorBinding: vi.fn(),
         renderTo,
@@ -98,7 +99,7 @@ describe("handleSliceRenderMultiPass", () => {
         canvasW: 64,
         canvasH: 64,
       },
-      () => ({ poolKey: null, datasetId: "ds-0" }),
+      () => ({ detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }),
     );
 
     expect(renderTo).toHaveBeenCalledTimes(1);

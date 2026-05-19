@@ -8,7 +8,6 @@
 
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import { snapshotHasProxy } from "../assetCatalog.ts";
-import { Axis } from "../../axes.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 import type {
   ActiveSetEntry,
@@ -411,18 +410,6 @@ function compatibleCoarseLevel(
   if (entity.coarseLevel === null) return null;
   const coarseLevel = clampLevel(entity, entity.coarseLevel);
   if (coarseLevel < detailLevel) return null;
-  if (coarseLevel === detailLevel) return coarseLevel;
-
-  const detailGeo = entity.levels[detailLevel];
-  const coarseGeo = entity.levels[coarseLevel];
-  if (!detailGeo || !coarseGeo) return null;
-
-  const axes = [Axis.X, Axis.Y, Axis.Z];
-  for (const axis of axes) {
-    if (detailGeo.chunk_shape[axis] !== coarseGeo.chunk_shape[axis]) {
-      return null;
-    }
-  }
   return coarseLevel;
 }
 

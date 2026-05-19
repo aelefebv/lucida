@@ -85,6 +85,7 @@ describe("handleVolumeRenderMultiPass", () => {
         setColormapTexture: vi.fn(),
         setProxyTextures: vi.fn(),
         setAtlas: vi.fn(),
+        setTierAtlases: vi.fn(),
         setRenderMode: vi.fn(),
         setMatrices: vi.fn(),
         setDescriptorBinding: vi.fn(),
@@ -117,8 +118,8 @@ describe("handleVolumeRenderMultiPass", () => {
       },
       (memberId) => (
         memberId === "img-b"
-          ? { poolKey: "pool-b", datasetId: "ds-0" }
-          : { poolKey: null, datasetId: "ds-0" }
+          ? { detailPoolKey: "pool-b", coarsePoolKey: null, datasetId: "ds-0" }
+          : { detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }
       ),
     );
 
@@ -164,7 +165,7 @@ describe("handleVolumeRenderMultiPass", () => {
     };
 
     const setProxyTextures = vi.fn();
-    const setAtlas = vi.fn();
+    const setTierAtlases = vi.fn();
     const ctx = {
       device,
       context: {
@@ -175,7 +176,8 @@ describe("handleVolumeRenderMultiPass", () => {
       getVolumeRenderer: () => ({
         setColormapTexture: vi.fn(),
         setProxyTextures,
-        setAtlas,
+        setAtlas: vi.fn(),
+        setTierAtlases,
         setRenderMode: vi.fn(),
         setMatrices: vi.fn(),
         setDescriptorBinding: vi.fn(),
@@ -204,12 +206,12 @@ describe("handleVolumeRenderMultiPass", () => {
         fullW: 64,
         fullH: 64,
       },
-      () => ({ poolKey: null, datasetId: "ds-0" }),
+      () => ({ detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }),
     );
 
     expect(renderTo).toHaveBeenCalledTimes(1);
     expect(setProxyTextures).toHaveBeenCalledWith(fieldProxyTexture, null);
-    expect(setAtlas.mock.calls[0][3]).toEqual([32, 16, 8]);
+    expect(setTierAtlases.mock.calls[0][6]).toEqual([32, 16, 8]);
     expect(composite).toHaveBeenCalledTimes(1);
   });
 });

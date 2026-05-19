@@ -80,7 +80,7 @@ export async function bootstrapWorker(
       state.currentColdState,
       state.volumeAtlases,
       state.sliceAtlases,
-      state.memberToPool,
+      state.memberTierToPool,
       proxySnap,
     );
     post({ type: "wantedSetDelta", epochs: state.currentEpochs, missing: result.missing });

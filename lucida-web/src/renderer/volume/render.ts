@@ -19,7 +19,11 @@ import {
 export function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
-  layerToPool: (memberId: string) => { poolKey: string | null; datasetId: string | null } | null,
+  layerToPool: (memberId: string) => {
+    detailPoolKey: string | null;
+    coarsePoolKey: string | null;
+    datasetId: string | null;
+  } | null,
 ): void {
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
@@ -51,12 +55,18 @@ export function handleVolumeRenderMultiPass(
     // Detect "no detail" via descriptor-derived state: the canonical
     // signal that this entity has no chunks in the pool. Drives the
     // dummy chunk atlas binding + skip-render guard below.
-    const atlas: AtlasState | null = resolved.poolKey ? atlasMap.get(resolved.poolKey) ?? null : null;
-    let entityLodMetas: LodIndirectionMeta[] | null = null;
-    if (atlas) {
-      entityLodMetas = atlas.entityMetas.get(memberId) ?? null;
-    }
-    const hasDetail = entityLodMetas != null && entityLodMetas.length > 0;
+    const detailAtlas: AtlasState | null = resolved.detailPoolKey
+      ? atlasMap.get(resolved.detailPoolKey) ?? null
+      : null;
+    const coarseAtlas: AtlasState | null = resolved.coarsePoolKey
+      ? atlasMap.get(resolved.coarsePoolKey) ?? null
+      : null;
+    const detailMetas: LodIndirectionMeta[] | null =
+      detailAtlas?.entityMetas.get(memberId) ?? null;
+    const coarseMetas: LodIndirectionMeta[] | null =
+      coarseAtlas?.entityMetas.get(memberId) ?? null;
+    const hasDetail = detailMetas != null && detailMetas.length > 0;
+    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
 
     // Colormap name lives in the descriptor's CPU mirror (set by cold
     // state). Resolve it per draw to bind the right LUT texture.
@@ -64,9 +74,11 @@ export function handleVolumeRenderMultiPass(
     const lutTex = ctx.getOrCreateLUT(colormapName);
     renderer.setColormapTexture(lutTex);
 
-    if (atlas && atlas.indirectionDirty) {
-      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
-      atlas.indirectionDirty = false;
+    for (const atlas of [detailAtlas, coarseAtlas]) {
+      if (atlas && atlas.indirectionDirty) {
+        ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+        atlas.indirectionDirty = false;
+      }
     }
 
     // Pool index + slot index live in the descriptor; CPU side only
@@ -106,43 +118,34 @@ export function handleVolumeRenderMultiPass(
     // Skip when the layer has nothing renderable: no detail chunks AND
     // no resident proxy. Entities with detail OR a resident proxy
     // continue rendering — the unified fallback chain handles the rest.
-    if (!hasDetail && !fieldProxySlotResident && !wellProxySlotResident) {
+    if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) {
       continue;
     }
 
     renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
 
-    if (hasDetail && atlas && entityLodMetas) {
-      // Detail path: real chunk atlas + LOD metadata.
-      const targetMeta = entityLodMetas[0]; // first is target (finest)
-      const [tLevelD, tLevelH, tLevelW] = targetMeta.levelDims;
-      renderer.setAtlas(
-        atlas.texture, atlas.indirectionBuf,
-        [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
-        [tLevelW, tLevelH, tLevelD],
-        entityLodMetas,
-      );
-    } else {
-      // No detail — bind dummies for the chunk path (the unified shader
-      // chain falls through to the well proxy via the descriptor).
-      // volumeDims must reflect the proxy's voxel resolution: the volume
-      // renderer derives ray-march stepSize from it, and [1,1,1] yields
-      // ~3 samples/ray → alpha barely accumulates in translucent
-      // compositing → proxy renders dim/desaturated.
-      const dummyChunk = ctx.getDummy3DTexture();
-      // proxySlotDimsForVolumeFallback is [Z, Y, X]; setAtlas takes
-      // volumeDims as [X, Y, Z].
-      const proxyVolumeDims: [number, number, number] = [
-        proxySlotDimsForVolumeFallback[2],
-        proxySlotDimsForVolumeFallback[1],
-        proxySlotDimsForVolumeFallback[0],
-      ];
-      renderer.setAtlas(
-        dummyChunk, getDummyIndirection(ctx.device),
-        [1, 1, 1], proxyVolumeDims,
-        [],
-      );
-    }
+    const dimsMeta = detailMetas?.[0] ?? coarseMetas?.[0] ?? null;
+    const volumeDims: [number, number, number] = dimsMeta
+      ? [dimsMeta.levelDims[2], dimsMeta.levelDims[1], dimsMeta.levelDims[0]]
+      : [
+          proxySlotDimsForVolumeFallback[2],
+          proxySlotDimsForVolumeFallback[1],
+          proxySlotDimsForVolumeFallback[0],
+        ];
+    const fallbackTexture = detailAtlas?.texture ?? coarseAtlas?.texture ?? ctx.getDummy3DTexture();
+    const fallbackIndirection =
+      detailAtlas?.indirectionBuf ??
+      coarseAtlas?.indirectionBuf ??
+      getDummyIndirection(ctx.device);
+    renderer.setTierAtlases(
+      hasDetail && detailAtlas ? detailAtlas.texture : fallbackTexture,
+      hasDetail && detailAtlas ? detailAtlas.indirectionBuf : fallbackIndirection,
+      hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY, detailAtlas.slotsZ] : [0, 0, 0],
+      hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
+      hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
+      hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY, coarseAtlas.slotsZ] : [0, 0, 0],
+      volumeDims,
+    );
 
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
     renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);

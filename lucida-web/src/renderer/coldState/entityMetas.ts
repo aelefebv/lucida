@@ -87,6 +87,37 @@ export function computeEntityMetas(
   return { metas, nextOffset: offset };
 }
 
+export function computeEntityTierMeta(
+  entry: ColdStateActiveEntry,
+  level: number,
+  poolChunkDims: [number, number, number],
+  startOffset: number,
+  dimArity: 2 | 3,
+): { meta: LodIndirectionMeta | null; nextOffset: number } {
+  const [pcZ, pcY, pcX] = poolChunkDims;
+  const lm = entry.levels.find(l => l.level === level);
+  if (!lm) return { meta: null, nextOffset: startOffset };
+  const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
+  if (dimArity === 3) {
+    if (lChunkX !== pcX || lChunkY !== pcY || lChunkZ !== pcZ) {
+      return { meta: null, nextOffset: startOffset };
+    }
+  } else if (lChunkX !== pcX || lChunkY !== pcY) {
+    return { meta: null, nextOffset: startOffset };
+  }
+  const [lGridZ, lGridY, lGridX] = lm.gridShape;
+  const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
+  const meta: LodIndirectionMeta = {
+    level,
+    gridDims: [lGridZ, lGridY, lGridX],
+    chunkDims: [lChunkZ, lChunkY, lChunkX],
+    levelDims: [lLevelD, lLevelH, lLevelW],
+    offset: startOffset,
+  };
+  const nextOffset = startOffset + (dimArity === 3 ? lGridX * lGridY * lGridZ : lGridX * lGridY);
+  return { meta, nextOffset };
+}
+
 function levelsFromRange([finest, coarsest]: [number, number]): number[] {
   const out: number[] = [];
   for (let lvl = finest; lvl <= coarsest; lvl++) out.push(lvl);

@@ -486,6 +486,7 @@ export interface ChunksEvictedMessage {
 /** A chunk that the worker is missing from its atlas. */
 export type MissingChunk = {
   kind: "chunk";
+  tier?: "detail" | "coarse";
   entityId: string;
   /**
    * Worker-side member id that owns the missing chunk. Single-channel

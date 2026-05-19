@@ -10,16 +10,17 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { CompositeLayer } from "../layerCompositor.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
-import {
-  type SliceAtlasState,
-  getDummySliceIndirection,
-} from "./atlas.ts";
+import { type SliceAtlasState } from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 
 export function handleSliceRenderMultiPass(
   ctx: WorkerCtx,
   msg: SliceRenderMultiPassMessage,
-  layerToPool: (memberId: string) => { poolKey: string | null; datasetId: string | null } | null,
+  layerToPool: (memberId: string) => {
+    detailPoolKey: string | null;
+    coarsePoolKey: string | null;
+    datasetId: string | null;
+  } | null,
 ): void {
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
@@ -49,16 +50,22 @@ export function handleSliceRenderMultiPass(
     // Detect "no detail" via descriptor-derived state: the canonical
     // signal that this entity has no chunks in the pool. Drives the
     // dummy chunk atlas binding + skip-render guard below.
-    const atlas: SliceAtlasState | null = resolved.poolKey ? atlasMap.get(resolved.poolKey) ?? null : null;
-    let entityLodMetas: LodIndirectionMeta[] | null = null;
-    if (atlas) {
-      entityLodMetas = atlas.entityMetas.get(memberId) ?? null;
-    }
-    const hasDetail = entityLodMetas != null && entityLodMetas.length > 0;
+    const detailAtlas: SliceAtlasState | null = resolved.detailPoolKey
+      ? atlasMap.get(resolved.detailPoolKey) ?? null
+      : null;
+    const coarseAtlas: SliceAtlasState | null = resolved.coarsePoolKey
+      ? atlasMap.get(resolved.coarsePoolKey) ?? null
+      : null;
+    const detailMetas: LodIndirectionMeta[] | null =
+      detailAtlas?.entityMetas.get(memberId) ?? null;
+    const coarseMetas: LodIndirectionMeta[] | null =
+      coarseAtlas?.entityMetas.get(memberId) ?? null;
+    const hasDetail = detailMetas != null && detailMetas.length > 0;
+    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
 
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
-    if (hasDetail) {
+    if (hasDetail || hasCoarse) {
       setCameraUVForMember(ctx.state, memberId, [
         (msg.cx - ox) / layer.dataW,
         (msg.cy - oy) / layer.dataH,
@@ -67,9 +74,11 @@ export function handleSliceRenderMultiPass(
 
     const idx = renderedLayers.length;
 
-    if (atlas && atlas.indirectionDirty) {
-      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
-      atlas.indirectionDirty = false;
+    for (const atlas of [detailAtlas, coarseAtlas]) {
+      if (atlas && atlas.indirectionDirty) {
+        ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+        atlas.indirectionDirty = false;
+      }
     }
 
     // Resolve proxy texture handles via the descriptor's dense pool
@@ -100,24 +109,18 @@ export function handleSliceRenderMultiPass(
     // Skip when the layer has nothing renderable: no detail chunks AND
     // no resident proxy. Entities with detail OR a resident proxy
     // continue rendering — the unified fallback chain handles the rest.
-    if (!hasDetail && !fieldProxySlotResident && !wellProxySlotResident) continue;
+    if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) continue;
 
     renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
 
-    if (hasDetail && atlas) {
-      renderer.setAtlas(
-        atlas.texture, atlas.indirectionBuf,
-        [atlas.slotsX, atlas.slotsY],
-      );
-    } else {
-      // No detail — bind the slice renderer's own dummy chunk +
-      // indirection so the bind group is valid. The unified shader chain
-      // falls through to the proxy via the descriptor.
-      renderer.setAtlas(
-        ctx.getDummyTexture(), getDummySliceIndirection(ctx.device),
-        [1, 1],
-      );
-    }
+    renderer.setTierAtlases(
+      hasDetail && detailAtlas ? detailAtlas.texture : null,
+      hasDetail && detailAtlas ? detailAtlas.indirectionBuf : null,
+      hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY] : [0, 0],
+      hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
+      hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
+      hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY] : [0, 0],
+    );
 
     // Colormap from descriptor's CPU mirror; contrast/gamma/opacity are
     // read by the shader straight from the descriptor.

@@ -2,12 +2,13 @@
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
-// Uniform buffer layout (112 bytes):
-//   offset 0:   transform        mat4x4f   (64B)
-//   offset 64:  atlasSlotDims    vec4u     (16B)
-//   offset 80:  memberScreenSize vec4f     (16B)
-//   offset 96:  lodParams        vec4u     (16B) — x=targetLodIdx
-const UNIFORM_SIZE = 112;
+// Uniform buffer layout (128 bytes):
+//   offset 0:   transform           mat4x4f (64B)
+//   offset 64:  detailAtlasSlotDims vec4u   (16B)
+//   offset 80:  coarseAtlasSlotDims vec4u   (16B)
+//   offset 96:  memberScreenSize    vec4f   (16B)
+//   offset 112: lodParams           vec4u   (16B) — x=targetLodIdx
+const UNIFORM_SIZE = 128;
 const ENTITY_REF_SIZE = 16;
 
 export class SliceRenderer {
@@ -21,14 +22,17 @@ export class SliceRenderer {
   private descriptorBindGroup: GPUBindGroup | null = null;
   private currentDescriptorBuffer: GPUBuffer | null = null;
 
-  private atlasTexture: GPUTexture | null = null;
-  private indirectionBuffer: GPUBuffer | null = null;
+  private detailAtlasTexture: GPUTexture | null = null;
+  private detailIndirectionBuffer: GPUBuffer | null = null;
+  private coarseAtlasTexture: GPUTexture | null = null;
+  private coarseIndirectionBuffer: GPUBuffer | null = null;
   private dummyTexture: GPUTexture;
   private dummyIndirectionBuffer: GPUBuffer;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
 
-  private atlasSlotDims = [1, 1];
+  private detailAtlasSlotDims: [number, number] = [0, 0];
+  private coarseAtlasSlotDims: [number, number] = [0, 0];
   // Proxy textures still bound CPU-side (slot indices and dims come
   // from the descriptor).
   private fieldProxyTexture: GPUTexture | null = null;
@@ -67,15 +71,25 @@ export class SliceRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
         },
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "2d" },
+        },
+        {
+          binding: 6,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
+        },
         // Proxy textures (fieldProxy + wellProxy). 3D r16uint, same as
         // volume.wgsl — slice mode reads at the slot's Z midpoint.
         {
-          binding: 5,
+          binding: 7,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
         },
         {
-          binding: 6,
+          binding: 8,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
         },
@@ -171,9 +185,23 @@ export class SliceRenderer {
     indirectionBuf: GPUBuffer,
     atlasSlotDims: [number, number],
   ) {
-    this.atlasTexture = texture;
-    this.indirectionBuffer = indirectionBuf;
-    this.atlasSlotDims = atlasSlotDims;
+    this.setTierAtlases(texture, indirectionBuf, atlasSlotDims, null, null, [0, 0]);
+  }
+
+  setTierAtlases(
+    detailTexture: GPUTexture | null,
+    detailIndirectionBuf: GPUBuffer | null,
+    detailAtlasSlotDims: [number, number],
+    coarseTexture: GPUTexture | null,
+    coarseIndirectionBuf: GPUBuffer | null,
+    coarseAtlasSlotDims: [number, number],
+  ) {
+    this.detailAtlasTexture = detailTexture;
+    this.detailIndirectionBuffer = detailIndirectionBuf;
+    this.detailAtlasSlotDims = detailTexture && detailIndirectionBuf ? detailAtlasSlotDims : [0, 0];
+    this.coarseAtlasTexture = coarseTexture;
+    this.coarseIndirectionBuffer = coarseIndirectionBuf;
+    this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0];
     this.rebuildBindGroup();
   }
 
@@ -224,8 +252,10 @@ export class SliceRenderer {
   }
 
   private rebuildBindGroup() {
-    const atlas = this.atlasTexture ?? this.dummyTexture;
-    const indirection = this.indirectionBuffer ?? this.dummyIndirectionBuffer;
+    const detailAtlas = this.detailAtlasTexture ?? this.dummyTexture;
+    const detailIndirection = this.detailIndirectionBuffer ?? this.dummyIndirectionBuffer;
+    const coarseAtlas = this.coarseAtlasTexture ?? this.dummyTexture;
+    const coarseIndirection = this.coarseIndirectionBuffer ?? this.dummyIndirectionBuffer;
     const dummyProxy = this.getDummyProxyTexture();
     const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
     const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
@@ -233,12 +263,14 @@ export class SliceRenderer {
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: atlas.createView() },
-        { binding: 2, resource: { buffer: indirection } },
+        { binding: 1, resource: detailAtlas.createView() },
+        { binding: 2, resource: { buffer: detailIndirection } },
         { binding: 3, resource: this.lutTexture.createView() },
         { binding: 4, resource: this.lutSampler },
-        { binding: 5, resource: fieldProxyView },
-        { binding: 6, resource: wellProxyView },
+        { binding: 5, resource: coarseAtlas.createView() },
+        { binding: 6, resource: { buffer: coarseIndirection } },
+        { binding: 7, resource: fieldProxyView },
+        { binding: 8, resource: wellProxyView },
       ],
     });
   }
@@ -263,16 +295,17 @@ export class SliceRenderer {
 
     // Atlas params (u32 written via Uint32Array view)
     const u32View = new Uint32Array(uniformData.buffer);
-    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], 0, 0], 16); // atlasSlotDims at 64B = 16 u32s
+    u32View.set([this.detailAtlasSlotDims[0], this.detailAtlasSlotDims[1], 0, 0], 16);
+    u32View.set([this.coarseAtlasSlotDims[0], this.coarseAtlasSlotDims[1], 0, 0], 20);
 
     // Member screen-pixel size for border detection
     const memberScreenW = dataW * zoom;
     const memberScreenH = dataH * zoom;
-    uniformData.set([memberScreenW, memberScreenH, 0, 0], 20); // memberScreenSize at 80B = 20 f32s
+    uniformData.set([memberScreenW, memberScreenH, 0, 0], 24);
 
     // lodParams.x = targetLodIdx (always 0 — descriptor lods start at
     // finest LOD).
-    u32View.set([0, 0, 0, 0], 24); // lodParams at 96B = 24 u32s
+    u32View.set([0, 0, 0, 0], 28);
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
