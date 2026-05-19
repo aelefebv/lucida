@@ -5,7 +5,7 @@
  * production-side state added for it to work.
  *
  * Two overlays, each gated by its own toggle in the Logging tab:
- *  - wellModes: per-well badge with tier mode + LOD
+ *  - wellModes: per-well badge with detail/coarse worker-delivered coverage
  *  - chunkGrid: LOD chunk grid for every visible field, colored by
  *    status. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
@@ -26,6 +26,11 @@ import { Axis } from "../axes.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
+import type {
+  CacheStateSnapshot,
+  ChunkRequest,
+  RequestPlan,
+} from "../pipeline/planning/index.ts";
 import {
   DEBUG_OVERLAYS,
   isOverlayEnabled,
@@ -49,6 +54,9 @@ const MODE_COLOR: Record<string, string> = {
   "well-as-proxy": "#88f",
   "fields-with-proxy-fallback": "#fb4",
   "fields-with-detail": "#4f4",
+  "render-detail": "#4f4",
+  "render-coarse": "#6cf",
+  "render-waiting": "#fb4",
 };
 
 const MODE_LABEL: Record<string, string> = {
@@ -63,7 +71,25 @@ interface WellBadge {
   centerY: number;
   mode: string;
   label: string;
-  lod: number | null;
+  title: string;
+}
+
+type OverlayTier = "detail" | "coarse";
+
+export interface TierCoverageCounts {
+  /** Chunks requested by the current plan for this tier. */
+  wanted: number;
+  /** Chunks optimistically delivered to the worker and not reported missing/evicted. */
+  shown: number;
+  /** Chunks currently decoded in the CPU cache, whether uploaded or not. */
+  ready: number;
+  /** Chunks currently being fetched/decoded. */
+  inFlight: number;
+}
+
+export interface WellTierCoverage {
+  detail: TierCoverageCounts;
+  coarse: TierCoverageCounts;
 }
 
 interface ChunkRect {
@@ -128,6 +154,105 @@ function cachedColor(
     case "prefetch":       return "rgba(70, 200, 200, 0.32)";
     default:               return SOLID_CACHED;
   }
+}
+
+function emptyTierCoverageCounts(): TierCoverageCounts {
+  return { wanted: 0, shown: 0, ready: 0, inFlight: 0 };
+}
+
+function emptyWellTierCoverage(): WellTierCoverage {
+  return {
+    detail: emptyTierCoverageCounts(),
+    coarse: emptyTierCoverageCounts(),
+  };
+}
+
+function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
+  if (req.lane === "detail") return "detail";
+  if (req.lane === "coarse" || req.lane === "overview") return "coarse";
+  return null;
+}
+
+export function buildWellTierCoverage(
+  plan: Pick<RequestPlan, "requests">,
+  parentByEntity: ReadonlyMap<string, string | null>,
+  cpuCache: Pick<CpuCache, "deliveryState"> | null,
+  cacheSnap: CacheStateSnapshot | null,
+): Map<string, WellTierCoverage> {
+  const out = new Map<string, WellTierCoverage>();
+  for (const req of plan.requests) {
+    const tier = overlayTierForRequest(req);
+    if (!tier) continue;
+
+    const wellId = parentByEntity.get(req.entityId) ?? req.entityId;
+    let coverage = out.get(wellId);
+    if (!coverage) {
+      coverage = emptyWellTierCoverage();
+      out.set(wellId, coverage);
+    }
+
+    const counts = coverage[tier];
+    counts.wanted++;
+    if (cacheSnap?.cached.get(req.entityId)?.has(req.chunkKey)) {
+      counts.ready++;
+    }
+    if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
+      counts.inFlight++;
+    }
+    if (cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey)) {
+      counts.shown++;
+    }
+  }
+  return out;
+}
+
+export function formatTierCoverageLabel(
+  coverage: WellTierCoverage,
+  fallbackLabel: string,
+  fallbackLod: number | null,
+): string {
+  const parts: string[] = [];
+  if (coverage.detail.wanted > 0) {
+    parts.push(`D${coverage.detail.shown}/${coverage.detail.wanted}`);
+  }
+  if (coverage.coarse.wanted > 0) {
+    parts.push(`C${coverage.coarse.shown}/${coverage.coarse.wanted}`);
+  }
+  if (parts.length > 0) return parts.join(" ");
+  return `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
+}
+
+export function tierCoverageMode(
+  coverage: WellTierCoverage,
+  fallbackMode: string,
+): string {
+  if (coverage.detail.shown > 0) return "render-detail";
+  if (coverage.coarse.shown > 0) return "render-coarse";
+  if (coverage.detail.wanted > 0 || coverage.coarse.wanted > 0) {
+    return "render-waiting";
+  }
+  return fallbackMode;
+}
+
+export function formatTierCoverageTitle(
+  coverage: WellTierCoverage,
+  fallbackLabel: string,
+  fallbackLod: number | null,
+): string {
+  const parts: string[] = [];
+  if (coverage.detail.wanted > 0) {
+    parts.push(
+      `detail shown ${coverage.detail.shown}/${coverage.detail.wanted}, ready ${coverage.detail.ready}, in-flight ${coverage.detail.inFlight}`,
+    );
+  }
+  if (coverage.coarse.wanted > 0) {
+    parts.push(
+      `coarse shown ${coverage.coarse.shown}/${coverage.coarse.wanted}, ready ${coverage.coarse.ready}, in-flight ${coverage.coarse.inFlight}`,
+    );
+  }
+  const modePart = `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
+  if (parts.length === 0) return modePart;
+  return `${parts.join("; ")}; planner ${modePart}`;
 }
 
 /**
@@ -320,11 +445,19 @@ export function DebugOverlays({
             positions = {};
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
+          const cacheSnap = cpuCache?.snapshot() ?? null;
+          const coverageByWell = buildWellTierCoverage(
+            plan,
+            parentByEntity,
+            cpuCache,
+            cacheSnap,
+          );
 
           // Per-well aggregator carrying world centroids of fields.
           const wells = new Map<string, {
             mode: string;
             lod: number | null;
+            coverage: WellTierCoverage;
             worldCentroids: Array<[number, number, number]>;
           }>();
 
@@ -344,7 +477,12 @@ export function DebugOverlays({
             const worldCenter = fieldWorldCenter(frame);
             let agg = wells.get(wellId);
             if (!agg) {
-              agg = { mode, lod, worldCentroids: [] };
+              agg = {
+                mode,
+                lod,
+                coverage: coverageByWell.get(wellId) ?? emptyWellTierCoverage(),
+                worldCentroids: [],
+              };
               wells.set(wellId, agg);
             }
             agg.worldCentroids.push(worldCenter);
@@ -389,9 +527,17 @@ export function DebugOverlays({
               key: `${dsId}/${wellId}`,
               centerX: screen.x,
               centerY: screen.y,
-              mode: agg.mode,
-              label: MODE_LABEL[agg.mode] ?? agg.mode,
-              lod: agg.lod,
+              mode: tierCoverageMode(agg.coverage, agg.mode),
+              label: formatTierCoverageLabel(
+                agg.coverage,
+                MODE_LABEL[agg.mode] ?? agg.mode,
+                agg.lod,
+              ),
+              title: formatTierCoverageTitle(
+                agg.coverage,
+                MODE_LABEL[agg.mode] ?? agg.mode,
+                agg.lod,
+              ),
             });
           }
         }
@@ -723,8 +869,9 @@ export function DebugOverlays({
             lineHeight: 1.2,
             whiteSpace: "nowrap",
           }}
+          title={b.title}
         >
-          {b.label}{b.lod !== null && ` L${b.lod}`}
+          {b.label}
         </div>
       ))}
     </div>
