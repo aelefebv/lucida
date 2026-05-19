@@ -57,6 +57,22 @@ export interface GeneratedAvailabilitySnapshot {
   chunks: WireGeneratedChunkStatusUpdate[];
 }
 
+export interface GeneratedStatusCounts {
+  levels: number;
+  totalChunks: number;
+  ready: number;
+  pending: number;
+  unavailable: number;
+  failed: number;
+  failedTransient: number;
+  failedPermanent: number;
+}
+
+export interface GeneratedStatusCountsByDataset {
+  datasetId: string;
+  counts: GeneratedStatusCounts;
+}
+
 export class GeneratedAvailabilityCatalog {
   private readonly byDataset = new Map<string, DatasetAvailability>();
 
@@ -98,6 +114,16 @@ export class GeneratedAvailabilityCatalog {
     return status ? cloneChunkStatus(status) : null;
   }
 
+  statusCounts(datasetId: string): GeneratedStatusCounts {
+    return statusCountsForState(this.byDataset.get(datasetId));
+  }
+
+  statusCountsByDataset(): GeneratedStatusCountsByDataset[] {
+    return Array.from(this.byDataset.entries())
+      .map(([datasetId, state]) => ({ datasetId, counts: statusCountsForState(state) }))
+      .sort((a, b) => a.datasetId.localeCompare(b.datasetId));
+  }
+
   mergeManifest(datasetId: string, manifest: DatasetManifest): DatasetManifest {
     return mergeGeneratedAvailabilityIntoManifest(manifest, this.snapshot(datasetId));
   }
@@ -137,6 +163,60 @@ export function mergeGeneratedAvailabilityIntoManifest(
 
 function emptyDatasetAvailability(): DatasetAvailability {
   return { levels: new Map(), chunks: new Map() };
+}
+
+function emptyStatusCounts(levels = 0): GeneratedStatusCounts {
+  return {
+    levels,
+    totalChunks: 0,
+    ready: 0,
+    pending: 0,
+    unavailable: 0,
+    failed: 0,
+    failedTransient: 0,
+    failedPermanent: 0,
+  };
+}
+
+function statusCountsForState(state: DatasetAvailability | undefined): GeneratedStatusCounts {
+  if (!state) return emptyStatusCounts();
+
+  const counts = emptyStatusCounts(state.levels.size);
+  if (state.chunks.size > 0) {
+    for (const chunk of state.chunks.values()) {
+      counts.totalChunks++;
+      switch (chunk.status) {
+        case "ready":
+          counts.ready++;
+          break;
+        case "pending":
+          counts.pending++;
+          break;
+        case "unavailable":
+          counts.unavailable++;
+          break;
+        case "failed_transient":
+          counts.failedTransient++;
+          counts.failed++;
+          break;
+        case "failed_permanent":
+          counts.failedPermanent++;
+          counts.failed++;
+          break;
+      }
+    }
+    return counts;
+  }
+
+  for (const level of state.levels.values()) {
+    const summary = level.summary;
+    if (!summary) continue;
+    counts.totalChunks += summary.total_chunks;
+    counts.ready += summary.ready_chunks;
+    counts.pending += summary.pending_chunks;
+    counts.failed += summary.failed_chunks;
+  }
+  return counts;
 }
 
 function levelKey(imageId: string, levelIndex: number): string {

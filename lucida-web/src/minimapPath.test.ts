@@ -19,9 +19,9 @@ describe("minimapCoarseLevelIndex", () => {
     expect(minimapCoarseLevelIndex(multiscale(1))).toBe(1);
   });
 
-  it("falls back to the coarsest source level when no coarse pointer exists", () => {
-    expect(minimapCoarseLevelIndex(multiscale(null))).toBe(2);
-    expect(minimapCoarseLevelIndex(multiscale(undefined))).toBe(2);
+  it("does not guess a coarse level when no coarse pointer exists", () => {
+    expect(minimapCoarseLevelIndex(multiscale(null))).toBeNull();
+    expect(minimapCoarseLevelIndex(multiscale(undefined))).toBeNull();
   });
 
   it("resolves by level_index before falling back to array index", () => {

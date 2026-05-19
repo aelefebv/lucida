@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use lucida_content::{
     DataType, DatasetId, DatasetKind, DatasetManifest, GeneratedLevelInfo,
@@ -144,6 +145,12 @@ pub struct GeneratedSchedulerTelemetry {
     pub canceled: u64,
     pub deduped: u64,
     pub cache_reused: u64,
+    pub ready_broadcasts: u64,
+    pub materialization_latency_samples: u64,
+    pub materialization_latency_total_ms: u64,
+    pub last_materialization_latency_ms: u64,
+    pub derived_cache_bytes: u64,
+    pub derived_cache_evictions: u64,
 }
 
 #[derive(Clone)]
@@ -176,6 +183,10 @@ struct GeneratedSchedulerState {
     canceled: u64,
     deduped: u64,
     cache_reused: u64,
+    ready_broadcasts: u64,
+    materialization_latency_samples: u64,
+    materialization_latency_total_ms: u64,
+    last_materialization_latency_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,12 +243,19 @@ struct DerivedChunkState {
     level_identities: HashMap<(ImageId, u32), String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DerivedCacheTelemetry {
+    pub bytes: u64,
+    pub evictions: u64,
+}
+
 #[derive(Debug)]
 struct DerivedDiskCache {
     root_dir: PathBuf,
     url_hash: [u8; 16],
     disk_budget_bytes: Option<u64>,
     tmp_counter: AtomicU64,
+    eviction_counter: AtomicU64,
 }
 
 /// In-memory runtime registry for generated levels and seeded fake chunks.
@@ -274,6 +292,7 @@ impl DerivedChunkCache {
                 url_hash,
                 disk_budget_bytes,
                 tmp_counter: AtomicU64::new(0),
+                eviction_counter: AtomicU64::new(0),
             })),
             Err(e) => {
                 tracing::warn!(
@@ -553,6 +572,23 @@ impl DerivedChunkCache {
         GeneratedAvailabilityDelta {
             levels: vec![],
             chunks,
+        }
+    }
+
+    pub fn telemetry(&self) -> DerivedCacheTelemetry {
+        if let Some(disk) = &self.disk {
+            return disk.telemetry().unwrap_or_default();
+        }
+        let state = self.inner.lock().unwrap();
+        let bytes = state
+            .chunks
+            .values()
+            .filter_map(|entry| entry.bytes.as_ref())
+            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add);
+        DerivedCacheTelemetry {
+            bytes,
+            evictions: 0,
         }
     }
 
@@ -919,9 +955,18 @@ impl DerivedDiskCache {
                 break;
             }
             fs::remove_dir_all(&path)?;
+            self.eviction_counter.fetch_add(1, Ordering::Relaxed);
             total = total.saturating_sub(bytes);
         }
         Ok(())
+    }
+
+    fn telemetry(&self) -> io::Result<DerivedCacheTelemetry> {
+        let (bytes, _) = dir_size_and_modified(&self.dataset_dir())?;
+        Ok(DerivedCacheTelemetry {
+            bytes,
+            evictions: self.eviction_counter.load(Ordering::Relaxed),
+        })
     }
 }
 
@@ -1200,8 +1245,9 @@ impl GeneratedCoarseService {
     }
 
     pub async fn telemetry(&self) -> GeneratedSchedulerTelemetry {
+        let cache_telemetry = self.inner.cache.telemetry();
         let state = self.inner.state.lock().await;
-        telemetry_locked(&state)
+        telemetry_locked(&state, cache_telemetry)
     }
 
     pub async fn enqueue_background_fill(&self) {
@@ -1248,18 +1294,28 @@ impl GeneratedCoarseService {
                 self.mark_canceled(item.work_key).await;
                 continue;
             }
+            let started = Instant::now();
             let result = self.materialize_work_item(&item).await;
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut state = self.inner.state.lock().await;
             state.running.remove(&item.work_key);
+            state.materialization_latency_samples =
+                state.materialization_latency_samples.saturating_add(1);
+            state.materialization_latency_total_ms = state
+                .materialization_latency_total_ms
+                .saturating_add(elapsed_ms);
+            state.last_materialization_latency_ms = elapsed_ms;
             match result {
                 MaterializeOneResult::Ready => {
                     state.completed_keys.insert(item.work_key);
                     state.completed += 1;
+                    state.ready_broadcasts += 1;
                 }
                 MaterializeOneResult::CacheReused => {
                     state.completed_keys.insert(item.work_key);
                     state.completed += 1;
                     state.cache_reused += 1;
+                    state.ready_broadcasts += 1;
                 }
                 MaterializeOneResult::Failed => {
                     state.failed += 1;
@@ -1522,7 +1578,10 @@ fn lane_from_interest_key(key: &ViewerInterestChunkKey) -> GeneratedSchedulingLa
     }
 }
 
-fn telemetry_locked(state: &GeneratedSchedulerState) -> GeneratedSchedulerTelemetry {
+fn telemetry_locked(
+    state: &GeneratedSchedulerState,
+    cache: DerivedCacheTelemetry,
+) -> GeneratedSchedulerTelemetry {
     let mut telemetry = GeneratedSchedulerTelemetry {
         running: state.running.len(),
         completed: state.completed,
@@ -1530,6 +1589,12 @@ fn telemetry_locked(state: &GeneratedSchedulerState) -> GeneratedSchedulerTeleme
         canceled: state.canceled,
         deduped: state.deduped,
         cache_reused: state.cache_reused,
+        ready_broadcasts: state.ready_broadcasts,
+        materialization_latency_samples: state.materialization_latency_samples,
+        materialization_latency_total_ms: state.materialization_latency_total_ms,
+        last_materialization_latency_ms: state.last_materialization_latency_ms,
+        derived_cache_bytes: cache.bytes,
+        derived_cache_evictions: cache.evictions,
         ..GeneratedSchedulerTelemetry::default()
     };
     for item in &state.queued {
@@ -3036,6 +3101,10 @@ mod tests {
                 vec![1, 2, 3, 4],
             )
             .unwrap();
+
+        let telemetry = cache.telemetry();
+        assert!(telemetry.evictions > 0);
+        assert!(telemetry.bytes <= 1);
 
         let delta = cache.missing_ready_delta();
 

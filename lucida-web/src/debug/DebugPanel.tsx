@@ -21,6 +21,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
 import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
+import type { GeneratedStatusCountsByDataset } from "../pipeline/generatedAvailability.ts";
 import type { Session } from "../session.ts";
 import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
@@ -489,6 +490,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
   // Cache tab state
   const [cacheTelemetry, setCacheTelemetry] = useState<CacheTelemetry | null>(null);
+  const [generatedStatusSnap, setGeneratedStatusSnap] = useState<GeneratedStatusCountsByDataset[]>([]);
 
   // Catalog tab state
   const [catalogSnap, setCatalogSnap] = useState<CatalogSnap | null>(null);
@@ -507,6 +509,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       // Poll cache telemetry
       const cache = sessionRef?.current?.cpuCache ?? null;
       if (cache) setCacheTelemetry(cache.telemetry());
+      setGeneratedStatusSnap(
+        sessionRef?.current?.generatedAvailability.statusCountsByDataset() ?? [],
+      );
 
       // Poll asset catalog (per-dataset proxy availability + cache stats)
       {
@@ -946,11 +951,40 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       </span>
                     )}
                   </div>
+                  {cacheTelemetry.tierDemand.sparseDetail && (
+                    <div style={{ color: "#fb4" }}>
+                      Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.
+                    </div>
+                  )}
                   <div>
                     Coarse resident: {cacheTelemetry.tierDemand.resident.coarseChunks}/
                     {cacheTelemetry.tierDemand.desired.coarseChunks}
                   </div>
                 </div>
+
+                {generatedStatusSnap.length > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-title">Generated coarse</div>
+                    <div className="debug-member-list">
+                      {generatedStatusSnap.map(({ datasetId: generatedDatasetId, counts }) => {
+                        const dsName = datasets.get(generatedDatasetId)?.manifest.name ?? generatedDatasetId;
+                        return (
+                          <div key={generatedDatasetId} className="debug-member-row">
+                            <span className="debug-member-id" title={generatedDatasetId}>
+                              {shortId(dsName)}
+                            </span>
+                            <span title="ready">{counts.ready} ready</span>
+                            <span title="pending">{counts.pending} pending</span>
+                            <span title="unavailable">{counts.unavailable} unavailable</span>
+                            <span title={`transient: ${counts.failedTransient}, permanent: ${counts.failedPermanent}`}>
+                              {counts.failed} failed
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Hit Rate */}
                 <div className="debug-section">

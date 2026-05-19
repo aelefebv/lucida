@@ -34,18 +34,18 @@ export function createMinimapState(): MinimapState {
   };
 }
 
-export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels" | "coarse_level_index">): number {
+export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels" | "coarse_level_index">): number | null {
   const explicit = multiscale.coarse_level_index;
   if (typeof explicit === "number") {
     const byLevelIndex = multiscale.levels.findIndex((level) => level.level_index === explicit);
     if (byLevelIndex >= 0) return byLevelIndex;
     if (explicit >= 0 && explicit < multiscale.levels.length) return explicit;
   }
-  return Math.max(multiscale.levels.length - 1, 0);
+  return null;
 }
 
 /**
- * Mark a dataset's coarsest level as fully seeded (all chunks already uploaded).
+ * Mark a dataset's explicit coarse level as fully seeded (all chunks already uploaded).
  * Called when overview data was bulk-uploaded externally.
  */
 export function markMinimapOverviewSeeded(
@@ -59,6 +59,7 @@ export function markMinimapOverviewSeeded(
   if (!ds) return;
   const multiscale = ds.manifest.images[0].multiscale;
   const coarsestIdx = minimapCoarseLevelIndex(multiscale);
+  if (coarsestIdx === null) return;
   const key = `${datasetId}/${coarsestIdx}/${t}/${c}`;
   state.overviewKey.set(datasetId, key);
   state.overviewSeeded.add(datasetId);
@@ -99,6 +100,10 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
       const memberId = img.image_id;
       const multiscale = img.multiscale;
       const coarsestIdx = minimapCoarseLevelIndex(multiscale);
+      if (coarsestIdx === null) {
+        state.pendingFetch.delete(memberId);
+        continue;
+      }
       const levelMeta = multiscale.levels[coarsestIdx];
       if (!levelMeta) continue;
       const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;

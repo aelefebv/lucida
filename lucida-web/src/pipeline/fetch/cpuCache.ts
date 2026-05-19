@@ -1194,6 +1194,7 @@ export class CpuCache {
       inFlightChunks: this.chunkScheduler.inFlightSize,
       mainBytes: this.chunkStore.bytes,
       mainBudget: this.config.mainBudgetBytes,
+      notice: "Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.",
     });
   }
 

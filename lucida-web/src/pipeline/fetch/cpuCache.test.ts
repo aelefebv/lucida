@@ -1962,6 +1962,7 @@ describe("CpuCache", () => {
           desiredDetailChunks: 4,
           residentDetailChunks: 0,
           pendingChunks: 4,
+          notice: expect.stringContaining("lower the detail LOD explicitly"),
         }),
       );
     });
