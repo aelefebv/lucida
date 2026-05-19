@@ -6,6 +6,11 @@ import type { DatasetState } from "../types.ts";
 import { Axis } from "../axes.ts";
 import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "../pipeline/fetch/index.ts";
+import type {
+  WireGeneratedAvailabilityByDataset,
+  WireGeneratedAvailabilityDelta,
+  WireGeneratedAvailabilitySnapshot,
+} from "../pipeline/generatedAvailability.ts";
 import { derivedBuildersFor } from "../pipeline/layoutBuilders.ts";
 import { Session } from "../session.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -100,7 +105,7 @@ export function useBridge({
     const cpuCache = new CpuCache(contentSource, decodePool);
 
     const handlers: BridgeHandlers = {
-      onSnapshot: (_seq, documentJson, snapshotPeers, yourId) => {
+      onSnapshot: (_seq, documentJson, snapshotPeers, yourId, generatedAvailability) => {
         try {
           const scene = ensureScene();
           scene.load_document(documentJson);
@@ -162,6 +167,7 @@ export function useBridge({
               }
             }
           }
+          applyGeneratedAvailabilitySnapshots(generatedAvailability);
 
           bumpRemoteDocumentVersion();
           bumpDatasetsVersion();
@@ -247,6 +253,7 @@ export function useBridge({
           if (cmd.type === "remove_dataset") {
             datasetCallbacksRef.current.removeDataset(cmd.id);
             sessionRef.current?.ensureAssetCatalog()?.removeDataset(cmd.id);
+            sessionRef.current?.generatedAvailability.removeDataset(cmd.id);
             sessionRef.current?.ensureLayoutRegistry()?.removeDataset(cmd.id);
           }
           if (cmd.type === "register_layout" || cmd.type === "set_active_layout") {
@@ -411,6 +418,23 @@ export function useBridge({
           console.warn("[Bridge] bad asset_catalog_update:", e);
         }
       },
+      onGeneratedAvailabilityUpdate: (datasetId, deltaJson) => {
+        try {
+          const delta = JSON.parse(deltaJson) as WireGeneratedAvailabilityDelta;
+          applyGeneratedAvailabilityDelta(datasetId, delta);
+        } catch (e) {
+          console.warn("[Bridge] bad generated_availability_update:", e);
+        }
+      },
+      onGeneratedChunkStatus: (datasetId, imageId, key, status, message) => {
+        sessionRef.current?.contentSource.handleChunkStatus(
+          datasetId,
+          imageId,
+          key,
+          status,
+          message,
+        );
+      },
       onDisconnect: () => {
         setRemoteDatasetLoading(false);
         contentSource.rejectAll();
@@ -427,6 +451,45 @@ export function useBridge({
     // listed callback/ref/state-bumper deps would re-mount the entire
     // WebSocket session and tear down all in-flight downloads.
   }, [wasmReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function applyGeneratedAvailabilitySnapshots(
+    snapshots: WireGeneratedAvailabilityByDataset,
+  ): void {
+    for (const [datasetId, snapshot] of Object.entries(snapshots)) {
+      applyGeneratedAvailabilitySnapshot(datasetId, snapshot);
+    }
+  }
+
+  function applyGeneratedAvailabilitySnapshot(
+    datasetId: string,
+    snapshot: WireGeneratedAvailabilitySnapshot,
+  ): void {
+    const session = sessionRef.current;
+    if (!session) return;
+    session.generatedAvailability.applySnapshot(datasetId, snapshot);
+    refreshRuntimeGeneratedManifest(datasetId);
+  }
+
+  function applyGeneratedAvailabilityDelta(
+    datasetId: string,
+    delta: WireGeneratedAvailabilityDelta,
+  ): void {
+    const session = sessionRef.current;
+    if (!session) return;
+    session.generatedAvailability.applyDelta(datasetId, delta);
+    refreshRuntimeGeneratedManifest(datasetId);
+  }
+
+  function refreshRuntimeGeneratedManifest(datasetId: string): void {
+    const session = sessionRef.current;
+    const entry = datasetsRef.current.get(datasetId);
+    if (!session || !entry) return;
+    const merged = session.generatedAvailability.mergeManifest(datasetId, entry.manifest);
+    datasetsRef.current.set(datasetId, { ...entry, manifest: merged });
+    loopRef.current?.updateDatasetManifest(datasetId, merged);
+    bumpDatasetsVersion();
+    loopRef.current?.markResidencyDirty("generated_availability_update");
+  }
 
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
     const datasetId = manifest.dataset_id;

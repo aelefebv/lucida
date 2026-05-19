@@ -33,6 +33,7 @@ use lucida_protocol::{
     DatasetOpened, FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat,
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
+use lucida_server::generated::DerivedChunkCache;
 use lucida_server::handler::dataset_id_for_url;
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
@@ -194,6 +195,7 @@ fn make_binding(
         resolver,
         cache,
         dataset_opened: register.clone(),
+        derived_chunks: Arc::new(DerivedChunkCache::default()),
         proxy_cache,
         proxy_generator,
     }

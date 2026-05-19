@@ -155,6 +155,12 @@ export class RenderLoop {
     this.setDirty("interactive", "dataset_added");
   }
 
+  updateDatasetManifest(id: string, manifest: DatasetManifest): void {
+    if (!this.datasets.has(id)) return;
+    this.datasets.set(id, { manifest });
+    this.setDirty("interactive", "dataset_manifest_updated");
+  }
+
   removeDataset(id: string): void {
     const unsub = this.unsubs.get(id);
     if (unsub) {

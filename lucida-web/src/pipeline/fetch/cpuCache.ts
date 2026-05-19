@@ -729,9 +729,10 @@ export class CpuCache {
     } catch (err: unknown) {
       const fe = classifyFetchError(err);
 
-      if (fe.kind === "abort") {
+      if (fe.kind === "abort" || fe.kind === "pending") {
         this.chunkScheduler.markInFlightDone(key);
         this.inFlightChunkMeta.delete(key);
+        if (fe.kind === "pending") this.drainSchedulers();
         return;
       }
 

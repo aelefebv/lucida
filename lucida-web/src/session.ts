@@ -1,6 +1,7 @@
 import type { Bridge } from "./bridge.ts";
 import type { ProxiedContentSource, CpuCache, DecodePool } from "./pipeline/fetch/index.ts";
 import { AssetCatalog } from "./pipeline/assetCatalog.ts";
+import { GeneratedAvailabilityCatalog } from "./pipeline/generatedAvailability.ts";
 import { LayoutRegistry } from "./pipeline/layoutRegistry.ts";
 import type { WasmScene } from "lucida-core";
 
@@ -22,6 +23,7 @@ export class Session {
   readonly contentSource: ProxiedContentSource;
   readonly cpuCache: CpuCache;
   readonly decodePool: DecodePool;
+  readonly generatedAvailability = new GeneratedAvailabilityCatalog();
 
   scene: WasmScene | null = null;
   assetCatalog: AssetCatalog | null = null;

@@ -166,6 +166,7 @@ mod tests {
 
     use crate::UnicastRoutes;
     use crate::binding::{ChunkResolver, ServerBinding};
+    use crate::generated::DerivedChunkCache;
     use crate::proxy::{ProxyCache, ProxyGenerator};
     use crate::session::Session;
     use lucida_store::import_types::ServerBindingSeed;
@@ -251,6 +252,7 @@ mod tests {
             resolver,
             cache: cached,
             dataset_opened,
+            derived_chunks: Arc::new(DerivedChunkCache::default()),
             proxy_cache,
             proxy_generator,
         }

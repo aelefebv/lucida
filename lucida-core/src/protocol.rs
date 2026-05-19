@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
-use lucida_protocol::AssetCatalogDelta;
+use lucida_protocol::{
+    AssetCatalogDelta, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot,
+    GeneratedChunkStatus,
+};
 
 use crate::camera::Camera;
 use crate::command::DocumentCommand;
@@ -65,6 +68,11 @@ pub enum ServerMessage {
         document: DocumentState,
         peers: Vec<PresenceState>,
         your_id: ClientId,
+        /// Server-authored runtime generated-level availability, keyed by
+        /// dataset. This is not part of `DocumentState` and is not sequenced as
+        /// a document command.
+        #[serde(default)]
+        generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
     },
     /// Command from another client, broadcast to all except sender.
     CommandBroadcast { seq: u64, command: DocumentCommand },
@@ -106,6 +114,22 @@ pub enum ServerMessage {
     AssetCatalogUpdate {
         dataset_id: DatasetId,
         delta: AssetCatalogDelta,
+    },
+    /// Runtime generated-level metadata/readiness update. Server-authored and
+    /// unsequenced; clients merge it into their local availability view.
+    GeneratedAvailabilityUpdate {
+        dataset_id: DatasetId,
+        delta: GeneratedAvailabilityDelta,
+    },
+    /// Response to a generated chunk request when bytes are not available.
+    /// Ready generated chunks still use the normal binary chunk frame.
+    GeneratedChunkStatus {
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        key: String,
+        status: GeneratedChunkStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// A server-stored bookmark was created, renamed, or deleted.
     /// Broadcast to clients whose session has at least one loaded dataset
@@ -164,6 +188,7 @@ mod tests {
             document: doc,
             peers: Vec::new(),
             your_id: 42,
+            generated_availability: HashMap::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -484,6 +509,78 @@ mod tests {
                 assert_eq!(delta.added[0].kinds, vec![ProxyKind::WellProxy3D]);
             }
             _ => panic!("expected AssetCatalogUpdate"),
+        }
+    }
+
+    #[test]
+    fn generated_availability_update_round_trips() {
+        use lucida_content::{
+            GeneratedLevelInfo, GeneratedLevelProvenance, GeneratedLevelRole, LevelGeometry,
+        };
+        use lucida_protocol::{
+            GeneratedAvailabilityDelta, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
+            GeneratedLevelAvailability,
+        };
+
+        let msg = ServerMessage::GeneratedAvailabilityUpdate {
+            dataset_id: DatasetId("ds1".into()),
+            delta: GeneratedAvailabilityDelta {
+                levels: vec![GeneratedLevelAvailability {
+                    image_id: ImageId("img1".into()),
+                    info: GeneratedLevelInfo {
+                        level_index: 2,
+                        role: GeneratedLevelRole::Coarse,
+                        provenance: GeneratedLevelProvenance::default(),
+                    },
+                    level: LevelGeometry {
+                        level_index: 2,
+                        shape: [1, 1, 1, 64, 64],
+                        chunk_shape: [1, 1, 1, 64, 64],
+                        grid_shape: [1, 1, 1, 1, 1],
+                        scale: [1.0, 1.0, 1.0, 8.0, 8.0],
+                    },
+                    summary: None,
+                }],
+                chunks: vec![GeneratedChunkStatusUpdate {
+                    image_id: ImageId("img1".into()),
+                    level_index: 2,
+                    key: "2/0/0/0/0/0".into(),
+                    status: GeneratedChunkStatus::Ready,
+                    message: None,
+                }],
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"generated_availability_update\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::GeneratedAvailabilityUpdate { dataset_id, delta } => {
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(delta.levels.len(), 1);
+                assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Ready);
+            }
+            _ => panic!("expected GeneratedAvailabilityUpdate"),
+        }
+    }
+
+    #[test]
+    fn generated_chunk_status_round_trips() {
+        let msg = ServerMessage::GeneratedChunkStatus {
+            dataset_id: DatasetId("ds1".into()),
+            image_id: ImageId("img1".into()),
+            key: "2/0/0/0/0/0".into(),
+            status: GeneratedChunkStatus::Pending,
+            message: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"generated_chunk_status\""));
+        assert!(json.contains("\"status\":\"pending\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::GeneratedChunkStatus { status, .. } => {
+                assert_eq!(status, GeneratedChunkStatus::Pending);
+            }
+            _ => panic!("expected GeneratedChunkStatus"),
         }
     }
 

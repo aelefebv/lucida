@@ -10,6 +10,7 @@ pub mod binding;
 pub mod bookmarks;
 pub mod browse;
 pub mod decode;
+pub mod generated;
 pub mod handler;
 pub mod health;
 pub mod proxy;
@@ -47,6 +48,8 @@ pub enum BroadcastItem {
     FollowChanged { json: String },
     /// Dataset presence update from a client.
     DatasetPresenceUpdate { sender: ClientId, json: String },
+    /// Server-authored generated level metadata/readiness update.
+    GeneratedAvailabilityUpdate { json: String },
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).

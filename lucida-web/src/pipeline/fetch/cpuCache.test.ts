@@ -8,6 +8,7 @@ import { debugLog } from "../../debug/logging.ts";
 
 import { CpuCache, type CpuCacheConfig, type ReadyDelivery } from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
+import { FetchError } from "./retry.ts";
 import type {
   ContentSource,
   FetchRequest,
@@ -1301,6 +1302,34 @@ describe("CpuCache", () => {
       await flush();
 
       expect(source.fetchCount).toBe(1); // no retry
+    });
+
+    it("treats generated pending as non-failure and re-requests on later submit", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ level: 2, lane: "coarse", tier: "coarse" });
+      cache.submit(makePlan([req]));
+
+      source.reject(
+        "entity-1/image-1/2/0/0/0/0/0",
+        new FetchError("generated pending", { kind: "pending" }),
+      );
+      await flush();
+
+      let tel = cache.telemetry();
+      expect(tel.failedChunks.permanent).toBe(0);
+      expect(tel.failedChunks.transient).toBe(0);
+      expect(tel.inFlightCount).toBe(0);
+      expect(source.fetchCount).toBe(1);
+
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(2);
+      source.resolve("entity-1/image-1/2/0/0/0/0/0", new ArrayBuffer(8));
+      await flush();
+
+      tel = cache.telemetry();
+      expect(tel.failedChunks.permanent).toBe(0);
+      const deliveries = Array.from(cache.getDeliverable()).filter(d => d.kind === "chunk");
+      expect(deliveries[0]).toMatchObject({ chunkKey: "2/0/0/0/0/0", lane: "coarse" });
     });
 
     it("excludes failed chunks from future submits until contentEpoch changes", async () => {
