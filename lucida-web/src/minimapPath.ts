@@ -1,5 +1,6 @@
 /** Minimap render path: overview seeding + render + overlay callback. */
 import { Axis } from "./axes.ts";
+import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
@@ -33,6 +34,16 @@ export function createMinimapState(): MinimapState {
   };
 }
 
+export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels" | "coarse_level_index">): number {
+  const explicit = multiscale.coarse_level_index;
+  if (typeof explicit === "number") {
+    const byLevelIndex = multiscale.levels.findIndex((level) => level.level_index === explicit);
+    if (byLevelIndex >= 0) return byLevelIndex;
+    if (explicit >= 0 && explicit < multiscale.levels.length) return explicit;
+  }
+  return Math.max(multiscale.levels.length - 1, 0);
+}
+
 /**
  * Mark a dataset's coarsest level as fully seeded (all chunks already uploaded).
  * Called when overview data was bulk-uploaded externally.
@@ -47,7 +58,7 @@ export function markMinimapOverviewSeeded(
   const ds = ctx.datasets.get(datasetId);
   if (!ds) return;
   const multiscale = ds.manifest.images[0].multiscale;
-  const coarsestIdx = multiscale.levels.length - 1;
+  const coarsestIdx = minimapCoarseLevelIndex(multiscale);
   const key = `${datasetId}/${coarsestIdx}/${t}/${c}`;
   state.overviewKey.set(datasetId, key);
   state.overviewSeeded.add(datasetId);
@@ -70,7 +81,7 @@ export function markMinimapOverviewSeeded(
 }
 
 /**
- * Upload coarsest-level overview chunks for the minimap.
+ * Upload explicit coarse-level overview chunks for the minimap.
  * Returns true if there are still missing chunks (caller should schedule another frame).
  */
 export function tickMinimapOverview(ctx: TickContext, state: MinimapState): boolean {
@@ -83,19 +94,19 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
   for (const [, ds] of datasets) {
-    const multiscale = ds.manifest.images[0].multiscale;
-    const coarsestIdx = multiscale.levels.length - 1;
-    const levelMeta = multiscale.levels[coarsestIdx];
-    const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-    const nz = Math.ceil(levelDepth / chunkZ);
-    const ny = Math.ceil(levelHeight / chunkY);
-    const nx = Math.ceil(levelWidth / chunkX);
-    const totalChunks = nz * ny * nx;
-
     // Iterate per-member so each FOV gets its own minimap overview texture.
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
+      const multiscale = img.multiscale;
+      const coarsestIdx = minimapCoarseLevelIndex(multiscale);
+      const levelMeta = multiscale.levels[coarsestIdx];
+      if (!levelMeta) continue;
+      const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
+      const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+      const nz = Math.ceil(levelDepth / chunkZ);
+      const ny = Math.ceil(levelHeight / chunkY);
+      const nx = Math.ceil(levelWidth / chunkX);
+      const totalChunks = nz * ny * nx;
       const overviewKey = `${memberId}/${coarsestIdx}/${t}/${c}`;
 
       if (state.overviewKey.get(memberId) !== overviewKey) {
