@@ -89,6 +89,14 @@ pub struct ProxyConfig {
     /// generator with this many permits; total system concurrency scales
     /// with the number of opened datasets, which is acceptable for now.
     pub concurrency: usize,
+    pub generated_enabled: bool,
+    pub generated_cache_dir: PathBuf,
+    pub generated_concurrency: usize,
+    pub generated_background_chunk_limit: usize,
+    pub generated_target_long_axis: u64,
+    pub generated_chunk_long_axis: u64,
+    pub generated_max_chunk_bytes: u64,
+    pub generated_disk_budget_bytes: Option<u64>,
 }
 
 impl ProxyConfig {
@@ -106,10 +114,23 @@ impl ProxyConfig {
         (num_cpus::get() / 2).max(1)
     }
 
+    pub fn default_generated_cache_dir() -> PathBuf {
+        Self::default_cache_dir().join("generated-coarse")
+    }
+
     pub fn defaults() -> Self {
+        let cache_dir = Self::default_cache_dir();
         Self {
-            cache_dir: Self::default_cache_dir(),
+            generated_cache_dir: cache_dir.join("generated-coarse"),
+            cache_dir,
             concurrency: Self::default_concurrency(),
+            generated_enabled: true,
+            generated_concurrency: 1,
+            generated_background_chunk_limit: 32,
+            generated_target_long_axis: 512,
+            generated_chunk_long_axis: 256,
+            generated_max_chunk_bytes: 2 * 1024 * 1024,
+            generated_disk_budget_bytes: None,
         }
     }
 }

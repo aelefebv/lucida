@@ -64,6 +64,24 @@ struct ServeArgs {
     /// Also readable from `LUCIDA_PROXY_CONCURRENCY`. CLI flag wins.
     #[arg(long, env = "LUCIDA_PROXY_CONCURRENCY")]
     proxy_concurrency: Option<usize>,
+    /// Enable server-generated coarse chunks.
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_ENABLED", default_value_t = true)]
+    generated_coarse_enabled: bool,
+    /// Override the generated coarse derived-cache root.
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_CACHE_DIR")]
+    generated_coarse_cache_dir: Option<PathBuf>,
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_CONCURRENCY")]
+    generated_coarse_concurrency: Option<usize>,
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_BACKGROUND_CHUNKS")]
+    generated_coarse_background_chunks: Option<usize>,
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_TARGET_LONG_AXIS")]
+    generated_coarse_target_long_axis: Option<u64>,
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_CHUNK_LONG_AXIS")]
+    generated_coarse_chunk_long_axis: Option<u64>,
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_MAX_CHUNK_BYTES")]
+    generated_coarse_max_chunk_bytes: Option<u64>,
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES")]
+    generated_coarse_disk_budget_bytes: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -167,8 +185,23 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .unwrap_or_else(ProxyConfig::default_concurrency);
 
     let proxy_config = ProxyConfig {
+        generated_cache_dir: args
+            .generated_coarse_cache_dir
+            .unwrap_or_else(|| proxy_cache_dir.join("generated-coarse")),
         cache_dir: proxy_cache_dir,
         concurrency: proxy_concurrency,
+        generated_enabled: args.generated_coarse_enabled,
+        generated_concurrency: args
+            .generated_coarse_concurrency
+            .map(|n| n.max(1))
+            .unwrap_or(1),
+        generated_background_chunk_limit: args.generated_coarse_background_chunks.unwrap_or(32),
+        generated_target_long_axis: args.generated_coarse_target_long_axis.unwrap_or(512),
+        generated_chunk_long_axis: args.generated_coarse_chunk_long_axis.unwrap_or(256),
+        generated_max_chunk_bytes: args
+            .generated_coarse_max_chunk_bytes
+            .unwrap_or(2 * 1024 * 1024),
+        generated_disk_budget_bytes: args.generated_coarse_disk_budget_bytes,
     };
     // Operational logs go through the configured tracing subscriber
     // so RUST_LOG filtering applies (ADR 0012).
@@ -176,6 +209,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         cache_dir = %proxy_config.cache_dir.display(),
         concurrency = proxy_config.concurrency,
         "proxy.config",
+    );
+    tracing::info!(
+        enabled = proxy_config.generated_enabled,
+        cache_dir = %proxy_config.generated_cache_dir.display(),
+        concurrency = proxy_config.generated_concurrency,
+        background_chunk_limit = proxy_config.generated_background_chunk_limit,
+        target_long_axis = proxy_config.generated_target_long_axis,
+        chunk_long_axis = proxy_config.generated_chunk_long_axis,
+        max_chunk_bytes = proxy_config.generated_max_chunk_bytes,
+        disk_budget_bytes = ?proxy_config.generated_disk_budget_bytes,
+        "generated_coarse.config",
     );
 
     let session = Arc::new(Mutex::new(Session::new()));

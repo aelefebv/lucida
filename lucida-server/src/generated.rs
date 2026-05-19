@@ -18,6 +18,7 @@ use lucida_protocol::{
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary,
 };
 use lucida_store::cache::CachedStore;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 use crate::BroadcastItem;
@@ -77,6 +78,7 @@ pub struct GeneratedCoarsePlan {
     pub cache_identity: String,
     pub source_content_id: String,
     pub config: GeneratedCoarseConfig,
+    pub output_data_type: DataType,
     pub input_level_candidates: Vec<usize>,
     pub availability: GeneratedLevelAvailability,
 }
@@ -175,6 +177,31 @@ struct GeneratedSchedulerState {
     deduped: u64,
     cache_reused: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DerivedLevelDiskManifest {
+    cache_identity: String,
+    generated_level_id: String,
+    source_content_id: String,
+    image_id: ImageId,
+    output_data_type: DataType,
+    config: GeneratedCoarseConfigDisk,
+    availability: GeneratedLevelAvailability,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GeneratedCoarseConfigDisk {
+    target_long_axis: u64,
+    chunk_long_axis: u64,
+    max_chunk_bytes: u64,
+    generator_version: String,
+    downsample_algorithm_version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct DerivedReadinessIndex {
+    chunks: Vec<GeneratedChunkStatusUpdate>,
+}
 #[derive(Debug, Clone)]
 pub enum DerivedChunkLookup {
     Ready(Vec<u8>),
@@ -202,12 +229,14 @@ struct DerivedChunkEntry {
 struct DerivedChunkState {
     availability: GeneratedAvailabilitySnapshot,
     chunks: HashMap<DerivedChunkKey, DerivedChunkEntry>,
+    level_identities: HashMap<(ImageId, u32), String>,
 }
 
 #[derive(Debug)]
 struct DerivedDiskCache {
     root_dir: PathBuf,
     url_hash: [u8; 16],
+    disk_budget_bytes: Option<u64>,
     tmp_counter: AtomicU64,
 }
 
@@ -231,10 +260,19 @@ impl DerivedChunkCache {
     }
 
     pub fn new_on_disk(root_dir: PathBuf, url_hash: [u8; 16]) -> Self {
+        Self::new_on_disk_with_budget(root_dir, url_hash, None)
+    }
+
+    pub fn new_on_disk_with_budget(
+        root_dir: PathBuf,
+        url_hash: [u8; 16],
+        disk_budget_bytes: Option<u64>,
+    ) -> Self {
         let disk = match fs::create_dir_all(&root_dir) {
             Ok(()) => Some(Arc::new(DerivedDiskCache {
                 root_dir,
                 url_hash,
+                disk_budget_bytes,
                 tmp_counter: AtomicU64::new(0),
             })),
             Err(e) => {
@@ -260,6 +298,7 @@ impl DerivedChunkCache {
         let mut state = self.inner.lock().unwrap();
         state.availability = snapshot.clone();
         state.chunks.clear();
+        state.level_identities.clear();
         for chunk in snapshot.chunks {
             let key = DerivedChunkKey {
                 image_id: chunk.image_id,
@@ -278,29 +317,60 @@ impl DerivedChunkCache {
     }
 
     pub fn apply_delta(&self, delta: GeneratedAvailabilityDelta) {
-        let mut state = self.inner.lock().unwrap();
-        state.availability.apply_delta(delta.clone());
-        for chunk in delta.chunks {
-            let key = DerivedChunkKey {
-                image_id: chunk.image_id,
-                level_index: chunk.level_index,
-                key: chunk.key,
-            };
-            state
-                .chunks
-                .entry(key)
-                .and_modify(|entry| {
-                    entry.status = chunk.status;
-                    entry.message = chunk.message.clone();
-                    if chunk.status != GeneratedChunkStatus::Ready {
-                        entry.bytes = None;
-                    }
+        let indexes = {
+            let mut state = self.inner.lock().unwrap();
+            state.availability.apply_delta(delta.clone());
+            let mut affected_identities = HashSet::new();
+            for chunk in delta.chunks {
+                let image_id = chunk.image_id;
+                let level_index = chunk.level_index;
+                if let Some(identity) = state
+                    .level_identities
+                    .get(&(image_id.clone(), level_index))
+                    .cloned()
+                {
+                    affected_identities.insert(identity);
+                }
+                let key = DerivedChunkKey {
+                    image_id,
+                    level_index,
+                    key: chunk.key,
+                };
+                state
+                    .chunks
+                    .entry(key)
+                    .and_modify(|entry| {
+                        entry.status = chunk.status;
+                        entry.message = chunk.message.clone();
+                        if chunk.status != GeneratedChunkStatus::Ready {
+                            entry.bytes = None;
+                        }
+                    })
+                    .or_insert(DerivedChunkEntry {
+                        status: chunk.status,
+                        message: chunk.message,
+                        bytes: None,
+                    });
+            }
+            affected_identities
+                .into_iter()
+                .map(|identity| {
+                    let chunks = chunks_for_identity_locked(&state, &identity);
+                    (identity, chunks)
                 })
-                .or_insert(DerivedChunkEntry {
-                    status: chunk.status,
-                    message: chunk.message,
-                    bytes: None,
-                });
+                .collect::<Vec<_>>()
+        };
+
+        if let Some(disk) = &self.disk {
+            for (identity, chunks) in indexes {
+                if let Err(e) = disk.put_index(&identity, &chunks) {
+                    tracing::warn!(
+                        identity = %identity,
+                        error = %e,
+                        "generated coarse readiness index persist failed"
+                    );
+                }
+            }
         }
     }
 
@@ -395,6 +465,97 @@ impl DerivedChunkCache {
         Ok(true)
     }
 
+    pub fn register_generated_plan(
+        &self,
+        plan: &GeneratedCoarsePlan,
+    ) -> io::Result<GeneratedAvailabilityDelta> {
+        if let Some(disk) = &self.disk {
+            disk.put_manifest(plan)?;
+        }
+
+        let recovered_chunks = if let Some(disk) = &self.disk {
+            disk.recover_readiness(plan)?
+        } else {
+            vec![]
+        };
+        let delta = GeneratedAvailabilityDelta {
+            levels: vec![plan.availability.clone()],
+            chunks: recovered_chunks,
+        };
+
+        {
+            let mut state = self.inner.lock().unwrap();
+            state.level_identities.insert(
+                (plan.image_id.clone(), plan.level_index),
+                plan.cache_identity.clone(),
+            );
+        }
+        self.apply_delta(delta.clone());
+        Ok(delta)
+    }
+
+    pub fn persist_readiness_indexes(&self) {
+        let Some(disk) = &self.disk else {
+            return;
+        };
+        let indexes = {
+            let state = self.inner.lock().unwrap();
+            state
+                .level_identities
+                .values()
+                .cloned()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(|identity| {
+                    let chunks = chunks_for_identity_locked(&state, &identity);
+                    (identity, chunks)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (identity, chunks) in indexes {
+            if let Err(e) = disk.put_index(&identity, &chunks) {
+                tracing::warn!(
+                    identity = %identity,
+                    error = %e,
+                    "generated coarse readiness index persist failed"
+                );
+            }
+        }
+    }
+
+    pub fn missing_ready_delta(&self) -> GeneratedAvailabilityDelta {
+        let Some(disk) = &self.disk else {
+            return GeneratedAvailabilityDelta::default();
+        };
+        let state = self.inner.lock().unwrap();
+        let chunks = state
+            .chunks
+            .iter()
+            .filter_map(|(key, entry)| {
+                if entry.status != GeneratedChunkStatus::Ready {
+                    return None;
+                }
+                let identity = state
+                    .level_identities
+                    .get(&(key.image_id.clone(), key.level_index))?;
+                if disk.chunk_exists(identity, &key.image_id, key.level_index, &key.key) {
+                    return None;
+                }
+                Some(GeneratedChunkStatusUpdate {
+                    image_id: key.image_id.clone(),
+                    level_index: key.level_index,
+                    key: key.key.clone(),
+                    status: GeneratedChunkStatus::Unavailable,
+                    message: Some("generated chunk was evicted from derived cache".into()),
+                })
+            })
+            .collect();
+        GeneratedAvailabilityDelta {
+            levels: vec![],
+            chunks,
+        }
+    }
+
     pub fn is_generated_level(&self, image_id: &ImageId, level_index: u32) -> bool {
         self.inner
             .lock()
@@ -406,43 +567,65 @@ impl DerivedChunkCache {
     }
 
     pub fn lookup(&self, image_id: &ImageId, level_index: u32, key: &str) -> DerivedChunkLookup {
-        let state = self.inner.lock().unwrap();
-        let chunk_key = DerivedChunkKey {
-            image_id: image_id.clone(),
-            level_index,
-            key: key.to_string(),
-        };
-        if let Some(entry) = state.chunks.get(&chunk_key) {
-            if entry.status == GeneratedChunkStatus::Ready {
-                if let Some(bytes) = &entry.bytes {
-                    return DerivedChunkLookup::Ready(bytes.clone());
+        let disk_load = {
+            let state = self.inner.lock().unwrap();
+            let chunk_key = DerivedChunkKey {
+                image_id: image_id.clone(),
+                level_index,
+                key: key.to_string(),
+            };
+            if let Some(entry) = state.chunks.get(&chunk_key) {
+                if entry.status == GeneratedChunkStatus::Ready {
+                    if let Some(bytes) = &entry.bytes {
+                        return DerivedChunkLookup::Ready(bytes.clone());
+                    }
+                    state
+                        .level_identities
+                        .get(&(image_id.clone(), level_index))
+                        .cloned()
+                } else {
+                    return DerivedChunkLookup::Status {
+                        status: entry.status,
+                        message: entry.message.clone(),
+                    };
                 }
-                return DerivedChunkLookup::Status {
-                    status: GeneratedChunkStatus::Unavailable,
-                    message: Some("generated chunk marked ready but bytes are unavailable".into()),
-                };
+            } else {
+                if state.availability.levels.iter().any(|level| {
+                    level.image_id == *image_id && level.info.level_index == level_index
+                }) {
+                    return DerivedChunkLookup::Status {
+                        status: GeneratedChunkStatus::Pending,
+                        message: None,
+                    };
+                }
+                None
             }
-            return DerivedChunkLookup::Status {
-                status: entry.status,
-                message: entry.message.clone(),
-            };
-        }
+        };
 
-        if state
-            .availability
-            .levels
-            .iter()
-            .any(|level| level.image_id == *image_id && level.info.level_index == level_index)
-        {
-            return DerivedChunkLookup::Status {
-                status: GeneratedChunkStatus::Pending,
-                message: None,
-            };
+        if let (Some(identity), Some(disk)) = (disk_load, &self.disk) {
+            match disk.get(&identity, image_id, level_index, key) {
+                Ok(Some(bytes)) => {
+                    self.seed_ready_chunk(
+                        image_id.clone(),
+                        level_index,
+                        key.to_string(),
+                        bytes.clone(),
+                    );
+                    return DerivedChunkLookup::Ready(bytes);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return DerivedChunkLookup::Status {
+                        status: GeneratedChunkStatus::FailedTransient,
+                        message: Some(e.to_string()),
+                    };
+                }
+            }
         }
 
         DerivedChunkLookup::Status {
             status: GeneratedChunkStatus::Unavailable,
-            message: Some("generated level is not registered".into()),
+            message: Some("generated chunk marked ready but bytes are unavailable".into()),
         }
     }
 }
@@ -452,6 +635,18 @@ impl DerivedDiskCache {
         self.root_dir.join(hex16(&self.url_hash))
     }
 
+    fn identity_dir(&self, level_identity: &str) -> PathBuf {
+        self.dataset_dir().join(sanitize_segment(level_identity))
+    }
+
+    fn manifest_path(&self, level_identity: &str) -> PathBuf {
+        self.identity_dir(level_identity).join("manifest.json")
+    }
+
+    fn index_path(&self, level_identity: &str) -> PathBuf {
+        self.identity_dir(level_identity).join("readiness.json")
+    }
+
     fn chunk_path(
         &self,
         level_identity: &str,
@@ -459,11 +654,164 @@ impl DerivedDiskCache {
         level_index: u32,
         key: &str,
     ) -> PathBuf {
-        self.dataset_dir()
-            .join(sanitize_segment(level_identity))
+        self.identity_dir(level_identity)
             .join(sanitize_segment(&image_id.0))
             .join(format!("L{level_index}"))
             .join(format!("{}.bin", sanitize_segment(key)))
+    }
+
+    fn put_manifest(&self, plan: &GeneratedCoarsePlan) -> io::Result<()> {
+        let manifest = DerivedLevelDiskManifest {
+            cache_identity: plan.cache_identity.clone(),
+            generated_level_id: plan.generated_level_id.clone(),
+            source_content_id: plan.source_content_id.clone(),
+            image_id: plan.image_id.clone(),
+            output_data_type: plan.output_data_type,
+            config: GeneratedCoarseConfigDisk {
+                target_long_axis: plan.config.target_long_axis,
+                chunk_long_axis: plan.config.chunk_long_axis,
+                max_chunk_bytes: plan.config.max_chunk_bytes,
+                generator_version: GENERATED_COARSE_GENERATOR_VERSION.into(),
+                downsample_algorithm_version: DOWNSAMPLE_ALGORITHM_VERSION.into(),
+            },
+            availability: plan.availability.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.put_bytes_atomic(&self.manifest_path(&plan.cache_identity), &bytes)?;
+        Ok(())
+    }
+
+    fn put_index(
+        &self,
+        level_identity: &str,
+        chunks: &[GeneratedChunkStatusUpdate],
+    ) -> io::Result<()> {
+        let index = DerivedReadinessIndex {
+            chunks: chunks.to_vec(),
+        };
+        let bytes = serde_json::to_vec_pretty(&index)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.put_bytes_atomic(&self.index_path(level_identity), &bytes)
+    }
+
+    fn recover_readiness(
+        &self,
+        plan: &GeneratedCoarsePlan,
+    ) -> io::Result<Vec<GeneratedChunkStatusUpdate>> {
+        let expected_bytes = expected_generated_chunk_bytes(plan);
+        let mut recovered = Vec::new();
+        let mut seen = HashSet::new();
+
+        if let Some(index) = self.read_index(&plan.cache_identity)? {
+            for chunk in index.chunks {
+                let valid = chunk.status != GeneratedChunkStatus::Ready
+                    || self
+                        .chunk_file_valid(
+                            &plan.cache_identity,
+                            &chunk.image_id,
+                            chunk.level_index,
+                            &chunk.key,
+                            expected_bytes,
+                        )
+                        .unwrap_or(false);
+                if valid {
+                    seen.insert(chunk.key.clone());
+                    recovered.push(chunk);
+                }
+            }
+        }
+
+        for key in self.scan_ready_chunk_keys(plan, expected_bytes)? {
+            if seen.insert(key.clone()) {
+                recovered.push(GeneratedChunkStatusUpdate {
+                    image_id: plan.image_id.clone(),
+                    level_index: plan.level_index,
+                    key,
+                    status: GeneratedChunkStatus::Ready,
+                    message: None,
+                });
+            }
+        }
+        Ok(recovered)
+    }
+
+    fn read_index(&self, level_identity: &str) -> io::Result<Option<DerivedReadinessIndex>> {
+        let path = self.index_path(level_identity);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    fn scan_ready_chunk_keys(
+        &self,
+        plan: &GeneratedCoarsePlan,
+        expected_bytes: u64,
+    ) -> io::Result<Vec<String>> {
+        let dir = self
+            .identity_dir(&plan.cache_identity)
+            .join(sanitize_segment(&plan.image_id.0))
+            .join(format!("L{}", plan.level_index));
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e),
+        };
+        let valid_keys: HashSet<String> = plan
+            .chunk_keys_for_all_tc()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut keys = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("bin") {
+                continue;
+            }
+            if entry.metadata().map(|m| m.len()).unwrap_or(0) != expected_bytes {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let key = stem.replace('_', "/");
+            if valid_keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
+    fn chunk_file_valid(
+        &self,
+        level_identity: &str,
+        image_id: &ImageId,
+        level_index: u32,
+        key: &str,
+        expected_bytes: u64,
+    ) -> io::Result<bool> {
+        let metadata =
+            match fs::metadata(self.chunk_path(level_identity, image_id, level_index, key)) {
+                Ok(metadata) => metadata,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            };
+        Ok(metadata.len() == expected_bytes)
+    }
+
+    fn chunk_exists(
+        &self,
+        level_identity: &str,
+        image_id: &ImageId,
+        level_index: u32,
+        key: &str,
+    ) -> bool {
+        self.chunk_path(level_identity, image_id, level_index, key)
+            .exists()
     }
 
     fn get(
@@ -493,6 +841,10 @@ impl DerivedDiskCache {
         bytes: &[u8],
     ) -> io::Result<()> {
         let path = self.chunk_path(level_identity, image_id, level_index, key);
+        self.put_bytes_atomic(&path, bytes)
+    }
+
+    fn put_bytes_atomic(&self, path: &PathBuf, bytes: &[u8]) -> io::Result<()> {
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -535,6 +887,39 @@ impl DerivedDiskCache {
 
         if let Ok(dir) = File::open(parent) {
             let _ = dir.sync_all();
+        }
+        self.enforce_budget()?;
+        Ok(())
+    }
+
+    fn enforce_budget(&self) -> io::Result<()> {
+        let Some(budget) = self.disk_budget_bytes else {
+            return Ok(());
+        };
+        let dataset_dir = self.dataset_dir();
+        let mut identities = Vec::new();
+        let mut total = 0_u64;
+        let entries = match fs::read_dir(&dataset_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let (bytes, modified) = dir_size_and_modified(&path)?;
+            total = total.saturating_add(bytes);
+            identities.push((path, bytes, modified));
+        }
+        identities.sort_by_key(|(_, _, modified)| *modified);
+        for (path, bytes, _) in identities {
+            if total <= budget {
+                break;
+            }
+            fs::remove_dir_all(&path)?;
+            total = total.saturating_sub(bytes);
         }
         Ok(())
     }
@@ -644,6 +1029,7 @@ fn plan_generated_coarse_for_image(
         cache_identity,
         source_content_id,
         config,
+        output_data_type: image.multiscale.data_type,
         input_level_candidates: candidates,
         availability,
     })
@@ -673,6 +1059,18 @@ impl GeneratedCoarsePlan {
             for gy in 0..grid[3] {
                 for gx in 0..grid[4] {
                     keys.push(chunk_key(self.level_index, t, c, gz, gy, gx));
+                }
+            }
+        }
+        keys
+    }
+
+    pub fn chunk_keys_for_all_tc(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        for t in 0..self.availability.level.shape[0] {
+            for c in 0..self.availability.level.shape[1] {
+                if let (Ok(t), Ok(c)) = (u32::try_from(t), u32::try_from(c)) {
+                    keys.extend(self.chunk_keys_for_tc(t, c));
                 }
             }
         }
@@ -1345,9 +1743,9 @@ where
                 key,
                 GeneratedChunkStatus::Ready,
                 None,
-                cache,
-                session,
-                tx,
+                cache.clone(),
+                session.clone(),
+                tx.clone(),
             )
             .await;
             return MaterializeOneResult::CacheReused;
@@ -1479,11 +1877,22 @@ where
                 key,
                 GeneratedChunkStatus::Ready,
                 None,
-                cache,
-                session,
-                tx,
+                cache.clone(),
+                session.clone(),
+                tx.clone(),
             )
             .await;
+            let withdrawal_delta = cache.missing_ready_delta();
+            if !withdrawal_delta.chunks.is_empty() {
+                publish_generated_delta(
+                    plan.dataset_id.clone(),
+                    withdrawal_delta,
+                    cache,
+                    session,
+                    tx,
+                )
+                .await;
+            }
             MaterializeOneResult::Ready
         }
         Err(e) => {
@@ -1708,6 +2117,67 @@ fn generated_status_for_source_error(error: &BuildSourceError) -> GeneratedChunk
         | BuildSourceError::ShortChunk { .. }
         | BuildSourceError::TooLarge => GeneratedChunkStatus::FailedPermanent,
     }
+}
+
+fn chunks_for_identity_locked(
+    state: &DerivedChunkState,
+    identity: &str,
+) -> Vec<GeneratedChunkStatusUpdate> {
+    let levels_for_identity = state
+        .level_identities
+        .iter()
+        .filter_map(|((image_id, level_index), mapped)| {
+            (mapped == identity).then_some((image_id.clone(), *level_index))
+        })
+        .collect::<HashSet<_>>();
+    state
+        .chunks
+        .iter()
+        .filter_map(|(key, entry)| {
+            levels_for_identity
+                .contains(&(key.image_id.clone(), key.level_index))
+                .then_some(GeneratedChunkStatusUpdate {
+                    image_id: key.image_id.clone(),
+                    level_index: key.level_index,
+                    key: key.key.clone(),
+                    status: entry.status,
+                    message: entry.message.clone(),
+                })
+        })
+        .collect()
+}
+
+fn expected_generated_chunk_bytes(plan: &GeneratedCoarsePlan) -> u64 {
+    checked_product(&[
+        plan.availability.level.chunk_shape[2],
+        plan.availability.level.chunk_shape[3],
+        plan.availability.level.chunk_shape[4],
+        data_type_size(plan.output_data_type),
+    ])
+    .unwrap_or(0)
+}
+
+fn dir_size_and_modified(path: &PathBuf) -> io::Result<(u64, std::time::SystemTime)> {
+    let mut total = 0_u64;
+    let mut oldest = std::time::SystemTime::now();
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((0, oldest)),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let metadata = entry.metadata()?;
+        let modified = metadata.modified().unwrap_or(oldest);
+        oldest = oldest.min(modified);
+        if metadata.is_dir() {
+            let (bytes, child_modified) = dir_size_and_modified(&entry.path())?;
+            total = total.saturating_add(bytes);
+            oldest = oldest.min(child_modified);
+        } else {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok((total, oldest))
 }
 
 fn source_content_id_for_image(manifest: &DatasetManifest, image: &ImageSpec) -> String {
@@ -2446,6 +2916,135 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn register_generated_plan_recovers_ready_chunks_from_readiness_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = source_manifest();
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+        let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [9; 16]);
+        cache.register_generated_plan(&plan).unwrap();
+        let bytes = vec![1_u8; expected_generated_chunk_bytes(&plan) as usize];
+        cache
+            .put_ready_chunk_atomic(
+                &plan.cache_identity,
+                plan.image_id.clone(),
+                plan.level_index,
+                "1/0/0/0/0/0".into(),
+                bytes.clone(),
+            )
+            .unwrap();
+        cache.set_chunk_status(
+            plan.image_id.clone(),
+            plan.level_index,
+            "1/0/0/0/0/0".into(),
+            GeneratedChunkStatus::Ready,
+            None,
+        );
+
+        let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [9; 16]);
+        let delta = reopened.register_generated_plan(&plan).unwrap();
+
+        assert_eq!(delta.chunks.len(), 1);
+        assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Ready);
+        match reopened.lookup(&plan.image_id, plan.level_index, "1/0/0/0/0/0") {
+            DerivedChunkLookup::Ready(recovered) => assert_eq!(recovered, bytes),
+            DerivedChunkLookup::Status { status, message } => {
+                panic!("expected recovered bytes, got {status:?}: {message:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn register_generated_plan_scans_when_readiness_index_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = source_manifest();
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+        let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [10; 16]);
+        cache.register_generated_plan(&plan).unwrap();
+        let bytes = vec![0_u8; expected_generated_chunk_bytes(&plan) as usize];
+        cache
+            .put_ready_chunk_atomic(
+                &plan.cache_identity,
+                plan.image_id.clone(),
+                plan.level_index,
+                "1/0/0/0/0/0".into(),
+                bytes,
+            )
+            .unwrap();
+        let _ = fs::remove_file(
+            cache
+                .disk
+                .as_ref()
+                .unwrap()
+                .index_path(&plan.cache_identity),
+        );
+
+        let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [10; 16]);
+        let delta = reopened.register_generated_plan(&plan).unwrap();
+
+        assert_eq!(delta.chunks.len(), 1);
+        assert_eq!(delta.chunks[0].key, "1/0/0/0/0/0");
+        assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Ready);
+    }
+
+    #[test]
+    fn corrupted_generated_chunk_is_not_recovered_as_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = source_manifest();
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+        let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [11; 16]);
+        cache.register_generated_plan(&plan).unwrap();
+        let path = cache.disk.as_ref().unwrap().chunk_path(
+            &plan.cache_identity,
+            &plan.image_id,
+            plan.level_index,
+            "1/0/0/0/0/0",
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, [1_u8]).unwrap();
+
+        let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [11; 16]);
+        let delta = reopened.register_generated_plan(&plan).unwrap();
+
+        assert!(delta.chunks.is_empty());
+    }
+
+    #[test]
+    fn disk_budget_eviction_withdraws_missing_ready_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = source_manifest();
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+        let cache =
+            DerivedChunkCache::new_on_disk_with_budget(dir.path().to_path_buf(), [12; 16], Some(1));
+        cache.register_generated_plan(&plan).unwrap();
+        cache
+            .put_ready_chunk_atomic(
+                &plan.cache_identity,
+                plan.image_id.clone(),
+                plan.level_index,
+                "1/0/0/0/0/0".into(),
+                vec![1, 2, 3, 4],
+            )
+            .unwrap();
+
+        let delta = cache.missing_ready_delta();
+
+        assert_eq!(delta.chunks.len(), 1);
+        assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Unavailable);
+        assert_eq!(
+            delta.chunks[0].message.as_deref(),
+            Some("generated chunk was evicted from derived cache")
+        );
     }
 
     #[tokio::test]

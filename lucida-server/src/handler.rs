@@ -609,14 +609,15 @@ async fn handle_open_remote_dataset(
     // Build operational binding.
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
-    let generated_plans =
-        plan_generated_coarse_for_manifest(&result.manifest, GeneratedCoarseConfig::default());
-    let generated_initial_delta = GeneratedAvailabilityDelta {
-        levels: generated_plans
-            .iter()
-            .map(|plan| plan.availability.clone())
-            .collect(),
-        chunks: vec![],
+    let generated_config = GeneratedCoarseConfig {
+        target_long_axis: proxy_config.generated_target_long_axis,
+        chunk_long_axis: proxy_config.generated_chunk_long_axis,
+        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+    };
+    let generated_plans = if proxy_config.generated_enabled {
+        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    } else {
+        vec![]
     };
 
     // Build the initial proxy availability catalog by enumerating
@@ -667,12 +668,31 @@ async fn handle_open_remote_dataset(
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
     let url_hash16 = dataset_url_hash16(&url);
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk(
-        proxy_config.cache_dir.join("generated-coarse"),
+    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
+        proxy_config.generated_cache_dir.clone(),
         url_hash16,
+        proxy_config.generated_disk_budget_bytes,
     ));
-    if !generated_initial_delta.levels.is_empty() {
-        derived_chunks.apply_delta(generated_initial_delta.clone());
+    let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
+    for plan in &generated_plans {
+        match derived_chunks.register_generated_plan(plan) {
+            Ok(delta) => {
+                generated_initial_delta.levels.extend(delta.levels);
+                generated_initial_delta.chunks.extend(delta.chunks);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    dataset_id = %dataset_id,
+                    image = %plan.image_id.0,
+                    error = %e,
+                    "generated coarse derived-cache registration failed"
+                );
+                derived_chunks.upsert_level(plan.availability.clone());
+                generated_initial_delta
+                    .levels
+                    .push(plan.availability.clone());
+            }
+        }
     }
     let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
     let generated_manifest = Arc::new(result.manifest.clone());
@@ -686,7 +706,11 @@ async fn handle_open_remote_dataset(
         derived_chunks.clone(),
         session.clone(),
         tx.clone(),
-        GeneratedSchedulingConfig::default(),
+        GeneratedSchedulingConfig {
+            concurrency: proxy_config.generated_concurrency,
+            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            ..GeneratedSchedulingConfig::default()
+        },
     ));
     generated_service.start();
     let proxy_generator = Arc::new(ProxyGenerator::new(
