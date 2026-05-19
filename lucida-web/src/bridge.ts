@@ -312,6 +312,10 @@ export class Bridge {
     this.send(JSON.stringify({ type: "open_remote_dataset", url }));
   }
 
+  sendViewerInterest(interest: unknown) {
+    this.send(JSON.stringify({ type: "viewer_interest", interest }));
+  }
+
   sendFollow(target: ClientId | null) {
     this.send(JSON.stringify({ type: "follow", target }));
   }

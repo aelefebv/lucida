@@ -1,21 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lucida_content::{
-    DataType, DatasetId, DatasetManifest, GeneratedLevelInfo, GeneratedLevelProvenance,
-    GeneratedLevelRole, ImageId, ImageSpec, LevelGeometry,
+    DataType, DatasetId, DatasetKind, DatasetManifest, GeneratedLevelInfo,
+    GeneratedLevelProvenance, GeneratedLevelRole, ImageId, ImageSpec, LevelGeometry,
 };
-use lucida_core::protocol::ServerMessage;
+use lucida_core::protocol::{
+    ClientId, ServerMessage, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
+};
 use lucida_protocol::{
     GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary,
 };
 use lucida_store::cache::CachedStore;
-use tokio::sync::{Mutex as AsyncMutex, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 use crate::BroadcastItem;
 use crate::binding::ChunkResolver;
@@ -76,6 +79,101 @@ pub struct GeneratedCoarsePlan {
     pub config: GeneratedCoarseConfig,
     pub input_level_candidates: Vec<usize>,
     pub availability: GeneratedLevelAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedSchedulingConfig {
+    pub concurrency: usize,
+    pub per_client_key_cap: usize,
+    pub background_chunk_limit: usize,
+    pub background_trickle_when_active: bool,
+}
+
+impl Default for GeneratedSchedulingConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 1,
+            per_client_key_cap: 256,
+            background_chunk_limit: 32,
+            background_trickle_when_active: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeneratedSchedulingLane {
+    Visible,
+    Predicted,
+    Background,
+}
+
+impl GeneratedSchedulingLane {
+    fn rank(self) -> u8 {
+        match self {
+            GeneratedSchedulingLane::Visible => 0,
+            GeneratedSchedulingLane::Predicted => 1,
+            GeneratedSchedulingLane::Background => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GeneratedWorkKey {
+    pub dataset_id: DatasetId,
+    pub image_id: ImageId,
+    pub level_index: u32,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedWorkItem {
+    pub work_key: GeneratedWorkKey,
+    pub lane: GeneratedSchedulingLane,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GeneratedSchedulerTelemetry {
+    pub queued_visible: usize,
+    pub queued_predicted: usize,
+    pub queued_background: usize,
+    pub running: usize,
+    pub completed: u64,
+    pub failed: u64,
+    pub canceled: u64,
+    pub deduped: u64,
+    pub cache_reused: u64,
+}
+
+#[derive(Clone)]
+pub struct GeneratedCoarseService {
+    inner: Arc<GeneratedCoarseServiceInner>,
+}
+
+struct GeneratedCoarseServiceInner {
+    plans: HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+    manifest: Arc<DatasetManifest>,
+    store: Arc<CachedStore>,
+    resolver: Arc<ChunkResolver>,
+    cache: Arc<DerivedChunkCache>,
+    session: Arc<AsyncMutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
+    config: GeneratedSchedulingConfig,
+    state: AsyncMutex<GeneratedSchedulerState>,
+    notify: Notify,
+}
+
+#[derive(Debug, Default)]
+struct GeneratedSchedulerState {
+    interests: HashMap<(ClientId, DatasetId), ViewerInterestHint>,
+    queued: VecDeque<GeneratedWorkItem>,
+    queued_keys: HashMap<GeneratedWorkKey, GeneratedSchedulingLane>,
+    running: HashSet<GeneratedWorkKey>,
+    completed_keys: HashSet<GeneratedWorkKey>,
+    completed: u64,
+    failed: u64,
+    canceled: u64,
+    deduped: u64,
+    cache_reused: u64,
 }
 #[derive(Debug, Clone)]
 pub enum DerivedChunkLookup {
@@ -582,6 +680,477 @@ impl GeneratedCoarsePlan {
     }
 }
 
+impl GeneratedCoarseService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        plans: Vec<GeneratedCoarsePlan>,
+        manifest: Arc<DatasetManifest>,
+        store: Arc<CachedStore>,
+        resolver: Arc<ChunkResolver>,
+        cache: Arc<DerivedChunkCache>,
+        session: Arc<AsyncMutex<Session>>,
+        tx: broadcast::Sender<BroadcastItem>,
+        config: GeneratedSchedulingConfig,
+    ) -> Self {
+        let plan_map = plans
+            .into_iter()
+            .map(|plan| ((plan.image_id.clone(), plan.level_index), plan))
+            .collect();
+        Self {
+            inner: Arc::new(GeneratedCoarseServiceInner {
+                plans: plan_map,
+                manifest,
+                store,
+                resolver,
+                cache,
+                session,
+                tx,
+                config,
+                state: AsyncMutex::new(GeneratedSchedulerState::default()),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    pub fn inert(cache: Arc<DerivedChunkCache>) -> Self {
+        let manifest = Arc::new(DatasetManifest::new(
+            DatasetId("__generated_inert__".into()),
+            "inert".into(),
+            DatasetKind::Single,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            None,
+        ));
+        let store =
+            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cached = Arc::new(CachedStore::new(store, 1));
+        let resolver = Arc::new(ChunkResolver::new(
+            &lucida_store::import_types::ServerBindingSeed { images: vec![] },
+        ));
+        let (tx, _rx) = broadcast::channel(1);
+        Self::new(
+            vec![],
+            manifest,
+            cached,
+            resolver,
+            cache,
+            Arc::new(AsyncMutex::new(Session::new())),
+            tx,
+            GeneratedSchedulingConfig {
+                background_chunk_limit: 0,
+                ..GeneratedSchedulingConfig::default()
+            },
+        )
+    }
+
+    pub fn start(&self) {
+        let concurrency = self.inner.config.concurrency.max(1);
+        for _ in 0..concurrency {
+            let service = self.clone();
+            tokio::spawn(async move {
+                service.worker_loop().await;
+            });
+        }
+    }
+
+    pub async fn enqueue_chunk_request(&self, image_id: &ImageId, level_index: u32, key: &str) {
+        let Some(plan) = self.inner.plans.get(&(image_id.clone(), level_index)) else {
+            return;
+        };
+        let work_key = GeneratedWorkKey {
+            dataset_id: plan.dataset_id.clone(),
+            image_id: image_id.clone(),
+            level_index,
+            key: key.to_string(),
+        };
+        self.enqueue_work(work_key, GeneratedSchedulingLane::Visible)
+            .await;
+    }
+
+    pub async fn apply_viewer_interest(
+        &self,
+        client_id: ClientId,
+        mut interest: ViewerInterestHint,
+    ) {
+        interest.client_id = Some(client_id);
+        let dataset_id = interest.dataset_id.clone();
+        let now_ms = current_unix_millis();
+        let mut state = self.inner.state.lock().await;
+        expire_interests_locked(&mut state, now_ms);
+        state
+            .interests
+            .insert((client_id, dataset_id), interest.clone());
+        enqueue_interest_locked(
+            &mut state,
+            &self.inner.plans,
+            &interest,
+            self.inner.config.per_client_key_cap,
+        );
+        prune_stale_queued_locked(&mut state, &self.inner.plans, now_ms);
+        drop(state);
+        self.inner.notify.notify_waiters();
+    }
+
+    pub async fn remove_client_interest(&self, client_id: ClientId) {
+        let mut state = self.inner.state.lock().await;
+        state.interests.retain(|(cid, _), _| *cid != client_id);
+        prune_stale_queued_locked(&mut state, &self.inner.plans, current_unix_millis());
+        drop(state);
+        self.inner.notify.notify_waiters();
+    }
+
+    pub async fn telemetry(&self) -> GeneratedSchedulerTelemetry {
+        let state = self.inner.state.lock().await;
+        telemetry_locked(&state)
+    }
+
+    pub async fn enqueue_background_fill(&self) {
+        if self.inner.config.background_chunk_limit == 0 {
+            return;
+        }
+        let mut admitted = 0usize;
+        for plan in self.inner.plans.values() {
+            'tc: for t in 0..plan.availability.level.shape[0] {
+                for c in 0..plan.availability.level.shape[1] {
+                    let (Ok(t), Ok(c)) = (u32::try_from(t), u32::try_from(c)) else {
+                        continue;
+                    };
+                    for key in plan.chunk_keys_for_tc(t, c) {
+                        let work_key = GeneratedWorkKey {
+                            dataset_id: plan.dataset_id.clone(),
+                            image_id: plan.image_id.clone(),
+                            level_index: plan.level_index,
+                            key,
+                        };
+                        self.enqueue_work(work_key, GeneratedSchedulingLane::Background)
+                            .await;
+                        admitted += 1;
+                        if admitted >= self.inner.config.background_chunk_limit {
+                            break 'tc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn enqueue_work(&self, work_key: GeneratedWorkKey, lane: GeneratedSchedulingLane) {
+        let mut state = self.inner.state.lock().await;
+        enqueue_work_locked(&mut state, work_key, lane);
+        drop(state);
+        self.inner.notify.notify_waiters();
+    }
+
+    async fn worker_loop(self) {
+        loop {
+            let item = self.next_work_item().await;
+            if self.should_cancel(&item).await {
+                self.mark_canceled(item.work_key).await;
+                continue;
+            }
+            let result = self.materialize_work_item(&item).await;
+            let mut state = self.inner.state.lock().await;
+            state.running.remove(&item.work_key);
+            match result {
+                MaterializeOneResult::Ready => {
+                    state.completed_keys.insert(item.work_key);
+                    state.completed += 1;
+                }
+                MaterializeOneResult::CacheReused => {
+                    state.completed_keys.insert(item.work_key);
+                    state.completed += 1;
+                    state.cache_reused += 1;
+                }
+                MaterializeOneResult::Failed => {
+                    state.failed += 1;
+                }
+                MaterializeOneResult::Canceled => {
+                    state.canceled += 1;
+                }
+            }
+        }
+    }
+
+    async fn next_work_item(&self) -> GeneratedWorkItem {
+        loop {
+            if let Some(item) = self.pop_next_work_item().await {
+                return item;
+            }
+            self.inner.notify.notified().await;
+        }
+    }
+
+    async fn pop_next_work_item(&self) -> Option<GeneratedWorkItem> {
+        let mut state = self.inner.state.lock().await;
+        expire_interests_locked(&mut state, current_unix_millis());
+        prune_stale_queued_locked(&mut state, &self.inner.plans, current_unix_millis());
+
+        loop {
+            let mut best_idx = None;
+            let mut best_lane = GeneratedSchedulingLane::Background;
+            let has_active = state
+                .queued
+                .iter()
+                .any(|item| item.lane != GeneratedSchedulingLane::Background);
+            for (idx, item) in state.queued.iter().enumerate() {
+                if item.lane == GeneratedSchedulingLane::Background
+                    && has_active
+                    && !self.inner.config.background_trickle_when_active
+                {
+                    continue;
+                }
+                if best_idx.is_none() || item.lane.rank() < best_lane.rank() {
+                    best_idx = Some(idx);
+                    best_lane = item.lane;
+                }
+            }
+
+            let idx = best_idx?;
+            let item = state.queued.remove(idx)?;
+            state.queued_keys.remove(&item.work_key);
+            if state.completed_keys.contains(&item.work_key) {
+                continue;
+            }
+            state.running.insert(item.work_key.clone());
+            return Some(item);
+        }
+    }
+
+    async fn should_cancel(&self, item: &GeneratedWorkItem) -> bool {
+        if item.lane == GeneratedSchedulingLane::Background {
+            return false;
+        }
+        let state = self.inner.state.lock().await;
+        !wanted_work_keys_locked(&state, &self.inner.plans, current_unix_millis())
+            .contains(&item.work_key)
+    }
+
+    async fn mark_canceled(&self, work_key: GeneratedWorkKey) {
+        let mut state = self.inner.state.lock().await;
+        state.running.remove(&work_key);
+        state.canceled += 1;
+    }
+
+    async fn materialize_work_item(&self, item: &GeneratedWorkItem) -> MaterializeOneResult {
+        if self.should_cancel(item).await {
+            return MaterializeOneResult::Canceled;
+        }
+        let Some(plan) = self
+            .inner
+            .plans
+            .get(&(item.work_key.image_id.clone(), item.work_key.level_index))
+            .cloned()
+        else {
+            return MaterializeOneResult::Failed;
+        };
+        let Some(coords) = parse_generated_chunk_key(&item.work_key.key) else {
+            publish_chunk_status(
+                &plan.dataset_id,
+                &plan.image_id,
+                plan.level_index,
+                item.work_key.key.clone(),
+                GeneratedChunkStatus::FailedPermanent,
+                Some("generated chunk key is malformed".into()),
+                self.inner.cache.clone(),
+                self.inner.session.clone(),
+                self.inner.tx.clone(),
+            )
+            .await;
+            return MaterializeOneResult::Failed;
+        };
+        if coords.level_index != plan.level_index {
+            return MaterializeOneResult::Failed;
+        }
+        materialize_generated_coarse_key(
+            &plan,
+            coords,
+            self.inner.manifest.clone(),
+            self.inner.store.clone(),
+            self.inner.resolver.clone(),
+            self.inner.cache.clone(),
+            self.inner.session.clone(),
+            self.inner.tx.clone(),
+            || async { self.should_cancel(item).await },
+        )
+        .await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterializeOneResult {
+    Ready,
+    CacheReused,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeneratedChunkCoords {
+    level_index: u32,
+    t: u32,
+    c: u32,
+    z: u64,
+    y: u64,
+    x: u64,
+}
+
+fn enqueue_interest_locked(
+    state: &mut GeneratedSchedulerState,
+    plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+    interest: &ViewerInterestHint,
+    per_client_key_cap: usize,
+) {
+    let mut admitted = 0usize;
+    for key in interest
+        .desired_keys
+        .iter()
+        .chain(interest.predicted_keys.iter())
+    {
+        if admitted >= per_client_key_cap {
+            break;
+        }
+        if let Some(work_key) = work_key_from_interest(plans, &interest.dataset_id, key) {
+            enqueue_work_locked(state, work_key, lane_from_interest_key(key));
+            admitted += 1;
+        }
+    }
+}
+
+fn enqueue_work_locked(
+    state: &mut GeneratedSchedulerState,
+    work_key: GeneratedWorkKey,
+    lane: GeneratedSchedulingLane,
+) {
+    if state.completed_keys.contains(&work_key) || state.running.contains(&work_key) {
+        state.deduped += 1;
+        return;
+    }
+    match state.queued_keys.get_mut(&work_key) {
+        Some(existing_lane) => {
+            if lane.rank() < existing_lane.rank() {
+                *existing_lane = lane;
+                if let Some(item) = state
+                    .queued
+                    .iter_mut()
+                    .find(|item| item.work_key == work_key)
+                {
+                    item.lane = lane;
+                }
+            }
+            state.deduped += 1;
+        }
+        None => {
+            state.queued_keys.insert(work_key.clone(), lane);
+            state.queued.push_back(GeneratedWorkItem { work_key, lane });
+        }
+    }
+}
+
+fn prune_stale_queued_locked(
+    state: &mut GeneratedSchedulerState,
+    plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+    now_ms: u64,
+) {
+    let wanted = wanted_work_keys_locked(state, plans, now_ms);
+    let mut retained = VecDeque::with_capacity(state.queued.len());
+    while let Some(item) = state.queued.pop_front() {
+        if item.lane == GeneratedSchedulingLane::Background || wanted.contains(&item.work_key) {
+            retained.push_back(item);
+        } else {
+            state.queued_keys.remove(&item.work_key);
+            state.canceled += 1;
+        }
+    }
+    state.queued = retained;
+}
+
+fn expire_interests_locked(state: &mut GeneratedSchedulerState, now_ms: u64) {
+    state.interests.retain(|_, interest| {
+        interest
+            .timestamp_ms
+            .saturating_add(interest.ttl_ms)
+            .ge(&now_ms)
+    });
+}
+
+fn wanted_work_keys_locked(
+    state: &GeneratedSchedulerState,
+    plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+    now_ms: u64,
+) -> HashSet<GeneratedWorkKey> {
+    let mut wanted = HashSet::new();
+    for interest in state.interests.values() {
+        if interest.timestamp_ms.saturating_add(interest.ttl_ms) < now_ms {
+            continue;
+        }
+        for key in interest
+            .desired_keys
+            .iter()
+            .chain(interest.predicted_keys.iter())
+        {
+            if let Some(work_key) = work_key_from_interest(plans, &interest.dataset_id, key) {
+                wanted.insert(work_key);
+            }
+        }
+    }
+    wanted
+}
+
+fn work_key_from_interest(
+    plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+    dataset_id: &DatasetId,
+    key: &ViewerInterestChunkKey,
+) -> Option<GeneratedWorkKey> {
+    let coords = parse_generated_chunk_key(&key.key)?;
+    let plan = plans.get(&(key.image_id.clone(), coords.level_index))?;
+    if &plan.dataset_id != dataset_id {
+        return None;
+    }
+    Some(GeneratedWorkKey {
+        dataset_id: dataset_id.clone(),
+        image_id: key.image_id.clone(),
+        level_index: coords.level_index,
+        key: key.key.clone(),
+    })
+}
+
+fn lane_from_interest_key(key: &ViewerInterestChunkKey) -> GeneratedSchedulingLane {
+    match key.lane {
+        ViewerInterestLane::Visible => GeneratedSchedulingLane::Visible,
+        ViewerInterestLane::Predicted => GeneratedSchedulingLane::Predicted,
+        ViewerInterestLane::Background => GeneratedSchedulingLane::Background,
+    }
+}
+
+fn telemetry_locked(state: &GeneratedSchedulerState) -> GeneratedSchedulerTelemetry {
+    let mut telemetry = GeneratedSchedulerTelemetry {
+        running: state.running.len(),
+        completed: state.completed,
+        failed: state.failed,
+        canceled: state.canceled,
+        deduped: state.deduped,
+        cache_reused: state.cache_reused,
+        ..GeneratedSchedulerTelemetry::default()
+    };
+    for item in &state.queued {
+        match item.lane {
+            GeneratedSchedulingLane::Visible => telemetry.queued_visible += 1,
+            GeneratedSchedulingLane::Predicted => telemetry.queued_predicted += 1,
+            GeneratedSchedulingLane::Background => telemetry.queued_background += 1,
+        }
+    }
+    telemetry
+}
+
+fn current_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 pub async fn publish_generated_level_availability(
     dataset_id: DatasetId,
     level: GeneratedLevelAvailability,
@@ -736,6 +1305,203 @@ async fn fetch_with_fallback(
         image: image.image_id.clone(),
         level: 0,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_generated_coarse_key<C, Fut>(
+    plan: &GeneratedCoarsePlan,
+    coords: GeneratedChunkCoords,
+    manifest: Arc<DatasetManifest>,
+    store: Arc<CachedStore>,
+    resolver: Arc<ChunkResolver>,
+    cache: Arc<DerivedChunkCache>,
+    session: Arc<AsyncMutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
+    should_cancel: C,
+) -> MaterializeOneResult
+where
+    C: Fn() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let key = chunk_key(
+        coords.level_index,
+        coords.t,
+        coords.c,
+        coords.z,
+        coords.y,
+        coords.x,
+    );
+    match cache.load_ready_chunk(
+        &plan.cache_identity,
+        plan.image_id.clone(),
+        plan.level_index,
+        key.clone(),
+    ) {
+        Ok(true) => {
+            publish_chunk_status(
+                &plan.dataset_id,
+                &plan.image_id,
+                plan.level_index,
+                key,
+                GeneratedChunkStatus::Ready,
+                None,
+                cache,
+                session,
+                tx,
+            )
+            .await;
+            return MaterializeOneResult::CacheReused;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(
+                image = %plan.image_id.0,
+                key = %key,
+                error = %e,
+                "generated coarse cache lookup failed; regenerating chunk"
+            );
+        }
+    }
+
+    if should_cancel().await {
+        return MaterializeOneResult::Canceled;
+    }
+
+    let Some(image) = manifest
+        .images()
+        .iter()
+        .find(|image| image.image_id == plan.image_id)
+        .cloned()
+    else {
+        publish_chunk_status(
+            &plan.dataset_id,
+            &plan.image_id,
+            plan.level_index,
+            key,
+            GeneratedChunkStatus::FailedPermanent,
+            Some("generated coarse source image disappeared".into()),
+            cache,
+            session,
+            tx,
+        )
+        .await;
+        return MaterializeOneResult::Failed;
+    };
+
+    if image.multiscale.data_type != DataType::Uint16 {
+        publish_chunk_status(
+            &plan.dataset_id,
+            &plan.image_id,
+            plan.level_index,
+            key,
+            GeneratedChunkStatus::FailedPermanent,
+            Some(format!(
+                "generated coarse currently supports Uint16 source data, got {:?}",
+                image.multiscale.data_type
+            )),
+            cache,
+            session,
+            tx,
+        )
+        .await;
+        return MaterializeOneResult::Failed;
+    }
+
+    let (source_data, source_dims) = match fetch_with_fallback(
+        &manifest, &image, coords.t, coords.c, plan, &store, &resolver,
+    )
+    .await
+    {
+        Ok((data, dims)) => (data, dims),
+        Err(e) => {
+            publish_chunk_status(
+                &plan.dataset_id,
+                &plan.image_id,
+                plan.level_index,
+                key,
+                generated_status_for_source_error(&e),
+                Some(e.to_string()),
+                cache,
+                session,
+                tx,
+            )
+            .await;
+            return MaterializeOneResult::Failed;
+        }
+    };
+
+    if should_cancel().await {
+        return MaterializeOneResult::Canceled;
+    }
+
+    let level = &plan.availability.level;
+    let output_dims = [
+        u32::try_from(level.shape[2]).unwrap_or(u32::MAX),
+        u32::try_from(level.shape[3]).unwrap_or(u32::MAX),
+        u32::try_from(level.shape[4]).unwrap_or(u32::MAX),
+    ];
+    let output = match downsample_u16_box(&source_data, source_dims, output_dims) {
+        Ok(output) => output,
+        Err(e) => {
+            publish_chunk_status(
+                &plan.dataset_id,
+                &plan.image_id,
+                plan.level_index,
+                key,
+                GeneratedChunkStatus::FailedPermanent,
+                Some(e),
+                cache,
+                session,
+                tx,
+            )
+            .await;
+            return MaterializeOneResult::Failed;
+        }
+    };
+
+    if should_cancel().await {
+        return MaterializeOneResult::Canceled;
+    }
+
+    let bytes = encode_generated_chunk_bytes(&output, level, coords.z, coords.y, coords.x);
+    match cache.put_ready_chunk_atomic(
+        &plan.cache_identity,
+        plan.image_id.clone(),
+        plan.level_index,
+        key.clone(),
+        bytes,
+    ) {
+        Ok(()) => {
+            publish_chunk_status(
+                &plan.dataset_id,
+                &plan.image_id,
+                plan.level_index,
+                key,
+                GeneratedChunkStatus::Ready,
+                None,
+                cache,
+                session,
+                tx,
+            )
+            .await;
+            MaterializeOneResult::Ready
+        }
+        Err(e) => {
+            publish_chunk_status(
+                &plan.dataset_id,
+                &plan.image_id,
+                plan.level_index,
+                key,
+                GeneratedChunkStatus::FailedTransient,
+                Some(e.to_string()),
+                cache,
+                session,
+                tx,
+            )
+            .await;
+            MaterializeOneResult::Failed
+        }
+    }
 }
 
 async fn materialize_chunks_for_tc(
@@ -1102,6 +1868,27 @@ fn chunk_key(level_index: u32, t: u32, c: u32, z: u64, y: u64, x: u64) -> String
     format!("{level_index}/{t}/{c}/{z}/{y}/{x}")
 }
 
+fn parse_generated_chunk_key(key: &str) -> Option<GeneratedChunkCoords> {
+    let mut parts = key.split('/');
+    let level_index = parts.next()?.parse().ok()?;
+    let t = parts.next()?.parse().ok()?;
+    let c = parts.next()?.parse().ok()?;
+    let z = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    let x = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(GeneratedChunkCoords {
+        level_index,
+        t,
+        c,
+        z,
+        y,
+        x,
+    })
+}
+
 fn checked_product(values: &[u64]) -> Option<u64> {
     values
         .iter()
@@ -1298,6 +2085,7 @@ mod tests {
     use lucida_store::codec::StorageCompression;
     use lucida_store::import_types::{ImageBindingSeed, LevelBindingInfo, ServerBindingSeed};
     use lucida_store::layout::ChunkByteLayout;
+    use tokio::sync::broadcast;
 
     fn generated_level() -> GeneratedLevelAvailability {
         GeneratedLevelAvailability {
@@ -1426,6 +2214,60 @@ mod tests {
                     })
                     .collect(),
             }],
+        }
+    }
+
+    fn service_for_plan(
+        manifest: DatasetManifest,
+        plan: GeneratedCoarsePlan,
+        config: GeneratedSchedulingConfig,
+    ) -> GeneratedCoarseService {
+        let store =
+            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cached = Arc::new(CachedStore::new(store, 1024 * 1024));
+        let resolver = Arc::new(ChunkResolver::new(&binding_seed_for(
+            &manifest.images()[0].multiscale.levels,
+        )));
+        let cache = Arc::new(DerivedChunkCache::default());
+        cache.upsert_level(plan.availability.clone());
+        let (tx, _rx) = broadcast::channel(16);
+        GeneratedCoarseService::new(
+            vec![plan],
+            Arc::new(manifest),
+            cached,
+            resolver,
+            cache,
+            Arc::new(AsyncMutex::new(Session::new())),
+            tx,
+            config,
+        )
+    }
+
+    fn interest(
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        key: &str,
+        lane: ViewerInterestLane,
+        timestamp_ms: u64,
+    ) -> ViewerInterestHint {
+        ViewerInterestHint {
+            client_id: None,
+            dataset_id,
+            generation: 1,
+            t: 0,
+            z: 0,
+            channels: vec![0],
+            mode: lucida_core::protocol::ViewerInterestMode::Slice,
+            viewport: None,
+            desired_keys: vec![ViewerInterestChunkKey {
+                image_id,
+                key: key.into(),
+                lane,
+            }],
+            predicted_keys: vec![],
+            interaction: lucida_core::protocol::ViewerInteractionMode::Idle,
+            timestamp_ms,
+            ttl_ms: 10_000,
         }
     }
 
@@ -1678,6 +2520,211 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&after[..], &source_bytes[..]);
+    }
+
+    #[tokio::test]
+    async fn viewer_interest_dedupes_duplicate_chunks_to_highest_lane() {
+        let manifest = source_manifest();
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+        let key = "1/0/0/0/0/0";
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    key,
+                    ViewerInterestLane::Predicted,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+        service
+            .apply_viewer_interest(
+                2,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    key,
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+
+        let item = service.pop_next_work_item().await.expect("work");
+        assert_eq!(item.lane, GeneratedSchedulingLane::Visible);
+        assert_eq!(item.work_key.key, key);
+        assert!(service.telemetry().await.deduped > 0);
+    }
+
+    #[tokio::test]
+    async fn latest_client_interest_replaces_stale_queued_work() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 512,
+                chunk_long_axis: 256,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/0/0",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/0/1",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+
+        let telemetry = service.telemetry().await;
+        assert_eq!(telemetry.queued_visible, 1);
+        assert_eq!(telemetry.canceled, 1);
+        let item = service.pop_next_work_item().await.expect("work");
+        assert_eq!(item.work_key.key, "1/0/0/0/0/1");
+    }
+
+    #[tokio::test]
+    async fn expired_viewer_interest_drops_queued_jobs() {
+        let manifest = source_manifest();
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+        let mut hint = interest(
+            plan.dataset_id.clone(),
+            plan.image_id.clone(),
+            "1/0/0/0/0/0",
+            ViewerInterestLane::Visible,
+            current_unix_millis().saturating_sub(60_000),
+        );
+        hint.ttl_ms = 1;
+
+        service.apply_viewer_interest(1, hint).await;
+
+        let telemetry = service.telemetry().await;
+        assert_eq!(telemetry.queued_visible, 0);
+        assert_eq!(telemetry.canceled, 1);
+    }
+
+    #[tokio::test]
+    async fn visible_work_yields_background_fill() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 512,
+                chunk_long_axis: 256,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service.enqueue_background_fill().await;
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/0/1",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+
+        let item = service.pop_next_work_item().await.expect("work");
+        assert_eq!(item.lane, GeneratedSchedulingLane::Visible);
+        assert_eq!(item.work_key.key, "1/0/0/0/0/1");
+    }
+
+    #[tokio::test]
+    async fn running_work_observes_cancellation_after_reprioritization() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 512,
+                chunk_long_axis: 256,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/0/0",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+        let running = service.pop_next_work_item().await.expect("running");
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/0/1",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+
+        assert!(service.should_cancel(&running).await);
     }
 
     #[test]

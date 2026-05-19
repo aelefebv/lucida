@@ -189,13 +189,17 @@ fn make_binding(
         Arc::new(register.manifest.clone()),
         1,
     ));
+    let derived_chunks = Arc::new(DerivedChunkCache::default());
     ServerBinding {
         source_url: url.to_string(),
         store,
         resolver,
         cache,
         dataset_opened: register.clone(),
-        derived_chunks: Arc::new(DerivedChunkCache::default()),
+        derived_chunks: derived_chunks.clone(),
+        generated_service: Arc::new(lucida_server::generated::GeneratedCoarseService::inert(
+            derived_chunks,
+        )),
         proxy_cache,
         proxy_generator,
     }

@@ -57,6 +57,71 @@ pub enum ClientMessage {
     /// Request the server open a Dataset from a URL.
     /// The server reads metadata via a StorageBackend and broadcasts DatasetOpened.
     OpenRemoteDataset { url: String },
+    /// Advisory, unsequenced scheduling hint for server-generated chunks.
+    /// This is session/runtime state only; it is not a document command and
+    /// must not be persisted in saved views.
+    ViewerInterest { interest: ViewerInterestHint },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewerInterestHint {
+    #[serde(default)]
+    pub client_id: Option<ClientId>,
+    pub dataset_id: DatasetId,
+    pub generation: u64,
+    pub t: u32,
+    pub z: u32,
+    #[serde(default)]
+    pub channels: Vec<u32>,
+    pub mode: ViewerInterestMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<ViewerInterestViewport>,
+    #[serde(default)]
+    pub desired_keys: Vec<ViewerInterestChunkKey>,
+    #[serde(default)]
+    pub predicted_keys: Vec<ViewerInterestChunkKey>,
+    pub interaction: ViewerInteractionMode,
+    pub timestamp_ms: u64,
+    pub ttl_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerInterestMode {
+    Slice,
+    Volume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerInteractionMode {
+    Idle,
+    Panning,
+    Zooming,
+    Scrubbing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewerInterestViewport {
+    pub xy_bounds: [f64; 4],
+    pub z_range: [f64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewerInterestChunkKey {
+    pub image_id: ImageId,
+    pub key: String,
+    #[serde(default)]
+    pub lane: ViewerInterestLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerInterestLane {
+    #[default]
+    Visible,
+    Predicted,
+    Background,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +326,54 @@ mod tests {
                 assert_eq!(key, "1/0/0/2/3/4");
             }
             _ => panic!("expected ChunkFetch"),
+        }
+    }
+
+    #[test]
+    fn viewer_interest_round_trips_as_unsequenced_client_message() {
+        let msg = ClientMessage::ViewerInterest {
+            interest: ViewerInterestHint {
+                client_id: None,
+                dataset_id: DatasetId("ds1".into()),
+                generation: 9,
+                t: 2,
+                z: 3,
+                channels: vec![0, 2],
+                mode: ViewerInterestMode::Slice,
+                viewport: Some(ViewerInterestViewport {
+                    xy_bounds: [0.0, 1.0, 2.0, 3.0],
+                    z_range: [3.0, 4.0],
+                }),
+                desired_keys: vec![ViewerInterestChunkKey {
+                    image_id: ImageId("img1".into()),
+                    key: "1/2/0/0/0/0".into(),
+                    lane: ViewerInterestLane::Visible,
+                }],
+                predicted_keys: vec![ViewerInterestChunkKey {
+                    image_id: ImageId("img1".into()),
+                    key: "1/2/0/0/0/1".into(),
+                    lane: ViewerInterestLane::Predicted,
+                }],
+                interaction: ViewerInteractionMode::Scrubbing,
+                timestamp_ms: 1234,
+                ttl_ms: 2000,
+            },
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"viewer_interest\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::ViewerInterest { interest } => {
+                assert_eq!(interest.dataset_id, DatasetId("ds1".into()));
+                assert_eq!(interest.desired_keys[0].lane, ViewerInterestLane::Visible);
+                assert_eq!(
+                    interest.predicted_keys[0].lane,
+                    ViewerInterestLane::Predicted
+                );
+                assert_eq!(interest.interaction, ViewerInteractionMode::Scrubbing);
+            }
+            _ => panic!("expected ViewerInterest"),
         }
     }
 

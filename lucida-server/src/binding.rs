@@ -7,7 +7,7 @@ use lucida_store::cache::CachedStore;
 use lucida_store::import_types::{LevelBindingInfo, ServerBindingSeed};
 use object_store::ObjectStore;
 
-use crate::generated::DerivedChunkCache;
+use crate::generated::{DerivedChunkCache, GeneratedCoarseService};
 use crate::proxy::{ProxyCache, ProxyGenerator};
 
 /// Operational storage binding. Owns live resources.
@@ -29,6 +29,7 @@ pub struct ServerBinding {
     pub cache: Arc<CachedStore>,
     pub dataset_opened: DatasetOpened,
     pub derived_chunks: Arc<DerivedChunkCache>,
+    pub generated_service: Arc<GeneratedCoarseService>,
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
 }

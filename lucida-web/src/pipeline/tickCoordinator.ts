@@ -110,6 +110,55 @@ interface PlannedDataset {
   result: RequestPlan;
 }
 
+const VIEWER_INTEREST_TTL_MS = 2_000;
+const VIEWER_INTEREST_KEY_CAP = 512;
+
+function emitViewerInterestHint(
+  ctx: TickContext,
+  datasetId: string,
+  selection: SelectionState,
+  visibleRegion: VisibleRegion,
+  requests: ChunkRequest[],
+  generation: number,
+): void {
+  if (!ctx.sendViewerInterest) return;
+
+  const desired = [];
+  const predicted = [];
+  for (const req of requests.slice(0, VIEWER_INTEREST_KEY_CAP)) {
+    const lane = req.lane === "prefetch" || req.lane === "overview"
+      ? "predicted"
+      : req.lane === "coarse" || req.lane === "detail" || req.lane === "minimap"
+        ? "visible"
+        : "background";
+    const entry = {
+      image_id: req.imageId,
+      key: req.chunkKey,
+      lane,
+    };
+    if (lane === "predicted") predicted.push(entry);
+    else desired.push(entry);
+  }
+
+  ctx.sendViewerInterest({
+    dataset_id: datasetId,
+    generation,
+    t: selection.t,
+    z: selection.z,
+    channels: selection.visibleChannels,
+    mode: selection.renderMode,
+    viewport: {
+      xy_bounds: visibleRegion.xyBoundsVox,
+      z_range: visibleRegion.zRangeVox,
+    },
+    desired_keys: desired,
+    predicted_keys: predicted,
+    interaction: selection.interactionState,
+    timestamp_ms: Date.now(),
+    ttl_ms: VIEWER_INTEREST_TTL_MS,
+  });
+}
+
 // Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
 export { synthesizeWellRosterEntry } from "./upload/coldState/roster.ts";
 
@@ -285,6 +334,7 @@ export class TickCoordinator {
       this._lastRequests = result.requests;
       this._lastVisibleRegion.set(dsId, visibleRegion);
       this._lastEntities.set(dsId, entities);
+      emitViewerInterestHint(ctx, dsId, selection, visibleRegion, result.requests, this.requestEpoch);
 
       const entityById = new Map(entities.map(e => [e.entityId, e]));
 

@@ -435,6 +435,7 @@ export class RenderLoop {
       mode: this.mode,
       renderScale: this._renderScale,
       cpuCache: this.session.cpuCache,
+      sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
       assetCatalog: this.session.assetCatalog!,
     };
   }

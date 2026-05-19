@@ -17,8 +17,8 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::decode::decode_storage_bytes;
 use crate::generated::{
-    DerivedChunkCache, DerivedChunkLookup, GeneratedCoarseConfig,
-    materialize_generated_coarse_plan, plan_generated_coarse_for_manifest,
+    DerivedChunkCache, DerivedChunkLookup, GeneratedCoarseConfig, GeneratedCoarseService,
+    GeneratedSchedulingConfig, plan_generated_coarse_for_manifest,
 };
 use crate::proxy::{ProxyCache, ProxyGenerator};
 use crate::session::Session;
@@ -253,6 +253,17 @@ pub async fn handle_client(
                                 .await;
                             });
                         }
+                        ClientMessage::ViewerInterest { interest } => {
+                            let service = {
+                                let sess = session.lock().await;
+                                sess.server_bindings
+                                    .get(&interest.dataset_id)
+                                    .map(|binding| binding.generated_service.clone())
+                            };
+                            if let Some(service) = service {
+                                service.apply_viewer_interest(id, interest).await;
+                            }
+                        }
                         ClientMessage::DatasetPresence {
                             dataset_order,
                             dataset_settings,
@@ -301,6 +312,7 @@ pub async fn handle_client(
                                         ChunkDispatch::Generated {
                                             level,
                                             derived_chunks: b.derived_chunks.clone(),
+                                            generated_service: b.generated_service.clone(),
                                         }
                                     } else {
                                         let level_info = b.resolver.level_info(&image_id, level);
@@ -336,9 +348,13 @@ pub async fn handle_client(
                                 Some(ChunkDispatch::Generated {
                                     level,
                                     derived_chunks,
+                                    generated_service,
                                 }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
                                     tokio::spawn(async move {
+                                        generated_service
+                                            .enqueue_chunk_request(&image_id, level, &key)
+                                            .await;
                                         serve_generated_chunk_request(
                                             id,
                                             &dataset_id,
@@ -426,6 +442,16 @@ pub async fn handle_client(
     // Cleanup on disconnect.
     outbound.abort();
     unicast_routes.lock().await.remove(&id);
+    let generated_services: Vec<_> = {
+        let sess = session.lock().await;
+        sess.server_bindings
+            .values()
+            .map(|binding| binding.generated_service.clone())
+            .collect()
+    };
+    for service in generated_services {
+        service.remove_client_interest(id).await;
+    }
 
     // Remove client from session, get affected followers.
     let (affected_followers, peer_left_json) = {
@@ -652,6 +678,17 @@ async fn handle_open_remote_dataset(
     let generated_manifest = Arc::new(result.manifest.clone());
     let generated_store = cached.clone();
     let generated_resolver = resolver.clone();
+    let generated_service = Arc::new(GeneratedCoarseService::new(
+        generated_plans.clone(),
+        generated_manifest,
+        generated_store,
+        generated_resolver,
+        derived_chunks.clone(),
+        session.clone(),
+        tx.clone(),
+        GeneratedSchedulingConfig::default(),
+    ));
+    generated_service.start();
     let proxy_generator = Arc::new(ProxyGenerator::new(
         proxy_cache.clone(),
         cached.clone(),
@@ -671,6 +708,7 @@ async fn handle_open_remote_dataset(
         cache: cached,
         dataset_opened: dataset_opened.clone(),
         derived_chunks: derived_chunks.clone(),
+        generated_service: generated_service.clone(),
         proxy_cache,
         proxy_generator,
     };
@@ -743,20 +781,7 @@ async fn handle_open_remote_dataset(
     );
 
     if !generated_plans.is_empty() {
-        for plan in generated_plans {
-            let manifest = generated_manifest.clone();
-            let store = generated_store.clone();
-            let resolver = generated_resolver.clone();
-            let cache = derived_chunks.clone();
-            let session = session.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                materialize_generated_coarse_plan(
-                    plan, manifest, store, resolver, cache, session, tx,
-                )
-                .await;
-            });
-        }
+        generated_service.enqueue_background_fill().await;
     }
 
     // Kick off background generation for the initial (T=0, C=0) view
@@ -805,6 +830,7 @@ enum ChunkDispatch {
     Generated {
         level: u32,
         derived_chunks: Arc<DerivedChunkCache>,
+        generated_service: Arc<GeneratedCoarseService>,
     },
 }
 
