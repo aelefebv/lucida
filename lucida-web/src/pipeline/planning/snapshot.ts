@@ -91,10 +91,15 @@ function resolveDetailLevel(
   if (typeof override === "number" && selectable.includes(override)) {
     return override;
   }
+  if (typeof override === "number") {
+    const lowerOrEqual = selectable.filter((level) => level <= override).at(-1);
+    if (lowerOrEqual !== undefined) return lowerOrEqual;
+    return selectable[0] ?? 0;
+  }
   return selectable.includes(0) ? 0 : selectable[0] ?? 0;
 }
 
-function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | null {
+export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | null {
   if (!imgSpec || imgSpec.multiscale.levels.length === 0) return null;
   const levels = imgSpec.multiscale.levels;
   const explicit = imgSpec.multiscale.coarse_level_index;
@@ -105,12 +110,7 @@ function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | null {
   ) {
     return explicit;
   }
-  const generated = generatedLevelIndices(imgSpec);
-  for (let i = levels.length - 1; i >= 0; i--) {
-    const level = levels[i].level_index ?? i;
-    if (!generated.has(level)) return level;
-  }
-  return levels.length - 1;
+  return null;
 }
 
 /**
