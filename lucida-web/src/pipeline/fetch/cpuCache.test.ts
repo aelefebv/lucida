@@ -1813,6 +1813,57 @@ describe("CpuCache", () => {
       }
     });
 
+    it("telemetry reports desired versus resident coarse/detail chunks", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      const detail = makeRequest({ lane: "detail", tier: "detail", chunkKey: "0/0/0/0/0/0" });
+      const coarse = makeRequest({
+        lane: "coarse",
+        tier: "coarse",
+        level: 2,
+        chunkKey: "2/0/0/0/0/0",
+      });
+
+      cache.submit(makePlan([detail, coarse]));
+      await flush();
+
+      const demand = cache.telemetry().tierDemand;
+      expect(demand.desired).toEqual({ detailChunks: 1, coarseChunks: 1 });
+      expect(demand.resident).toMatchObject({
+        detailChunks: 1,
+        coarseChunks: 1,
+        detailBytes: 64,
+        coarseBytes: 64,
+      });
+      expect(demand.detailCoverageRatio).toBe(1);
+      expect(demand.sparseDetail).toBe(false);
+    });
+
+    it("logs sparse detail after sustained low coverage", () => {
+      vi.mocked(debugLog).mockClear();
+      const { cache } = createTestCache({ maxConcurrentFetches: 0 });
+      cache.submit(makePlan([
+        makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" }),
+        makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" }),
+        makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" }),
+        makeRequest({ x: 3, chunkKey: "0/0/0/0/0/3" }),
+      ]));
+
+      expect(cache.telemetry().tierDemand.sparseDetail).toBe(true);
+      cache.telemetry();
+      cache.telemetry();
+
+      expect(debugLog).toHaveBeenCalledWith(
+        "cache",
+        "cache.sparse_detail",
+        expect.objectContaining({
+          desiredDetailChunks: 4,
+          residentDetailChunks: 0,
+          pendingChunks: 4,
+        }),
+      );
+    });
+
     it("backpressure log fires at most once per second under sustained queue depth", () => {
       vi.useFakeTimers();
       try {
@@ -1971,12 +2022,28 @@ describe("CpuCache", () => {
           overview: { count: expect.any(Number), bytes: expect.any(Number) },
           proxy: { count: expect.any(Number), bytes: expect.any(Number) },
         },
+        tierDemand: {
+          desired: {
+            detailChunks: expect.any(Number),
+            coarseChunks: expect.any(Number),
+          },
+          resident: {
+            detailChunks: expect.any(Number),
+            coarseChunks: expect.any(Number),
+            detailBytes: expect.any(Number),
+            coarseBytes: expect.any(Number),
+          },
+          detailCoverageRatio: expect.any(Number),
+          sparseDetail: expect.any(Boolean),
+        },
       });
 
       // Load-bearing values from the known-input sequence.
       expect(tel.hitRate).toBe(0);
       expect(tel.tierResidency.activeDetail.count).toBe(1);
       expect(tel.tierResidency.activeDetail.bytes).toBe(64);
+      expect(tel.tierDemand.desired.detailChunks).toBe(1);
+      expect(tel.tierDemand.resident.detailChunks).toBe(1);
       expect(tel.mainBytes).toBe(64);
     });
   });

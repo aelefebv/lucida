@@ -937,6 +937,19 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       </span>
                     )}
                   </div>
+                  <div>
+                    Detail coverage: {cacheTelemetry.tierDemand.resident.detailChunks}/
+                    {cacheTelemetry.tierDemand.desired.detailChunks}
+                    {cacheTelemetry.tierDemand.sparseDetail && (
+                      <span style={{ color: "#fb4", marginLeft: 6 }}>
+                        (sparse)
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    Coarse resident: {cacheTelemetry.tierDemand.resident.coarseChunks}/
+                    {cacheTelemetry.tierDemand.desired.coarseChunks}
+                  </div>
                 </div>
 
                 {/* Hit Rate */}

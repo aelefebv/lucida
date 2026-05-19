@@ -140,6 +140,21 @@ export interface TierResidencyEntry {
   bytes: number;
 }
 
+export interface TierDemandTelemetry {
+  desired: {
+    detailChunks: number;
+    coarseChunks: number;
+  };
+  resident: {
+    detailChunks: number;
+    coarseChunks: number;
+    detailBytes: number;
+    coarseBytes: number;
+  };
+  detailCoverageRatio: number;
+  sparseDetail: boolean;
+}
+
 export interface TierCounters {
   activeDetail: number;
   demotedDetail: number;
@@ -192,4 +207,6 @@ export interface CacheTelemetry {
     overview: TierResidencyEntry;
     proxy: TierResidencyEntry;
   };
+  /** Current-plan wanted vs CPU-resident chunk coverage by coarse/detail tier. */
+  tierDemand: TierDemandTelemetry;
 }
