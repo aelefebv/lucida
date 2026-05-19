@@ -2,9 +2,10 @@ use lucida_content::{DataType, LevelGeometry};
 
 /// Source-level selection bounds for the `coarse` tier.
 ///
-/// These defaults intentionally describe a whole image/field at one T/C. Later
-/// generated-coarse work can make them operator-configurable, but import-time
-/// source selection needs a deterministic contract now.
+/// These defaults intentionally describe a whole image/field at one T/C. Among
+/// the source levels that fit, the coarse tier uses the least-fine LOD. Later
+/// generated-coarse work can make the bounds operator-configurable, but
+/// import-time source selection needs a deterministic contract now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceCoarseConfig {
     pub max_long_axis: u64,
@@ -33,7 +34,7 @@ pub(crate) fn select_source_coarse_level(
         .iter()
         .filter(|level| source_level_fits(level, data_type, config))
         .map(|level| level.level_index)
-        .min()
+        .max()
 }
 
 fn source_level_fits(
@@ -102,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_finest_source_level_that_fits_bounds() {
+    fn selects_least_fine_source_level_that_fits_bounds() {
         let levels = vec![
             level(0, [1, 1, 1, 8192, 8192], [1, 1, 1, 512, 512]),
             level(1, [1, 1, 1, 4096, 4096], [1, 1, 1, 512, 512]),
@@ -112,7 +113,7 @@ mod tests {
 
         assert_eq!(
             select_source_coarse_level(&levels, DataType::Uint16, SourceCoarseConfig::default()),
-            Some(2),
+            Some(3),
         );
     }
 
