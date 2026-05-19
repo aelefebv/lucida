@@ -31,7 +31,6 @@ import type { CpuCache } from "../pipeline/fetch/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import {
   chunkWithinRenderRadius,
-  renderRadiusEnabled,
   renderRadiusLimitVox,
   visibleRegionCenterVox,
   type ChunkRadiusGeometry,
@@ -44,10 +43,14 @@ import type {
 } from "../pipeline/planning/index.ts";
 import {
   DEBUG_OVERLAYS,
+  getRenderRadiusPreviewTier,
   isOverlayEnabled,
   onOverlaysChanged,
+  onRenderRadiusPreviewChanged,
   type DebugOverlay,
+  type RenderRadiusPreviewTier,
 } from "./logging.ts";
+import { radiusSpecsForOverlay } from "./radiusPreview.ts";
 
 interface Props {
   wasmSceneRef: RefObject<WasmScene | null>;
@@ -556,8 +559,14 @@ export function DebugOverlays({
   useEffect(() => {
     return onOverlaysChanged(() => setEnabled(readEnabled()));
   }, []);
+  const [radiusPreviewTier, setRadiusPreviewTier] = useState<RenderRadiusPreviewTier | null>(
+    getRenderRadiusPreviewTier,
+  );
+  useEffect(() => {
+    return onRenderRadiusPreviewChanged(() => setRadiusPreviewTier(getRenderRadiusPreviewTier()));
+  }, []);
 
-  const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]);
+  const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null;
 
   const [badges, setBadges] = useState<WellBadge[]>([]);
   const [chunks, setChunks] = useState<ChunkRect[]>([]);
@@ -622,14 +631,11 @@ export function DebugOverlays({
         };
       };
 
-      if (enabled.renderRadius && plans) {
+      const showRenderRadius = enabled.renderRadius || radiusPreviewTier !== null;
+      if (showRenderRadius && plans) {
         const out: RadiusPath[] = [];
         const planningConfig = configStore.get();
-        const allRadiusSpecs: Array<{ tier: OverlayTier; radiusView: number }> = [
-          { tier: "coarse", radiusView: planningConfig.coarseRenderRadiusView },
-          { tier: "detail", radiusView: planningConfig.detailRenderRadiusView },
-        ];
-        const radiusSpecs = allRadiusSpecs.filter((spec) => renderRadiusEnabled(spec.radiusView));
+        const radiusSpecs = radiusSpecsForOverlay(planningConfig, radiusPreviewTier);
 
         if (radiusSpecs.length > 0) {
           for (const [dsId, plan] of plans) {
@@ -1141,7 +1147,7 @@ export function DebugOverlays({
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef]);
+  }, [enabled, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef]);
 
   if (!anyEnabled) return null;
 
@@ -1198,7 +1204,7 @@ export function DebugOverlays({
           />
         );
       })}
-      {enabled.renderRadius && radiusPaths.length > 0 && (
+      {(enabled.renderRadius || radiusPreviewTier !== null) && radiusPaths.length > 0 && (
         <svg
           width={size.w}
           height={size.h}

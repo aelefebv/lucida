@@ -6,15 +6,21 @@ import userEvent from "@testing-library/user-event";
 import { ConfigTab } from "./ConfigTab.tsx";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
+import {
+  getRenderRadiusPreviewTier,
+  setRenderRadiusPreviewTier,
+} from "./logging.ts";
 
 beforeEach(() => {
   configStore.__resetForTesting();
+  setRenderRadiusPreviewTier(null);
   localStorage.clear();
 });
 
 afterEach(() => {
   cleanup();
   configStore.__resetForTesting();
+  setRenderRadiusPreviewTier(null);
   localStorage.clear();
 });
 
@@ -77,6 +83,28 @@ describe("ConfigTab — slider + number input edits", () => {
     const slider = screen.getByLabelText(/Detail render radius.*slider/i) as HTMLInputElement;
     fireEvent.change(slider, { target: { value: "0.75" } });
     expect(configStore.get().detailRenderRadiusView).toBe(0.75);
+  });
+
+  it("previews only the active radius tier while dragging radius sliders", () => {
+    render(<ConfigTab />);
+
+    const detail = screen.getByLabelText(/Detail render radius.*slider/i);
+    fireEvent.pointerDown(detail);
+    expect(getRenderRadiusPreviewTier()).toBe("detail");
+    fireEvent.pointerUp(window);
+    expect(getRenderRadiusPreviewTier()).toBeNull();
+
+    const coarse = screen.getByLabelText(/Coarse render radius.*slider/i);
+    fireEvent.pointerDown(coarse);
+    expect(getRenderRadiusPreviewTier()).toBe("coarse");
+    fireEvent.pointerCancel(window);
+    expect(getRenderRadiusPreviewTier()).toBeNull();
+  });
+
+  it("does not preview radius visuals for unrelated sliders", () => {
+    render(<ConfigTab />);
+    fireEvent.pointerDown(screen.getByLabelText(/FAR threshold.*slider/i));
+    expect(getRenderRadiusPreviewTier()).toBeNull();
   });
 
   it("typing into the number input updates the configStore", () => {

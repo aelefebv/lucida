@@ -11,6 +11,8 @@ import {
   tierCoverageMode,
   type WellTierCoverage,
 } from "./DebugOverlays.tsx";
+import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
+import { radiusSpecsForOverlay } from "./radiusPreview.ts";
 
 function req(overrides: Partial<ChunkRequest>): ChunkRequest {
   return {
@@ -39,6 +41,25 @@ function emptyCoverage(): WellTierCoverage {
 }
 
 describe("DebugOverlays tier coverage helpers", () => {
+  it("filters render-radius specs to the active slider preview tier", () => {
+    const cfg = {
+      ...DEFAULT_PLANNING_CONFIG,
+      detailRenderRadiusView: 0.25,
+      coarseRenderRadiusView: 0.75,
+    };
+
+    expect(radiusSpecsForOverlay(cfg, "detail")).toEqual([
+      { tier: "detail", radiusView: 0.25 },
+    ]);
+    expect(radiusSpecsForOverlay(cfg, "coarse")).toEqual([
+      { tier: "coarse", radiusView: 0.75 },
+    ]);
+    expect(radiusSpecsForOverlay(cfg, null)).toEqual([
+      { tier: "coarse", radiusView: 0.75 },
+      { tier: "detail", radiusView: 0.25 },
+    ]);
+  });
+
   it("aggregates current detail and coarse available coverage per well", () => {
     const deliveryState = new DeliveryState();
     deliveryState.markChunkSent("img-a", 0, "0/0/0/0/0/0");
