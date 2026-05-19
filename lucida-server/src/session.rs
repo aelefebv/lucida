@@ -224,6 +224,8 @@ mod tests {
                         grid_shape: [1, 1, 10, 2, 2],
                         scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                     }],
+                    coarse_level_index: None,
+                    generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
                 },
