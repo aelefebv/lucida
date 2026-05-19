@@ -332,6 +332,7 @@ function parseVisibleRegion(ws: WasmScene, dsId: string): VisibleRegion | null {
       xy_bounds: [number, number, number, number];
       z_range: [number, number];
       effective_zoom: number;
+      radius_basis_vox?: number;
       sort_center: [number, number, number] | null;
       frustum_planes: [number, number, number, number][] | null;
     };
@@ -339,6 +340,7 @@ function parseVisibleRegion(ws: WasmScene, dsId: string): VisibleRegion | null {
       xyBoundsVox: vr.xy_bounds,
       zRangeVox: vr.z_range,
       effectiveZoom: vr.effective_zoom,
+      ...(vr.radius_basis_vox !== undefined ? { radiusBasisVox: vr.radius_basis_vox } : {}),
       sortCenterVox: vr.sort_center,
       frustumPlanes: vr.frustum_planes,
     };

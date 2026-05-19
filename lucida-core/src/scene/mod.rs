@@ -275,6 +275,7 @@ impl Scene {
                 ],
                 z_range: region.z_range.clone(),
                 effective_zoom: region.effective_zoom,
+                radius_basis_vox: region.radius_basis_vox,
                 sort_center: region
                     .sort_center
                     .map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),

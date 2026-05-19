@@ -10,6 +10,8 @@ export interface VisibleRegion {
   zRangeVox: [number, number];
   /** Screen pixels per voxel. */
   effectiveZoom: number;
+  /** View-relative radius basis in voxels. 3-D uses the focal plane, not the far-frustum AABB. */
+  radiusBasisVox?: number;
   /** Sort/focal center in voxel coordinates. */
   sortCenterVox: [number, number, number] | null;
   /** Six frustum half-planes, or null for 2-D views. */

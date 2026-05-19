@@ -38,6 +38,7 @@ interface VisibleRegionJson {
   xy_bounds: [number, number, number, number];
   z_range: [number, number];
   effective_zoom: number;
+  radius_basis_vox?: number;
   sort_center: [number, number, number] | null;
   frustum_planes: [number, number, number, number][] | null;
 }
@@ -352,6 +353,7 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
         xy_bounds: [10, 20, 30, 40],
         z_range: [5, 6],
         effective_zoom: 2.5,
+        radius_basis_vox: 12.5,
         sort_center: [1, 2, 3],
         frustum_planes: [
           [1, 0, 0, 0],
@@ -364,6 +366,7 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
       xyBoundsVox: [10, 20, 30, 40],
       zRangeVox: [5, 6],
       effectiveZoom: 2.5,
+      radiusBasisVox: 12.5,
       sortCenterVox: [1, 2, 3],
       frustumPlanes: [
         [1, 0, 0, 0],

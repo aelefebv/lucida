@@ -31,6 +31,10 @@ export function renderRadiusLimitVox(
   radiusView: number,
 ): number {
   if (!renderRadiusEnabled(radiusView)) return Number.POSITIVE_INFINITY;
+  const radiusBasis = region.radiusBasisVox;
+  if (radiusBasis !== undefined && Number.isFinite(radiusBasis) && radiusBasis > 0) {
+    return Math.max(1, radiusBasis) * radiusView;
+  }
   const halfX = Math.max(0, (region.xyBoundsVox[2] - region.xyBoundsVox[0]) / 2);
   const halfY = Math.max(0, (region.xyBoundsVox[3] - region.xyBoundsVox[1]) / 2);
   const halfZ = Math.max(0, (region.zRangeVox[1] - region.zRangeVox[0]) / 2);
