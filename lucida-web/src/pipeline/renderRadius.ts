@@ -42,6 +42,43 @@ export function renderRadiusLimitVox(
   return Math.max(1, halfDiagonal) * radiusView;
 }
 
+export function deriveFocalPlaneRadiusBasisVox(
+  region: VisibleRegion,
+  viewportPx: [number, number] | undefined,
+): number | null {
+  if (!region.frustumPlanes || !viewportPx) return null;
+  const [viewportW, viewportH] = viewportPx;
+  const zoom = region.effectiveZoom;
+  if (
+    !Number.isFinite(viewportW) ||
+    !Number.isFinite(viewportH) ||
+    !Number.isFinite(zoom) ||
+    viewportW <= 0 ||
+    viewportH <= 0 ||
+    zoom <= 0
+  ) {
+    return null;
+  }
+  const halfX = viewportW / (2 * zoom);
+  const halfY = viewportH / (2 * zoom);
+  return Math.max(1, Math.sqrt(halfX * halfX + halfY * halfY));
+}
+
+export function withDerivedRadiusBasis(
+  region: VisibleRegion,
+  viewportPx: [number, number] | undefined,
+): VisibleRegion {
+  if (
+    region.radiusBasisVox !== undefined &&
+    Number.isFinite(region.radiusBasisVox) &&
+    region.radiusBasisVox > 0
+  ) {
+    return region;
+  }
+  const derived = deriveFocalPlaneRadiusBasisVox(region, viewportPx);
+  return derived === null ? region : { ...region, radiusBasisVox: derived };
+}
+
 export function chunkWorldDimsForRadius(
   geometry: ChunkRadiusGeometry,
 ): [number, number, number] {

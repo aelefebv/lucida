@@ -20,6 +20,7 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
+import { withDerivedRadiusBasis } from "../renderRadius.ts";
 
 // Re-export from canonical home in `./index.ts`.
 export type { MinimapChunkCoord } from "./index.ts";
@@ -152,6 +153,8 @@ export interface BuildPlanningSnapshotArgs {
   minimapPending: Map<string, MinimapChunkCoord[]>;
   /** Render mode of the current tick (`slice` vs `volume`). */
   mode: "slice" | "volume";
+  /** Physical viewport size in pixels, used to derive 3-D focal-plane radius fallback. */
+  viewportPx?: [number, number];
   /** True when the dataset is being viewed in multi-channel mode. */
   multiChannel: boolean;
   /** Epoch counters parsed by the orchestrator — passed through verbatim. */
@@ -202,6 +205,7 @@ export function buildPlanningSnapshot(
     assetCatalog,
     minimapPending,
     mode,
+    viewportPx,
     multiChannel,
     currentEpochs,
   } = args;
@@ -290,7 +294,7 @@ export function buildPlanningSnapshot(
   const vr = vrJson && vrJson !== "null"
     ? (JSON.parse(vrJson) as VisibleRegionJson | null)
     : null;
-  const visibleRegion: VisibleRegion = vr
+  const rawVisibleRegion: VisibleRegion = vr
     ? {
         xyBoundsVox: vr.xy_bounds,
         zRangeVox: vr.z_range,
@@ -300,6 +304,9 @@ export function buildPlanningSnapshot(
         frustumPlanes: vr.frustum_planes,
       }
     : DEFAULT_VISIBLE_REGION;
+  const visibleRegion = mode === "volume"
+    ? withDerivedRadiusBasis(rawVisibleRegion, viewportPx)
+    : rawVisibleRegion;
 
   // 6. Selection — single-channel mode plans only for the current C
   //    (the upload path sends one atlas config with one channel; other

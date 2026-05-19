@@ -34,6 +34,7 @@ import {
   renderRadiusEnabled,
   renderRadiusLimitVox,
   visibleRegionCenterVox,
+  withDerivedRadiusBasis,
   type ChunkRadiusGeometry,
 } from "../pipeline/renderRadius.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
@@ -635,8 +636,11 @@ export function DebugOverlays({
           for (const [dsId, plan] of plans) {
             const ds = datasets.get(dsId);
             if (!ds) continue;
-            const visibleRegion = parseVisibleRegion(ws, dsId);
-            if (!visibleRegion) continue;
+            const parsedVisibleRegion = parseVisibleRegion(ws, dsId);
+            if (!parsedVisibleRegion) continue;
+            const visibleRegion = is3D
+              ? withDerivedRadiusBasis(parsedVisibleRegion, [canvasWCss * dpr, canvasHCss * dpr])
+              : parsedVisibleRegion;
 
             let positions: Record<string, [number, number]> = {};
             try {
@@ -880,7 +884,10 @@ export function DebugOverlays({
             positions = {};
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
-          const visibleRegion = parseVisibleRegion(ws, dsId);
+          const parsedVisibleRegion = parseVisibleRegion(ws, dsId);
+          const visibleRegion = parsedVisibleRegion && is3D
+            ? withDerivedRadiusBasis(parsedVisibleRegion, [canvasWCss * dpr, canvasHCss * dpr])
+            : parsedVisibleRegion;
 
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
