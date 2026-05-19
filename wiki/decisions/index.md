@@ -53,6 +53,7 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0038-budgeted-proxy-gpu-residency]] — proxy GPU residency becomes a planning-owned, worker-global budgeted desired set over coherent well bundles; worker feedback reports only desired missing proxies; stale/no-longer-desired uploads are dropped; proxy atlases move from X-only slot layout toward grid/3D packing under a 128 MB default budget (PRD #664; 2026-05-18)
 - [[decisions/0039-chunk-only-coarse-detail-residency]] — fallback/residency becomes two canonical chunk tiers (`coarse` and `detail`); detail defaults to source level 0; proxy fallback and well-as-residency-unit behavior are superseded for the new path (PRD #672; 2026-05-18)
 - [[decisions/0040-generated-coarse-as-derived-pyramid-levels]] — coarse points at an existing source level when possible, otherwise at an append-only server-managed derived level served through the normal chunk path with metadata/readiness deltas (PRD #672; 2026-05-18)
+- [[decisions/0041-clean-two-source-chunk-tier-renderer]] — the renderer binds two explicit chunk tier sources (`detail`, `coarse`) in one draw path, with clean tier descriptors instead of proxy binding reuse (PRD #672; 2026-05-18)
 
 ## Deferred — considered but not built yet
 
