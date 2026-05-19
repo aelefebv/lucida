@@ -913,7 +913,7 @@ impl DerivedDiskCache {
             file.sync_all()?;
         }
 
-        match fs::rename(&tmp_path, &path) {
+        match fs::rename(&tmp_path, path) {
             Ok(()) => {}
             Err(e) => {
                 let _ = fs::remove_file(&tmp_path);
@@ -2094,6 +2094,7 @@ async fn publish_all_chunks_for_plan(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_chunks_for_tc(
     plan: &GeneratedCoarsePlan,
     t: u32,
@@ -2354,7 +2355,7 @@ fn generated_chunk_shape(
     let bytes_per_voxel = data_type_size(data_type);
     let mut chunk_y = output_shape[3].min(config.chunk_long_axis).max(1);
     let mut chunk_x = output_shape[4].min(config.chunk_long_axis).max(1);
-    let chunk_z = 1_u64.min(output_shape[2]).max(1);
+    let chunk_z = 1_u64;
     while checked_product(&[chunk_z, chunk_y, chunk_x, bytes_per_voxel])
         .is_some_and(|bytes| bytes > config.max_chunk_bytes)
         && (chunk_y > 1 || chunk_x > 1)
@@ -2487,11 +2488,7 @@ fn downsample_u16_box(
                         }
                     }
                 }
-                let value = if count == 0 {
-                    0
-                } else {
-                    ((sum + count / 2) / count) as u16
-                };
+                let value = (sum + count / 2).checked_div(count).unwrap_or(0) as u16;
                 let out_idx =
                     (oz as usize) * out_stride_z + (oy as usize) * out_stride_y + ox as usize;
                 output[out_idx] = value;
