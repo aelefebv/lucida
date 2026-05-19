@@ -9,6 +9,8 @@
  *  - chunkGrid: planned LOD chunk grid for every visible field, colored
  *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
+ *  - renderRadius: actual detail/coarse render-radius boundary, projected
+ *    through the same voxel→world→screen path as chunk overlays.
  *
  * Both modes (slice + volume) share the same projection pipeline:
  *
@@ -29,6 +31,9 @@ import type { CpuCache } from "../pipeline/fetch/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import {
   chunkWithinRenderRadius,
+  renderRadiusEnabled,
+  renderRadiusLimitVox,
+  visibleRegionCenterVox,
   type ChunkRadiusGeometry,
 } from "../pipeline/renderRadius.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
@@ -131,12 +136,23 @@ interface ChunkRect {
   tier?: import("../pipeline/fetch/index.ts").EvictionTier | null;
 }
 
+interface RadiusPath {
+  key: string;
+  tier: OverlayTier;
+  plane: "xy" | "xz" | "yz";
+  d: string;
+  title: string;
+}
+
 const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
 const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
 const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
 const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
 const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
 const TIER_MISSING = "rgba(245, 70, 70, 0.38)";
+const RADIUS_DETAIL_STROKE = "rgba(80, 255, 130, 0.90)";
+const RADIUS_COARSE_STROKE = "rgba(255, 220, 70, 0.90)";
+const RADIUS_SAMPLE_COUNT = 96;
 
 function tierColor(tier: DisplayTier | undefined): string | null {
   switch (tier) {
@@ -457,6 +473,70 @@ function projectVoxelAabb(
   return { x: sxMin, y: syMin, w: sxMax - sxMin, h: syMax - syMin };
 }
 
+function distanceToVoxelAabbSq(
+  point: [number, number, number],
+  min: [number, number, number],
+  max: [number, number, number],
+): number {
+  let out = 0;
+  for (let i = 0; i < 3; i++) {
+    if (point[i] < min[i]) out += (min[i] - point[i]) ** 2;
+    else if (point[i] > max[i]) out += (point[i] - max[i]) ** 2;
+  }
+  return out;
+}
+
+function pathFromProjectedPoints(points: Array<{ x: number; y: number }>): string {
+  return points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+    .join(" ");
+}
+
+function projectRadiusCircle(
+  ws: WasmScene,
+  frame: FieldFrame,
+  centerLocalVox: [number, number, number],
+  radiusVox: number,
+  plane: RadiusPath["plane"],
+  dpr: number,
+): string[] {
+  const paths: string[] = [];
+  let segment: Array<{ x: number; y: number }> = [];
+  const flush = () => {
+    if (segment.length >= 2) paths.push(pathFromProjectedPoints(segment));
+    segment = [];
+  };
+
+  for (let i = 0; i <= RADIUS_SAMPLE_COUNT; i++) {
+    const theta = (i / RADIUS_SAMPLE_COUNT) * Math.PI * 2;
+    const cos = Math.cos(theta) * radiusVox;
+    const sin = Math.sin(theta) * radiusVox;
+    let vx = centerLocalVox[0];
+    let vy = centerLocalVox[1];
+    let vz = centerLocalVox[2];
+    if (plane === "xy") {
+      vx += cos;
+      vy += sin;
+    } else if (plane === "xz") {
+      vx += cos;
+      vz += sin;
+    } else {
+      vy += cos;
+      vz += sin;
+    }
+
+    const [wx, wy, wz] = voxelToWorld(frame, vx, vy, vz);
+    const projected = projectWorld(ws, wx, wy, wz, dpr);
+    if (!projected || !Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+      flush();
+      continue;
+    }
+    segment.push(projected);
+  }
+  flush();
+  return paths;
+}
+
 export function DebugOverlays({
   wasmSceneRef,
   canvasRef,
@@ -479,6 +559,7 @@ export function DebugOverlays({
 
   const [badges, setBadges] = useState<WellBadge[]>([]);
   const [chunks, setChunks] = useState<ChunkRect[]>([]);
+  const [radiusPaths, setRadiusPaths] = useState<RadiusPath[]>([]);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
   useEffect(() => {
@@ -488,6 +569,7 @@ export function DebugOverlays({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
       setChunks([]);
+      setRadiusPaths([]);
       return;
     }
 
@@ -537,6 +619,109 @@ export function DebugOverlays({
           model,
         };
       };
+
+      if (enabled.renderRadius && plans) {
+        const out: RadiusPath[] = [];
+        const planningConfig = configStore.get();
+        const allRadiusSpecs: Array<{ tier: OverlayTier; radiusView: number }> = [
+          { tier: "coarse", radiusView: planningConfig.coarseRenderRadiusView },
+          { tier: "detail", radiusView: planningConfig.detailRenderRadiusView },
+        ];
+        const radiusSpecs = allRadiusSpecs.filter((spec) => renderRadiusEnabled(spec.radiusView));
+
+        if (radiusSpecs.length > 0) {
+          for (const [dsId, plan] of plans) {
+            const ds = datasets.get(dsId);
+            if (!ds) continue;
+            const visibleRegion = parseVisibleRegion(ws, dsId);
+            if (!visibleRegion) continue;
+
+            let positions: Record<string, [number, number]> = {};
+            try {
+              positions = JSON.parse(ws.member_positions(dsId));
+            } catch {
+              positions = {};
+            }
+            const centerGlobal = visibleRegionCenterVox(visibleRegion);
+            let frame: FieldFrame | null = null;
+            let centerLocal: [number, number, number] = centerGlobal;
+
+            if (is3D) {
+              const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
+              let best: {
+                score: number;
+                frame: FieldFrame;
+                pos: [number, number];
+              } | null = null;
+              for (const entry of plan.activeSet) {
+                if (entry.kind !== "field") continue;
+                const pos = positions[entry.entityId];
+                const img = imgById.get(entry.imageId);
+                const lvl0 = img?.multiscale.levels[0];
+                if (!pos || !lvl0) continue;
+                const candidate = getFrame(dsId, entry.imageId, lvl0.shape);
+                if (!candidate.model) continue;
+                candidate.pos = pos;
+                const score = distanceToVoxelAabbSq(
+                  centerGlobal,
+                  [pos[0], pos[1], 0],
+                  [
+                    pos[0] + lvl0.shape[Axis.X],
+                    pos[1] + lvl0.shape[Axis.Y],
+                    lvl0.shape[Axis.Z],
+                  ],
+                );
+                if (!best || score < best.score) {
+                  best = { score, frame: candidate, pos };
+                }
+              }
+              if (!best) continue;
+              frame = best.frame;
+              centerLocal = [
+                centerGlobal[0] - best.pos[0],
+                centerGlobal[1] - best.pos[1],
+                centerGlobal[2],
+              ];
+            } else {
+              frame = {
+                pos: [0, 0],
+                fullVoxel: [1, 1, 1],
+                model: null,
+              };
+            }
+            if (!frame) continue;
+
+            const planes: RadiusPath["plane"][] = is3D ? ["xy", "xz", "yz"] : ["xy"];
+            for (const spec of radiusSpecs) {
+              const radiusVox = renderRadiusLimitVox(visibleRegion, spec.radiusView);
+              if (!Number.isFinite(radiusVox)) continue;
+              const title = `${spec.tier} render radius ${spec.radiusView.toFixed(2)}x (${radiusVox.toFixed(1)} vox)`;
+              for (const plane of planes) {
+                const paths = projectRadiusCircle(
+                  ws,
+                  frame,
+                  centerLocal,
+                  radiusVox,
+                  plane,
+                  dpr,
+                );
+                for (let i = 0; i < paths.length; i++) {
+                  out.push({
+                    key: `${dsId}/${spec.tier}/${plane}/${i}`,
+                    tier: spec.tier,
+                    plane,
+                    d: paths[i],
+                    title,
+                  });
+                }
+              }
+            }
+          }
+        }
+        setRadiusPaths(out);
+      } else if (radiusPaths.length > 0) {
+        setRadiusPaths([]);
+      }
 
       // Well badges
       if (enabled.wellModes && plans) {
@@ -1011,6 +1196,41 @@ export function DebugOverlays({
           />
         );
       })}
+      {enabled.renderRadius && radiusPaths.length > 0 && (
+        <svg
+          width={size.w}
+          height={size.h}
+          viewBox={`0 0 ${size.w} ${size.h}`}
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            overflow: "hidden",
+          }}
+        >
+          {radiusPaths.map(r => {
+            const stroke = r.tier === "detail" ? RADIUS_DETAIL_STROKE : RADIUS_COARSE_STROKE;
+            const isPrimaryPlane = r.plane === "xy";
+            const dash = r.tier === "coarse"
+              ? isPrimaryPlane ? "8 5" : "4 6"
+              : isPrimaryPlane ? undefined : "2 6";
+            return (
+              <path
+                key={r.key}
+                d={r.d}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={isPrimaryPlane ? 2.25 : 1.5}
+                strokeDasharray={dash}
+                opacity={isPrimaryPlane ? 1 : 0.72}
+                vectorEffect="non-scaling-stroke"
+              >
+                <title>{`${r.title}; ${r.plane.toUpperCase()} plane`}</title>
+              </path>
+            );
+          })}
+        </svg>
+      )}
       {enabled.wellModes && badges.map(b => (
         <div
           key={b.key}
