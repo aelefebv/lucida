@@ -6,8 +6,8 @@ use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, AssetMessage, DatasetOpened, GeneratedChunkStatus, ProxyAvailability,
-    ProxyFootprint,
+    AssetCatalog, AssetMessage, DatasetOpened, GeneratedAvailabilityDelta, GeneratedChunkStatus,
+    ProxyAvailability, ProxyFootprint,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
 use lucida_store::cache::CachedStore;
@@ -16,7 +16,10 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::decode::decode_storage_bytes;
-use crate::generated::{DerivedChunkCache, DerivedChunkLookup};
+use crate::generated::{
+    DerivedChunkCache, DerivedChunkLookup, GeneratedCoarseConfig,
+    materialize_generated_coarse_plan, plan_generated_coarse_for_manifest,
+};
 use crate::proxy::{ProxyCache, ProxyGenerator};
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
@@ -580,6 +583,15 @@ async fn handle_open_remote_dataset(
     // Build operational binding.
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
+    let generated_plans =
+        plan_generated_coarse_for_manifest(&result.manifest, GeneratedCoarseConfig::default());
+    let generated_initial_delta = GeneratedAvailabilityDelta {
+        levels: generated_plans
+            .iter()
+            .map(|plan| plan.availability.clone())
+            .collect(),
+        chunks: vec![],
+    };
 
     // Build the initial proxy availability catalog by enumerating
     // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
@@ -629,7 +641,17 @@ async fn handle_open_remote_dataset(
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
     let url_hash16 = dataset_url_hash16(&url);
+    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk(
+        proxy_config.cache_dir.join("generated-coarse"),
+        url_hash16,
+    ));
+    if !generated_initial_delta.levels.is_empty() {
+        derived_chunks.apply_delta(generated_initial_delta.clone());
+    }
     let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
+    let generated_manifest = Arc::new(result.manifest.clone());
+    let generated_store = cached.clone();
+    let generated_resolver = resolver.clone();
     let proxy_generator = Arc::new(ProxyGenerator::new(
         proxy_cache.clone(),
         cached.clone(),
@@ -648,7 +670,7 @@ async fn handle_open_remote_dataset(
         resolver,
         cache: cached,
         dataset_opened: dataset_opened.clone(),
-        derived_chunks: Arc::new(DerivedChunkCache::default()),
+        derived_chunks: derived_chunks.clone(),
         proxy_cache,
         proxy_generator,
     };
@@ -682,6 +704,12 @@ async fn handle_open_remote_dataset(
             return;
         }
         let seq = sess.apply(command.clone());
+        if !generated_initial_delta.levels.is_empty() {
+            sess.apply_generated_availability_delta(
+                dataset_id_key.clone(),
+                generated_initial_delta.clone(),
+            );
+        }
         sess.server_bindings.insert(dataset_id_key, binding);
         seq
     };
@@ -698,11 +726,38 @@ async fn handle_open_remote_dataset(
         ack_json: String::new(), // unused — no client will match
     });
 
+    if !generated_initial_delta.levels.is_empty() {
+        let msg = ServerMessage::GeneratedAvailabilityUpdate {
+            dataset_id: DatasetId(dataset_id.clone()),
+            delta: generated_initial_delta.clone(),
+        };
+        let _ = tx.send(BroadcastItem::GeneratedAvailabilityUpdate {
+            json: serde_json::to_string(&msg).unwrap(),
+        });
+    }
+
     tracing::info!(
         dataset_id = %dataset_id,
         seq,
         "open_remote_dataset.broadcast_sent"
     );
+
+    if !generated_plans.is_empty() {
+        for plan in generated_plans {
+            let manifest = generated_manifest.clone();
+            let store = generated_store.clone();
+            let resolver = generated_resolver.clone();
+            let cache = derived_chunks.clone();
+            let session = session.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                materialize_generated_coarse_plan(
+                    plan, manifest, store, resolver, cache, session, tx,
+                )
+                .await;
+            });
+        }
+    }
 
     // Kick off background generation for the initial (T=0, C=0) view
     // of every advertised entity at the lowest priority. Errors are logged
