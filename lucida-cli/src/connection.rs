@@ -46,6 +46,7 @@ pub async fn connect(
             document,
             peers,
             your_id,
+            ..
         } => Ok((
             sink,
             stream,
