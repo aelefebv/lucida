@@ -91,7 +91,7 @@ function tierSourcesForEntry(entry: ColdStateActiveEntry): Array<{ tier: ChunkTi
   const sources: Array<{ tier: ChunkTier; level: number }> = [
     { tier: "detail", level: detailLevel },
   ];
-  if (entry.coarseLevel !== undefined && entry.coarseLevel !== null && entry.coarseLevel !== detailLevel) {
+  if (entry.coarseLevel !== undefined && entry.coarseLevel !== null) {
     sources.push({ tier: "coarse", level: entry.coarseLevel });
   }
   return sources;

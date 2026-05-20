@@ -78,6 +78,27 @@ describe("ProxiedContentSource.fetch", () => {
     expect(result.dataType).toBe("uint16");
   });
 
+  it("coalesces duplicate in-flight chunk fetches by wire key", async () => {
+    const first = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
+      new AbortController().signal,
+    );
+    const second = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
+      new AbortController().signal,
+    );
+
+    expect(sentMessages).toHaveLength(1);
+
+    const responseBytes = new Uint8Array([0x10, 0x20, 0x30]).buffer;
+    source.handleChunkData("ds-1/image-1/0/0/0/0/0/0", responseBytes);
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(new Uint8Array(a.bytes)).toEqual(new Uint8Array([0x10, 0x20, 0x30]));
+    expect(new Uint8Array(b.bytes)).toEqual(new Uint8Array([0x10, 0x20, 0x30]));
+    expect(a.bytes).not.toBe(b.bytes);
+  });
+
   it("rejects synchronously when the image's wire format is not registered", async () => {
     const ctrl = new AbortController();
     await expect(

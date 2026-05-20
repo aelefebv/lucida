@@ -393,9 +393,13 @@ export class CpuCache {
     const wasNew = this.rejectionTracker.mark(entityId, chunkKey);
     if (!wasNew) return;
 
-    const key = this.inFlightKey({ entityId, chunkKey } as ChunkRequest);
-    this.chunkScheduler.cancelOne(key);
-    this.inFlightChunkMeta.delete(key);
+    const cancelled = this.chunkScheduler.cancelWhere((entry) => (
+      entry.request.entityId === entityId &&
+      entry.request.chunkKey === chunkKey
+    ));
+    for (const key of cancelled) {
+      this.inFlightChunkMeta.delete(key);
+    }
   }
 
   clearRejected(): void {
@@ -424,7 +428,12 @@ export class CpuCache {
     for (const entry of this.chunkStore.iterateTier("active-detail")) {
       if (entry.lane !== "detail") continue;
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey)) {
+      if (this.deliveryState.wasChunkSent(
+        entry.imageId,
+        entry.c,
+        entry.chunkKey,
+        entry.residencyTier,
+      )) {
         continue;
       }
       if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
@@ -434,7 +443,12 @@ export class CpuCache {
     for (const entry of this.overviewStore.allEntries()) {
       if (entry.lane !== "coarse") continue;
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey)) {
+      if (this.deliveryState.wasChunkSent(
+        entry.imageId,
+        entry.c,
+        entry.chunkKey,
+        entry.residencyTier,
+      )) {
         continue;
       }
       if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
@@ -453,7 +467,7 @@ export class CpuCache {
   markSent(delivery: ReadyDelivery): void {
     if (delivery.kind === "chunk") {
       this.deliveryState.markChunkSent(
-        delivery.imageId, delivery.c, delivery.chunkKey,
+        delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
       );
     } else {
       this.deliveryState.markProxySent(this.proxyKeyFromDelivery(delivery));
@@ -478,8 +492,13 @@ export class CpuCache {
     }
   }
 
-  markChunkMissing(imageId: string, c: number, chunkKey: string): void {
-    this.deliveryState.clearChunkSent(imageId, c, chunkKey);
+  markChunkMissing(
+    imageId: string,
+    c: number,
+    chunkKey: string,
+    tier?: ResidencyTier,
+  ): void {
+    this.deliveryState.clearChunkSent(imageId, c, chunkKey, tier);
   }
 
   markProxyMissing(key: string): void {
@@ -1199,7 +1218,7 @@ export class CpuCache {
   }
 
   private inFlightKey(req: ChunkRequest): string {
-    return `${req.entityId}/${req.chunkKey}`;
+    return `${req.entityId}/${this.requestResidencyTier(req)}/${req.chunkKey}`;
   }
 }
 

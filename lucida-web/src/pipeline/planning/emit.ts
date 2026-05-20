@@ -284,7 +284,6 @@ export function emitCoarseLane(
   for (const entry of activeSet) {
     if (entry.kind !== "field") continue;
     if (entry.coarseLevel === undefined || entry.coarseLevel === null) continue;
-    if (entry.coarseLevel === entry.detailLevel) continue;
 
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
