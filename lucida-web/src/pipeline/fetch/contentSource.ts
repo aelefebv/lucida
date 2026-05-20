@@ -183,16 +183,13 @@ export class ProxiedContentSource implements ContentSource {
     const dataType = extractDataType(wireFormat);
 
     return new Promise<FetchResult>((resolve, reject) => {
-      let pendingEntry: PendingRequest;
-      const timeoutId = setTimeout(() => {
-        this.removePending(compositeKey, pendingEntry);
-        reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
-      }, this.timeoutMs);
-
-      pendingEntry = {
-        resolve: (bytes) => { clearTimeout(timeoutId); resolve({ bytes, wireFormat, dataType }); },
-        reject: (err) => { clearTimeout(timeoutId); reject(err); },
-        timeoutId,
+      const pendingEntry: PendingRequest = {
+        resolve: (bytes) => { clearTimeout(pendingEntry.timeoutId); resolve({ bytes, wireFormat, dataType }); },
+        reject: (err) => { clearTimeout(pendingEntry.timeoutId); reject(err); },
+        timeoutId: setTimeout(() => {
+          this.removePending(compositeKey, pendingEntry);
+          reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
+        }, this.timeoutMs),
       };
 
       const shouldSend = this.addPending(compositeKey, pendingEntry);
@@ -206,7 +203,7 @@ export class ProxiedContentSource implements ContentSource {
       }
 
       signal.addEventListener("abort", () => {
-        clearTimeout(timeoutId);
+        clearTimeout(pendingEntry.timeoutId);
         this.removePending(compositeKey, pendingEntry);
         // Keep the AbortError shape for downstream `instanceof DOMException`.
         reject(new DOMException("Aborted", "AbortError"));
