@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0](https://github.com/aelefebv/lucida/compare/v0.4.0...v0.5.0) (2026-05-21)
+
+
+### Features
+
+* add chunk-only coarse/detail residency ([#691](https://github.com/aelefebv/lucida/issues/691)) ([45f7038](https://github.com/aelefebv/lucida/commit/45f703867c1f020a22cb3d0bf4e9742a61219bc5))
+* budget proxy GPU residency ([#671](https://github.com/aelefebv/lucida/issues/671)) ([43cd2fa](https://github.com/aelefebv/lucida/commit/43cd2fac4959cf2cb4934c73ef5695fc9a401224)), closes [#670](https://github.com/aelefebv/lucida/issues/670)
+* preview render radius while dragging sliders ([#693](https://github.com/aelefebv/lucida/issues/693)) ([555f0fe](https://github.com/aelefebv/lucida/commit/555f0fef922bcb73d84b6f2ed5dc0b5c54060567))
+
+
+### Bug Fixes
+
+* keep same-level coarse radius chunks resident ([#694](https://github.com/aelefebv/lucida/issues/694)) ([c694d31](https://github.com/aelefebv/lucida/commit/c694d314a97dfb99810c7b4adb7967ded69bd22c))
+* **renderer:** harden worker residency feedback ([#662](https://github.com/aelefebv/lucida/issues/662)) ([7635fab](https://github.com/aelefebv/lucida/commit/7635faba869123539812662098e5fe82b35661f0))
+* **renderer:** multi channel scrubbing was sometimes stuck without all 3 channels loaded, but panning / zooming fixed it. ([#663](https://github.com/aelefebv/lucida/issues/663)) ([09295e9](https://github.com/aelefebv/lucida/commit/09295e9d463cc1e2dd567906f2599b97c268f0b6))
+* **renderer:** requeue stale chunks during scrubbing ([#653](https://github.com/aelefebv/lucida/issues/653)) ([5828bd3](https://github.com/aelefebv/lucida/commit/5828bd31b2a3c739d64463ebb4ebd7125f13b74a))
+
 ## [0.4.0](https://github.com/aelefebv/lucida/compare/v0.3.2...v0.4.0) (2026-05-17)
 
 
