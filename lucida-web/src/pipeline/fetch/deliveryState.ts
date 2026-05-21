@@ -8,33 +8,60 @@
  * Pure collaborator: no I/O, no clocks, no worker-member-id knowledge.
  */
 
-function chunkKeyFor(imageId: string, c: number): string {
+import type { ResidencyTier } from "./types.ts";
+
+function channelKeyFor(imageId: string, c: number): string {
   return `${imageId}|${c}`;
+}
+
+function sentKeyFor(chunkKey: string, tier?: ResidencyTier): string {
+  return `${tier ?? "detail"}|${chunkKey}`;
 }
 
 export class DeliveryState {
   private chunkSent = new Map<string, Set<string>>();
   private proxySent = new Set<string>();
 
-  markChunkSent(imageId: string, c: number, chunkKey: string): void {
-    const key = chunkKeyFor(imageId, c);
+  markChunkSent(
+    imageId: string,
+    c: number,
+    chunkKey: string,
+    tier?: ResidencyTier,
+  ): void {
+    const key = channelKeyFor(imageId, c);
     let set = this.chunkSent.get(key);
     if (!set) {
       set = new Set();
       this.chunkSent.set(key, set);
     }
-    set.add(chunkKey);
+    set.add(sentKeyFor(chunkKey, tier));
   }
 
-  wasChunkSent(imageId: string, c: number, chunkKey: string): boolean {
-    return this.chunkSent.get(chunkKeyFor(imageId, c))?.has(chunkKey) ?? false;
+  wasChunkSent(
+    imageId: string,
+    c: number,
+    chunkKey: string,
+    tier?: ResidencyTier,
+  ): boolean {
+    return this.chunkSent.get(channelKeyFor(imageId, c))?.has(sentKeyFor(chunkKey, tier)) ?? false;
   }
 
-  clearChunkSent(imageId: string, c: number, chunkKey: string): void {
-    const key = chunkKeyFor(imageId, c);
+  clearChunkSent(
+    imageId: string,
+    c: number,
+    chunkKey: string,
+    tier?: ResidencyTier,
+  ): void {
+    const key = channelKeyFor(imageId, c);
     const set = this.chunkSent.get(key);
     if (!set) return;
-    set.delete(chunkKey);
+    if (tier === undefined) {
+      for (const sentKey of Array.from(set)) {
+        if (sentKey.endsWith(`|${chunkKey}`)) set.delete(sentKey);
+      }
+    } else {
+      set.delete(sentKeyFor(chunkKey, tier));
+    }
     if (set.size === 0) this.chunkSent.delete(key);
   }
 

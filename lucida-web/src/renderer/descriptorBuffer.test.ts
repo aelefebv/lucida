@@ -573,6 +573,44 @@ describe("EntityDescriptor byte layout", () => {
     expect(u32[coarse + SOURCE_OFFSET_CHUNK_DIMS / 4 + 2]).toBe(8);
   });
 
+  it("uses separate same-level metas for explicit detail and coarse tier sources", () => {
+    const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const entry = makeEntry({
+      entityId: "e1", imageId: "img-0", mode: "fields-with-detail",
+      detailLevel: 1,
+      coarseLevel: 1,
+      wantedLodLevels: [1],
+      levels: [
+        { level: 1, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+      ],
+    });
+    const metas: LodIndirectionMeta[] = [
+      {
+        level: 1,
+        gridDims: [2, 4, 4],
+        chunkDims: [32, 64, 64],
+        levelDims: [64, 256, 256],
+        offset: 11,
+      },
+      {
+        level: 1,
+        gridDims: [2, 4, 4],
+        chunkDims: [32, 64, 64],
+        levelDims: [64, 256, 256],
+        offset: 43,
+      },
+    ];
+    serializeEntityDescriptor(buf, 0, entry, metas, defaultDisplayState(), new Map(), new Map(), [], new Map());
+
+    const u32 = new Uint32Array(buf);
+    const detail = OFFSET_DETAIL_SOURCE / 4;
+    const coarse = OFFSET_COARSE_SOURCE / 4;
+    expect(u32[detail + SOURCE_OFFSET_LEVEL / 4]).toBe(1);
+    expect(u32[detail + SOURCE_OFFSET_INDIRECTION_OFFSET / 4]).toBe(11);
+    expect(u32[coarse + SOURCE_OFFSET_LEVEL / 4]).toBe(1);
+    expect(u32[coarse + SOURCE_OFFSET_INDIRECTION_OFFSET / 4]).toBe(43);
+  });
+
   it("keeps tier sources invalid for legacy entries without detailLevel", () => {
     const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "fields-with-detail" });

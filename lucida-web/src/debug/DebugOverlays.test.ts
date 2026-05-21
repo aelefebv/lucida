@@ -62,8 +62,8 @@ describe("DebugOverlays tier coverage helpers", () => {
 
   it("aggregates current detail and coarse available coverage per well", () => {
     const deliveryState = new DeliveryState();
-    deliveryState.markChunkSent("img-a", 0, "0/0/0/0/0/0");
-    deliveryState.markChunkSent("img-a", 0, "2/0/0/0/0/0");
+    deliveryState.markChunkSent("img-a", 0, "0/0/0/0/0/0", "detail");
+    deliveryState.markChunkSent("img-a", 0, "2/0/0/0/0/0", "coarse");
 
     const cacheSnap: CacheStateSnapshot = {
       cached: new Map([

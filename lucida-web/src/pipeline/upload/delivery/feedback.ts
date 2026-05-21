@@ -97,7 +97,11 @@ export class WorkerFeedback {
           byChannel.set(c, keys);
         }
         keys.add(entry.chunkKey);
-        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
+        if (entry.tier) {
+          cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier);
+        } else {
+          cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
+        }
         missingChunks++;
       } else if (entry.kind === "proxy") {
         cpuCache.markProxyMissing(proxyKeyFromMissing(entry));

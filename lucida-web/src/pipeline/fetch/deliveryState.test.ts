@@ -12,6 +12,23 @@ describe("DeliveryState", () => {
     expect(state.wasChunkSent("img-1", 1, "0/0/1/0/0/0")).toBe(false);
   });
 
+  it("tracks the same chunk key independently per residency tier", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img-0", 0, "1/0/0/0/0/0", "detail");
+
+    expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "detail")).toBe(true);
+    expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse")).toBe(false);
+
+    state.markChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse");
+    state.clearChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse");
+
+    expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "detail")).toBe(true);
+    expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse")).toBe(false);
+
+    state.clearChunkSent("img-0", 0, "1/0/0/0/0/0");
+    expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "detail")).toBe(false);
+  });
+
   it("clears individual chunk keys and image-wide chunk state", () => {
     const state = new DeliveryState();
     state.markChunkSent("img-0", 0, "a");

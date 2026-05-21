@@ -438,15 +438,31 @@ export function serializeEntityDescriptor(
     }
   }
 
-  const hasTierSources = entry.kind === "field" && entry.detailLevel !== undefined;
+  const detailLevel = entry.kind === "field" ? entry.detailLevel : undefined;
+  const coarseLevel = entry.kind === "field" ? entry.coarseLevel : undefined;
+  const hasTierSources = detailLevel !== undefined;
   const detailMeta = hasTierSources
-    ? lodMetas.find((m) => m.level === entry.detailLevel)
+    ? findLodMeta(lodMetas, detailLevel)
     : undefined;
-  const coarseMeta = hasTierSources && entry.coarseLevel !== undefined && entry.coarseLevel !== null
-    ? lodMetas.find((m) => m.level === entry.coarseLevel)
+  const coarseMeta = hasTierSources && coarseLevel !== undefined && coarseLevel !== null
+    ? findLodMeta(lodMetas, coarseLevel, "last")
     : undefined;
   writeChunkTierSource(u32, OFFSET_DETAIL_SOURCE, detailMeta);
   writeChunkTierSource(u32, OFFSET_COARSE_SOURCE, coarseMeta);
+}
+
+function findLodMeta(
+  lodMetas: LodIndirectionMeta[],
+  level: number,
+  preference: "first" | "last" = "first",
+): LodIndirectionMeta | undefined {
+  if (preference === "first") {
+    return lodMetas.find((m) => m.level === level);
+  }
+  for (let i = lodMetas.length - 1; i >= 0; i--) {
+    if (lodMetas[i].level === level) return lodMetas[i];
+  }
+  return undefined;
 }
 
 function writeChunkTierSource(

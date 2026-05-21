@@ -1354,6 +1354,45 @@ describe("plan() — coarse/detail bridge", () => {
     expect(new Set(coarse.map((r) => r.level))).toEqual(new Set([2]));
   });
 
+  it("keeps the coarse lane when the selected detail level is also the coarse level", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
+    const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "field-a",
+      imageId: "img-a",
+      kind: "Image",
+      levels: [level0, level1],
+      detailLevel: 1,
+      coarseLevel: 1,
+    });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }),
+      selection: makeSelection(),
+    });
+
+    const result = plan(
+      snapshot,
+      createSyntheticState(),
+      mergeConfig({ coarseDetailEnabled: true, prefetchDepth: 0 }),
+    );
+
+    const detail = result.requests.filter((r) => r.lane === "detail");
+    const coarse = result.requests.filter((r) => r.lane === "coarse");
+    expect(detail.map((r) => [r.level, r.tier])).toEqual([
+      [1, "detail"],
+      [1, "detail"],
+      [1, "detail"],
+      [1, "detail"],
+    ]);
+    expect(coarse.map((r) => [r.level, r.tier])).toEqual([
+      [1, "coarse"],
+      [1, "coarse"],
+      [1, "coarse"],
+      [1, "coarse"],
+    ]);
+  });
+
   it("filters detail and coarse lanes with independent render radius knobs", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
@@ -1384,7 +1423,7 @@ describe("plan() — coarse/detail bridge", () => {
     );
 
     expect(result.requests.filter((r) => r.lane === "detail")).toHaveLength(4);
-    expect(result.requests.filter((r) => r.lane === "coarse")).toHaveLength(0);
+    expect(result.requests.filter((r) => r.lane === "coarse")).toHaveLength(4);
   });
 });
 

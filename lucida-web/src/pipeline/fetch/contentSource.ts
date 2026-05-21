@@ -62,7 +62,7 @@ interface PendingProxyRequest {
 }
 
 export class ProxiedContentSource implements ContentSource {
-  private pending = new Map<string, PendingRequest>();
+  private pending = new Map<string, PendingRequest[]>();
   private pendingProxy = new Map<string, PendingProxyRequest>();
   private imageWireFormats = new Map<string, WireFormat>();
 
@@ -111,21 +111,21 @@ export class ProxiedContentSource implements ContentSource {
     message?: string | null,
   ): void {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
-    const entry = this.pending.get(compositeKey);
-    if (!entry) return;
+    const entries = this.takePending(compositeKey);
+    if (entries.length === 0) return;
 
-    clearTimeout(entry.timeoutId);
-    this.pending.delete(compositeKey);
-    entry.reject(generatedStatusToFetchError(status, chunkKey, message));
+    for (const entry of entries) {
+      clearTimeout(entry.timeoutId);
+      entry.reject(generatedStatusToFetchError(status, chunkKey, message));
+    }
   }
 
   handleChunkData(key: string, data: ArrayBuffer): void {
-    const entry = this.pending.get(key);
-    if (entry) {
+    const entries = this.takePending(key);
+    entries.forEach((entry, idx) => {
       clearTimeout(entry.timeoutId);
-      this.pending.delete(key);
-      entry.resolve(data);
-    }
+      entry.resolve(idx === 0 ? data : data.slice(0));
+    });
   }
 
   handleProxyData(key: string, data: ArrayBuffer): void {
@@ -140,11 +140,13 @@ export class ProxiedContentSource implements ContentSource {
   /** Treated as `abort` downstream; matches caller-driven cancellation. */
   rejectDataset(datasetId: string): void {
     const prefix = datasetId + "/";
-    for (const [key, entry] of this.pending) {
+    for (const [key, entries] of this.pending) {
       if (key.startsWith(prefix)) {
-        clearTimeout(entry.timeoutId);
         this.pending.delete(key);
-        entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
+        for (const entry of entries) {
+          clearTimeout(entry.timeoutId);
+          entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
+        }
       }
     }
     // Proxy keys aren't dataset-scoped — entity IDs are unique enough.
@@ -152,9 +154,11 @@ export class ProxiedContentSource implements ContentSource {
 
   /** Transient so the cache's `OnceTransientRetry` covers the reconnect. */
   rejectAll(): void {
-    for (const [, entry] of this.pending) {
-      clearTimeout(entry.timeoutId);
-      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
+    for (const [, entries] of this.pending) {
+      for (const entry of entries) {
+        clearTimeout(entry.timeoutId);
+        entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
+      }
     }
     this.pending.clear();
     for (const [, entry] of this.pendingProxy) {
@@ -179,27 +183,28 @@ export class ProxiedContentSource implements ContentSource {
     const dataType = extractDataType(wireFormat);
 
     return new Promise<FetchResult>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.pending.delete(compositeKey);
-        reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
-      }, this.timeoutMs);
+      const pendingEntry: PendingRequest = {
+        resolve: (bytes) => { clearTimeout(pendingEntry.timeoutId); resolve({ bytes, wireFormat, dataType }); },
+        reject: (err) => { clearTimeout(pendingEntry.timeoutId); reject(err); },
+        timeoutId: setTimeout(() => {
+          this.removePending(compositeKey, pendingEntry);
+          reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
+        }, this.timeoutMs),
+      };
 
-      this.pending.set(compositeKey, {
-        resolve: (bytes) => { clearTimeout(timeoutId); resolve({ bytes, wireFormat, dataType }); },
-        reject: (err) => { clearTimeout(timeoutId); reject(err); },
-        timeoutId,
-      });
-
-      this.sendMessage(JSON.stringify({
-        type: "chunk_request",
-        dataset_id: datasetId,
-        image_id: imageId,
-        key: chunkKey,
-      }));
+      const shouldSend = this.addPending(compositeKey, pendingEntry);
+      if (shouldSend) {
+        this.sendMessage(JSON.stringify({
+          type: "chunk_request",
+          dataset_id: datasetId,
+          image_id: imageId,
+          key: chunkKey,
+        }));
+      }
 
       signal.addEventListener("abort", () => {
-        clearTimeout(timeoutId);
-        this.pending.delete(compositeKey);
+        clearTimeout(pendingEntry.timeoutId);
+        this.removePending(compositeKey, pendingEntry);
         // Keep the AbortError shape for downstream `instanceof DOMException`.
         reject(new DOMException("Aborted", "AbortError"));
       });
@@ -256,6 +261,33 @@ export class ProxiedContentSource implements ContentSource {
         reject(new DOMException("Aborted", "AbortError"));
       });
     });
+  }
+
+  private addPending(key: string, entry: PendingRequest): boolean {
+    const entries = this.pending.get(key);
+    if (entries) {
+      entries.push(entry);
+      return false;
+    }
+    this.pending.set(key, [entry]);
+    return true;
+  }
+
+  private removePending(key: string, entry: PendingRequest): void {
+    const entries = this.pending.get(key);
+    if (!entries) return;
+    const next = entries.filter((candidate) => candidate !== entry);
+    if (next.length === 0) {
+      this.pending.delete(key);
+    } else {
+      this.pending.set(key, next);
+    }
+  }
+
+  private takePending(key: string): PendingRequest[] {
+    const entries = this.pending.get(key) ?? [];
+    this.pending.delete(key);
+    return entries;
   }
 }
 

@@ -72,6 +72,32 @@ export function chunkCenterDistanceToVisibleCenterVox(args: {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+export function chunkClosestDistanceToVisibleCenterVox(args: {
+  region: VisibleRegion;
+  layoutPositionVox: [number, number];
+  geometry: ChunkRadiusGeometry;
+  chunk: { x: number; y: number; z: number };
+}): number {
+  const [centerX, centerY, centerZ] = visibleRegionCenterVox(args.region);
+  const [chunkWorldX, chunkWorldY, chunkWorldZ] = chunkWorldDimsForRadius(args.geometry);
+  const minX = args.layoutPositionVox[0] + args.chunk.x * chunkWorldX;
+  const minY = args.layoutPositionVox[1] + args.chunk.y * chunkWorldY;
+  const minZ = args.chunk.z * chunkWorldZ;
+  const maxX = Math.min(
+    args.layoutPositionVox[0] + args.geometry.fullDims[0],
+    minX + chunkWorldX,
+  );
+  const maxY = Math.min(
+    args.layoutPositionVox[1] + args.geometry.fullDims[1],
+    minY + chunkWorldY,
+  );
+  const maxZ = Math.min(args.geometry.fullDims[2], minZ + chunkWorldZ);
+  const dx = distanceOutsideInterval(centerX, minX, maxX);
+  const dy = distanceOutsideInterval(centerY, minY, maxY);
+  const dz = distanceOutsideInterval(centerZ, minZ, maxZ);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 export function chunkWithinRenderRadius(args: {
   region: VisibleRegion;
   radiusView: number;
@@ -80,6 +106,12 @@ export function chunkWithinRenderRadius(args: {
   chunk: { x: number; y: number; z: number };
 }): boolean {
   if (!renderRadiusEnabled(args.radiusView)) return true;
-  return chunkCenterDistanceToVisibleCenterVox(args) <=
+  return chunkClosestDistanceToVisibleCenterVox(args) <=
     renderRadiusLimitVox(args.region, args.radiusView);
+}
+
+function distanceOutsideInterval(value: number, min: number, max: number): number {
+  if (value < min) return min - value;
+  if (value > max) return value - max;
+  return 0;
 }

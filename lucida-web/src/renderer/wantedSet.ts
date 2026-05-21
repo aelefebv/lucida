@@ -353,8 +353,7 @@ function chunkSourcesForEntry(
   ];
   if (
     entry.coarseLevel !== undefined &&
-    entry.coarseLevel !== null &&
-    entry.coarseLevel !== entry.detailLevel
+    entry.coarseLevel !== null
   ) {
     sources.push({ tier: "coarse", levels: [entry.coarseLevel] });
   }

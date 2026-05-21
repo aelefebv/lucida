@@ -252,7 +252,7 @@ export function buildWellTierCoverage(
     if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
       counts.inFlight++;
     }
-    if (ready || cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey)) {
+    if (ready || cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey, tier)) {
       counts.shown++;
     }
   }
@@ -1005,7 +1005,7 @@ export function DebugOverlays({
               const worker = renderLoopRef.current?.workerChunkResidency(dsId, entry.imageId, c, key) ?? "unknown";
               if (worker === "resident") return true;
               if (worker === "missing") return false;
-              return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key);
+              return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key, tier);
             };
 
             const statusFor = (key: string): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
@@ -1130,7 +1130,7 @@ export function DebugOverlays({
               }
             };
 
-            if (coarseLevel !== null && coarseLevel !== entry.detailLevel) {
+            if (coarseLevel !== null) {
               appendSource(coarseLevel, "coarse");
             }
             appendSource(entry.detailLevel ?? entry.targetLod, "detail");

@@ -441,6 +441,49 @@ describe("CpuCache", () => {
       });
     });
 
+    it("keeps identical detail and coarse chunk keys deliverable as separate residency tiers", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const detail = makeRequest({
+        entityId: "image-1",
+        imageId: "image-1",
+        level: 1,
+        chunkKey: "1/0/0/0/0/0",
+        lane: "detail",
+        tier: "detail",
+        priority: 10,
+      });
+      const coarse = makeRequest({
+        entityId: "image-1",
+        imageId: "image-1",
+        level: 1,
+        chunkKey: "1/0/0/0/0/0",
+        lane: "coarse",
+        tier: "coarse",
+        priority: 20,
+      });
+
+      cache.submit(makePlan([detail, coarse], [makeActiveEntry("image-1", "image-1")]));
+      await flush();
+
+      expect(source.fetchCount).toBe(2);
+      expect(cache.telemetry().mainBytes).toBe(64);
+      expect(cache.telemetry().overviewBytes).toBe(64);
+
+      const deliveries = Array.from(cache.getDeliverable());
+      expect(deliveries.map((d) => d.kind === "chunk" ? d.residencyTier : "proxy")).toEqual([
+        "detail",
+        "coarse",
+      ]);
+
+      cache.markSent(deliveries[0]);
+      expect(Array.from(cache.getDeliverable()).map((d) =>
+        d.kind === "chunk" ? d.residencyTier : "proxy",
+      )).toEqual(["coarse"]);
+    });
+
     it("resolves skipped chunk feedback from imageId back to entityId", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;

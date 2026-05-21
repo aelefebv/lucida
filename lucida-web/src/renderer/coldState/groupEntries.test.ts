@@ -213,6 +213,35 @@ describe("groupEntriesByPool — volume", () => {
       level: 2,
     });
   });
+
+  it("detail and coarse sources stay separate when they share the same level", () => {
+    const cold = makeCold([
+      makeEntry({
+        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        detailLevel: 1,
+        coarseLevel: 1,
+        wantedLodLevels: [1],
+        levels: [
+          { level: 1, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+        ],
+      }),
+    ]);
+    const groups = groupEntriesByPool(cold, "volume");
+    expect(Array.from(groups.keys()).sort()).toEqual([
+      "ds1:64x64x32:coarse",
+      "ds1:64x64x32:detail",
+    ]);
+    expect(groups.get("ds1:64x64x32:detail")?.entries[0]).toMatchObject({
+      memberId: "imgA",
+      tier: "detail",
+      level: 1,
+    });
+    expect(groups.get("ds1:64x64x32:coarse")?.entries[0]).toMatchObject({
+      memberId: "imgA",
+      tier: "coarse",
+      level: 1,
+    });
+  });
 });
 
 describe("groupEntriesByPool — slice", () => {

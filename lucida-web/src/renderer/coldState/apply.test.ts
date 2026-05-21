@@ -385,6 +385,37 @@ describe("Suite A — applyColdState", () => {
     expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.get("imgA")?.map((m) => m.level)).toEqual([0, 2]);
   });
 
+  it("source-backed detail and coarse tiers stay separate when they share the same level", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const cold = makeCold([
+      makeEntry({
+        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        targetLod: 1,
+        detailOwnedLodRange: [1, 1],
+        detailLevel: 1,
+        coarseLevel: 1,
+        wantedLodLevels: [1],
+        levels: [
+          { level: 1, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+        ],
+      }),
+    ]);
+
+    applyColdState(ctx, cold);
+
+    expect(ctx.state.memberTierToPool.get("imgA|detail")).toBe("ds1:64x64x32:detail");
+    expect(ctx.state.memberTierToPool.get("imgA|coarse")).toBe("ds1:64x64x32:coarse");
+    expect(vol(ctx.state).get("ds1:64x64x32:detail")?.entityMetas.get("imgA")?.[0]).toMatchObject({
+      level: 1,
+      offset: 0,
+    });
+    expect(vol(ctx.state).get("ds1:64x64x32:coarse")?.entityMetas.get("imgA")?.[0]).toMatchObject({
+      level: 1,
+      offset: 0,
+    });
+    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.get("imgA")?.map((m) => m.level)).toEqual([1, 1]);
+  });
+
   // -------------------------------------------------------------------------
   // 6. Slice mode cold state
   // -------------------------------------------------------------------------
