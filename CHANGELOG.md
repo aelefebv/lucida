@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/aelefebv/lucida/compare/v0.5.0...v0.5.1) (2026-05-21)
+
+
+### Bug Fixes
+
+* refresh runtime packages before release scan ([7deb4ce](https://github.com/aelefebv/lucida/commit/7deb4ce8d938e76334f4f62df2c0bbecdb4665ed))
+
 ## [0.5.0](https://github.com/aelefebv/lucida/compare/v0.4.0...v0.5.0) (2026-05-21)
 
 
