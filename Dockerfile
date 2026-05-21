@@ -125,8 +125,10 @@ FROM debian:bookworm-slim AS runtime
 
 # Runtime deps: ca-certificates is required for outbound HTTPS to
 # Google's OAuth/JWKS endpoints, GCS, and any other TLS hosts the
-# proxy fetches from. Nothing else is strictly needed.
+# proxy fetches from. Upgrade inherited packages first so release
+# scans don't block on fixed CVEs from a stale parent-image layer.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
  && rm -rf /var/lib/apt/lists/*
