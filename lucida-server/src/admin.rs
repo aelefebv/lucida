@@ -25,7 +25,7 @@
 //!
 //! The on-disk layout — `{cache_dir}/{url_hash hex}/{entity_id}/{kind}/...`
 //! — is owned by `proxy::ProxyCache`. We use
-//! [`crate::handler::dataset_url_hash16`] to compute the same 16-byte
+//! [`lucida_content::url::dataset_url_hash16`] to compute the same 16-byte
 //! BLAKE3-prefix hash that the cache uses for its per-dataset directory
 //! name, formatted as 32 lowercase hex chars.
 
@@ -36,11 +36,11 @@ use std::path::{Path, PathBuf};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use lucida_content::url::dataset_url_hash16;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::auth::AdminRequired;
-use crate::handler::dataset_url_hash16;
 
 /// Outcome of a `clear_proxy_cache` invocation.
 #[derive(Debug, Clone, Copy, Default, Serialize)]

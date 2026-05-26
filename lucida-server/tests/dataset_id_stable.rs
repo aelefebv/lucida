@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use lucida_content::url::dataset_id_for_url;
 use lucida_content::{
     Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
     EntityKind, EntityLabels, ImageSpec, LevelGeometry, MultiscaleInfo,
@@ -34,7 +35,6 @@ use lucida_protocol::{
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::generated::DerivedChunkCache;
-use lucida_server::handler::dataset_id_for_url;
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
 use lucida_store::cache::CachedStore;
@@ -176,7 +176,7 @@ fn make_binding(
     cache: Arc<CachedStore>,
 ) -> ServerBinding {
     let resolver = Arc::new(ChunkResolver::new(&ServerBindingSeed { images: vec![] }));
-    let url_hash = lucida_server::handler::dataset_url_hash16(url);
+    let url_hash = lucida_content::url::dataset_url_hash16(url);
     // tempfile auto-cleans on drop; we leak it for the duration of the
     // test which is fine — every test process gets a fresh dir.
     let tmp = tempfile::tempdir().expect("tempdir");

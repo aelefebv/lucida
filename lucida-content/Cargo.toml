@@ -6,6 +6,11 @@ license = "MIT"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Used by `url::dataset_id_for_url` and `url::dataset_url_hash16` — the
+# single source of truth for the BLAKE3-derived dataset id and proxy-cache
+# directory name. Previously lived in `lucida-core` and `lucida-server`;
+# unified here per `wiki/decisions/0042-canonical-dataset-url-form.md`.
+blake3 = "1"
 
 [dev-dependencies]
 serde_json = "1"
