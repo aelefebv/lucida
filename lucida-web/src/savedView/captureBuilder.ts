@@ -9,6 +9,7 @@
 // for the wire shapes this mirrors.
 
 import type { WasmScene } from "lucida-core";
+import { is_local_dataset_url } from "lucida-core";
 import type {
   Camera,
   DatasetId,
@@ -130,6 +131,16 @@ export function localFilePathCount(view: SavedView): number {
   return view.datasets.filter(isLocalFilePath).length;
 }
 
+/**
+ * Delegates to the wasm-shimmed `is_local_dataset_url` so the SPA's
+ * share-warning classifier shares one implementation with the Rust
+ * server and storage layer. See
+ * [[decisions/0042-canonical-dataset-url-form]] for the canonical-form
+ * contract: callers pass the already-canonical URL (URLs in
+ * `SavedView.datasets` are normalized at submit-time by
+ * `useDatasets.handleUrlSubmit`, and `DatasetOpened` broadcasts carry
+ * server-normalized URLs).
+ */
 function isLocalFilePath(url: string): boolean {
-  return url.startsWith("/") || url.startsWith("file://");
+  return is_local_dataset_url(url);
 }
