@@ -36,7 +36,7 @@ use lucida_server::auth::middleware::auth_middleware;
 use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::session_store::{LoginSession, LoginSessionStore};
 use lucida_server::auth::{AuthConfig, MemorySessionStore};
-use lucida_server::handler::dataset_url_hash16;
+use lucida_content::url::dataset_url_hash16;
 use lucida_server::session::Session;
 use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
 

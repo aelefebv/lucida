@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
+use lucida_content::url::{dataset_id_for_url, dataset_url_hash16};
 use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
@@ -481,40 +482,10 @@ pub async fn handle_client(
     eprintln!("client {id} disconnected");
 }
 
-/// Compute the stable, content-derived DatasetId for a source URL.
-///
-/// The ID is deterministic in `url` only — independent of wall clock or
-/// server lifetime — so that:
-///   * the same URL opened multiple times within a session shares one
-///     `ServerBinding` (and therefore one cache, one import);
-///   * the proxy cache layout can key on the URL hash and survive
-///     restarts.
-///
-/// Uses the first 8 bytes of a BLAKE3 hash of the URL.
-pub fn dataset_id_for_url(url: &str) -> String {
-    let digest = blake3_url(url);
-    let prefix: [u8; 8] = digest[..8].try_into().unwrap();
-    format!("ds-{:016x}", u64::from_le_bytes(prefix))
-}
-
-/// 16-byte URL hash used by the proxy cache for its per-dataset
-/// directory name. Shares the underlying BLAKE3 digest with
-/// [`dataset_id_for_url`] so the two stay in lockstep — the cache
-/// directory's first 8 bytes (in BLAKE3 order) match the bytes from
-/// which the `ds-...` ID is built.
-pub fn dataset_url_hash16(url: &str) -> [u8; 16] {
-    let digest = blake3_url(url);
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&digest[..16]);
-    out
-}
-
-/// Internal: full 32-byte BLAKE3 digest of `url`. Held as a single
-/// helper so the ID, the 16-byte cache key, and any future longer
-/// derivation cannot drift apart.
-fn blake3_url(url: &str) -> [u8; 32] {
-    *blake3::hash(url.as_bytes()).as_bytes()
-}
+// `dataset_id_for_url` and `dataset_url_hash16` live in
+// `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
+// the storage layer, and this handler share one implementation. See
+// `wiki/decisions/0042-canonical-dataset-url-form.md`.
 
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
 #[tracing::instrument(
