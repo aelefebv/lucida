@@ -247,9 +247,8 @@ fn is_drive_letter_canonical(s: &str) -> bool {
     if bytes.len() < 2 {
         return false;
     }
-    let drive_ok = bytes[0].is_ascii_lowercase()
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':';
+    let drive_ok =
+        bytes[0].is_ascii_lowercase() && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if !drive_ok {
         return false;
     }
@@ -294,7 +293,10 @@ mod tests {
             ),
             // UNC: backslash form folds to forward-slash form.
             ("\\\\server\\share\\foo", "//server/share/foo"),
-            ("\\\\fileserver\\share\\foo.zarr", "//fileserver/share/foo.zarr"),
+            (
+                "\\\\fileserver\\share\\foo.zarr",
+                "//fileserver/share/foo.zarr",
+            ),
             // file:// UNC form (rare, but `file:////host/share/…` is
             // the URI form for UNC).
             ("file:////server/share/foo", "//server/share/foo"),
@@ -373,7 +375,13 @@ mod tests {
         // observable layer (same id) — see the PRD's "Testing
         // Decisions" §.
         let groups: Vec<Vec<&str>> = vec![
-            vec!["C:\\foo", "c:/foo", "C:/foo", "file:///C:/foo", "file://C:\\foo"],
+            vec![
+                "C:\\foo",
+                "c:/foo",
+                "C:/foo",
+                "file:///C:/foo",
+                "file://C:\\foo",
+            ],
             vec!["\\\\server\\share\\foo", "//server/share/foo"],
         ];
         for group in groups {

@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use lucida_content::url::dataset_id_for_url;
 use lucida_content::{
     Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
     EntityKind, EntityLabels, ImageSpec, LevelGeometry, MultiscaleInfo,
@@ -34,7 +35,6 @@ use lucida_protocol::{
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::generated::DerivedChunkCache;
-use lucida_content::url::dataset_id_for_url;
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
 use lucida_store::cache::CachedStore;
