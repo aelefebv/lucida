@@ -250,6 +250,22 @@ async fn browse_works_without_cookie_in_disabled_mode() {
         entries.iter().any(|e| e["name"] == "seed.txt"),
         "seeded file should appear in the listing; got {body}",
     );
+
+    // The response's `path` field must be in canonical-display form:
+    // forward slashes throughout, no `\\?\` verbatim-UNC prefix, and
+    // (on Windows) a lowercase drive letter. On Linux the canonical
+    // form of an absolute Unix path is identical to its raw string, so
+    // the assertion reduces to "no backslashes and no `\\?\` prefix"
+    // — both trivially true on Linux but load-bearing on Windows.
+    let response_path = body["path"].as_str().expect("path string");
+    assert!(
+        !response_path.contains('\\'),
+        "browse response path must use forward slashes only; got {response_path:?}",
+    );
+    assert!(
+        !response_path.starts_with(r"\\?\"),
+        "browse response path must strip the Windows verbatim-UNC prefix; got {response_path:?}",
+    );
 }
 
 // POST /auth/dev/login is gone — the route was retired in favour of

@@ -17,16 +17,23 @@
 //! Tests at the bottom of this file lock the wire format. Don't touch them
 //! casually — see [[gotchas/scene-document-state-json-compat]].
 //
-// `blake3` is a small dep that already lives in the workspace via
-// `lucida-server`. Lifting the URL-derivation here means the WASM bundle
-// can compute `dataset_id_for_url(url)` directly so `lucida-web` doesn't
-// need a parallel JS implementation.
+// The URL-derivation helpers (`dataset_id_for_url`, plus the new
+// `normalize_dataset_url` and `is_local_dataset_url` from
+// `wiki/decisions/0042-canonical-dataset-url-form.md`) live in
+// `lucida-content::url` so server, store, and SPA share one
+// implementation. The shims below re-export them via `#[wasm_bindgen]`
+// so the existing `import { dataset_id_for_url } from "lucida-core"`
+// call sites in the SPA continue to work, and the two new helpers are
+// available under the same import.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, LayoutId};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
 use crate::camera::Camera;
 use crate::scene::{DatasetDisplaySettings, DisplayState};
@@ -119,18 +126,43 @@ impl SavedView {
     }
 }
 
-/// Stable, content-derived ID for a dataset URL. Mirrors
-/// `lucida_server::handler::dataset_id_for_url` exactly so the IDs the web
-/// client computes for `SavedView::datasets` URLs match the server's
-/// per-binding ids. See [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]
+/// Stable, content-derived ID for a dataset URL. Thin shim over
+/// [`lucida_content::url::dataset_id_for_url`] — the single source of
+/// truth for the BLAKE3-derived id, shared between the SPA, the server
+/// (`lucida-server::handler`), and the storage layer
+/// (`lucida-store::backend::open`). See
+/// `wiki/decisions/0042-canonical-dataset-url-form.md` for placement
+/// rationale and
+/// `wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`
 /// for the BLAKE3-collision sharp edge.
 ///
-/// Format: `ds-{first_8_bytes_of_blake3(url)_as_le_u64_hex}`.
+/// On `target_arch = "wasm32"` this function is also exported via
+/// `wasm-bindgen`; that's why the SPA's existing
+/// `import { dataset_id_for_url } from "lucida-core"` resolves.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn dataset_id_for_url(url: &str) -> String {
-    let digest = blake3::hash(url.as_bytes());
-    let bytes = digest.as_bytes();
-    let prefix: [u8; 8] = bytes[..8].try_into().expect("blake3 always >= 8 bytes");
-    format!("ds-{:016x}", u64::from_le_bytes(prefix))
+    lucida_content::url::dataset_id_for_url(url)
+}
+
+/// Canonicalize a user-typed dataset URL. Thin `#[wasm_bindgen]` shim
+/// over [`lucida_content::url::normalize_dataset_url`] — see that
+/// function for the full table of behaviors. Exposed here so the SPA
+/// can normalize URL-bar input before submit (the canonical form is
+/// what gets hashed, broadcast, and shown).
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn normalize_dataset_url(raw: &str) -> String {
+    lucida_content::url::normalize_dataset_url(raw)
+}
+
+/// `true` if `canonical` (already normalized) refers to a local
+/// filesystem path. Thin `#[wasm_bindgen]` shim over
+/// [`lucida_content::url::is_local_dataset_url`]. Exposed here so the
+/// SPA's share-warning classifier (`captureBuilder.ts`) can call into
+/// the same Rust implementation the server uses, eliminating
+/// classifier-drift bugs.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn is_local_dataset_url(canonical: &str) -> bool {
+    lucida_content::url::is_local_dataset_url(canonical)
 }
 
 #[cfg(test)]

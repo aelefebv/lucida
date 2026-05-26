@@ -19,8 +19,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use lucida_content::url::dataset_url_hash16;
 use lucida_server::admin::clear_proxy_cache;
-use lucida_server::handler::dataset_url_hash16;
 
 const URL_A: &str = "gs://lucida-test/datasets/dataset-a.zarr";
 const URL_B: &str = "gs://lucida-test/datasets/dataset-b.zarr";

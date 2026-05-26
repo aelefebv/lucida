@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-26
 ---
 
 # lucida-core
@@ -37,7 +37,7 @@ Module-level only — see the source for signatures.
 - `ray.rs` — `Ray`, `RayHit` for picking
 - `chunk.rs` / `transform.rs` — chunk plan synthesis and 4×4 voxel transforms
 - `wasm.rs` — `wasm-bindgen` wrappers; only compiled for `target_arch = "wasm32"`
-- `saved_view.rs` — `SavedView` schema (capture record for [[saved-views]]); `dataset_id_for_url` BLAKE3 helper. Shared between web encoder/decoder and server bookmark store.
+- `saved_view.rs` — `SavedView` schema (capture record for [[saved-views]]); thin `#[wasm_bindgen]` shims for `dataset_id_for_url`, `normalize_dataset_url`, `is_local_dataset_url` that delegate to [[lucida-content]]'s `url` module per [[decisions/0042-canonical-dataset-url-form]]. The SPA imports the shims; Rust callers use `lucida_content::url::*` directly.
 - `auth_principal.rs` — `AuthPrincipal` struct (shared seam type for [[auth]]; consumed by [[saved-views]])
 
 ## Invariants
