@@ -21,16 +21,11 @@ pub fn set_debug_categories(csv: &str) {
     crate::wasm_log::set_categories(&cats);
 }
 
-/// Stable, content-derived dataset id for a URL. Mirrors
-/// `lucida_server::handler::dataset_id_for_url` so the web client can
-/// compute the same id the server will assign on `OpenRemoteDataset` —
-/// used by the saved-views encoder/applier to diff the requested dataset
-/// list against currently-loaded ids without a JS-side blake3
-/// implementation.
-#[wasm_bindgen]
-pub fn dataset_id_for_url(url: &str) -> String {
-    crate::saved_view::dataset_id_for_url(url)
-}
+// `dataset_id_for_url`, `normalize_dataset_url`, and
+// `is_local_dataset_url` are exported directly from `saved_view` via
+// `#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]`. They delegate to
+// `lucida_content::url` — the single source of truth shared with the
+// server and store. See `wiki/decisions/0042-canonical-dataset-url-form.md`.
 
 #[wasm_bindgen]
 pub struct WasmScene {
