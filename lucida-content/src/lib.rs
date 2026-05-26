@@ -7,6 +7,7 @@ pub mod layout;
 pub mod normalize;
 pub mod plate;
 pub mod transform;
+pub mod url;
 
 pub use entity::*;
 pub use graph::*;
