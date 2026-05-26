@@ -1,7 +1,10 @@
 //! Storage backend abstraction for reading from Zarr Stores.
 //!
-//! URL scheme routing:
-//! - `/path/...` → local filesystem
+//! URL scheme routing (after [`lucida_content::url::normalize_dataset_url`]
+//! is applied at entry — see
+//! `wiki/decisions/0042-canonical-dataset-url-form.md`):
+//! - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
+//!   → local filesystem (classified via [`lucida_content::url::is_local_dataset_url`]).
 //! - `gs://bucket/...` → Google Cloud Storage. Credential discovery order:
 //!   `GOOGLE_*` env vars (incl. `GOOGLE_SERVICE_ACCOUNT*` and Google's standard
 //!   `GOOGLE_APPLICATION_CREDENTIALS`) read by `GoogleCloudStorageBuilder::from_env`,
@@ -14,6 +17,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use lucida_content::url::{is_local_dataset_url, normalize_dataset_url};
 use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -96,7 +100,17 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 
 /// Open a storage backend from a URL.
 ///
-/// - Paths starting with `/` are treated as local filesystem paths.
+/// The input URL is first normalized via
+/// [`lucida_content::url::normalize_dataset_url`] (idempotent, pure
+/// string-level). All subsequent dispatch — and the value embedded in
+/// any [`StoreError::UnsupportedScheme`] — uses the canonical form. See
+/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
+///
+/// Dispatch on the canonical form:
+///
+/// - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
+///   classified by [`lucida_content::url::is_local_dataset_url`] → local
+///   filesystem.
 /// - `gs://bucket/path` URLs use Google Cloud Storage. Credentials are
 ///   discovered, in order: `GOOGLE_*` env vars (incl. `GOOGLE_SERVICE_ACCOUNT*`
 ///   and Google's standard `GOOGLE_APPLICATION_CREDENTIALS`) via
@@ -105,15 +119,19 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 ///   metadata server (Workload Identity / GCE instance default).
 /// - `s3://bucket/path` URLs use Amazon S3 with environment/instance credentials.
 /// - `http://` and `https://` URLs use an HTTP static file server.
+/// - Anything else → [`StoreError::UnsupportedScheme`].
 pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
-    // Strip file:// prefix for local paths.
-    let url = url.strip_prefix("file://").unwrap_or(url);
+    // Normalize once at entry: drive-letter case, slash direction, UNC
+    // backslashes, `file://` prefix — see ADR-0042. Idempotent, so it's
+    // safe even if the caller already normalized.
+    let canonical = normalize_dataset_url(url);
 
-    if url.starts_with('/') {
-        let store = LocalFileSystem::new_with_prefix(url).map_err(StoreError::ObjectStore)?;
+    if is_local_dataset_url(&canonical) {
+        let store =
+            LocalFileSystem::new_with_prefix(&canonical).map_err(StoreError::ObjectStore)?;
         Ok(Arc::new(store))
-    } else if url.starts_with("gs://") {
-        let (bucket, prefix) = parse_gs_url(url)?;
+    } else if canonical.starts_with("gs://") {
+        let (bucket, prefix) = parse_gs_url(&canonical)?;
         // `from_env()` iterates `GOOGLE_*` env vars (incl.
         // `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT*`) — mirrors
         // the S3 line below. If none are set, falls back to
@@ -126,8 +144,8 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
             Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
             None => Ok(Arc::new(store)),
         }
-    } else if url.starts_with("s3://") {
-        let (bucket, prefix) = parse_s3_url(url)?;
+    } else if canonical.starts_with("s3://") {
+        let (bucket, prefix) = parse_s3_url(&canonical)?;
         let store = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
             .build()?;
@@ -135,11 +153,11 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
             Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
             None => Ok(Arc::new(store)),
         }
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        let store = HttpBuilder::new().with_url(url).build()?;
+    } else if canonical.starts_with("http://") || canonical.starts_with("https://") {
+        let store = HttpBuilder::new().with_url(&canonical).build()?;
         Ok(Arc::new(store))
     } else {
-        Err(StoreError::UnsupportedScheme(url.into()))
+        Err(StoreError::UnsupportedScheme(canonical))
     }
 }
 
@@ -158,6 +176,52 @@ mod tests {
     fn open_unsupported_scheme() {
         let err = open("ftp://host/path").unwrap_err();
         assert!(matches!(err, StoreError::UnsupportedScheme(_)));
+    }
+
+    // --- Cross-platform local-path construction (ADR-0042) ---
+    //
+    // These tests assert that each canonical-equivalent spelling of a
+    // local path *dispatches* to the local-filesystem branch (i.e. NOT
+    // `StoreError::UnsupportedScheme`). Whether the path actually exists
+    // is out of scope — `LocalFileSystem::new_with_prefix` calls
+    // `std::fs::canonicalize` which surfaces non-existing paths as
+    // `ObjectStore(UnableToCanonicalize)`. That's a real local-storage
+    // error, not a classification miss, and it's the cross-platform
+    // observable proxy for "this URL was treated as local."
+    //
+    // To exercise the canonicalize-succeeds path with an existing path,
+    // see [`open_local_path`] above (it uses `std::env::temp_dir()`).
+
+    /// Helper: assert that `open(url)` did NOT bail with `UnsupportedScheme`.
+    /// Any other outcome (success, NotFound, UnableToCanonicalize) means
+    /// dispatch reached the local-filesystem branch — that's the property
+    /// we're verifying.
+    fn assert_dispatched_local(url: &str, result: Result<Arc<dyn ObjectStore>, StoreError>) {
+        if let Err(StoreError::UnsupportedScheme(scheme)) = &result {
+            panic!(
+                "open({url:?}) classified as UnsupportedScheme({scheme:?}) — expected local dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn open_drive_letter_path_backslash_dispatches_local() {
+        assert_dispatched_local("C:\\foo", open("C:\\foo"));
+    }
+
+    #[test]
+    fn open_drive_letter_path_forward_slash_lowercase_dispatches_local() {
+        assert_dispatched_local("c:/foo", open("c:/foo"));
+    }
+
+    #[test]
+    fn open_file_uri_drive_letter_dispatches_local() {
+        assert_dispatched_local("file:///C:/foo", open("file:///C:/foo"));
+    }
+
+    #[test]
+    fn open_unc_path_dispatches_local() {
+        assert_dispatched_local("\\\\server\\share\\foo", open("\\\\server\\share\\foo"));
     }
 
     // --- S3 tests ---

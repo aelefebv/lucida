@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use lucida_content::url::dataset_id_for_url;
+use lucida_content::url::{dataset_id_for_url, normalize_dataset_url};
 use lucida_content::{
     Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
     EntityKind, EntityLabels, ImageSpec, LevelGeometry, MultiscaleInfo,
@@ -52,6 +52,86 @@ fn id_is_stable_across_repeat_invocations() {
     assert_eq!(a, b, "ID must be deterministic in URL");
     assert!(a.starts_with("ds-"), "ID should use 'ds-' prefix; got {a}");
     assert_eq!(a.len(), "ds-".len() + 16, "ID should be ds- + 16 hex chars");
+}
+
+#[test]
+fn id_is_stable_across_windows_spelling_variants() {
+    // ADR-0042: a single Windows file has many legal spellings
+    // (`C:\foo`, `c:/foo`, `file:///C:/foo`). The server normalizes
+    // every incoming URL via `normalize_dataset_url` before deriving
+    // the `DatasetId`, so all spellings dedup to the same id — which
+    // is what makes the `handle_open_remote_dataset` short-circuit
+    // re-bind the existing dataset on second open instead of
+    // re-importing the (multi-GB) backing store.
+    //
+    // This test mirrors the handler's normalize-then-hash pipeline at
+    // the same boundary the handler does (after the URL is in hand,
+    // before `dataset_id_for_url`). Each group is a set of equivalent
+    // spellings; every spelling in the group must produce the same id.
+    let groups: Vec<Vec<&str>> = vec![
+        vec![
+            "C:\\foo",
+            "c:/foo",
+            "C:/foo",
+            "file:///C:/foo",
+            "file://C:\\foo",
+        ],
+        vec!["\\\\server\\share\\foo", "//server/share/foo"],
+    ];
+    for group in groups {
+        let ids: Vec<String> = group
+            .iter()
+            .map(|s| dataset_id_for_url(&normalize_dataset_url(s)))
+            .collect();
+        let first = &ids[0];
+        for (i, id) in ids.iter().enumerate().skip(1) {
+            assert_eq!(
+                id, first,
+                "spelling {:?} produced id {id}, expected {first} (same as {:?})",
+                group[i], group[0]
+            );
+        }
+    }
+}
+
+#[test]
+fn second_open_reuses_binding_across_windows_spelling_variants() {
+    // Operational property: after URL X is opened in one spelling
+    // (`C:\foo`), an open of an equivalent spelling (`c:/foo`,
+    // `file:///C:/foo`) must resolve to the same `DatasetId` and find
+    // the existing binding — the handler's dedup short-circuit.
+    let mut session = Session::new();
+
+    let canonical = normalize_dataset_url("C:\\data\\foo.zarr");
+    let dataset_id = DatasetId(dataset_id_for_url(&canonical));
+    let cache = Arc::new(CachedStore::new(in_memory_store(), 1024));
+    let register = sample_register(&dataset_id);
+    let binding = make_binding(&canonical, &register, in_memory_store(), cache.clone());
+    session.server_bindings.insert(dataset_id.clone(), binding);
+
+    for variant in [
+        "c:/data/foo.zarr",
+        "C:/data/foo.zarr",
+        "file:///C:/data/foo.zarr",
+        "file://C:\\data\\foo.zarr",
+    ] {
+        let canonical_variant = normalize_dataset_url(variant);
+        let recomputed = DatasetId(dataset_id_for_url(&canonical_variant));
+        assert_eq!(
+            recomputed, dataset_id,
+            "variant {variant:?} (canonical {canonical_variant:?}) must produce \
+             the same id as canonical {canonical:?}"
+        );
+        let recovered = session
+            .server_bindings
+            .get(&recomputed)
+            .unwrap_or_else(|| panic!("variant {variant:?} should find existing binding"));
+        assert_eq!(recovered.source_url, canonical);
+        assert!(
+            Arc::ptr_eq(&recovered.cache, &cache),
+            "variant {variant:?} must reuse the same CachedStore Arc"
+        );
+    }
 }
 
 #[test]

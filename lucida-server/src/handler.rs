@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use lucida_content::url::{dataset_id_for_url, dataset_url_hash16};
+use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
 use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
@@ -488,6 +488,14 @@ pub async fn handle_client(
 // `wiki/decisions/0042-canonical-dataset-url-form.md`.
 
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
+///
+/// The incoming `url` is normalized once at entry via
+/// [`lucida_content::url::normalize_dataset_url`]; every downstream
+/// derivation (`dataset_id_for_url`, `dataset_url_hash16`,
+/// `backend::open`, the binding's `source_url`, and the name extraction)
+/// uses the canonical form. This makes spelling variants of the same
+/// path dedup to one binding — see
+/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
 #[tracing::instrument(
     name = "dataset_open",
     skip(session, tx, unicast_routes, proxy_config),
@@ -501,9 +509,17 @@ async fn handle_open_remote_dataset(
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
 ) {
+    // Normalize at the input boundary. Drive-letter case, slash
+    // direction, `file://` prefix, UNC backslashes — see ADR-0042.
+    // Idempotent (safe even though `backend::open` will also normalize),
+    // and required *here* because `dataset_id_for_url` /
+    // `dataset_url_hash16` must hash the canonical form for the dedup
+    // short-circuit to fire across spelling variants.
+    let canonical_url = normalize_dataset_url(&url);
+
     // Stable, content-derived ID. Two opens of the same URL produce the
     // same ID so the second open reuses the existing binding.
-    let dataset_id = dataset_id_for_url(&url);
+    let dataset_id = dataset_id_for_url(&canonical_url);
     let dataset_id_key = DatasetId(dataset_id.clone());
 
     // If we've already imported this URL in this session, reuse the binding.
@@ -524,36 +540,40 @@ async fn handle_open_remote_dataset(
             });
             tracing::info!(
                 dataset_id = %dataset_id,
+                url = %canonical_url,
                 "open_remote_dataset.dedup_reuse"
             );
             return;
         }
     }
 
-    // Open storage backend.
-    let store = match lucida_store::backend::open(&url) {
+    // Open storage backend. `backend::open` re-normalizes (idempotent)
+    // and dispatches via `is_local_dataset_url`.
+    let store = match lucida_store::backend::open(&canonical_url) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
-            send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
+            send_open_failed(client_id, &canonical_url, &e.to_string(), &unicast_routes).await;
             return;
         }
     };
 
-    // Extract dataset name from URL (last path component).
-    let name = url
+    // Extract dataset name from URL (last path component). Canonical
+    // form is always forward-slash, so a single `rsplit('/')` works for
+    // every platform.
+    let name = canonical_url
         .rsplit('/')
         .find(|s| !s.is_empty())
         .unwrap_or("dataset")
         .to_string();
 
     // Import dataset via the new pipeline.
-    tracing::info!(url = %url, id = %dataset_id, name = %name, "importing dataset");
+    tracing::info!(url = %canonical_url, id = %dataset_id, name = %name, "importing dataset");
     let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.import_failed");
-            send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
+            send_open_failed(client_id, &canonical_url, &e.to_string(), &unicast_routes).await;
             return;
         }
     };
@@ -609,7 +629,7 @@ async fn handle_open_remote_dataset(
     // 16-byte URL hash so a single shared `cache_dir` can host many
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
-    let url_hash16 = dataset_url_hash16(&url);
+    let url_hash16 = dataset_url_hash16(&canonical_url);
     let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
         proxy_config.generated_cache_dir.clone(),
         url_hash16,
@@ -668,7 +688,7 @@ async fn handle_open_remote_dataset(
     let prefetch_entries = catalog_entries.clone();
 
     let binding = ServerBinding {
-        source_url: url.clone(),
+        source_url: canonical_url.clone(),
         store: store.clone(),
         resolver,
         cache: cached,
