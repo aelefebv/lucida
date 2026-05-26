@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-23
+modified: 2026-05-26
 ---
 
 # lucida-content
@@ -22,6 +22,7 @@ The crate exists so that [[lucida-store]] can produce the manifest without pulli
 - `graph.rs` — `DatasetManifest` itself: holds entities, transforms, images, source layouts, default layout id
 - `plate.rs` — `build_grid_field_transforms`, `build_plate_layout`, `PlateLayoutError`
 - `normalize.rs` — `normalize_to_5d` for axis padding when datasets have fewer than 5 axes; `classify_axes` for splitting a raw OME-Zarr axes list into canonical `{t,c,z,y,x}` and pinned non-canonical members
+- `url.rs` — cross-platform dataset URL helpers per [[decisions/0042-canonical-dataset-url-form]]: `normalize_dataset_url` (light string-level canonicalization — strip `file://[/]+`, lowercase drive letter, forward-slashify, UNC `\\server\share` → `//server/share`; idempotent), `is_local_dataset_url` (classifier over the canonical form), `dataset_id_for_url` (BLAKE3 ID derivation; was duplicated in `lucida-core::saved_view` and `lucida-server::handler` before the dedup), `dataset_url_hash16` (16-byte cache-key digest, kept in lockstep with the ID via a shared internal `blake3_url` helper). [[lucida-core::saved_view]] re-exposes the three public helpers as `#[wasm_bindgen]` shims so the SPA imports the same single source of truth.
 
 ## Interactions
 

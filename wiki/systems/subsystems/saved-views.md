@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-09
+modified: 2026-05-26
 ---
 
 # Saved Views
@@ -55,7 +55,7 @@ The web bridge dispatcher handles it via a per-bridge `subscribeBookmarkChanged`
 
 ## Local-file dataset sharp edge
 
-URLs starting with `/` or `file://` (paths the server's `lucida-store::backend::open` routes to `LocalFileSystem`) are embedded in saved views as-is. `dataset_id_for_url` is BLAKE3 of the URL string — content-derived from the *string*, not the bytes. Two consequences:
+URLs classified as local by `lucida_content::url::is_local_dataset_url` (canonical Unix `/foo`, drive-letter `c:/foo`, UNC `//server/share/foo` — see [[decisions/0042-canonical-dataset-url-form]]; everything routes through `lucida-store::backend::open` to `LocalFileSystem`) are embedded in saved views in canonical form. `dataset_id_for_url` is BLAKE3 of the *canonical* URL string — content-derived from the string after normalization, not the file bytes. Two consequences:
 
 - For the **sender on their own server**: refresh-preserves works as for cloud datasets (same path → same file → same `DatasetId`).
 - For a **recipient on a different server**: same path may not exist, may be outside `data_dir`, or worst case may resolve to a *different* file with the same path on a different machine — silently loading the wrong dataset and applying viewport state meaningful for the original.

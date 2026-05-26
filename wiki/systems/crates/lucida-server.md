@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-05-26
 ---
 
 # lucida-server
@@ -27,7 +27,7 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - `generated.rs` — generated coarse planning, scheduling, cancellation, materialization, derived-cache recovery, and availability broadcasts
 - `proxy/` — legacy server-side proxy infrastructure: `ProxyCache` (per-dataset on-disk cache), `ProxyGenerator` (bounded-concurrency, in-flight dedup), `ServerProxySource` (adapter from `CachedStore` to `lucida-proxy`'s sync trait)
 - `auth/` — Google OAuth + session cookies + admin allowlist + cleanup sweep + audit logging. See [[auth]] for the deep-dive.
-- `browse.rs` / `admin.rs` — HTTP routes for filesystem browsing and admin operations (e.g. clear proxy cache)
+- `browse.rs` / `admin.rs` — HTTP routes for filesystem browsing and admin operations (e.g. clear proxy cache). `browse_handler`'s `path` query param is optional per [[decisions/0042-canonical-dataset-url-form]]: when absent, the response is a platform-default root — drives list (`c:`, `d:`, ...) on Windows via an A-Z `tokio::fs::metadata` scan, `/` listing on Unix. Returned `path` field is always in canonical-display form (`\\?\` and `\\?\UNC\` prefixes stripped, drive letter lowercased, forward-slashified). `data_dir` security constraint still enforced via segment-aware `starts_with` on canonicalized PathBufs.
 - `migrations/` — versioned SQL migrations applied at startup (sqlx). Persistent state grew with [[auth]] (`login_sessions`, `pending_auth`) and [[saved-views]] (`bookmarks` + `bookmark_datasets`).
 - `bookmarks/` — server side of [[saved-views]]: `store.rs` (deep, `BookmarkStore` trait + SQLite + memory impls), `handlers.rs` (REST `/api/bookmarks/*` gated by `AuthPrincipal`), `broadcast.rs` (best-effort `BookmarkChanged` dispatch scoped by overlapping loaded datasets).
 - `static_serve.rs` — SPA-asset router built around `tower-http::ServeDir`. Reads `LUCIDA_WEB_DIST` (default `./lucida-web/dist`); serves the bundle with index-fallback for client-routed deep links, or a build-instructions landing page when the dist dir is missing. Mounted on the **public** router half (no auth wrap) so HTML/JS/CSS aren't 401'd; auth gates remain on `/auth/whoami` polling and `/api/*`. See [[decisions/0020-single-image-with-servedir]].
@@ -42,7 +42,7 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 ## Invariants
 
 - **Document commands are sequenced and acked; presence updates are not.** Sender of a command receives `ServerMessage::Ack`; everyone else receives `ServerMessage::CommandBroadcast`. Both carry the same `seq`.
-- **`DatasetId` is content-derived from the source URL** (BLAKE3 of URL, first 8 bytes → `ds-{hex}`). Two opens of the same URL within a session reuse the existing `ServerBinding` and rebroadcast the canonical `DatasetOpened` instead of re-importing. See `dataset_id_for_url` in `handler.rs`.
+- **`DatasetId` is content-derived from the canonical URL form** (BLAKE3 of URL, first 8 bytes → `ds-{hex}`). The handler normalizes incoming URLs via `lucida_content::url::normalize_dataset_url` before computing the ID, so spelling variants of the same path (e.g. Windows `C:\foo` vs `c:/foo` vs `file:///C:/foo`) dedup to a single `ServerBinding`. Two opens of the same canonical URL within a session reuse the existing binding and rebroadcast the canonical `DatasetOpened` instead of re-importing. The helpers (`dataset_id_for_url`, `dataset_url_hash16`) live in [[lucida-content::url]] per [[decisions/0042-canonical-dataset-url-form]].
 - **`u64::MAX` is the sentinel sender for server-originated broadcasts.** Used for `DatasetOpened` so the requesting client also receives a `CommandBroadcast` (not an `Ack`) — the client never applied the command locally and needs the broadcast path.
 - **Self-presence is filtered server-side.** The outbound loop checks `sender == id` and drops presence/cursor/peer-joined messages back to their originator. Only `CommandBroadcast` is rewritten to `Ack` for the sender; everything else is silently filtered.
 - **Per-client unicast routes** for chunk/status/proxy delivery live in `unicast_routes: HashMap<ClientId, mpsc::UnboundedSender<Message>>`. The first 4 bytes of every binary frame are the `client_id` so the relay can route without parsing.
@@ -50,7 +50,7 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 ## Gotchas
 
 - **Open-dataset is async-spawned**, not awaited inline. The handler returns immediately; a background task does the import and broadcasts when ready. A second open of the same URL during the first import races on the binding map; `handle_open_remote_dataset` re-checks the binding presence under the lock and rebroadcasts the canonical event if it lost the race. See `handler.rs:594-619`.
-- **Generated coarse cache directories are keyed by 16-byte URL hash**, not `DatasetId`. The hash is the same BLAKE3 prefix used for `DatasetId` so reopen can recover ready derived chunks for the same source URL.
+- **Generated coarse cache directories are keyed by 16-byte URL hash** (`lucida_content::url::dataset_url_hash16` over the canonical URL form), not `DatasetId`. The hash is the same BLAKE3 prefix used for `DatasetId` so reopen can recover ready derived chunks for the same source URL across spelling variants.
 - **Generated coarse fill is best-effort.** Background work warms coarse chunks, but visible requests and viewer-interest reprioritization drive correctness. Pending chunks surface as generated status messages, not timeouts.
 - **Storage compression is detected from the codec chain** at level 0 only and assumed uniform across levels. If a dataset uses different compression at different LODs, this assumption breaks silently.
 - **Persistent state lives in SQLite** (`lucida.db` + `.db-shm` + `.db-wal`). Holds login sessions and pending OAuth states ([[auth]]); bookmarks + their indexed dataset side-table ([[saved-views]]). `LUCIDA_DB_PATH` configures the path; default is CWD-relative — set to an absolute path in production. See [[gotchas/oss-config-defaults]].
