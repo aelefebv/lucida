@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-05-26
 ---
 
 # Queue — Open Questions
@@ -23,6 +23,7 @@ Each item is a short bullet. Add a date when raised. Link to an article or PR wh
 - **2026-05-07 / refined 2026-05-08** — Disabled-mode bookmark ownership. Originally framed as "auth cutover for `dev@local` bookmarks created pre-auth"; resolved-by-sequence (auth landed before bookmarks did, so production never sees `dev@local` rows). Refined open question: when `LUCIDA_AUTH=disabled` runs against a SQLite DB that already has bookmarks (e.g., a local dev clone of a prod backup), the disabled-extractor synthesizes a principal whose email may not match any real user — so PATCH/DELETE permission checks behave oddly. Decide policy if/when production ever runs disabled mode against a bookmark-bearing DB.
 - **2026-05-07** — Undo/redo system (future scope, surfaced during saved-views grilling): proposed dedicated undo/redo for milestone events (dataset opened/removed, active layout changed) — *not* via browser back/forward + `pushState`. Saved-views feature deliberately uses `replaceState` only so back-button stays clean; an in-app undo/redo lives separately and would track milestone document/viewport mutations independently of URL state.
 - **2026-05-17** — Single source of truth for stateful pipeline phases. PRD #640 moved delivery sent state into [[cpu-cache]]; after the shape settles, run a follow-up INTERVIEW pass to decide whether this should become a general principle across planning/fetch/upload/render boundaries.
+- **2026-05-26** — Windows CI deferred for [[decisions/0042-canonical-dataset-url-form]] (PRD #703). Manual verification by the author at PR time while Windows usage is single-developer. Revisit when ≥2 Windows users hit a regression or when the `wasm-pack` / `pnpm` / `sqlite-bundled` / `blosc-codec` build matrices on Windows runners stop being unknown territory. Flipping on a `windows-latest` row in the existing `cargo test --workspace` job matrix is the planned shape.
 
 ## Resolved
 

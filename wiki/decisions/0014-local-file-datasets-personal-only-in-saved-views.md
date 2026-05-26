@@ -1,15 +1,17 @@
 ---
 created: 2026-05-07
-modified: 2026-05-08
+modified: 2026-05-26
 ---
 
 # Local-File Datasets Are Personal-Only in Saved Views
 
 > Status: Accepted (implemented in PR #478 via `ShareToolbarButton.tsx`'s local-file warning toast — landed 2026-05-08).
 
+> Amended 2026-05-26 by [[decisions/0042-canonical-dataset-url-form]]: the local-path classifier is now `is_local_dataset_url(normalize_dataset_url(s))`, extended to cover drive-letter (`c:/…`) and UNC (`//server/share/…`) canonical forms. The personal-only-share decision and the `DatasetId`-blake3-collision sharp edge below remain valid verbatim.
+
 ## Decision
 
-A saved view ([[decisions/0013-url-as-app-state-for-saved-views]]) that references local-file datasets — paths like `/data/scans/foo.zarr`, identified by `url.startsWith('/') || url.startsWith('file://')` — is treated as a *personal* artifact: it works for the sender refreshing on the same `lucida-server`, but is documented and warned-about as fragile when shared across machines.
+A saved view ([[decisions/0013-url-as-app-state-for-saved-views]]) that references local-file datasets — paths like `/data/scans/foo.zarr`, `c:/users/me/foo.zarr`, or `//server/share/foo.zarr`, identified by `lucida_content::url::is_local_dataset_url` after `normalize_dataset_url` — is treated as a *personal* artifact: it works for the sender refreshing on the same `lucida-server`, but is documented and warned-about as fragile when shared across machines.
 
 The web client surfaces a non-blocking warning at share time when the current URL contains local-file paths: "This view references local files (N paths) — link only works on a server with the same files at the same paths."
 
