@@ -29,6 +29,11 @@ body {
   min-height: 100vh;
 }
 
+.workspace-route-message {
+  padding: 2rem;
+  color: #888;
+}
+
 h1 {
   font-size: 3.2em;
   line-height: 1.1;

@@ -26,6 +26,7 @@ export interface SavedViewBridgeHooks {
 }
 
 interface Params {
+  workspaceId: string;
   wasmReady: boolean;
   wasmSceneRef: React.RefObject<WasmScene | null>;
   setWasmScene: React.Dispatch<React.SetStateAction<WasmScene | null>>;
@@ -52,6 +53,7 @@ interface Params {
 }
 
 export function useBridge({
+  workspaceId,
   wasmReady,
   wasmSceneRef,
   setWasmScene,
@@ -476,7 +478,7 @@ export function useBridge({
         contentSource.rejectAll();
       },
     };
-    const bridge = new Bridge(handlers);
+    const bridge = new Bridge(handlers, undefined, workspaceId);
     sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
     // Publish the bridge as React state so consumer hooks
     // (useBookmarks subscribes to `bookmark_changed`) can take a

@@ -4,6 +4,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
 use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
+use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
@@ -23,7 +24,198 @@ use crate::generated::{
 };
 use crate::proxy::{ProxyCache, ProxyGenerator};
 use crate::session::Session;
+use crate::workspace::{LiveWorkspace, WorkspaceDatasetSource, WorkspaceManager};
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
+
+#[derive(Clone)]
+struct WorkspaceClientContext {
+    live: Arc<LiveWorkspace>,
+    manager: Arc<WorkspaceManager>,
+    principal: AuthPrincipal,
+}
+
+pub async fn handle_workspace_client(
+    id: ClientId,
+    ws: WebSocket,
+    live: Arc<LiveWorkspace>,
+    manager: Arc<WorkspaceManager>,
+    principal: AuthPrincipal,
+) {
+    let session = Arc::clone(&live.session);
+    let tx = live.tx.clone();
+    let unicast_routes = Arc::clone(&live.unicast_routes);
+    let proxy_config = manager.proxy_config();
+    handle_client_inner(
+        id,
+        ws,
+        session,
+        tx,
+        unicast_routes,
+        proxy_config,
+        Some(WorkspaceClientContext {
+            live,
+            manager,
+            principal,
+        }),
+    )
+    .await;
+}
+
+/// Rebuild server-private dataset bindings for a lazily restored workspace.
+///
+/// The durable workspace document stores client-facing dataset state, but
+/// operational chunk/proxy/generated services are intentionally not part of
+/// `DocumentState`. On first open after a server restart, rebuild those
+/// bindings from the structured `workspace_datasets → dataset_sources`
+/// records before the first snapshot goes out.
+pub async fn restore_workspace_bindings(
+    session: Arc<Mutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
+    sources: Vec<WorkspaceDatasetSource>,
+    proxy_config: ProxyConfig,
+) {
+    for source in sources {
+        {
+            let sess = session.lock().await;
+            if sess
+                .server_bindings
+                .contains_key(&source.workspace_dataset_id)
+            {
+                continue;
+            }
+        }
+        if let Err(e) =
+            restore_one_workspace_binding(Arc::clone(&session), tx.clone(), &source, &proxy_config)
+                .await
+        {
+            tracing::warn!(
+                dataset_id = %source.workspace_dataset_id,
+                dataset_source_id = %source.dataset_source_id,
+                url = %source.canonical_url,
+                error = %e,
+                "workspace.binding_restore_failed"
+            );
+        }
+    }
+}
+
+async fn restore_one_workspace_binding(
+    session: Arc<Mutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
+    source: &WorkspaceDatasetSource,
+    proxy_config: &ProxyConfig,
+) -> Result<(), String> {
+    let canonical_url = normalize_dataset_url(&source.canonical_url);
+    let dataset_id = source.workspace_dataset_id.0.clone();
+    let dataset_id_key = DatasetId(dataset_id.clone());
+
+    let store = lucida_store::backend::open(&canonical_url).map_err(|e| e.to_string())?;
+    let result = lucida_store::import::import_dataset(&store, &dataset_id, &source.display_name)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let catalog_entries =
+        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
+    let dataset_opened = DatasetOpened {
+        manifest: result.manifest.clone(),
+        fetch: result.fetch,
+        catalog: AssetCatalog {
+            entries: catalog_entries.clone(),
+        },
+    };
+
+    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
+    let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
+    let generated_config = GeneratedCoarseConfig {
+        target_long_axis: proxy_config.generated_target_long_axis,
+        chunk_long_axis: proxy_config.generated_chunk_long_axis,
+        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+    };
+    let generated_plans = if proxy_config.generated_enabled {
+        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    } else {
+        vec![]
+    };
+
+    let url_hash16 = dataset_url_hash16(&canonical_url);
+    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
+        proxy_config.generated_cache_dir.clone(),
+        url_hash16,
+        proxy_config.generated_disk_budget_bytes,
+    ));
+    let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
+    for plan in &generated_plans {
+        match derived_chunks.register_generated_plan(plan) {
+            Ok(delta) => {
+                generated_initial_delta.levels.extend(delta.levels);
+                generated_initial_delta.chunks.extend(delta.chunks);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    dataset_id = %dataset_id,
+                    image = %plan.image_id.0,
+                    error = %e,
+                    "workspace.binding_restore.generated_registration_failed"
+                );
+                derived_chunks.upsert_level(plan.availability.clone());
+                generated_initial_delta
+                    .levels
+                    .push(plan.availability.clone());
+            }
+        }
+    }
+    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
+    let generated_service = Arc::new(GeneratedCoarseService::new(
+        generated_plans.clone(),
+        Arc::new(result.manifest.clone()),
+        cached.clone(),
+        resolver.clone(),
+        derived_chunks.clone(),
+        Arc::clone(&session),
+        tx,
+        GeneratedSchedulingConfig {
+            concurrency: proxy_config.generated_concurrency,
+            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            ..GeneratedSchedulingConfig::default()
+        },
+    ));
+    generated_service.start();
+    let proxy_generator = Arc::new(ProxyGenerator::new(
+        proxy_cache.clone(),
+        cached.clone(),
+        resolver.clone(),
+        Arc::new(result.manifest),
+        proxy_config.concurrency,
+    ));
+
+    let binding = ServerBinding {
+        source_url: canonical_url,
+        store,
+        resolver,
+        cache: cached,
+        dataset_opened,
+        derived_chunks,
+        generated_service: generated_service.clone(),
+        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
+        proxy_cache,
+        proxy_generator,
+    };
+
+    {
+        let mut sess = session.lock().await;
+        if !generated_initial_delta.levels.is_empty() {
+            sess.apply_generated_availability_delta(
+                dataset_id_key.clone(),
+                generated_initial_delta.clone(),
+            );
+        }
+        sess.server_bindings.insert(dataset_id_key, binding);
+    }
+    if !generated_plans.is_empty() {
+        generated_service.enqueue_background_fill().await;
+    }
+    Ok(())
+}
 
 pub async fn handle_client(
     id: ClientId,
@@ -32,6 +224,18 @@ pub async fn handle_client(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
+) {
+    handle_client_inner(id, ws, session, tx, unicast_routes, proxy_config, None).await;
+}
+
+async fn handle_client_inner(
+    id: ClientId,
+    ws: WebSocket,
+    session: Arc<Mutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
+    unicast_routes: UnicastRoutes,
+    proxy_config: ProxyConfig,
+    workspace: Option<WorkspaceClientContext>,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -148,10 +352,51 @@ pub async fn handle_client(
                         ClientMessage::Command { command } => {
                             // All commands in ClientMessage are DocumentCommands
                             // by construction — no runtime guard needed.
-                            let seq = {
+                            if let Some(ctx) = workspace.as_ref() {
+                                if matches!(command, DocumentCommand::DatasetOpened(_)) {
+                                    tracing::warn!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        "workspace.command.rejected_client_dataset_opened"
+                                    );
+                                    continue;
+                                }
+                                if let Err(e) = ctx
+                                    .manager
+                                    .require_editor(&ctx.live.workspace_id, &ctx.principal)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        error = %e,
+                                        "workspace.command.forbidden"
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            let (seq, document) = {
                                 let mut sess = session.lock().await;
-                                sess.apply(command.clone())
+                                let seq = sess.apply(command.clone());
+                                let document = sess.document.clone();
+                                (seq, document)
                             };
+
+                            if let Some(ctx) = workspace.as_ref()
+                                && let Err(e) = ctx
+                                    .manager
+                                    .persist_applied_command(&ctx.live, &command, seq, &document)
+                                    .await
+                            {
+                                tracing::error!(
+                                    client_id = %id,
+                                    workspace_id = %ctx.live.workspace_id,
+                                    error = %e,
+                                    "workspace.command.persist_failed"
+                                );
+                                continue;
+                            }
 
                             let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
                             let ack_msg = ServerMessage::Ack { seq };
@@ -242,6 +487,7 @@ pub async fn handle_client(
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let url_clone = url.clone();
                             let proxy_config_clone = proxy_config.clone();
+                            let workspace_clone = workspace.clone();
                             tokio::spawn(async move {
                                 handle_open_remote_dataset(
                                     id,
@@ -250,6 +496,7 @@ pub async fn handle_client(
                                     tx_clone,
                                     unicast_routes_clone,
                                     proxy_config_clone,
+                                    workspace_clone,
                                 )
                                 .await;
                             });
@@ -498,7 +745,7 @@ pub async fn handle_client(
 /// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
 #[tracing::instrument(
     name = "dataset_open",
-    skip(session, tx, unicast_routes, proxy_config),
+    skip(session, tx, unicast_routes, proxy_config, workspace),
     fields(url = %url, client_id = %client_id)
 )]
 async fn handle_open_remote_dataset(
@@ -508,6 +755,7 @@ async fn handle_open_remote_dataset(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
+    workspace: Option<WorkspaceClientContext>,
 ) {
     // Normalize at the input boundary. Drive-letter case, slash
     // direction, `file://` prefix, UNC backslashes — see ADR-0042.
@@ -521,6 +769,29 @@ async fn handle_open_remote_dataset(
     // same ID so the second open reuses the existing binding.
     let dataset_id = dataset_id_for_url(&canonical_url);
     let dataset_id_key = DatasetId(dataset_id.clone());
+
+    if let Some(ctx) = workspace.as_ref()
+        && let Err(e) = ctx
+            .manager
+            .require_editor(&ctx.live.workspace_id, &ctx.principal)
+            .await
+    {
+        tracing::warn!(
+            client_id = %client_id,
+            workspace_id = %ctx.live.workspace_id,
+            url = %canonical_url,
+            error = %e,
+            "open_remote_dataset.forbidden"
+        );
+        send_open_failed(
+            client_id,
+            &canonical_url,
+            "workspace role cannot add datasets",
+            &unicast_routes,
+        )
+        .await;
+        return;
+    }
 
     // If we've already imported this URL in this session, reuse the binding.
     // Re-broadcast the existing DatasetOpened (held on the binding) so the
@@ -705,7 +976,7 @@ async fn handle_open_remote_dataset(
 
     // Apply command and register server binding. Re-check the binding
     // presence under the lock in case a concurrent open raced ahead.
-    let seq = {
+    let (seq, document) = {
         let mut sess = session.lock().await;
         if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
             // Lost the race: another open completed the import. Drop our
@@ -736,8 +1007,41 @@ async fn handle_open_remote_dataset(
             );
         }
         sess.server_bindings.insert(dataset_id_key, binding);
-        seq
+        let document = sess.document.clone();
+        (seq, document)
     };
+
+    if let Some(ctx) = workspace.as_ref()
+        && let Err(e) = ctx
+            .manager
+            .persist_dataset_opened(
+                &ctx.live,
+                &DatasetId(dataset_id.clone()),
+                &dataset_id,
+                &canonical_url,
+                &name,
+                &ctx.principal,
+                seq,
+                &document,
+            )
+            .await
+    {
+        tracing::error!(
+            client_id = %client_id,
+            workspace_id = %ctx.live.workspace_id,
+            dataset_id = %dataset_id,
+            error = %e,
+            "open_remote_dataset.persist_failed"
+        );
+        send_open_failed(
+            client_id,
+            &canonical_url,
+            "workspace persistence failed",
+            &unicast_routes,
+        )
+        .await;
+        return;
+    }
 
     // Broadcast to ALL clients including the requester.
     // Use u64::MAX as sender so no client matches — everyone gets the

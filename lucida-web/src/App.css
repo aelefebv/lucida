@@ -17,6 +17,50 @@
   overflow: auto;
 }
 
+.workspace-chrome {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(14rem, 28rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.workspace-back-button {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.workspace-name-input,
+.workspace-name-label {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.375rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: #1a1a1a;
+  color: inherit;
+  font: inherit;
+  font-weight: 650;
+}
+
+.workspace-name-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-id-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #888;
+  font-size: 0.75rem;
+  text-align: right;
+}
+
 .secondary {
   color: #888;
   font-size: 0.875rem;

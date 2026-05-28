@@ -18,7 +18,9 @@ use lucida_server::bookmarks;
 use lucida_server::health;
 use lucida_server::session::Session;
 use lucida_server::static_serve;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler};
+use lucida_server::{
+    AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
+};
 
 // CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
 // treated as `serve`) alongside explicit `serve` / `clear-proxy-cache`
@@ -238,7 +240,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         next_id,
         unicast_routes,
         data_dir,
-        proxy_config,
+        proxy_config: proxy_config.clone(),
     };
 
     // Env-var validation lives in `AuthConfig::from_env`: `LUCIDA_BIND`,
@@ -361,6 +363,15 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     };
     let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
 
+    let workspace_store = Arc::new(workspace::SqliteWorkspaceStore::new(
+        session_store.pool().clone(),
+    ));
+    let workspace_manager = Arc::new(workspace::WorkspaceManager::new(
+        workspace_store as Arc<dyn workspace::WorkspaceStore>,
+        proxy_config.clone(),
+    ));
+    let workspaces_router: Router<()> = workspace::router(workspace_manager);
+
     // /auth/error is available regardless of auth mode — if the user
     // somehow reaches it (a stale link, a misconfigured deployment),
     // we still render the generic page rather than 404. Mounted on
@@ -438,6 +449,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .with_state(state)
         .merge(authed_auth_router)
         .merge(bookmarks_router)
+        .merge(workspaces_router)
         .layer(axum::middleware::from_fn_with_state(
             extractor,
             auth::middleware::auth_middleware,
