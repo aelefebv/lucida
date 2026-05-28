@@ -61,6 +61,146 @@
   text-align: right;
 }
 
+.workspace-chrome-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.workspace-share-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.workspace-share-dialog {
+  width: min(640px, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid #444;
+  border-radius: 8px;
+  background: #202020;
+  color: inherit;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.workspace-share-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.workspace-share-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.workspace-share-error {
+  margin-bottom: 1rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid #7a2b2b;
+  border-radius: 6px;
+  background: #341818;
+  color: #ffb4b4;
+}
+
+.workspace-share-muted {
+  color: #aaa;
+}
+
+.workspace-share-section {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.workspace-share-section label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  color: #aaa;
+  font-size: 0.8125rem;
+}
+
+.workspace-share-section select,
+.workspace-share-section input,
+.workspace-share-add input,
+.workspace-share-add select,
+.workspace-share-member select {
+  min-width: 0;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #151515;
+  color: inherit;
+  font: inherit;
+}
+
+.workspace-share-add {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8rem auto;
+  gap: 0.5rem;
+}
+
+.workspace-share-members {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.workspace-share-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8rem auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 0;
+  border-top: 1px solid #333;
+}
+
+.workspace-share-person {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.workspace-share-person strong,
+.workspace-share-person span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-share-person span {
+  color: #aaa;
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 720px) {
+  .workspace-chrome-actions {
+    justify-content: flex-start;
+  }
+
+  .workspace-share-section,
+  .workspace-share-add,
+  .workspace-share-member {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .secondary {
   color: #888;
   font-size: 0.875rem;
