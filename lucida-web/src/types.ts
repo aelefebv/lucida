@@ -2,13 +2,6 @@ import type { DatasetManifest, FetchSource } from "./manifestTypes.ts";
 
 export type ViewMode = "2d" | "3d";
 
-export interface VolumeData {
-  data: Uint16Array;
-  width: number; // X
-  height: number; // Y
-  depth: number; // Z
-}
-
 export interface DatasetState {
   id: string;
   name: string;

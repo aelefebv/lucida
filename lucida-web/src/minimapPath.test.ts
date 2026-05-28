@@ -30,6 +30,18 @@ describe("minimapCoarseLevelIndex", () => {
     expect(minimapCoarseLevelIndex(ms)).toBe(1);
   });
 
+  it("uses an appended generated coarse level by level_index", () => {
+    const ms = multiscale(8);
+    ms.levels.push({
+      level_index: 8,
+      shape: [1, 1, 1, 128, 128],
+      chunk_shape: [1, 1, 1, 128, 128],
+      grid_shape: [1, 1, 1, 1, 1],
+      scale: [1, 1, 1, 8, 8],
+    });
+    expect(minimapCoarseLevelIndex(ms)).toBe(3);
+  });
+
   it("uses array index for legacy metadata with no matching level_index", () => {
     const ms = multiscale(1);
     ms.levels = ms.levels.map((level, idx) => ({ ...level, level_index: idx + 10 }));

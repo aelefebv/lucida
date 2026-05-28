@@ -958,29 +958,32 @@ async fn serve_chunk_from_store(
 
     tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
     let obj_path = Path::from(object_path);
-    let storage_bytes = match cache.get_bytes(&obj_path).await {
-        Ok(b) => b,
+    let mut bytes: Vec<u8> = match cache.get_bytes(&obj_path).await {
+        Ok(storage_bytes) => {
+            // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
+            // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
+            match decode_storage_bytes(&storage_bytes, level_info.compression) {
+                Ok(raw) => {
+                    tracing::debug!(
+                        key = chunk_key,
+                        compressed = storage_bytes.len(),
+                        decompressed = raw.len(),
+                        compression = ?level_info.compression,
+                        "chunk decoded"
+                    );
+                    raw
+                }
+                Err(e) => {
+                    eprintln!("server: decode failed for {chunk_key}: {e}");
+                    return;
+                }
+            }
+        }
+        Err(e) if is_not_found(&e) => {
+            vec![0_u8; level_info.chunk_byte_layout.canonical_byte_size]
+        }
         Err(e) => {
             eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
-            return;
-        }
-    };
-
-    // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
-    // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
-    let mut bytes: Vec<u8> = match decode_storage_bytes(&storage_bytes, level_info.compression) {
-        Ok(raw) => {
-            tracing::debug!(
-                key = chunk_key,
-                compressed = storage_bytes.len(),
-                decompressed = raw.len(),
-                compression = ?level_info.compression,
-                "chunk decoded"
-            );
-            raw
-        }
-        Err(e) => {
-            eprintln!("server: decode failed for {chunk_key}: {e}");
             return;
         }
     };
@@ -1006,6 +1009,12 @@ async fn serve_chunk_from_store(
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Binary(buf.into()));
     }
+}
+
+fn is_not_found(error: &object_store::Error) -> bool {
+    matches!(error, object_store::Error::NotFound { .. })
+        || error.to_string().contains("not found")
+        || error.to_string().contains("No such file or directory")
 }
 
 async fn serve_generated_chunk_request(
@@ -1389,6 +1398,49 @@ mod tests {
         let key = std::str::from_utf8(&buf[6..6 + key_len]).unwrap();
         assert_eq!(key, "ds1/img1/2/0/0/0/0/0");
         assert_eq!(&buf[6 + key_len..], &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn missing_source_chunk_is_served_as_zero_fill() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+        let store =
+            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::new(store, 1024));
+        let level_info = crate::binding::LevelInfo {
+            level_index: 0,
+            compression: crate::decode::StorageCompression::None,
+            chunk_shape: vec![1, 1, 1, 1, 2],
+            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
+                canonical_byte_size: 4,
+                on_disk_byte_size: 4,
+                byte_stride_t: 0,
+                byte_stride_c: 0,
+                chunk_size_t: 1,
+                chunk_size_c: 1,
+            },
+        };
+
+        serve_chunk_from_store(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            "0/0/0/0/0/0",
+            Some("missing"),
+            Some(level_info),
+            &cache,
+            &routes,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("message");
+        let Message::Binary(buf) = msg else {
+            panic!("expected binary chunk frame");
+        };
+        let buf = buf.as_ref();
+        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
+        assert_eq!(&buf[6 + key_len..], &[0, 0, 0, 0]);
     }
 
     #[tokio::test]

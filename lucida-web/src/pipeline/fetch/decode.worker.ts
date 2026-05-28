@@ -106,6 +106,20 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
       for (let i = 0; i < src.length; i++) dst[i] = src[i] ? 255 : 0;
       return dst.buffer;
     }
+    case "float32": {
+      if (buf.byteLength % 4 !== 0) {
+        throw new Error(`float32 buffer byteLength ${buf.byteLength} is not a multiple of 4`);
+      }
+      const src = new Float32Array(buf);
+      const dst = new Uint16Array(src.length);
+      for (let i = 0; i < src.length; i++) {
+        const value = src[i];
+        dst[i] = Number.isFinite(value)
+          ? Math.round(Math.min(1, Math.max(0, value)) * 65535)
+          : 0;
+      }
+      return dst.buffer;
+    }
     case "uint16":
     default:
       return buf;

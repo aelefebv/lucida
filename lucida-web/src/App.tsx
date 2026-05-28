@@ -17,7 +17,6 @@ import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
 import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
-import type { VolumeData } from "./types.ts";
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -27,7 +26,6 @@ import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
-import { usePreUpload } from "./hooks/usePreUpload.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import "./App.css";
 
@@ -48,7 +46,6 @@ function App() {
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
-  const [volumeMap, setVolumeMap] = useState<Map<string, VolumeData>>(new Map());
   const [cameraMode, setCameraMode] = useState<string>("arcball");
   const bumpDatasetsVersion = useCallback(() => setDatasetsVersion(v => v + 1), []);
   const bumpRemoteDocumentVersion = useCallback(() => setRemoteDocumentVersion(v => v + 1), []);
@@ -111,7 +108,6 @@ function App() {
     setT: dims.setT,
     setViewMode: dims.setViewMode,
     setSelectedDatasetId,
-    setVolumeMap,
     bumpDatasetsVersion,
     bumpRemoteDocumentVersion,
   });
@@ -185,7 +181,7 @@ function App() {
   // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
   // changeTick alone doesn't bump on viewport-only mutations like
   // pan/zoom/T/C/Z/contrast). Used here AND threaded into SliceViewer /
-  // VolumeViewer / PlateSelector / handleCameraModeToggle / usePreUpload
+  // VolumeViewer / PlateSelector / handleCameraModeToggle
   // — anywhere a viewport mutation already calls bridge.emitPresence.
   const emitPresenceWithUrl = useCallback(() => {
     bridge.emitPresence();
@@ -218,7 +214,6 @@ function App() {
         }
         return prev;
       });
-      setVolumeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
       bridge.sessionRef.current?.contentSource.rejectDataset(id);
       bumpDatasetsVersion();
     },
@@ -265,16 +260,6 @@ function App() {
     sessionRef: bridge.sessionRef,
     datasetsRef,
     setDataRangeMap: layers.setDataRangeMap,
-  });
-
-  usePreUpload({
-    volumeMap,
-    clientReady: render.clientReady,
-    clientRef: render.clientRef,
-    datasetsRef,
-    loopRef: render.loopRef,
-    wasmSceneRef: scene.wasmSceneRef,
-    emitPresence: emitPresenceWithUrl,
   });
 
   const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);

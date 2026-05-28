@@ -213,17 +213,6 @@ export interface MinimapDestroyMessage {
   type: "minimapDestroy";
 }
 
-export interface MinimapSetOverviewForLayerMessage {
-  type: "minimapSetOverviewForLayer";
-  datasetId: string;
-  data: ArrayBuffer;
-  width: number;
-  height: number;
-  depth: number;
-  t: number;
-  c: number;
-}
-
 export interface MinimapUploadOverviewChunksForLayerMessage {
   type: "minimapUploadOverviewChunksForLayer";
   datasetId: string;
@@ -434,7 +423,6 @@ export type MainToWorkerMessage =
   | MinimapInitMessage
   | MinimapRenderMessage
   | MinimapDestroyMessage
-  | MinimapSetOverviewForLayerMessage
   | MinimapUploadOverviewChunksForLayerMessage
   | RemoveLayerResourcesMessage
   | UpdateCursorDataMessage

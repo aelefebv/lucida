@@ -24,14 +24,14 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 use crate::BroadcastItem;
 use crate::binding::ChunkResolver;
-use crate::proxy::{BuildSourceError, fetch_dense_volume};
+use crate::proxy::{BuildSourceError, VolumeRegion, fetch_volume_region};
 use crate::session::Session;
 
-pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v1";
+pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v2";
 const DEFAULT_TARGET_LONG_AXIS: u64 = 512;
 const DEFAULT_CHUNK_LONG_AXIS: u64 = 256;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
-const DOWNSAMPLE_ALGORITHM_VERSION: &str = "box-average-v1";
+const DOWNSAMPLE_ALGORITHM_VERSION: &str = "max-pool-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedCoarseConfig {
@@ -1022,7 +1022,13 @@ fn plan_generated_coarse_for_image(
     let selected_level = &image.multiscale.levels[selected_input];
     let source_level0 = &image.multiscale.levels[0];
     let output_shape = generated_output_shape(source_level0.shape, selected_level.shape, &config);
-    let chunk_shape = generated_chunk_shape(output_shape, image.multiscale.data_type, &config);
+    let chunk_shape = generated_chunk_shape(
+        output_shape,
+        selected_level.shape,
+        selected_level.chunk_shape,
+        image.multiscale.data_type,
+        &config,
+    );
     let grid_shape = grid_shape(output_shape, chunk_shape);
     let scale = generated_scale(source_level0.shape, output_shape);
     let level_index = next_generated_level_index(&image.multiscale.levels);
@@ -1450,6 +1456,27 @@ struct GeneratedChunkCoords {
     x: u64,
 }
 
+#[derive(Debug)]
+enum GeneratedChunkBuildError {
+    Source(BuildSourceError),
+    Downsample(String),
+}
+
+impl std::fmt::Display for GeneratedChunkBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GeneratedChunkBuildError::Source(error) => write!(f, "{error}"),
+            GeneratedChunkBuildError::Downsample(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<BuildSourceError> for GeneratedChunkBuildError {
+    fn from(error: BuildSourceError) -> Self {
+        GeneratedChunkBuildError::Source(error)
+    }
+}
+
 fn enqueue_interest_locked(
     state: &mut GeneratedSchedulerState,
     plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
@@ -1644,32 +1671,15 @@ pub async fn materialize_generated_coarse_plan(
     session: Arc<AsyncMutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
 ) {
-    let Some(image) = manifest
+    if !manifest
         .images()
         .iter()
-        .find(|image| image.image_id == plan.image_id)
-        .cloned()
-    else {
+        .any(|image| image.image_id == plan.image_id)
+    {
         publish_all_chunks_for_plan(
             &plan,
             GeneratedChunkStatus::FailedPermanent,
             Some("generated coarse source image disappeared".into()),
-            cache,
-            session,
-            tx,
-        )
-        .await;
-        return;
-    };
-
-    if image.multiscale.data_type != DataType::Uint16 {
-        publish_all_chunks_for_plan(
-            &plan,
-            GeneratedChunkStatus::FailedPermanent,
-            Some(format!(
-                "generated coarse currently supports Uint16 source data, got {:?}",
-                image.multiscale.data_type
-            )),
             cache,
             session,
             tx,
@@ -1690,84 +1700,37 @@ pub async fn materialize_generated_coarse_plan(
                 Err(_) => continue,
             };
 
-            let source_volume =
-                fetch_with_fallback(&manifest, &image, t, c, &plan, &store, &resolver).await;
-            let (source_data, source_dims) = match source_volume {
-                Ok((data, dims)) => (data, dims),
-                Err(e) => {
-                    let status = generated_status_for_source_error(&e);
-                    publish_chunks_for_tc(
-                        &plan,
-                        t,
-                        c,
-                        status,
-                        Some(e.to_string()),
-                        cache.clone(),
-                        session.clone(),
-                        tx.clone(),
-                    )
-                    .await;
-                    continue;
-                }
-            };
-
-            let output_dims = [
-                u32::try_from(level.shape[2]).unwrap_or(u32::MAX),
-                u32::try_from(level.shape[3]).unwrap_or(u32::MAX),
-                u32::try_from(level.shape[4]).unwrap_or(u32::MAX),
-            ];
-            let output = match downsample_u16_box(&source_data, source_dims, output_dims) {
-                Ok(output) => output,
-                Err(e) => {
-                    publish_chunks_for_tc(
-                        &plan,
-                        t,
-                        c,
+            for key in plan.chunk_keys_for_tc(t, c) {
+                let Some(coords) = parse_generated_chunk_key(&key) else {
+                    publish_chunk_status(
+                        &plan.dataset_id,
+                        &plan.image_id,
+                        plan.level_index,
+                        key,
                         GeneratedChunkStatus::FailedPermanent,
-                        Some(e),
+                        Some("generated chunk key is malformed".into()),
                         cache.clone(),
                         session.clone(),
                         tx.clone(),
                     )
                     .await;
                     continue;
-                }
-            };
-
-            materialize_chunks_for_tc(
-                &plan,
-                t,
-                c,
-                &output,
-                cache.clone(),
-                session.clone(),
-                tx.clone(),
-            )
-            .await;
+                };
+                materialize_generated_coarse_key(
+                    &plan,
+                    coords,
+                    manifest.clone(),
+                    store.clone(),
+                    resolver.clone(),
+                    cache.clone(),
+                    session.clone(),
+                    tx.clone(),
+                    || async { false },
+                )
+                .await;
+            }
         }
     }
-}
-
-async fn fetch_with_fallback(
-    manifest: &DatasetManifest,
-    image: &ImageSpec,
-    t: u32,
-    c: u32,
-    plan: &GeneratedCoarsePlan,
-    store: &Arc<CachedStore>,
-    resolver: &Arc<ChunkResolver>,
-) -> Result<(Vec<u16>, [u32; 3]), BuildSourceError> {
-    let mut last_error = None;
-    for level in &plan.input_level_candidates {
-        match fetch_dense_volume(manifest, image, t, c, *level, store, resolver).await {
-            Ok((data, dims, _voxel_to_image)) => return Ok((data, dims)),
-            Err(e) => last_error = Some(e),
-        }
-    }
-    Err(last_error.unwrap_or(BuildSourceError::BadLevel {
-        image: image.image_id.clone(),
-        level: 0,
-    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1851,38 +1814,19 @@ where
         return MaterializeOneResult::Failed;
     };
 
-    if image.multiscale.data_type != DataType::Uint16 {
-        publish_chunk_status(
-            &plan.dataset_id,
-            &plan.image_id,
-            plan.level_index,
-            key,
-            GeneratedChunkStatus::FailedPermanent,
-            Some(format!(
-                "generated coarse currently supports Uint16 source data, got {:?}",
-                image.multiscale.data_type
-            )),
-            cache,
-            session,
-            tx,
-        )
-        .await;
-        return MaterializeOneResult::Failed;
-    }
-
-    let (source_data, source_dims) = match fetch_with_fallback(
-        &manifest, &image, coords.t, coords.c, plan, &store, &resolver,
+    let bytes = match generate_chunk_with_fallback(
+        &manifest, &image, coords, plan, &store, &resolver,
     )
     .await
     {
-        Ok((data, dims)) => (data, dims),
+        Ok(bytes) => bytes,
         Err(e) => {
             publish_chunk_status(
                 &plan.dataset_id,
                 &plan.image_id,
                 plan.level_index,
                 key,
-                generated_status_for_source_error(&e),
+                generated_status_for_chunk_error(&e),
                 Some(e.to_string()),
                 cache,
                 session,
@@ -1896,37 +1840,6 @@ where
     if should_cancel().await {
         return MaterializeOneResult::Canceled;
     }
-
-    let level = &plan.availability.level;
-    let output_dims = [
-        u32::try_from(level.shape[2]).unwrap_or(u32::MAX),
-        u32::try_from(level.shape[3]).unwrap_or(u32::MAX),
-        u32::try_from(level.shape[4]).unwrap_or(u32::MAX),
-    ];
-    let output = match downsample_u16_box(&source_data, source_dims, output_dims) {
-        Ok(output) => output,
-        Err(e) => {
-            publish_chunk_status(
-                &plan.dataset_id,
-                &plan.image_id,
-                plan.level_index,
-                key,
-                GeneratedChunkStatus::FailedPermanent,
-                Some(e),
-                cache,
-                session,
-                tx,
-            )
-            .await;
-            return MaterializeOneResult::Failed;
-        }
-    };
-
-    if should_cancel().await {
-        return MaterializeOneResult::Canceled;
-    }
-
-    let bytes = encode_generated_chunk_bytes(&output, level, coords.z, coords.y, coords.x);
     match cache.put_ready_chunk_atomic(
         &plan.cache_identity,
         plan.image_id.clone(),
@@ -1978,92 +1891,246 @@ where
     }
 }
 
-async fn materialize_chunks_for_tc(
+async fn generate_chunk_with_fallback(
+    manifest: &DatasetManifest,
+    image: &ImageSpec,
+    coords: GeneratedChunkCoords,
     plan: &GeneratedCoarsePlan,
-    t: u32,
-    c: u32,
-    output: &[u16],
-    cache: Arc<DerivedChunkCache>,
-    session: Arc<AsyncMutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
-) {
-    let level = &plan.availability.level;
-    for gz in 0..level.grid_shape[2] {
-        for gy in 0..level.grid_shape[3] {
-            for gx in 0..level.grid_shape[4] {
-                let key = chunk_key(plan.level_index, t, c, gz, gy, gx);
-                match cache.load_ready_chunk(
-                    &plan.cache_identity,
-                    plan.image_id.clone(),
-                    plan.level_index,
-                    key.clone(),
-                ) {
-                    Ok(true) => {
-                        publish_chunk_status(
-                            &plan.dataset_id,
-                            &plan.image_id,
-                            plan.level_index,
-                            key,
-                            GeneratedChunkStatus::Ready,
-                            None,
-                            cache.clone(),
-                            session.clone(),
-                            tx.clone(),
-                        )
-                        .await;
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            image = %plan.image_id.0,
-                            key = %key,
-                            error = %e,
-                            "generated coarse cache lookup failed; regenerating chunk"
-                        );
-                    }
-                }
+    store: &Arc<CachedStore>,
+    resolver: &Arc<ChunkResolver>,
+) -> Result<Vec<u8>, GeneratedChunkBuildError> {
+    let mut last_error = None;
+    for source_level_index in &plan.input_level_candidates {
+        match generate_chunk_from_source_level(
+            manifest,
+            image,
+            coords,
+            plan,
+            *source_level_index,
+            store,
+            resolver,
+        )
+        .await
+        {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => last_error = Some(e),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        BuildSourceError::BadLevel {
+            image: image.image_id.clone(),
+            level: 0,
+        }
+        .into()
+    }))
+}
 
-                let bytes = encode_generated_chunk_bytes(output, level, gz, gy, gx);
-                match cache.put_ready_chunk_atomic(
-                    &plan.cache_identity,
-                    plan.image_id.clone(),
-                    plan.level_index,
-                    key.clone(),
-                    bytes,
-                ) {
-                    Ok(()) => {
-                        publish_chunk_status(
-                            &plan.dataset_id,
-                            &plan.image_id,
-                            plan.level_index,
-                            key,
-                            GeneratedChunkStatus::Ready,
-                            None,
-                            cache.clone(),
-                            session.clone(),
-                            tx.clone(),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        publish_chunk_status(
-                            &plan.dataset_id,
-                            &plan.image_id,
-                            plan.level_index,
-                            key,
-                            GeneratedChunkStatus::FailedTransient,
-                            Some(e.to_string()),
-                            cache.clone(),
-                            session.clone(),
-                            tx.clone(),
-                        )
-                        .await;
+async fn generate_chunk_from_source_level(
+    manifest: &DatasetManifest,
+    image: &ImageSpec,
+    coords: GeneratedChunkCoords,
+    plan: &GeneratedCoarsePlan,
+    source_level_index: usize,
+    store: &Arc<CachedStore>,
+    resolver: &Arc<ChunkResolver>,
+) -> Result<Vec<u8>, GeneratedChunkBuildError> {
+    let source_level = image
+        .multiscale
+        .levels
+        .get(source_level_index)
+        .ok_or_else(|| BuildSourceError::BadLevel {
+            image: image.image_id.clone(),
+            level: source_level_index,
+        })?;
+    let source_dims = spatial_dims_u32(source_level.shape)
+        .map_err(|message| GeneratedChunkBuildError::Downsample(message.to_string()))?;
+    let level = &plan.availability.level;
+    let output_dims = spatial_dims_u32(level.shape)
+        .map_err(|message| GeneratedChunkBuildError::Downsample(message.to_string()))?;
+    let source_region = source_region_for_output_chunk(source_dims, output_dims, level, coords)
+        .map_err(GeneratedChunkBuildError::Downsample)?;
+    let (source_data, region_dims) = fetch_volume_region(
+        manifest,
+        image,
+        coords.t,
+        coords.c,
+        source_level_index,
+        source_region,
+        store,
+        resolver,
+    )
+    .await?;
+    let chunk = downsample_region_to_generated_chunk(
+        &source_data,
+        source_region,
+        region_dims,
+        source_dims,
+        output_dims,
+        level,
+        coords,
+    )
+    .map_err(GeneratedChunkBuildError::Downsample)?;
+
+    Ok(encode_generated_chunk_values(&chunk, plan.output_data_type))
+}
+
+fn spatial_dims_u32(shape: [u64; 5]) -> Result<[u32; 3], &'static str> {
+    Ok([
+        u32::try_from(shape[2]).map_err(|_| "generated coarse z dimension is too large")?,
+        u32::try_from(shape[3]).map_err(|_| "generated coarse y dimension is too large")?,
+        u32::try_from(shape[4]).map_err(|_| "generated coarse x dimension is too large")?,
+    ])
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SpatialBounds {
+    z0: u32,
+    z1: u32,
+    y0: u32,
+    y1: u32,
+    x0: u32,
+    x1: u32,
+}
+
+fn output_chunk_bounds(
+    output_dims: [u32; 3],
+    level: &LevelGeometry,
+    coords: GeneratedChunkCoords,
+) -> Result<SpatialBounds, String> {
+    let chunk_z = level.chunk_shape[2].max(1);
+    let chunk_y = level.chunk_shape[3].max(1);
+    let chunk_x = level.chunk_shape[4].max(1);
+    let z0 = coords
+        .z
+        .checked_mul(chunk_z)
+        .ok_or_else(|| "generated chunk z coordinate is too large".to_string())?;
+    let y0 = coords
+        .y
+        .checked_mul(chunk_y)
+        .ok_or_else(|| "generated chunk y coordinate is too large".to_string())?;
+    let x0 = coords
+        .x
+        .checked_mul(chunk_x)
+        .ok_or_else(|| "generated chunk x coordinate is too large".to_string())?;
+    let [out_z, out_y, out_x] = output_dims;
+    if z0 >= out_z as u64 || y0 >= out_y as u64 || x0 >= out_x as u64 {
+        return Err("generated chunk key is outside the generated level".to_string());
+    }
+    let z1 = z0.saturating_add(chunk_z).min(out_z as u64);
+    let y1 = y0.saturating_add(chunk_y).min(out_y as u64);
+    let x1 = x0.saturating_add(chunk_x).min(out_x as u64);
+    Ok(SpatialBounds {
+        z0: u32::try_from(z0)
+            .map_err(|_| "generated chunk z coordinate is too large".to_string())?,
+        z1: u32::try_from(z1)
+            .map_err(|_| "generated chunk z coordinate is too large".to_string())?,
+        y0: u32::try_from(y0)
+            .map_err(|_| "generated chunk y coordinate is too large".to_string())?,
+        y1: u32::try_from(y1)
+            .map_err(|_| "generated chunk y coordinate is too large".to_string())?,
+        x0: u32::try_from(x0)
+            .map_err(|_| "generated chunk x coordinate is too large".to_string())?,
+        x1: u32::try_from(x1)
+            .map_err(|_| "generated chunk x coordinate is too large".to_string())?,
+    })
+}
+
+fn source_region_for_output_chunk(
+    source_dims: [u32; 3],
+    output_dims: [u32; 3],
+    level: &LevelGeometry,
+    coords: GeneratedChunkCoords,
+) -> Result<VolumeRegion, String> {
+    let bounds = output_chunk_bounds(output_dims, level, coords)?;
+    let [in_z, in_y, in_x] = source_dims;
+    let [out_z, out_y, out_x] = output_dims;
+    let (z0, _) = scale_range(bounds.z0, out_z, in_z);
+    let (_, z1) = scale_range(bounds.z1 - 1, out_z, in_z);
+    let (y0, _) = scale_range(bounds.y0, out_y, in_y);
+    let (_, y1) = scale_range(bounds.y1 - 1, out_y, in_y);
+    let (x0, _) = scale_range(bounds.x0, out_x, in_x);
+    let (_, x1) = scale_range(bounds.x1 - 1, out_x, in_x);
+    Ok(VolumeRegion {
+        z0: z0 as u64,
+        z1: z1 as u64,
+        y0: y0 as u64,
+        y1: y1 as u64,
+        x0: x0 as u64,
+        x1: x1 as u64,
+    })
+}
+
+fn downsample_region_to_generated_chunk(
+    source: &[u16],
+    source_region: VolumeRegion,
+    region_dims: [u32; 3],
+    source_dims: [u32; 3],
+    output_dims: [u32; 3],
+    level: &LevelGeometry,
+    coords: GeneratedChunkCoords,
+) -> Result<Vec<u16>, String> {
+    let expected = (region_dims[0] as usize)
+        .checked_mul(region_dims[1] as usize)
+        .and_then(|v| v.checked_mul(region_dims[2] as usize))
+        .ok_or_else(|| "source generated coarse region is too large".to_string())?;
+    if source.len() != expected {
+        return Err(format!(
+            "source generated coarse region has {} voxels, expected {expected}",
+            source.len()
+        ));
+    }
+
+    let bounds = output_chunk_bounds(output_dims, level, coords)?;
+    let chunk_z = level.chunk_shape[2].max(1);
+    let chunk_y = level.chunk_shape[3].max(1);
+    let chunk_x = level.chunk_shape[4].max(1);
+    let chunk_voxels = (chunk_z as usize)
+        .checked_mul(chunk_y as usize)
+        .and_then(|v| v.checked_mul(chunk_x as usize))
+        .ok_or_else(|| "generated coarse chunk is too large".to_string())?;
+    let mut chunk = vec![0_u16; chunk_voxels];
+
+    let [in_z, in_y, in_x] = source_dims;
+    let [out_z, out_y, out_x] = output_dims;
+    let source_stride_y = region_dims[2] as usize;
+    let source_stride_z = (region_dims[1] as usize) * source_stride_y;
+    let chunk_stride_y = chunk_x as usize;
+    let chunk_stride_z = (chunk_y as usize) * chunk_stride_y;
+
+    for oz in bounds.z0..bounds.z1 {
+        let (src_z0, src_z1) = scale_range(oz, out_z, in_z);
+        for oy in bounds.y0..bounds.y1 {
+            let (src_y0, src_y1) = scale_range(oy, out_y, in_y);
+            for ox in bounds.x0..bounds.x1 {
+                let (src_x0, src_x1) = scale_range(ox, out_x, in_x);
+                let mut value = 0_u16;
+                for iz in src_z0..src_z1 {
+                    let local_z = (iz as u64)
+                        .checked_sub(source_region.z0)
+                        .ok_or_else(|| "generated coarse source z underflow".to_string())?;
+                    for iy in src_y0..src_y1 {
+                        let local_y = (iy as u64)
+                            .checked_sub(source_region.y0)
+                            .ok_or_else(|| "generated coarse source y underflow".to_string())?;
+                        let base = (local_z as usize) * source_stride_z
+                            + (local_y as usize) * source_stride_y;
+                        for ix in src_x0..src_x1 {
+                            let local_x = (ix as u64)
+                                .checked_sub(source_region.x0)
+                                .ok_or_else(|| "generated coarse source x underflow".to_string())?;
+                            value = value.max(source[base + local_x as usize]);
+                        }
                     }
                 }
+                let dst = ((oz - bounds.z0) as usize) * chunk_stride_z
+                    + ((oy - bounds.y0) as usize) * chunk_stride_y
+                    + (ox - bounds.x0) as usize;
+                chunk[dst] = value;
             }
         }
     }
+
+    Ok(chunk)
 }
 
 async fn publish_all_chunks_for_plan(
@@ -2178,10 +2245,18 @@ fn generated_status_for_source_error(error: &BuildSourceError) -> GeneratedChunk
         | BuildSourceError::NoFields(_)
         | BuildSourceError::BadLevel { .. }
         | BuildSourceError::OutOfBounds { .. }
+        | BuildSourceError::SpatialOutOfBounds { .. }
         | BuildSourceError::UnknownImage(_)
         | BuildSourceError::Decode { .. }
         | BuildSourceError::ShortChunk { .. }
         | BuildSourceError::TooLarge => GeneratedChunkStatus::FailedPermanent,
+    }
+}
+
+fn generated_status_for_chunk_error(error: &GeneratedChunkBuildError) -> GeneratedChunkStatus {
+    match error {
+        GeneratedChunkBuildError::Source(source) => generated_status_for_source_error(source),
+        GeneratedChunkBuildError::Downsample(_) => GeneratedChunkStatus::FailedPermanent,
     }
 }
 
@@ -2312,19 +2387,21 @@ fn generated_output_shape(
     selected_input_shape: [u64; 5],
     config: &GeneratedCoarseConfig,
 ) -> [u64; 5] {
+    let source_z = source_level0_shape[2].max(1);
     let source_y = source_level0_shape[3].max(1);
     let source_x = source_level0_shape[4].max(1);
     let long_axis = source_y.max(source_x);
     let target_long = long_axis.min(config.target_long_axis).max(1);
     let scale = target_long as f64 / long_axis as f64;
+    let out_z = ((source_z as f64) * scale).round().max(1.0) as u64;
     let out_y = ((source_y as f64) * scale).round().max(1.0) as u64;
     let out_x = ((source_x as f64) * scale).round().max(1.0) as u64;
     [
         source_level0_shape[0],
         source_level0_shape[1],
-        selected_input_shape[2].max(1),
-        out_y.min(source_y),
-        out_x.min(source_x),
+        out_z.min(source_z).min(selected_input_shape[2].max(1)),
+        out_y.min(source_y).min(selected_input_shape[3].max(1)),
+        out_x.min(source_x).min(selected_input_shape[4].max(1)),
     ]
 }
 
@@ -2349,24 +2426,60 @@ fn input_level_candidates(image: &ImageSpec, target_long_axis: u64) -> Vec<usize
 
 fn generated_chunk_shape(
     output_shape: [u64; 5],
+    source_shape: [u64; 5],
+    source_chunk_shape: [u64; 5],
     data_type: DataType,
     config: &GeneratedCoarseConfig,
 ) -> [u64; 5] {
     let bytes_per_voxel = data_type_size(data_type);
-    let mut chunk_y = output_shape[3].min(config.chunk_long_axis).max(1);
-    let mut chunk_x = output_shape[4].min(config.chunk_long_axis).max(1);
-    let chunk_z = 1_u64;
+    let mut chunk_z = output_chunk_axis_for_source_chunk(
+        output_shape[2],
+        source_shape[2],
+        source_chunk_shape[2],
+        config.chunk_long_axis,
+    );
+    let mut chunk_y = output_chunk_axis_for_source_chunk(
+        output_shape[3],
+        source_shape[3],
+        source_chunk_shape[3],
+        config.chunk_long_axis,
+    );
+    let mut chunk_x = output_chunk_axis_for_source_chunk(
+        output_shape[4],
+        source_shape[4],
+        source_chunk_shape[4],
+        config.chunk_long_axis,
+    );
     while checked_product(&[chunk_z, chunk_y, chunk_x, bytes_per_voxel])
         .is_some_and(|bytes| bytes > config.max_chunk_bytes)
-        && (chunk_y > 1 || chunk_x > 1)
+        && (chunk_z > 1 || chunk_y > 1 || chunk_x > 1)
     {
-        if chunk_y >= chunk_x && chunk_y > 1 {
+        if chunk_z >= chunk_y && chunk_z >= chunk_x && chunk_z > 1 {
+            chunk_z = chunk_z.div_ceil(2).max(1);
+        } else if chunk_y >= chunk_x && chunk_y > 1 {
             chunk_y = chunk_y.div_ceil(2).max(1);
         } else if chunk_x > 1 {
             chunk_x = chunk_x.div_ceil(2).max(1);
         }
     }
     [1, 1, chunk_z, chunk_y, chunk_x]
+}
+
+fn output_chunk_axis_for_source_chunk(
+    output_axis: u64,
+    source_axis: u64,
+    source_chunk_axis: u64,
+    chunk_axis_cap: u64,
+) -> u64 {
+    let output_axis = output_axis.max(1);
+    let source_axis = source_axis.max(1);
+    let source_chunk_axis = source_chunk_axis.max(1);
+    let cap = chunk_axis_cap.max(1);
+    let axis = output_axis
+        .saturating_mul(source_chunk_axis)
+        .div_ceil(source_axis)
+        .max(1);
+    axis.min(output_axis).min(cap)
 }
 
 fn generated_scale(source_shape: [u64; 5], output_shape: [u64; 5]) -> [f64; 5] {
@@ -2440,7 +2553,8 @@ fn data_type_size(data_type: DataType) -> u64 {
     }
 }
 
-fn downsample_u16_box(
+#[cfg(test)]
+fn downsample_u16_max(
     input: &[u16],
     input_dims: [u32; 3],
     output_dims: [u32; 3],
@@ -2477,18 +2591,15 @@ fn downsample_u16_box(
             let (y0, y1) = scale_range(oy, out_y, in_y);
             for ox in 0..out_x {
                 let (x0, x1) = scale_range(ox, out_x, in_x);
-                let mut sum = 0_u64;
-                let mut count = 0_u64;
+                let mut value = 0_u16;
                 for iz in z0..z1 {
                     for iy in y0..y1 {
                         let base = (iz as usize) * in_stride_z + (iy as usize) * in_stride_y;
                         for ix in x0..x1 {
-                            sum += input[base + ix as usize] as u64;
-                            count += 1;
+                            value = value.max(input[base + ix as usize]);
                         }
                     }
                 }
-                let value = (sum + count / 2).checked_div(count).unwrap_or(0) as u16;
                 let out_idx =
                     (oz as usize) * out_stride_z + (oy as usize) * out_stride_y + ox as usize;
                 output[out_idx] = value;
@@ -2505,12 +2616,14 @@ fn scale_range(out_index: u32, out_len: u32, in_len: u32) -> (u32, u32) {
     (start.min(in_len.saturating_sub(1)), end)
 }
 
+#[cfg(test)]
 fn encode_generated_chunk_bytes(
     output: &[u16],
     level: &LevelGeometry,
     gz: u64,
     gy: u64,
     gx: u64,
+    output_data_type: DataType,
 ) -> Vec<u8> {
     let chunk_z = level.chunk_shape[2];
     let chunk_y = level.chunk_shape[3];
@@ -2542,11 +2655,29 @@ fn encode_generated_chunk_bytes(
         }
     }
 
-    let mut bytes = Vec::with_capacity(chunk.len() * 2);
+    encode_generated_chunk_values(&chunk, output_data_type)
+}
+
+fn encode_generated_chunk_values(chunk: &[u16], output_data_type: DataType) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(chunk.len() * data_type_size(output_data_type) as usize);
     for value in chunk {
-        bytes.extend_from_slice(&value.to_le_bytes());
+        encode_u16_as_data_type(*value, output_data_type, &mut bytes);
     }
     bytes
+}
+
+fn encode_u16_as_data_type(value: u16, data_type: DataType, out: &mut Vec<u8>) {
+    match data_type {
+        DataType::Uint8 => out.push(value.min(u8::MAX as u16) as u8),
+        DataType::Uint16 => out.extend_from_slice(&value.to_le_bytes()),
+        DataType::Uint32 => out.extend_from_slice(&(value as u32).to_le_bytes()),
+        DataType::Float32 => {
+            out.extend_from_slice(&((value as f32) / (u16::MAX as f32)).to_le_bytes())
+        }
+        DataType::Float64 => {
+            out.extend_from_slice(&((value as f64) / (u16::MAX as f64)).to_le_bytes())
+        }
+    }
 }
 
 fn hex32(bytes: &[u8; 32]) -> String {
@@ -2718,6 +2849,13 @@ mod tests {
     }
 
     fn binding_seed_for(levels: &[LevelGeometry]) -> ServerBindingSeed {
+        binding_seed_for_data_type(levels, DataType::Uint16)
+    }
+
+    fn binding_seed_for_data_type(
+        levels: &[LevelGeometry],
+        data_type: DataType,
+    ) -> ServerBindingSeed {
         ServerBindingSeed {
             images: vec![ImageBindingSeed {
                 image_id: ImageId("img-1".into()),
@@ -2734,7 +2872,7 @@ mod tests {
                                 level.chunk_shape[2],
                                 level.chunk_shape[3],
                                 level.chunk_shape[4],
-                                2,
+                                data_type_size(data_type),
                             ])
                             .unwrap() as usize,
                             on_disk_byte_size: 0,
@@ -2757,8 +2895,10 @@ mod tests {
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let cached = Arc::new(CachedStore::new(store, 1024 * 1024));
-        let resolver = Arc::new(ChunkResolver::new(&binding_seed_for(
-            &manifest.images()[0].multiscale.levels,
+        let image = &manifest.images()[0];
+        let resolver = Arc::new(ChunkResolver::new(&binding_seed_for_data_type(
+            &image.multiscale.levels,
+            image.multiscale.data_type,
         )));
         let cache = Arc::new(DerivedChunkCache::default());
         cache.upsert_level(plan.availability.clone());
@@ -2895,6 +3035,23 @@ mod tests {
     }
 
     #[test]
+    fn generated_coarse_planner_downsamples_z_and_aligns_chunks_to_source_footprint() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 2480, 8058, 7718], [1, 1, 32, 1024, 1024])],
+            None,
+            DataType::Float32,
+        );
+
+        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
+            .pop()
+            .expect("plan");
+
+        assert_eq!(plan.availability.level.shape, [1, 1, 158, 512, 490]);
+        assert_eq!(plan.availability.level.chunk_shape, [1, 1, 3, 66, 66]);
+        assert_eq!(plan.availability.level.grid_shape, [1, 1, 53, 8, 8]);
+    }
+
+    #[test]
     fn generated_chunk_job_key_carries_identity_scope() {
         let manifest = source_manifest();
         let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
@@ -2913,12 +3070,12 @@ mod tests {
     }
 
     #[test]
-    fn box_downsample_averages_source_pixels() {
+    fn max_downsample_preserves_sparse_source_pixels() {
         let input: Vec<u16> = (0..16).collect();
 
-        let output = downsample_u16_box(&input, [1, 4, 4], [1, 2, 2]).unwrap();
+        let output = downsample_u16_max(&input, [1, 4, 4], [1, 2, 2]).unwrap();
 
-        assert_eq!(output, vec![3, 5, 11, 13]);
+        assert_eq!(output, vec![5, 7, 13, 15]);
     }
 
     #[test]
@@ -2932,13 +3089,37 @@ mod tests {
         };
         let output: Vec<u16> = (1..=9).collect();
 
-        let bytes = encode_generated_chunk_bytes(&output, &level, 0, 1, 1);
+        let bytes = encode_generated_chunk_bytes(&output, &level, 0, 1, 1, DataType::Uint16);
         let values: Vec<u16> = bytes
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
 
         assert_eq!(values, vec![9, 0, 0, 0]);
+    }
+
+    #[test]
+    fn generated_chunk_encoding_preserves_float32_wire_format() {
+        let level = LevelGeometry {
+            level_index: 1,
+            shape: [1, 1, 1, 2, 2],
+            chunk_shape: [1, 1, 1, 2, 2],
+            grid_shape: [1, 1, 1, 1, 1],
+            scale: [1.0; 5],
+        };
+        let output = vec![0, 32768, 65535, 16384];
+
+        let bytes = encode_generated_chunk_bytes(&output, &level, 0, 0, 0, DataType::Float32);
+        let values: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(values[0], 0.0);
+        assert!((values[1] - 0.5).abs() < 0.00002);
+        assert_eq!(values[2], 1.0);
+        assert!((values[3] - 0.25).abs() < 0.00002);
     }
 
     #[test]
@@ -3171,7 +3352,7 @@ mod tests {
                     .chunks_exact(2)
                     .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                     .collect();
-                assert_eq!(values, vec![3, 5, 11, 13]);
+                assert_eq!(values, vec![5, 7, 13, 15]);
             }
             DerivedChunkLookup::Status { status, message } => {
                 panic!("expected generated bytes, got {status:?}: {message:?}");
@@ -3185,6 +3366,216 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&after[..], &source_bytes[..]);
+    }
+
+    #[tokio::test]
+    async fn generated_coarse_materializes_one_chunk_without_fetching_full_source() {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use tokio::sync::broadcast;
+
+        let source_level = level(0, [1, 1, 1, 4, 4], [1, 1, 1, 2, 2]);
+        let manifest =
+            source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 4,
+                chunk_long_axis: 2,
+                max_chunk_bytes: 64,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let seed = binding_seed_for(&[source_level]);
+        let resolver = Arc::new(ChunkResolver::new(&seed));
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let source_path = Path::from("0/c/0/0/0/0/0");
+        let mut source_bytes = Vec::new();
+        for value in [10_u16, 20, 30, 40] {
+            source_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        store
+            .put(&source_path, PutPayload::from(source_bytes))
+            .await
+            .unwrap();
+
+        let cache = Arc::new(DerivedChunkCache::new_on_disk(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            [9; 16],
+        ));
+        cache.upsert_level(plan.availability.clone());
+        let session = Arc::new(AsyncMutex::new(Session::new()));
+        let (tx, _rx) = broadcast::channel(16);
+        let manifest = Arc::new(manifest);
+        let cached = Arc::new(CachedStore::new(store, 1024 * 1024));
+
+        let result = materialize_generated_coarse_key(
+            &plan,
+            parse_generated_chunk_key("1/0/0/0/0/0").unwrap(),
+            manifest.clone(),
+            cached.clone(),
+            resolver.clone(),
+            cache.clone(),
+            session.clone(),
+            tx.clone(),
+            || async { false },
+        )
+        .await;
+        assert_eq!(result, MaterializeOneResult::Ready);
+
+        match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
+            DerivedChunkLookup::Ready(bytes) => {
+                let values: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                assert_eq!(values, vec![10, 20, 30, 40]);
+            }
+            DerivedChunkLookup::Status { status, message } => {
+                panic!("expected generated bytes, got {status:?}: {message:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_coarse_materializes_float32_source_chunks() {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use tokio::sync::broadcast;
+
+        let source_level = level(0, [1, 1, 1, 2, 2], [1, 1, 1, 2, 2]);
+        let manifest =
+            source_manifest_with_levels(vec![source_level.clone()], None, DataType::Float32);
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 2,
+                chunk_long_axis: 2,
+                max_chunk_bytes: 64,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let seed = binding_seed_for_data_type(&[source_level], DataType::Float32);
+        let resolver = Arc::new(ChunkResolver::new(&seed));
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let source_path = Path::from("0/c/0/0/0/0/0");
+        let mut source_bytes = Vec::new();
+        for value in [0.0_f32, 0.5, 1.0, 2.0] {
+            source_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        store
+            .put(&source_path, PutPayload::from(source_bytes))
+            .await
+            .unwrap();
+
+        let cache = Arc::new(DerivedChunkCache::new_on_disk(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            [10; 16],
+        ));
+        cache.upsert_level(plan.availability.clone());
+        let session = Arc::new(AsyncMutex::new(Session::new()));
+        let (tx, _rx) = broadcast::channel(16);
+        let coords = parse_generated_chunk_key("1/0/0/0/0/0").unwrap();
+
+        let result = materialize_generated_coarse_key(
+            &plan,
+            coords,
+            Arc::new(manifest),
+            Arc::new(CachedStore::new(store, 1024 * 1024)),
+            resolver,
+            cache.clone(),
+            session,
+            tx,
+            || async { false },
+        )
+        .await;
+
+        assert_eq!(result, MaterializeOneResult::Ready);
+        match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
+            DerivedChunkLookup::Ready(bytes) => {
+                let values: Vec<f32> = bytes
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                assert!((values[0] - 0.0).abs() < 0.00001);
+                assert!((values[1] - 0.5).abs() < 0.00002);
+                assert!((values[2] - 1.0).abs() < 0.00001);
+                assert!((values[3] - 1.0).abs() < 0.00001);
+            }
+            DerivedChunkLookup::Status { status, message } => {
+                panic!("expected generated bytes, got {status:?}: {message:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_coarse_treats_missing_source_chunks_as_zero_fill() {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use tokio::sync::broadcast;
+
+        let source_level = level(0, [1, 1, 1, 2, 2], [1, 1, 1, 1, 1]);
+        let manifest =
+            source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 2,
+                chunk_long_axis: 2,
+                max_chunk_bytes: 64,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let seed = binding_seed_for(&[source_level]);
+        let resolver = Arc::new(ChunkResolver::new(&seed));
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let source_path = Path::from("0/c/0/0/0/0/1");
+        store
+            .put(&source_path, PutPayload::from(7_u16.to_le_bytes().to_vec()))
+            .await
+            .unwrap();
+
+        let cache = Arc::new(DerivedChunkCache::new_on_disk(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            [11; 16],
+        ));
+        cache.upsert_level(plan.availability.clone());
+        let session = Arc::new(AsyncMutex::new(Session::new()));
+        let (tx, _rx) = broadcast::channel(16);
+        let coords = parse_generated_chunk_key("1/0/0/0/0/0").unwrap();
+
+        let result = materialize_generated_coarse_key(
+            &plan,
+            coords,
+            Arc::new(manifest),
+            Arc::new(CachedStore::new(store, 1024 * 1024)),
+            resolver,
+            cache.clone(),
+            session,
+            tx,
+            || async { false },
+        )
+        .await;
+
+        assert_eq!(result, MaterializeOneResult::Ready);
+        match cache.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
+            DerivedChunkLookup::Ready(bytes) => {
+                let values: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                assert_eq!(values, vec![0]);
+            }
+            DerivedChunkLookup::Status { status, message } => {
+                panic!("expected generated bytes, got {status:?}: {message:?}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -36,7 +36,6 @@ import {
   handleMinimapDestroy,
   handleMinimapInit,
   handleMinimapRender,
-  handleMinimapSetOverview,
   handleMinimapUploadOverviewChunks,
   removeMinimapResources,
 } from "../minimapHandlers.ts";
@@ -139,9 +138,6 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "minimapRender":
       handleMinimapRender(ctx, msg);
-      return;
-    case "minimapSetOverviewForLayer":
-      handleMinimapSetOverview(ctx, msg);
       return;
     case "minimapUploadOverviewChunksForLayer":
       handleMinimapUploadOverviewChunks(ctx, msg);

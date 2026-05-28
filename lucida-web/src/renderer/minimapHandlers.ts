@@ -2,7 +2,6 @@ import type { WorkerCtx } from "./workerContext.ts";
 import type {
   MinimapInitMessage,
   MinimapRenderMessage,
-  MinimapSetOverviewForLayerMessage,
   MinimapUploadOverviewChunksForLayerMessage,
 } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
@@ -92,33 +91,6 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     comp.composite(minimapContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
     ctx.device.queue.submit([compEncoder.finish()]);
   }
-}
-
-export function handleMinimapSetOverview(ctx: WorkerCtx, msg: MinimapSetOverviewForLayerMessage): void {
-  const existing = minimapOverviewPerDataset.get(msg.datasetId);
-  if (existing) existing.texture.destroy();
-
-  const texture = createEmptyVolumeTexture(ctx.device, msg.width, msg.height, msg.depth);
-  for (let z = 0; z < msg.depth; z++) {
-    ctx.device.queue.writeTexture(
-      { texture, origin: [0, 0, z] },
-      msg.data,
-      {
-        offset: z * msg.width * msg.height * 2,
-        bytesPerRow: msg.width * 2,
-        rowsPerImage: msg.height,
-      },
-      [msg.width, msg.height, 1],
-    );
-  }
-  const data = new Uint16Array(msg.data);
-  const { min, max } = sampleIntensityRange(data);
-  minimapOverviewPerDataset.set(msg.datasetId, {
-    texture, uploaded: new Set(["full"]),
-    t: msg.t, c: msg.c,
-    width: msg.width, height: msg.height, depth: msg.depth,
-    intensityMin: min, intensityMax: max,
-  });
 }
 
 export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUploadOverviewChunksForLayerMessage): void {

@@ -1,6 +1,6 @@
 ---
 created: 2026-05-19
-modified: 2026-05-19
+modified: 2026-05-26
 ---
 
 # Generated Coarse
@@ -28,7 +28,13 @@ Generated coarse chunks use the same request key shape as source chunks: `{level
 
 `GeneratedCoarseService` schedules visible, predicted, and background work. Viewer-interest hints can reprioritize queued work and cancel stale running work, so temporal or Z scrubbing does not leave generation stuck behind obsolete chunks.
 
-Materialized chunks are written through `DerivedChunkCache`. On-disk writes are atomic, readiness indexes are persisted, and the cache can recover ready chunks on reopen. Disk budget eviction withdraws missing ready chunks by publishing an `unavailable` readiness delta.
+Generated levels downsample all spatial axes, including Z, so a single-level 3D source still gets a genuinely coarse 3D context level. Generated chunk dimensions are chosen to map roughly to the selected source level's chunk footprint; this avoids one generated chunk forcing a huge multi-chunk source read.
+
+Generated chunks are materialized chunk-locally: the server maps the requested output chunk back to the overlapping source cuboid, fetches only the source chunks that intersect that cuboid, normalizes source samples into the u16 working range, max-pools the region so sparse bright structures survive downsampling, and writes the generated chunk in the source dtype's wire format. This keeps single-level large sources from forcing a full-volume allocation just to satisfy minimap/coarse context.
+
+Missing source Zarr chunks are treated as zero fill on both the normal source chunk path and the generated-source read path. Sparse OME-Zarrs therefore do not turn empty regions into transient fetch failures.
+
+Materialized chunks are written through `DerivedChunkCache`. On-disk writes are atomic, readiness indexes are persisted, and the cache can recover ready chunks on reopen. The generated-cache identity includes the generator version; when materialization semantics change, bumping that version prevents stale persisted failures or bytes from poisoning the new generator. Disk budget eviction withdraws missing ready chunks by publishing an `unavailable` readiness delta.
 
 ## Interactions
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-05-19
-modified: 2026-05-19
+modified: 2026-05-26
 ---
 
 # Minimap
@@ -9,11 +9,11 @@ modified: 2026-05-19
 
 ## Model
 
-The minimap uses an explicit source coarse level when the manifest advertises one. It does not synthesize a fallback by choosing the last source level, and it does not depend on generated coarse readiness. If no explicit minimap-safe source coarse exists, the minimap skips rendering for that dataset rather than consuming the coarse fallback tier.
+The minimap uses the manifest's explicit `coarse_level_index` pointer. That pointer may refer to a source coarse level or to a server-generated coarse level merged in through generated availability. The minimap does not synthesize a fallback by choosing the last source level. If no explicit coarse pointer exists yet, the minimap skips rendering for that dataset until metadata supplies one.
 
 This keeps two concerns separate:
 
-- **coarse tier** — per-field/image fallback/context chunks used by the main renderer.
+- **coarse tier** — per-field/image fallback/context chunks used by the main renderer and selected by the same explicit coarse pointer.
 - **minimap** — whole-dataset navigation context with its own render key, upload budget, and cache lane.
 
 ## Interactions
@@ -25,8 +25,8 @@ This keeps two concerns separate:
 ## Invariants
 
 - The minimap should not evict or be evicted by detail chunks.
-- The minimap should not silently select arbitrary lowest-resolution source data; it needs an explicit source coarse level.
-- Main-render coarse fallback can use generated coarse. The minimap does not.
+- The minimap should not silently select arbitrary lowest-resolution source data; it needs an explicit `coarse_level_index`.
+- Generated coarse is valid minimap input once it is advertised as the explicit coarse level, but it must flow through the progressive chunk upload path rather than an eager full-volume browser allocation.
 
 ## Related
 
