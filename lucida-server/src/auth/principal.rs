@@ -10,9 +10,9 @@
 //! production cookie+session lookup), [`GoogleJwtPrincipalExtractor`]
 //! (Bearer-token validator for non-cookie call sites), and
 //! [`StubPrincipalExtractor`] (the disabled-mode extractor that yields
-//! a fixed `dev@local` principal without touching headers, the cookie,
-//! or any store). `build_extractor` in [`crate::auth::middleware`] picks
-//! between them based on `AuthMode`.
+//! `dev@local` unless a local-dev identity cookie overrides it).
+//! `build_extractor` in [`crate::auth::middleware`] picks between them
+//! based on `AuthMode`.
 
 use std::sync::Arc;
 
@@ -25,6 +25,7 @@ use lucida_core::auth_principal::AuthPrincipal;
 
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
+use super::dev::{default_dev_principal, read_dev_principal_cookie};
 use super::google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
@@ -391,8 +392,8 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
     }
 }
 
-/// Disabled-mode extractor: yields a fixed `dev@local` principal for
-/// every request. Touches no headers, no cookie, no store.
+/// Disabled-mode extractor: yields the browser's selected local-dev
+/// principal, falling back to `dev@local`. Touches no store.
 ///
 /// Wired in by [`crate::auth::middleware::build_extractor`] when
 /// `AuthMode::Disabled`. ADR-0018 promises that loopback default (and
@@ -402,23 +403,15 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// `UnauthLanding` would bounce into a `/auth/start` that isn't
 /// registered → infinite redirect loop.
 ///
-/// `is_admin: true` is intentional: "no auth" means no gating at all,
-/// so admin-only endpoints have to resolve as admin too. The multi-user
-/// trade-off (every browser is the same `dev@local` identity, sharing
-/// one bookmark namespace and unprotected admin endpoints) is the
-/// honest semantic of "no auth" — see the deferred per-browser-anon
-/// sketch in `wiki/decisions/deferred.md`.
+/// The fallback `dev@local` has `is_admin: true`: "no auth" means no
+/// gating unless the developer intentionally switches this browser to
+/// a non-admin dev principal for role/manual-testing.
 pub struct StubPrincipalExtractor;
 
 #[async_trait]
 impl PrincipalExtractor for StubPrincipalExtractor {
-    async fn extract(&self, _req: &Parts) -> Result<AuthPrincipal, AuthError> {
-        Ok(AuthPrincipal {
-            email: "dev@local".to_string(),
-            display_name: "Local Dev".to_string(),
-            picture_url: None,
-            is_admin: true,
-        })
+    async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
+        Ok(read_dev_principal_cookie(req).unwrap_or_else(default_dev_principal))
     }
 }
 
@@ -470,6 +463,7 @@ pub(crate) mod test_helpers {
 mod tests {
     use super::test_helpers::*;
     use super::*;
+    use crate::auth::dev::{build_dev_principal_cookie, normalize_dev_principal};
     use crate::auth::session_store_memory::MemorySessionStore;
     use axum::http::Request;
     use chrono::Duration as ChronoDuration;
@@ -480,6 +474,16 @@ mod tests {
             builder = builder.header("cookie", format!("lucida_session={v}"));
         }
         builder.body(()).unwrap().into_parts().0
+    }
+
+    fn parts_with_raw_cookie(value: &str) -> Parts {
+        Request::builder()
+            .uri("http://localhost/")
+            .header("cookie", value)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
     }
 
     #[tokio::test]
@@ -851,10 +855,8 @@ mod tests {
 
     #[tokio::test]
     async fn stub_extractor_returns_canned_principal_with_arbitrary_cookie() {
-        // The whole point of the stub is that whatever cookie shows up
-        // (including a bogus value that the cookie extractor would
-        // reject) is ignored — disabled mode never touches the session
-        // store.
+        // Session-cookie garbage is ignored — disabled mode never
+        // touches the session store.
         let p = StubPrincipalExtractor
             .extract(&parts_with_cookie(Some("garbage-no-row-exists")))
             .await
@@ -863,5 +865,22 @@ mod tests {
         assert_eq!(p.display_name, "Local Dev");
         assert!(p.picture_url.is_none());
         assert!(p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn stub_extractor_uses_dev_principal_cookie_when_present() {
+        let config = AuthConfig::for_tests();
+        let dev = normalize_dev_principal("Viewer@Example.com", Some("Viewer"), false).unwrap();
+        let set_cookie = build_dev_principal_cookie(&config, &dev, false);
+        let inbound_cookie = set_cookie.split(';').next().unwrap();
+
+        let p = StubPrincipalExtractor
+            .extract(&parts_with_raw_cookie(inbound_cookie))
+            .await
+            .unwrap();
+
+        assert_eq!(p.email, "viewer@example.com");
+        assert_eq!(p.display_name, "Viewer");
+        assert!(!p.is_admin);
     }
 }

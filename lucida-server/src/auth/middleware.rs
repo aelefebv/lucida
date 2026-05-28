@@ -141,11 +141,10 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
 /// Pick the active extractor for the configured `AuthMode`.
 ///
 /// `Disabled` → [`StubPrincipalExtractor`]: every request resolves to
-/// the canned `dev@local` principal without touching the cookie or the
-/// store. ADR-0018's loopback-default safety promise relies on this
-/// branch existing — without it the cookie extractor would 401 every
-/// request and the SPA would loop into a `/auth/start` that isn't
-/// registered.
+/// the selected local-dev principal, falling back to `dev@local`.
+/// ADR-0018's loopback-default safety promise relies on this branch
+/// existing — without it the cookie extractor would 401 every request
+/// and the SPA would loop into a `/auth/start` that isn't registered.
 ///
 /// `Google` → [`SessionCookieExtractor`]: read the `lucida_session`
 /// cookie, look up the row, enforce idle + hard-cap, derive `is_admin`

@@ -16,6 +16,19 @@ import type { AuthPrincipal, AuthState } from "./types.ts";
 // silently break SameSite=Lax cookies.
 export const WHOAMI_URL = "/auth/whoami";
 export const LOGOUT_URL = "/auth/logout";
+export const DEV_AUTH_STATUS_URL = "/auth/dev/status";
+export const DEV_LOGIN_URL = "/auth/dev/login";
+
+export interface DevAuthStatus {
+  enabled: boolean;
+  default_principal: AuthPrincipal;
+}
+
+export interface DevLoginRequest {
+  email: string;
+  display_name?: string;
+  is_admin?: boolean;
+}
 
 export type FetchLike = (
   input: string,
@@ -79,4 +92,48 @@ export async function postLogout(fetchImpl: FetchLike = fetch): Promise<void> {
   } catch {
     // Intentionally swallowed — see doc comment.
   }
+}
+
+export async function fetchDevAuthStatus(fetchImpl: FetchLike = fetch): Promise<DevAuthStatus> {
+  const disabled: DevAuthStatus = {
+    enabled: false,
+    default_principal: {
+      email: "dev@local",
+      display_name: "Local Dev",
+      picture_url: null,
+      is_admin: true,
+    },
+  };
+  try {
+    const res = await fetchImpl(DEV_AUTH_STATUS_URL, { credentials: "include" });
+    if (!res.ok) return disabled;
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) return disabled;
+    return (await res.json()) as DevAuthStatus;
+  } catch {
+    return disabled;
+  }
+}
+
+export async function postDevLogin(
+  body: DevLoginRequest,
+  fetchImpl: FetchLike = fetch,
+): Promise<AuthPrincipal> {
+  const res = await fetchImpl(DEV_LOGIN_URL, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const payload = await res.json();
+      detail = payload.detail || payload.error || detail;
+    } catch {
+      // Keep status text.
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as AuthPrincipal;
 }

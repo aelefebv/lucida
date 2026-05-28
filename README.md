@@ -26,7 +26,7 @@ docker run --rm -p 9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the multi-user posture: every browser resolves to the same `dev@local` identity, bookmarks land in one shared namespace, and admin endpoints (`/admin/clear-proxy-cache`) are unprotected. If you want per-user identity, use the auth-enabled scenario below.
+Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the auth-off posture: browsers default to the admin `dev@local` identity, the profile menu can switch a browser to a different local dev identity for manual role testing, and admin endpoints (`/admin/clear-proxy-cache`) are unprotected. If you want real per-user authentication, use the auth-enabled scenario below.
 
 ### Run with sign-in (Google OAuth)
 

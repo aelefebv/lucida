@@ -11,6 +11,7 @@ This is a running log for workspace planning decisions before the umbrella PRD i
 - 2026-05-28: Workspace isolation tracer-bullet slice implemented create/list/open workspace, `/w/:id` routing, workspace-scoped document persistence, owner-only access, and restart restore.
 - 2026-05-28: Runtime identity slice migrated workspace sessions to opaque `workspace_dataset_id` values while keeping source/cache identity global for reuse across workspaces.
 - 2026-05-28: Sharing slice implemented owner-managed explicit members, viewer/editor/owner member roles, restricted vs anyone-with-link access, viewer/editor link roles, and owner-only sharing UI. Link-shared workspaces remain URL-accessible but are not globally listed; recents/pins for prior link visits remain a later `user_workspace_state` slice.
+- 2026-05-28: Dev-auth testing slice added disabled-mode per-browser identity switching so workspace sharing roles can be manually tested locally without Google OAuth.
 
 ## Pipeline Shape
 

@@ -14,7 +14,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse, Json, Response};
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info, warn};
 
@@ -24,6 +24,10 @@ use super::config::AuthConfig;
 use super::cookie::{
     build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
     build_signed_out_marker, read_session_cookie, read_signed_out_marker, request_is_https,
+};
+use super::dev::{
+    build_clearing_dev_principal_cookie, build_dev_principal_cookie, default_dev_principal,
+    normalize_dev_principal,
 };
 use super::google_oauth::{GoogleOAuthClient, OAuthError, Prompt};
 use super::pending_auth::{PendingAuth, PendingAuthStore};
@@ -44,6 +48,88 @@ pub async fn whoami(principal: Option<Extension<AuthPrincipal>>) -> Response {
         )
             .into_response(),
     }
+}
+
+/// State for disabled-auth developer identity routes.
+#[derive(Clone)]
+pub struct DevAuthState {
+    pub config: Arc<AuthConfig>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DevAuthStatus {
+    pub enabled: bool,
+    pub default_principal: AuthPrincipal,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DevLoginRequest {
+    pub email: String,
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_admin: bool,
+}
+
+pub async fn dev_status(State(state): State<DevAuthState>) -> Response {
+    Json(DevAuthStatus {
+        enabled: state.enabled,
+        default_principal: default_dev_principal(),
+    })
+    .into_response()
+}
+
+pub async fn dev_login(
+    State(state): State<DevAuthState>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    if !state.enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let (parts, body) = req.into_parts();
+    let payload: DevLoginRequest = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(payload) => payload,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "bad_request", "detail": "invalid JSON body" })),
+                )
+                    .into_response();
+            }
+        },
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "bad_request", "detail": "invalid request body" })),
+            )
+                .into_response();
+        }
+    };
+
+    let principal = match normalize_dev_principal(
+        &payload.email,
+        payload.display_name.as_deref(),
+        payload.is_admin,
+    ) {
+        Ok(principal) => principal,
+        Err(detail) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "bad_request", "detail": detail })),
+            )
+                .into_response();
+        }
+    };
+
+    let cookie = build_dev_principal_cookie(&state.config, &principal, request_is_https(&parts));
+    (
+        StatusCode::OK,
+        AppendHeaders([(SET_COOKIE, cookie)]),
+        Json(principal),
+    )
+        .into_response()
 }
 
 /// State for `/auth/logout`. Carries just the pieces logout needs so
@@ -107,10 +193,11 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
         "auth.logout"
     );
 
-    // Two Set-Cookie headers: clear `lucida_session`, and set the
-    // `lucida_signed_out` marker. The marker survives the page refresh
-    // that would otherwise route through the auto-bouncing unauth
-    // landing → Google's still-active session → silent re-auth.
+    // Set-Cookie headers: clear `lucida_session`, set the
+    // `lucida_signed_out` marker, and clear any disabled-auth dev
+    // principal override. The marker survives the page refresh that
+    // would otherwise route through the auto-bouncing unauth landing →
+    // Google's still-active session → silent re-auth.
     // Middleware consumes it (serves the static landing) and
     // `/auth/start` clears it on user-initiated re-sign-in.
     //
@@ -120,9 +207,14 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
     let is_https = request_is_https(&parts);
     let clearing = build_clearing_cookie(&state.config, is_https);
     let marker = build_signed_out_marker(&state.config, is_https);
+    let dev_clearing = build_clearing_dev_principal_cookie(&state.config, is_https);
     (
         StatusCode::FOUND,
-        AppendHeaders([(SET_COOKIE, clearing), (SET_COOKIE, marker)]),
+        AppendHeaders([
+            (SET_COOKIE, clearing),
+            (SET_COOKIE, marker),
+            (SET_COOKIE, dev_clearing),
+        ]),
         [(LOCATION, "/".to_string())],
     )
         .into_response()
@@ -510,6 +602,84 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // -- /auth/dev/* -----------------------------------------------------
+
+    fn dev_auth_app(enabled: bool) -> Router {
+        let state = DevAuthState {
+            config: Arc::new(AuthConfig::for_tests()),
+            enabled,
+        };
+        Router::new()
+            .route(
+                "/auth/dev/status",
+                get(dev_status).with_state(state.clone()),
+            )
+            .route("/auth/dev/login", post(dev_login).with_state(state))
+    }
+
+    #[tokio::test]
+    async fn dev_status_reports_disabled_auth_switcher_availability() {
+        let app = dev_auth_app(true);
+        let req = Request::builder()
+            .uri("/auth/dev/status")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["default_principal"]["email"], "dev@local");
+    }
+
+    #[tokio::test]
+    async fn dev_login_sets_principal_cookie_and_returns_principal() {
+        let app = dev_auth_app(true);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/dev/login")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"email":"Viewer@Example.com","display_name":"Viewer","is_admin":false}"#,
+            ))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let set_cookie = res
+            .headers()
+            .get(SET_COOKIE)
+            .expect("dev principal cookie")
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("lucida_dev_principal="));
+        assert!(set_cookie.contains("HttpOnly"));
+
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let principal: AuthPrincipal = serde_json::from_slice(&body).unwrap();
+        assert_eq!(principal.email, "viewer@example.com");
+        assert_eq!(principal.display_name, "Viewer");
+        assert!(!principal.is_admin);
+    }
+
+    #[tokio::test]
+    async fn dev_login_404s_when_switcher_disabled() {
+        let app = dev_auth_app(false);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/dev/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"email":"viewer@example.com"}"#))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
     // -- /auth/logout -----------------------------------------------------
 
     fn logout_state_with(store: Arc<MemorySessionStore>) -> LogoutState {
@@ -553,9 +723,10 @@ mod tests {
         let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
         assert_eq!(location, "/");
 
-        // Two Set-Cookie headers expected: clear lucida_session AND
-        // set the lucida_signed_out marker. Iterate get_all so we
-        // don't accidentally only see the first one.
+        // Set-Cookie headers expected: clear lucida_session, set the
+        // lucida_signed_out marker, and clear any dev-principal
+        // override. Iterate get_all so we don't accidentally only see
+        // the first one.
         let set_cookies: Vec<&str> = res
             .headers()
             .get_all(SET_COOKIE)
@@ -574,6 +745,11 @@ mod tests {
             .expect("signed-out marker cookie");
         assert!(marker.contains("Max-Age=600"));
         assert!(marker.contains("HttpOnly"));
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_dev_principal=") && c.contains("Max-Age=0"))
+        );
 
         // The row must be gone after logout.
         assert!(store.get("kill-me").await.unwrap().is_none());
@@ -592,7 +768,7 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::FOUND);
         assert_eq!(res.headers().get(LOCATION).unwrap().to_str().unwrap(), "/");
-        // Even cookieless callers get the clearing cookie + the marker —
+        // Even cookieless callers get clearing cookies + the marker —
         // logout's contract is shape-stable regardless of inbound state.
         let set_cookies: Vec<&str> = res
             .headers()
@@ -609,6 +785,11 @@ mod tests {
             set_cookies
                 .iter()
                 .any(|c| c.contains("lucida_signed_out=1"))
+        );
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_dev_principal=") && c.contains("Max-Age=0"))
         );
         // No rows existed; no rows now.
         assert!(store.is_empty());
@@ -646,6 +827,11 @@ mod tests {
             set_cookies
                 .iter()
                 .any(|c| c.contains("lucida_signed_out=1"))
+        );
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_dev_principal=") && c.contains("Max-Age=0"))
         );
     }
 

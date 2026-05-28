@@ -48,11 +48,11 @@ makes idle atlas slots cheaper than they are today.
 ## Per-browser anonymous identity in disabled-auth mode
 
 Today, [[decisions/0018-auth-mode-auto-detect-by-bind-address|disabled-auth mode]]
-gives every request the same `dev@local` principal — fine for solo
-local use, but multi-user scenarios (someone exposes their port to
-share with friends on a LAN) end up with one shared bookmark
-namespace, every action attributed to `dev@local`, and admin endpoints
-unprotected.
+defaults every browser to the same admin `dev@local` principal. A
+developer can now intentionally switch a browser to another local dev
+identity with `/auth/dev/login`, which is enough for manual role tests,
+but Lucida still does not auto-assign distinct identities to different
+browsers.
 
 **Sketch.** In disabled mode, when no session cookie is present, the
 extractor would auto-mint a session row with `email = anon-{uuid8}@local`

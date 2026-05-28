@@ -12,14 +12,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthSession } from "./AuthSession.ts";
+import { fetchDevAuthStatus, postDevLogin } from "./whoami.ts";
 
 export function ProfileMenu() {
-  const { principal, signOut } = useAuthSession();
+  const { principal, refresh, signOut } = useAuthSession();
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [pending, setPending] = useState(false);
+  const [devAuthEnabled, setDevAuthEnabled] = useState(false);
+  const [devEmail, setDevEmail] = useState(principal.email);
+  const [devDisplayName, setDevDisplayName] = useState(principal.display_name);
+  const [devAdmin, setDevAdmin] = useState(false);
+  const [devPending, setDevPending] = useState(false);
+  const [devError, setDevError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const nameVisible = hovered || open;
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchDevAuthStatus().then((status) => {
+      if (!cancelled) setDevAuthEnabled(status.enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Close on click-outside. Bound only while the menu is open so we
   // don't pay for a global listener at all times.
@@ -48,6 +65,36 @@ export function ProfileMenu() {
     }
   }, [pending, signOut]);
 
+  const handleToggle = useCallback(() => {
+    const nextOpen = !open;
+    if (nextOpen) {
+      setDevEmail(principal.email);
+      setDevDisplayName(principal.display_name);
+      setDevAdmin(false);
+      setDevError(null);
+    }
+    setOpen(nextOpen);
+  }, [open, principal.display_name, principal.email]);
+
+  const handleDevSwitch = useCallback(async () => {
+    if (devPending) return;
+    setDevPending(true);
+    setDevError(null);
+    try {
+      await postDevLogin({
+        email: devEmail,
+        display_name: devDisplayName,
+        is_admin: devAdmin,
+      });
+      await refresh();
+      setOpen(false);
+    } catch (e) {
+      setDevError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDevPending(false);
+    }
+  }, [devAdmin, devDisplayName, devEmail, devPending, refresh]);
+
   return (
     <div
       ref={containerRef}
@@ -65,7 +112,7 @@ export function ProfileMenu() {
         aria-label="Account menu"
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onFocus={() => setHovered(true)}
@@ -123,21 +170,82 @@ export function ProfileMenu() {
               {principal.email}
             </div>
           </div>
+          {devAuthEnabled && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleDevSwitch();
+              }}
+              style={{
+                padding: "8px 12px",
+                borderBottom: "1px solid #333",
+                display: "grid",
+                gap: 6,
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: "0.8125rem" }}>Dev user</div>
+              <input
+                type="email"
+                aria-label="Dev user email"
+                value={devEmail}
+                onChange={(e) => setDevEmail(e.target.value)}
+                placeholder="viewer@example.com"
+                disabled={devPending}
+                style={devInputStyle}
+              />
+              <input
+                type="text"
+                aria-label="Dev display name"
+                value={devDisplayName}
+                onChange={(e) => setDevDisplayName(e.target.value)}
+                placeholder="Display name"
+                disabled={devPending}
+                style={devInputStyle}
+              />
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  color: "#ccc",
+                  fontSize: "0.8125rem",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={devAdmin}
+                  disabled={devPending}
+                  onChange={(e) => setDevAdmin(e.target.checked)}
+                />
+                Admin override
+              </label>
+              {devError && (
+                <div style={{ color: "#ffb4b4", fontSize: "0.8125rem" }}>
+                  {devError}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={devPending || !devEmail.trim()}
+                style={{
+                  ...menuButtonStyle,
+                  color: devPending || !devEmail.trim() ? "#888" : "#eee",
+                  cursor: devPending || !devEmail.trim() ? "default" : "pointer",
+                }}
+              >
+                {devPending ? "Switching..." : "Switch dev user"}
+              </button>
+            </form>
+          )}
           <button
             type="button"
             role="menuitem"
             onClick={handleSignOut}
             disabled={pending}
             style={{
-              display: "block",
-              width: "100%",
-              padding: "8px 12px",
-              background: "none",
+              ...menuButtonStyle,
               color: pending ? "#888" : "#eee",
-              border: "none",
-              textAlign: "left",
               cursor: pending ? "default" : "pointer",
-              font: "inherit",
             }}
           >
             {pending ? "Signing out..." : "Sign out"}
@@ -147,6 +255,26 @@ export function ProfileMenu() {
     </div>
   );
 }
+
+const menuButtonStyle = {
+  display: "block",
+  width: "100%",
+  padding: "8px 12px",
+  background: "none",
+  border: "none",
+  textAlign: "left" as const,
+  font: "inherit",
+};
+
+const devInputStyle = {
+  minWidth: 0,
+  padding: "6px 8px",
+  border: "1px solid #444",
+  borderRadius: 6,
+  background: "#111",
+  color: "#eee",
+  font: "inherit",
+};
 
 // Avatar: image when `picture_url` is present, coloured initial circle
 // otherwise. Kept inline (rather than a separate file) because it
