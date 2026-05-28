@@ -734,14 +734,46 @@ async fn handle_client_inner(
 // the storage layer, and this handler share one implementation. See
 // `wiki/decisions/0042-canonical-dataset-url-form.md`.
 
+fn new_workspace_dataset_id() -> DatasetId {
+    DatasetId(format!("wds-{}", uuid::Uuid::new_v4().simple()))
+}
+
+fn find_loaded_binding(
+    sess: &Session,
+    dataset_id: &DatasetId,
+    canonical_url: &str,
+    allow_source_url_match: bool,
+) -> Option<(DatasetId, DatasetOpened)> {
+    if sess.document.manifests.contains_key(dataset_id)
+        && let Some(binding) = sess.server_bindings.get(dataset_id)
+    {
+        return Some((dataset_id.clone(), binding.dataset_opened.clone()));
+    }
+
+    if allow_source_url_match {
+        for (existing_id, binding) in &sess.server_bindings {
+            if binding.source_url == canonical_url
+                && sess.document.manifests.contains_key(existing_id)
+            {
+                return Some((existing_id.clone(), binding.dataset_opened.clone()));
+            }
+        }
+    }
+
+    None
+}
+
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
 ///
 /// The incoming `url` is normalized once at entry via
 /// [`lucida_content::url::normalize_dataset_url`]; every downstream
-/// derivation (`dataset_id_for_url`, `dataset_url_hash16`,
-/// `backend::open`, the binding's `source_url`, and the name extraction)
-/// uses the canonical form. This makes spelling variants of the same
-/// path dedup to one binding — see
+/// derivation (`dataset_id_for_url` for source identity,
+/// `dataset_url_hash16` for cache identity, `backend::open`, the
+/// binding's `source_url`, and the name extraction) uses the canonical
+/// form. Workspace clients receive an opaque workspace-local
+/// `DatasetId`; the source-derived id is retained only for membership
+/// dedupe and shared source/cache routing. This makes spelling variants
+/// of the same path dedup to one source — see
 /// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
 #[tracing::instrument(
     name = "dataset_open",
@@ -765,10 +797,12 @@ async fn handle_open_remote_dataset(
     // short-circuit to fire across spelling variants.
     let canonical_url = normalize_dataset_url(&url);
 
-    // Stable, content-derived ID. Two opens of the same URL produce the
-    // same ID so the second open reuses the existing binding.
-    let dataset_id = dataset_id_for_url(&canonical_url);
-    let dataset_id_key = DatasetId(dataset_id.clone());
+    // Stable, content-derived source ID. This is intentionally not the
+    // client-facing dataset ID inside a workspace: workspace document
+    // state uses an opaque workspace-local ID so the same source can be
+    // opened independently in different workspaces while sharing the
+    // source/cache identity below.
+    let dataset_source_id = dataset_id_for_url(&canonical_url);
 
     if let Some(ctx) = workspace.as_ref()
         && let Err(e) = ctx
@@ -793,14 +827,59 @@ async fn handle_open_remote_dataset(
         return;
     }
 
+    let existing_workspace_source = if let Some(ctx) = workspace.as_ref() {
+        match ctx
+            .manager
+            .dataset_by_source(&ctx.live.workspace_id, &dataset_source_id)
+            .await
+        {
+            Ok(source) => source,
+            Err(e) => {
+                tracing::error!(
+                    client_id = %client_id,
+                    workspace_id = %ctx.live.workspace_id,
+                    dataset_source_id = %dataset_source_id,
+                    url = %canonical_url,
+                    error = %e,
+                    "open_remote_dataset.source_lookup_failed"
+                );
+                send_open_failed(
+                    client_id,
+                    &canonical_url,
+                    "workspace dataset lookup failed",
+                    &unicast_routes,
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let dataset_id_key = existing_workspace_source
+        .as_ref()
+        .map(|source| source.workspace_dataset_id.clone())
+        .unwrap_or_else(|| {
+            if workspace.is_some() {
+                new_workspace_dataset_id()
+            } else {
+                DatasetId(dataset_source_id.clone())
+            }
+        });
+    let dataset_id = dataset_id_key.0.clone();
+    let workspace_scoped = workspace.is_some();
+
     // If we've already imported this URL in this session, reuse the binding.
     // Re-broadcast the existing DatasetOpened (held on the binding) so the
     // requesting client receives the same content graph + fetch descriptor
     // without re-importing.
     {
         let sess = session.lock().await;
-        if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
-            let command = DocumentCommand::DatasetOpened(existing.dataset_opened.clone());
+        if let Some((existing_dataset_id, existing)) =
+            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
+        {
+            let command = DocumentCommand::DatasetOpened(existing);
             let seq = sess.seq;
             drop(sess);
             let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
@@ -810,7 +889,8 @@ async fn handle_open_remote_dataset(
                 ack_json: String::new(),
             });
             tracing::info!(
-                dataset_id = %dataset_id,
+                dataset_id = %existing_dataset_id,
+                dataset_source_id = %dataset_source_id,
                 url = %canonical_url,
                 "open_remote_dataset.dedup_reuse"
             );
@@ -832,14 +912,25 @@ async fn handle_open_remote_dataset(
     // Extract dataset name from URL (last path component). Canonical
     // form is always forward-slash, so a single `rsplit('/')` works for
     // every platform.
-    let name = canonical_url
-        .rsplit('/')
-        .find(|s| !s.is_empty())
-        .unwrap_or("dataset")
-        .to_string();
+    let name = existing_workspace_source
+        .as_ref()
+        .map(|source| source.display_name.clone())
+        .unwrap_or_else(|| {
+            canonical_url
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or("dataset")
+                .to_string()
+        });
 
     // Import dataset via the new pipeline.
-    tracing::info!(url = %canonical_url, id = %dataset_id, name = %name, "importing dataset");
+    tracing::info!(
+        url = %canonical_url,
+        id = %dataset_id,
+        dataset_source_id = %dataset_source_id,
+        name = %name,
+        "importing dataset"
+    );
     let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
         Ok(r) => r,
         Err(e) => {
@@ -978,15 +1069,16 @@ async fn handle_open_remote_dataset(
     // presence under the lock in case a concurrent open raced ahead.
     let (seq, document) = {
         let mut sess = session.lock().await;
-        if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
+        if let Some((existing_dataset_id, existing)) =
+            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
+        {
             // Lost the race: another open completed the import. Drop our
             // duplicate binding/command and rebroadcast the canonical one.
-            let canonical = existing.dataset_opened.clone();
             let seq = sess.seq;
             drop(sess);
             let broadcast_msg = ServerMessage::CommandBroadcast {
                 seq,
-                command: DocumentCommand::DatasetOpened(canonical),
+                command: DocumentCommand::DatasetOpened(existing),
             };
             let _ = tx.send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
@@ -994,7 +1086,8 @@ async fn handle_open_remote_dataset(
                 ack_json: String::new(),
             });
             tracing::info!(
-                dataset_id = %dataset_id,
+                dataset_id = %existing_dataset_id,
+                dataset_source_id = %dataset_source_id,
                 "open_remote_dataset.lost_race"
             );
             return;
@@ -1006,7 +1099,7 @@ async fn handle_open_remote_dataset(
                 generated_initial_delta.clone(),
             );
         }
-        sess.server_bindings.insert(dataset_id_key, binding);
+        sess.server_bindings.insert(dataset_id_key.clone(), binding);
         let document = sess.document.clone();
         (seq, document)
     };
@@ -1016,8 +1109,8 @@ async fn handle_open_remote_dataset(
             .manager
             .persist_dataset_opened(
                 &ctx.live,
-                &DatasetId(dataset_id.clone()),
-                &dataset_id,
+                &dataset_id_key,
+                &dataset_source_id,
                 &canonical_url,
                 &name,
                 &ctx.principal,
@@ -1030,6 +1123,7 @@ async fn handle_open_remote_dataset(
             client_id = %client_id,
             workspace_id = %ctx.live.workspace_id,
             dataset_id = %dataset_id,
+            dataset_source_id = %dataset_source_id,
             error = %e,
             "open_remote_dataset.persist_failed"
         );

@@ -40,6 +40,7 @@ vi.mock("lucida-core", () => ({
 }));
 
 import {
+  buildCapture,
   hasLocalFilePaths,
   localFilePathCount,
 } from "./captureBuilder.ts";
@@ -117,5 +118,48 @@ describe("captureBuilder.isLocalFilePath (via hasLocalFilePaths)", () => {
     ]);
     expect(hasLocalFilePaths(v)).toBe(true);
     expect(localFilePathCount(v)).toBe(3);
+  });
+});
+
+describe("buildCapture workspace dataset references", () => {
+  it("does not put source URLs into workspace-mode saved views", () => {
+    const scene = {
+      export_presence: () => JSON.stringify({
+        camera: {
+          mode: "slice",
+          center: [0, 0],
+          zoom: 1.0,
+          viewport: [800, 600],
+        },
+        view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+        display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
+      }),
+      export_dataset_presence: () => JSON.stringify({
+        dataset_order: ["wds-a"],
+        dataset_settings: {
+          "wds-a": {
+            visible: true,
+            opacity: 1,
+            contrast_min: 0,
+            contrast_max: 65535,
+            gamma: 1,
+            blend_mode: "alpha",
+          },
+        },
+      }),
+      dataset_ids: () => JSON.stringify(["wds-a"]),
+      available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+    };
+
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map([["wds-a", "gs://bucket/private.zarr"]]),
+      datasetReferenceMode: "workspace-dataset-id",
+    });
+
+    expect(view.datasets).toEqual([]);
+    expect(view.dataset_order).toEqual(["wds-a"]);
+    expect(Object.keys(view.dataset_settings)).toEqual(["wds-a"]);
+    expect(view.active_layouts).toEqual({ "wds-a": "source" });
   });
 });

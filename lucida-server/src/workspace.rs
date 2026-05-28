@@ -207,6 +207,12 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<WorkspaceDatasetSource>, StoreError>;
+
+    async fn dataset_by_source(
+        &self,
+        workspace_id: &str,
+        dataset_source_id: &str,
+    ) -> Result<Option<WorkspaceDatasetSource>, StoreError>;
 }
 
 #[derive(Clone)]
@@ -564,15 +570,42 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .await
         .map_err(map_sql)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| WorkspaceDatasetSource {
-                workspace_dataset_id: DatasetId(row.get::<String, _>("workspace_dataset_id")),
-                dataset_source_id: row.get("dataset_source_id"),
-                canonical_url: row.get("canonical_url"),
-                display_name: row.get("display_name"),
-            })
-            .collect())
+        Ok(rows.into_iter().map(row_to_dataset_source).collect())
+    }
+
+    async fn dataset_by_source(
+        &self,
+        workspace_id: &str,
+        dataset_source_id: &str,
+    ) -> Result<Option<WorkspaceDatasetSource>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                wd.id AS workspace_dataset_id,
+                wd.dataset_source_id,
+                ds.canonical_url,
+                wd.display_name
+            FROM workspace_datasets wd
+            INNER JOIN dataset_sources ds ON ds.id = wd.dataset_source_id
+            WHERE wd.workspace_id = ? AND wd.dataset_source_id = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(dataset_source_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        Ok(row.map(row_to_dataset_source))
+    }
+}
+
+fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
+    WorkspaceDatasetSource {
+        workspace_dataset_id: DatasetId(row.get::<String, _>("workspace_dataset_id")),
+        dataset_source_id: row.get("dataset_source_id"),
+        canonical_url: row.get("canonical_url"),
+        display_name: row.get("display_name"),
     }
 }
 
@@ -826,6 +859,17 @@ impl WorkspaceManager {
             .await
             .map_err(WorkspaceError::Store)
     }
+
+    pub async fn dataset_by_source(
+        &self,
+        workspace_id: &str,
+        dataset_source_id: &str,
+    ) -> Result<Option<WorkspaceDatasetSource>, WorkspaceError> {
+        self.store
+            .dataset_by_source(workspace_id, dataset_source_id)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1076,11 +1120,12 @@ pub mod tests {
         let store = fresh_store().await;
         let owner = principal("owner@example.com", false);
         let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
+        let workspace_dataset_id = DatasetId("wds_runtime".into());
         let mut doc = DocumentState::default();
         doc.manifests.insert(
-            DatasetId("ds_source".into()),
+            workspace_dataset_id.clone(),
             lucida_content::DatasetManifest::new(
-                DatasetId("ds_source".into()),
+                workspace_dataset_id.clone(),
                 "dataset".into(),
                 lucida_content::DatasetKind::Single,
                 vec![],
@@ -1094,7 +1139,7 @@ pub mod tests {
         store
             .persist_dataset_opened(
                 &workspace.id,
-                &DatasetId("ds_source".into()),
+                &workspace_dataset_id,
                 "ds_source",
                 "file:///data/demo.zarr",
                 "demo.zarr",
@@ -1107,9 +1152,16 @@ pub mod tests {
 
         let sources = store.list_dataset_sources(&workspace.id).await.unwrap();
         assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].workspace_dataset_id, workspace_dataset_id);
+        assert_eq!(sources[0].dataset_source_id, "ds_source");
         assert_eq!(
-            sources[0].workspace_dataset_id,
-            DatasetId("ds_source".into())
+            store
+                .dataset_by_source(&workspace.id, "ds_source")
+                .await
+                .unwrap()
+                .unwrap()
+                .workspace_dataset_id,
+            DatasetId("wds_runtime".into())
         );
 
         let restored = store.get_workspace(&workspace.id).await.unwrap().unwrap();
@@ -1118,7 +1170,73 @@ pub mod tests {
             restored
                 .document
                 .manifests
-                .contains_key(&DatasetId("ds_source".into()))
+                .contains_key(&DatasetId("wds_runtime".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn same_source_can_have_distinct_workspace_dataset_ids() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let a = store.create_workspace(&owner, Some("A")).await.unwrap();
+        let b = store.create_workspace(&owner, Some("B")).await.unwrap();
+        let source_id = "ds_shared_source";
+        let canonical_url = "file:///data/shared.zarr";
+
+        for (workspace, workspace_dataset_id) in [
+            (&a, DatasetId("wds_workspace_a".into())),
+            (&b, DatasetId("wds_workspace_b".into())),
+        ] {
+            let mut doc = DocumentState::default();
+            doc.manifests.insert(
+                workspace_dataset_id.clone(),
+                lucida_content::DatasetManifest::new(
+                    workspace_dataset_id.clone(),
+                    "shared.zarr".into(),
+                    lucida_content::DatasetKind::Single,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    None,
+                ),
+            );
+            store
+                .persist_dataset_opened(
+                    &workspace.id,
+                    &workspace_dataset_id,
+                    source_id,
+                    canonical_url,
+                    "shared.zarr",
+                    &owner.email,
+                    1,
+                    &doc,
+                )
+                .await
+                .unwrap();
+        }
+
+        let source_a = store
+            .dataset_by_source(&a.id, source_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let source_b = store
+            .dataset_by_source(&b.id, source_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source_a.dataset_source_id, source_b.dataset_source_id);
+        assert_eq!(source_a.canonical_url, source_b.canonical_url);
+        assert_ne!(source_a.workspace_dataset_id, source_b.workspace_dataset_id);
+        assert_eq!(
+            source_a.workspace_dataset_id,
+            DatasetId("wds_workspace_a".into())
+        );
+        assert_eq!(
+            source_b.workspace_dataset_id,
+            DatasetId("wds_workspace_b".into())
         );
     }
 

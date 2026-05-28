@@ -26,6 +26,7 @@ import type {
   Camera,
   DatasetDisplaySettings,
   DatasetId,
+  DatasetReferenceMode,
   LayoutId,
   SavedView,
   ChannelSettings,
@@ -104,14 +105,31 @@ const IDLE_STATE: ApplierState = {
   anyOpenFailed: false,
 };
 
+function workspaceDatasetIdsForView(view: SavedView): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+  };
+
+  for (const id of view.dataset_order) add(id);
+  for (const id of Object.keys(view.dataset_settings)) add(id);
+  for (const id of Object.keys(view.active_layouts)) add(id);
+  for (const id of Object.keys(view.auto_contrast ?? {})) add(id);
+
+  return out;
+}
+
 export class SavedViewApplier {
   private state: ApplierState = IDLE_STATE;
   private listeners = new Set<StateListener>();
   private applyResultListeners = new Set<ApplyResultListener>();
   private applyCompleteListeners = new Set<ApplyCompleteListener>();
-  // Pending opens keyed by computed dataset id (we don't get the URL back
-  // in the DatasetOpened broadcast — only the manifest, which carries the
-  // server-assigned id derived from the URL). The applier resolves each
+  // Pending source-url opens keyed by computed dataset id (we don't get
+  // the URL back in the DatasetOpened broadcast — only the manifest,
+  // which carries the server-assigned id). The applier resolves each
   // entry via `notifyDatasetOpened(datasetId)`.
   private pendingByDatasetId = new Map<string, {
     url: string;
@@ -122,6 +140,7 @@ export class SavedViewApplier {
   private readonly bridge: ApplierBridge;
   private readonly getScene: () => WasmScene | null;
   private readonly datasetIdForUrl: (url: string) => string;
+  private readonly datasetReferenceMode: DatasetReferenceMode;
   private readonly openTimeoutMs: number;
 
   constructor(
@@ -133,10 +152,12 @@ export class SavedViewApplier {
     datasetIdForUrl: (url: string) => string,
     /** ms after which a queued open is considered failed (default 30 s). */
     openTimeoutMs: number = 30_000,
+    datasetReferenceMode: DatasetReferenceMode = "source-url",
   ) {
     this.bridge = bridge;
     this.getScene = getScene;
     this.datasetIdForUrl = datasetIdForUrl;
+    this.datasetReferenceMode = datasetReferenceMode;
     this.openTimeoutMs = openTimeoutMs;
   }
 
@@ -214,11 +235,16 @@ export class SavedViewApplier {
     }
     this.setState({ ...IDLE_STATE, inProgress: true });
     try {
-      // Compute requested dataset ids from URLs.
-      const requestedIds = view.datasets.map((url) => ({
-        url,
-        id: this.datasetIdForUrl(url),
-      }));
+      // Compute requested dataset ids. Global saved views identify
+      // datasets by source URL and may open missing datasets. Workspace
+      // inline views identify already-loaded workspace datasets by their
+      // document/runtime IDs and must not expose source URLs.
+      const requestedIds = this.datasetReferenceMode === "source-url"
+        ? view.datasets.map((url) => ({
+          url,
+          id: this.datasetIdForUrl(url),
+        }))
+        : workspaceDatasetIdsForView(view).map((id) => ({ url: "", id }));
 
       // Snapshot of currently-loaded ids.
       const scene = this.getScene();
@@ -232,7 +258,9 @@ export class SavedViewApplier {
       );
 
       // Step 2-4: open missing.
-      const toOpen = requestedIds.filter((r) => !loadedIds.has(r.id));
+      const toOpen = this.datasetReferenceMode === "source-url"
+        ? requestedIds.filter((r) => !loadedIds.has(r.id))
+        : [];
       this.setState({
         ...this.state,
         totalToOpen: toOpen.length,
@@ -251,13 +279,17 @@ export class SavedViewApplier {
 
       // Step 5: hide datasets that are loaded but not in the link
       // (recipient-only, ViewportCommand).
-      for (const id of loadedAfter) {
-        if (!requestedSet.has(id)) {
-          this.applyViewport(sceneAfter, {
-            type: "set_dataset_visible",
-            dataset_id: id,
-            visible: false,
-          });
+      const shouldHideUnrequested =
+        this.datasetReferenceMode === "source-url" || requestedSet.size > 0;
+      if (shouldHideUnrequested) {
+        for (const id of loadedAfter) {
+          if (!requestedSet.has(id)) {
+            this.applyViewport(sceneAfter, {
+              type: "set_dataset_visible",
+              dataset_id: id,
+              visible: false,
+            });
+          }
         }
       }
 

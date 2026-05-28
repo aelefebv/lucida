@@ -93,6 +93,7 @@ export interface DatasetDisplaySettings {
 
 export type DatasetId = string;
 export type LayoutId = string;
+export type DatasetReferenceMode = "source-url" | "workspace-dataset-id";
 
 /**
  * Capture record for the URL-as-app-state saved-views feature. Spans both
