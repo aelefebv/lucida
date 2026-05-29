@@ -4,6 +4,7 @@ import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import {
   getWorkspace,
   renameWorkspace,
+  updateWorkspaceDefaultSavedView,
   type WorkspaceRecord,
 } from "./workspaceApi.ts";
 
@@ -82,6 +83,11 @@ function WorkspaceViewerRoute({ workspaceId, onBackToDashboard }: WorkspaceViewe
     setWorkspace(updated);
   }, [workspaceId]);
 
+  const handleSetDefaultSavedView = useCallback(async (savedViewId: string | null) => {
+    const updated = await updateWorkspaceDefaultSavedView(workspaceId, savedViewId);
+    setWorkspace(updated);
+  }, [workspaceId]);
+
   if (error) {
     return (
       <div className="workspace-route-message">
@@ -100,9 +106,11 @@ function WorkspaceViewerRoute({ workspaceId, onBackToDashboard }: WorkspaceViewe
       workspaceId={workspace.id}
       workspaceName={workspace.name}
       workspaceRole={workspace.role}
+      defaultSavedViewId={workspace.default_saved_view_id}
       canRenameWorkspace={workspace.role === "owner"}
       onBackToDashboard={onBackToDashboard}
       onRenameWorkspace={handleRename}
+      onSetDefaultSavedView={handleSetDefaultSavedView}
     />
   );
 }

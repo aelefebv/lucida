@@ -13,6 +13,7 @@ export interface WorkspaceSummary {
   archived_at: string | null;
   seq: number;
   dataset_count: number;
+  default_saved_view_id: string | null;
 }
 
 export interface WorkspaceRecord {
@@ -24,6 +25,7 @@ export interface WorkspaceRecord {
   updated_at: string;
   archived_at: string | null;
   seq: number;
+  default_saved_view_id: string | null;
 }
 
 export interface WorkspaceMember {
@@ -223,4 +225,17 @@ export function deleteWorkspaceSavedView(
   return requestNoContent(workspaceSavedViewUrl(workspaceId, savedViewId), {
     method: "DELETE",
   });
+}
+
+export function updateWorkspaceDefaultSavedView(
+  workspaceId: string,
+  savedViewId: string | null,
+): Promise<WorkspaceRecord> {
+  return requestJson<WorkspaceRecord>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/default-saved-view`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ saved_view_id: savedViewId }),
+    },
+  );
 }

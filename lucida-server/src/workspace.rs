@@ -111,6 +111,7 @@ pub struct WorkspaceSummary {
     pub archived_at: Option<DateTime<Utc>>,
     pub seq: u64,
     pub dataset_count: i64,
+    pub default_saved_view_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,7 @@ pub struct WorkspaceRecord {
     pub updated_at: DateTime<Utc>,
     pub archived_at: Option<DateTime<Utc>>,
     pub seq: u64,
+    pub default_saved_view_id: Option<String>,
     pub document: DocumentState,
 }
 
@@ -355,6 +357,12 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         saved_view_id: &str,
     ) -> Result<bool, StoreError>;
+
+    async fn set_default_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: Option<&str>,
+    ) -> Result<Option<WorkspaceRecord>, StoreError>;
 }
 
 #[derive(Clone)]
@@ -500,6 +508,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             updated_at: now,
             archived_at: None,
             seq: 0,
+            default_saved_view_id: None,
             document,
         })
     }
@@ -513,7 +522,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
                 r#"
                 SELECT
                     w.id, w.name, w.created_by, w.created_at, w.updated_at,
-                    w.archived_at, w.seq, 'owner' AS role,
+                    w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
                     COALESCE(COUNT(wd.id), 0) AS dataset_count
                 FROM workspaces w
                 LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
@@ -531,7 +540,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
                 r#"
                 SELECT
                     w.id, w.name, w.created_by, w.created_at, w.updated_at,
-                    w.archived_at, w.seq, wm.role,
+                    w.archived_at, w.seq, w.default_saved_view_id, wm.role,
                     COALESCE(COUNT(wd.id), 0) AS dataset_count
                 FROM workspaces w
                 INNER JOIN workspace_members wm ON wm.workspace_id = w.id
@@ -553,7 +562,9 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, created_by, created_at, updated_at, archived_at, seq, document_json
+            SELECT
+                id, name, created_by, created_at, updated_at, archived_at,
+                seq, default_saved_view_id, document_json
             FROM workspaces
             WHERE id = ?
             "#,
@@ -1161,9 +1172,47 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             return Ok(false);
         }
 
+        sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET default_saved_view_id = NULL
+            WHERE id = ? AND default_saved_view_id = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(saved_view_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
         touch_workspace(&mut tx, workspace_id, &now).await?;
         tx.commit().await.map_err(map_sql)?;
         Ok(true)
+    }
+
+    async fn set_default_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: Option<&str>,
+    ) -> Result<Option<WorkspaceRecord>, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET default_saved_view_id = ?, updated_at = ?
+            WHERE id = ? AND archived_at IS NULL
+            "#,
+        )
+        .bind(saved_view_id)
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_workspace(workspace_id).await
     }
 }
 
@@ -1188,6 +1237,7 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, Stor
         archived_at: parse_opt_dt(row.get("archived_at"))?,
         seq: seq.max(0) as u64,
         dataset_count: row.get("dataset_count"),
+        default_saved_view_id: row.get("default_saved_view_id"),
     })
 }
 
@@ -1202,6 +1252,7 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceRecord, StoreE
         updated_at: parse_dt(row.get("updated_at"))?,
         archived_at: parse_opt_dt(row.get("archived_at"))?,
         seq: seq.max(0) as u64,
+        default_saved_view_id: row.get("default_saved_view_id"),
         document: serde_json::from_str(&document_json).map_err(map_json_in)?,
     })
 }
@@ -1520,6 +1571,28 @@ impl WorkspaceManager {
         }
     }
 
+    pub async fn set_default_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: Option<&str>,
+    ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
+        let role = self.require_editor(workspace_id, principal).await?;
+        if let Some(saved_view_id) = saved_view_id {
+            self.store
+                .get_saved_view(workspace_id, saved_view_id)
+                .await
+                .map_err(WorkspaceError::Store)?
+                .ok_or(WorkspaceError::NotFound)?;
+        }
+        self.store
+            .set_default_saved_view(workspace_id, saved_view_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .map(|record| (record, role))
+            .ok_or(WorkspaceError::NotFound)
+    }
+
     pub async fn live_workspace(
         &self,
         workspace_id: &str,
@@ -1813,6 +1886,10 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
                 .delete(delete_workspace_saved_view),
         )
         .route(
+            "/api/workspaces/{workspace_id}/default-saved-view",
+            patch(update_workspace_default_saved_view),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/members",
             post(upsert_member),
         )
@@ -1864,6 +1941,11 @@ pub struct UpdateWorkspaceSavedViewRequest {
     pub view: Option<SavedView>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceDefaultSavedViewRequest {
+    pub saved_view_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WorkspaceResponse {
     pub id: String,
@@ -1874,6 +1956,7 @@ pub struct WorkspaceResponse {
     pub updated_at: DateTime<Utc>,
     pub archived_at: Option<DateTime<Utc>>,
     pub seq: u64,
+    pub default_saved_view_id: Option<String>,
 }
 
 impl WorkspaceResponse {
@@ -1887,6 +1970,7 @@ impl WorkspaceResponse {
             updated_at: record.updated_at,
             archived_at: record.archived_at,
             seq: record.seq,
+            default_saved_view_id: record.default_saved_view_id,
         }
     }
 }
@@ -2077,6 +2161,26 @@ async fn delete_workspace_saved_view(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn update_workspace_default_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpdateWorkspaceDefaultSavedViewRequest>,
+) -> Response {
+    match state
+        .manager
+        .set_default_saved_view(&workspace_id, &principal, body.saved_view_id.as_deref())
+        .await
+    {
+        Ok((record, role)) => (
+            StatusCode::OK,
+            Json(WorkspaceResponse::from_record(record, role)),
+        )
+            .into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -2498,6 +2602,88 @@ pub mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn workspace_default_saved_view_is_editor_controlled_and_scoped() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Default view"))
+            .await
+            .unwrap();
+        let other_workspace = store.create_workspace(&owner, Some("Other")).await.unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let saved = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "default",
+                SavedView::empty([800, 600]),
+            )
+            .await
+            .unwrap();
+        let other_saved = manager
+            .create_saved_view(
+                &other_workspace.id,
+                &owner,
+                "other default",
+                SavedView::empty([800, 600]),
+            )
+            .await
+            .unwrap();
+
+        let (record, role) = manager
+            .set_default_saved_view(&workspace.id, &editor, Some(&saved.id))
+            .await
+            .unwrap();
+        assert_eq!(role, WorkspaceRole::Editor);
+        assert_eq!(
+            record.default_saved_view_id.as_deref(),
+            Some(saved.id.as_str())
+        );
+
+        let err = manager
+            .set_default_saved_view(&workspace.id, &viewer, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        let err = manager
+            .set_default_saved_view(&workspace.id, &editor, Some(&other_saved.id))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+
+        manager
+            .delete_saved_view(&workspace.id, &editor, &saved.id)
+            .await
+            .unwrap();
+        let restored = store.get_workspace(&workspace.id).await.unwrap().unwrap();
+        assert!(restored.default_saved_view_id.is_none());
     }
 
     #[tokio::test]

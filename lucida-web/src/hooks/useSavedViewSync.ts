@@ -10,7 +10,7 @@
 // epochs to drive the debounced URL writes — see
 // `wiki/systems/subsystems/scene-state-and-epochs.md`.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { dataset_id_for_url } from "lucida-core";
 import { SavedViewApplier } from "../savedView/applier.ts";
@@ -56,6 +56,9 @@ interface Params {
   autoContrastMapRef: React.RefObject<Map<string, boolean>>;
   setAutoContrastMap: React.Dispatch<React.SetStateAction<Map<string, boolean>>>;
   datasetReferenceMode?: DatasetReferenceMode;
+  fetchSavedViewById?: (id: string) => Promise<{ id: string; view: SavedView } | null>;
+  fetchDefaultSavedView?: () => Promise<{ id: string; view: SavedView } | null>;
+  allowDocumentLayoutMutation?: boolean;
 }
 
 interface SyncBundle {
@@ -79,6 +82,9 @@ export function useSavedViewSync({
   autoContrastMapRef,
   setAutoContrastMap,
   datasetReferenceMode = "source-url",
+  fetchSavedViewById,
+  fetchDefaultSavedView,
+  allowDocumentLayoutMutation = true,
 }: Params): {
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
@@ -88,6 +94,13 @@ export function useSavedViewSync({
    *  mutation co-taps the URL (Bug #1 fix). Stable identity. */
   notifyChange: () => void;
 } {
+  const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
+  const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
+  // eslint-disable-next-line react-hooks/refs
+  fetchSavedViewByIdRef.current = fetchSavedViewById;
+  // eslint-disable-next-line react-hooks/refs
+  fetchDefaultSavedViewRef.current = fetchDefaultSavedView;
+
   // Construct everything lazily on first render via useState's initializer
   // (runs exactly once). The captured `autoContrastMapRef` is read at
   // call-time inside captureFn (which fires from event handlers), not
@@ -119,14 +132,19 @@ export function useSavedViewSync({
           }
           sendOpenRemoteDataset(url);
         },
-        sendCommand,
+      sendCommand,
       },
       getScene,
       dataset_id_for_url,
       30_000,
       datasetReferenceMode,
+      allowDocumentLayoutMutation,
     );
-    const urlSync = new UrlSync(captureFn, applier, { debounceMs });
+    const urlSync = new UrlSync(captureFn, applier, {
+      debounceMs,
+      fetchSavedViewById: async (id) => fetchSavedViewByIdRef.current?.(id) ?? null,
+      fetchDefaultSavedView: async () => fetchDefaultSavedViewRef.current?.() ?? null,
+    });
     return { applier, urlSync, urlByDatasetId };
   });
 

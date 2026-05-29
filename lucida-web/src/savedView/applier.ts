@@ -11,9 +11,9 @@
 //   4. Wait for DatasetOpened to come back via CommandBroadcast.
 //   5. For currently-loaded datasets NOT in the link, send
 //      SetDatasetVisible(false) — a ViewportCommand (recipient-only).
-//   6. In source-url mode, apply SetActiveLayout for any dataset where
-//      the link's layout differs from the live scene (DocumentCommand).
-//      Workspace inline views do not mutate shared active layout.
+//   6. Apply SetActiveLayout for any dataset where the link's layout
+//      differs from the live scene when document layout mutation is
+//      allowed. Workspace viewers skip this shared document mutation.
 //   7. SetDatasetOrder, then per-dataset SetDatasetVisible/Opacity/contrast/
 //      gamma/blend/render mode/per-channel colormap+contrast+gamma.
 //   8. SetContrast / SetGamma / SetMultiChannel.
@@ -63,6 +63,9 @@ export interface ApplierState {
   okOpened: number;
   /** True on at least one OpenDatasetFailed. Drives the partial-failure UI. */
   anyOpenFailed: boolean;
+  /** Non-fatal apply warnings, such as missing workspace dataset ids or
+   * skipped shared layout changes for viewer-role applies. */
+  warnings: readonly string[];
 }
 
 export type StateListener = (s: ApplierState) => void;
@@ -106,6 +109,7 @@ const IDLE_STATE: ApplierState = {
   totalToOpen: 0,
   okOpened: 0,
   anyOpenFailed: false,
+  warnings: [],
 };
 
 function workspaceDatasetIdsForView(view: SavedView): string[] {
@@ -125,12 +129,15 @@ function workspaceDatasetIdsForView(view: SavedView): string[] {
   return out;
 }
 
-function warnWorkspaceMissingDatasets(loadedIds: Set<string>, requestedIds: Set<string>): void {
+function workspaceMissingDatasetWarnings(
+  loadedIds: Set<string>,
+  requestedIds: Set<string>,
+): string[] {
   const missing = Array.from(requestedIds).filter((id) => !loadedIds.has(id));
-  if (missing.length === 0) return;
-  console.warn(
-    `[SavedViewApplier] workspace view references ${missing.length} missing dataset(s): ${missing.join(", ")}`,
-  );
+  if (missing.length === 0) return [];
+  const warning = `Workspace view references ${missing.length} missing dataset(s): ${missing.join(", ")}`;
+  console.warn(`[SavedViewApplier] ${warning}`);
+  return [warning];
 }
 
 export class SavedViewApplier {
@@ -152,6 +159,7 @@ export class SavedViewApplier {
   private readonly getScene: () => WasmScene | null;
   private readonly datasetIdForUrl: (url: string) => string;
   private readonly datasetReferenceMode: DatasetReferenceMode;
+  private readonly allowDocumentLayoutMutation: boolean;
   private readonly openTimeoutMs: number;
 
   constructor(
@@ -164,11 +172,13 @@ export class SavedViewApplier {
     /** ms after which a queued open is considered failed (default 30 s). */
     openTimeoutMs: number = 30_000,
     datasetReferenceMode: DatasetReferenceMode = "source-url",
+    allowDocumentLayoutMutation: boolean = true,
   ) {
     this.bridge = bridge;
     this.getScene = getScene;
     this.datasetIdForUrl = datasetIdForUrl;
     this.datasetReferenceMode = datasetReferenceMode;
+    this.allowDocumentLayoutMutation = allowDocumentLayoutMutation;
     this.openTimeoutMs = openTimeoutMs;
   }
 
@@ -288,7 +298,9 @@ export class SavedViewApplier {
       );
       const requestedSet = new Set(requestedIds.map((r) => r.id));
       if (this.datasetReferenceMode === "workspace-dataset-id") {
-        warnWorkspaceMissingDatasets(loadedAfter, requestedSet);
+        for (const warning of workspaceMissingDatasetWarnings(loadedAfter, requestedSet)) {
+          this.addWarning(warning);
+        }
       }
 
       // Step 5: hide datasets that are loaded but not in the link
@@ -322,10 +334,10 @@ export class SavedViewApplier {
           continue;
         }
         if (currentActive !== layoutId) {
-          if (this.datasetReferenceMode === "workspace-dataset-id") {
-            console.warn(
-              `[SavedViewApplier] workspace inline view expects layout ${JSON.stringify(layoutId)} for dataset ${id}, but active layout is ${JSON.stringify(currentActive)}; leaving shared layout unchanged`,
-            );
+          if (!this.allowDocumentLayoutMutation) {
+            const warning = `Workspace view expects layout ${JSON.stringify(layoutId)} for dataset ${id}, but active layout is ${JSON.stringify(currentActive)}; leaving shared layout unchanged`;
+            console.warn(`[SavedViewApplier] ${warning}`);
+            this.addWarning(warning);
             continue;
           }
           this.applyDocument({
@@ -581,6 +593,13 @@ export class SavedViewApplier {
   private setState(next: ApplierState): void {
     this.state = next;
     for (const fn of this.listeners) fn(next);
+  }
+
+  private addWarning(warning: string): void {
+    this.setState({
+      ...this.state,
+      warnings: [...this.state.warnings, warning],
+    });
   }
 }
 

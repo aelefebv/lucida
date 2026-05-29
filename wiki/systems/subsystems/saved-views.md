@@ -9,7 +9,7 @@ Cross-cutting subsystem spanning [[lucida-core]] (the `SavedView` schema), [[luc
 
 1. **Live URL** (`#view=…`) — debounced `window.history.replaceState` keeps the URL hash a current snapshot of the view. Sharing = copy URL. Refresh preserves view. No server involvement.
 2. **Named bookmarks** (`#b=<id>`) — server-stored entries with name + creator + timestamp; visible in a sidebar filtered to bookmarks for currently-loaded datasets; live cross-peer updates via `BookmarkChanged` broadcast.
-3. **Workspace saved views** — workspace-scoped named entries under `/api/workspaces/:workspace_id/saved-views`. Editors can create/update/rename/delete; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
+3. **Workspace saved views** — workspace-scoped named entries under `/api/workspaces/:workspace_id/saved-views`. Editors can create/update/rename/delete and set/clear the workspace default view; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
 
 ## Why two surfaces, one record
 
@@ -57,8 +57,11 @@ All routes are workspace-scoped:
 - `GET /api/workspaces/:workspace_id/saved-views`
 - `POST /api/workspaces/:workspace_id/saved-views`
 - `GET/PATCH/DELETE /api/workspaces/:workspace_id/saved-views/:saved_view_id`
+- `PATCH /api/workspaces/:workspace_id/default-saved-view`
 
-The manager enforces viewer-or-better for list/get and editor-or-better for create/update/delete. On create/update, the server clears `SavedView.datasets` before persistence; workspace saved views are expected to key `dataset_order`, `dataset_settings`, `active_layouts`, and `auto_contrast` by `workspace_dataset_id`.
+The manager enforces viewer-or-better for list/get and editor-or-better for create/update/delete/default changes. On create/update, the server clears `SavedView.datasets` before persistence; workspace saved views are expected to key `dataset_order`, `dataset_settings`, `active_layouts`, and `auto_contrast` by `workspace_dataset_id`.
+
+`/w/:workspace_id#b=<saved_view_id>` resolves through the workspace-scoped API and collapses to `/w/:workspace_id#view=...` after a successful apply. Bare `/w/:workspace_id` applies `default_saved_view_id` when one is configured and no explicit hash is present.
 
 ## `BookmarkChanged` is unsequenced
 

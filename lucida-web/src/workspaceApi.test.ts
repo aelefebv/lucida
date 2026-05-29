@@ -5,6 +5,7 @@ import {
   getWorkspaceSavedView,
   listWorkspaceSavedViews,
   updateWorkspaceSavedView,
+  updateWorkspaceDefaultSavedView,
 } from "./workspaceApi.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./savedView/types.ts";
 
@@ -119,5 +120,44 @@ describe("workspace saved view API", () => {
     expect(calls[0].method).toBe("DELETE");
     expect(calls[0].url).toBe("/api/workspaces/workspace-1/saved-views/view-1");
   });
-});
 
+  it("PATCHes the workspace default saved view pointer", async () => {
+    responder = () => jsonResponse(200, {
+      id: "workspace-1",
+      name: "Workspace",
+      role: "editor",
+      created_by: "alice@example.com",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-05-29T00:00:00Z",
+      archived_at: null,
+      seq: 1,
+      default_saved_view_id: "view-1",
+    });
+
+    await updateWorkspaceDefaultSavedView("workspace-1", "view-1");
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe("/api/workspaces/workspace-1/default-saved-view");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({
+      saved_view_id: "view-1",
+    });
+  });
+
+  it("clears the workspace default saved view pointer", async () => {
+    responder = () => jsonResponse(200, {
+      id: "workspace-1",
+      name: "Workspace",
+      role: "editor",
+      created_by: "alice@example.com",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-05-29T00:00:00Z",
+      archived_at: null,
+      seq: 1,
+      default_saved_view_id: null,
+    });
+
+    await updateWorkspaceDefaultSavedView("workspace-1", null);
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({
+      saved_view_id: null,
+    });
+  });
+});
