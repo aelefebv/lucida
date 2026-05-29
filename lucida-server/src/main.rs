@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -87,6 +88,12 @@ struct ServeArgs {
     generated_coarse_max_chunk_bytes: Option<u64>,
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES")]
     generated_coarse_disk_budget_bytes: Option<u64>,
+    /// How long a live workspace with no connected clients remains in memory.
+    #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_TTL_SECS", default_value_t = 3600)]
+    workspace_idle_ttl_secs: u64,
+    /// How often the server checks for idle live workspaces.
+    #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_SWEEP_SECS", default_value_t = 60)]
+    workspace_idle_sweep_secs: u64,
 }
 
 #[derive(Args, Debug)]
@@ -366,10 +373,21 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let workspace_store = Arc::new(workspace::SqliteWorkspaceStore::new(
         session_store.pool().clone(),
     ));
-    let workspace_manager = Arc::new(workspace::WorkspaceManager::new(
+    let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
+        idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
+        idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
+    };
+    tracing::info!(
+        idle_ttl_secs = workspace_runtime_config.idle_ttl.as_secs(),
+        idle_sweep_secs = workspace_runtime_config.idle_sweep_interval.as_secs(),
+        "workspace.runtime.config"
+    );
+    let workspace_manager = Arc::new(workspace::WorkspaceManager::new_with_runtime_config(
         workspace_store as Arc<dyn workspace::WorkspaceStore>,
         proxy_config.clone(),
+        workspace_runtime_config,
     ));
+    let _workspace_idle_eviction_handle = workspace_manager.spawn_idle_eviction_loop();
     let workspaces_router: Router<()> = workspace::router(workspace_manager);
 
     // /auth/error is available regardless of auth mode — if the user

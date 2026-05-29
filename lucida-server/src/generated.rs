@@ -173,6 +173,7 @@ struct GeneratedCoarseServiceInner {
 
 #[derive(Debug, Default)]
 struct GeneratedSchedulerState {
+    shutdown_reason: Option<String>,
     interests: HashMap<(ClientId, DatasetId), ViewerInterestHint>,
     queued: VecDeque<GeneratedWorkItem>,
     queued_keys: HashMap<GeneratedWorkKey, GeneratedSchedulingLane>,
@@ -1204,6 +1205,40 @@ impl GeneratedCoarseService {
         }
     }
 
+    pub async fn shutdown(&self, reason: &str) -> GeneratedSchedulerTelemetry {
+        let canceled_queued = {
+            let mut state = self.inner.state.lock().await;
+            if state.shutdown_reason.is_some() {
+                0
+            } else {
+                let canceled_queued = state.queued.len() as u64;
+                state.shutdown_reason = Some(reason.to_string());
+                state.canceled = state.canceled.saturating_add(canceled_queued);
+                state.interests.clear();
+                state.queued.clear();
+                state.queued_keys.clear();
+                canceled_queued
+            }
+        };
+        self.inner.cache.persist_readiness_indexes();
+        self.inner.notify.notify_waiters();
+        let telemetry = self.telemetry().await;
+        tracing::info!(
+            reason,
+            canceled_queued,
+            running = telemetry.running,
+            completed = telemetry.completed,
+            failed = telemetry.failed,
+            canceled = telemetry.canceled,
+            "generated_coarse.shutdown"
+        );
+        telemetry
+    }
+
+    pub async fn is_shutdown(&self) -> bool {
+        self.inner.state.lock().await.shutdown_reason.is_some()
+    }
+
     pub async fn enqueue_chunk_request(&self, image_id: &ImageId, level_index: u32, key: &str) {
         let Some(plan) = self.inner.plans.get(&(image_id.clone(), level_index)) else {
             return;
@@ -1227,6 +1262,9 @@ impl GeneratedCoarseService {
         let dataset_id = interest.dataset_id.clone();
         let now_ms = current_unix_millis();
         let mut state = self.inner.state.lock().await;
+        if state.shutdown_reason.is_some() {
+            return;
+        }
         expire_interests_locked(&mut state, now_ms);
         state
             .interests
@@ -1244,6 +1282,9 @@ impl GeneratedCoarseService {
 
     pub async fn remove_client_interest(&self, client_id: ClientId) {
         let mut state = self.inner.state.lock().await;
+        if state.shutdown_reason.is_some() {
+            return;
+        }
         state.interests.retain(|(cid, _), _| *cid != client_id);
         prune_stale_queued_locked(&mut state, &self.inner.plans, current_unix_millis());
         drop(state);
@@ -1288,6 +1329,9 @@ impl GeneratedCoarseService {
 
     async fn enqueue_work(&self, work_key: GeneratedWorkKey, lane: GeneratedSchedulingLane) {
         let mut state = self.inner.state.lock().await;
+        if state.shutdown_reason.is_some() {
+            return;
+        }
         enqueue_work_locked(&mut state, work_key, lane);
         drop(state);
         self.inner.notify.notify_waiters();
@@ -1295,7 +1339,10 @@ impl GeneratedCoarseService {
 
     async fn worker_loop(self) {
         loop {
-            let item = self.next_work_item().await;
+            let Some(item) = self.next_work_item().await else {
+                tracing::debug!("generated_coarse.worker_stopped");
+                break;
+            };
             if self.should_cancel(&item).await {
                 self.mark_canceled(item.work_key).await;
                 continue;
@@ -1333,17 +1380,24 @@ impl GeneratedCoarseService {
         }
     }
 
-    async fn next_work_item(&self) -> GeneratedWorkItem {
+    async fn next_work_item(&self) -> Option<GeneratedWorkItem> {
         loop {
+            let notified = self.inner.notify.notified();
             if let Some(item) = self.pop_next_work_item().await {
-                return item;
+                return Some(item);
             }
-            self.inner.notify.notified().await;
+            if self.is_shutdown().await {
+                return None;
+            }
+            notified.await;
         }
     }
 
     async fn pop_next_work_item(&self) -> Option<GeneratedWorkItem> {
         let mut state = self.inner.state.lock().await;
+        if state.shutdown_reason.is_some() {
+            return None;
+        }
         expire_interests_locked(&mut state, current_unix_millis());
         prune_stale_queued_locked(&mut state, &self.inner.plans, current_unix_millis());
 
@@ -1379,6 +1433,12 @@ impl GeneratedCoarseService {
     }
 
     async fn should_cancel(&self, item: &GeneratedWorkItem) -> bool {
+        {
+            let state = self.inner.state.lock().await;
+            if state.shutdown_reason.is_some() {
+                return true;
+            }
+        }
         if item.lane == GeneratedSchedulingLane::Background {
             return false;
         }
@@ -3781,6 +3841,50 @@ mod tests {
             .await;
 
         assert!(service.should_cancel(&running).await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_queued_work_and_rejects_new_interest() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 512,
+                chunk_long_axis: 256,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service.enqueue_background_fill().await;
+        assert!(service.telemetry().await.queued_background > 0);
+
+        let telemetry = service.shutdown("test").await;
+        assert!(service.is_shutdown().await);
+        assert_eq!(telemetry.queued_background, 0);
+        assert!(telemetry.canceled > 0);
+        assert!(service.pop_next_work_item().await.is_none());
+
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/0/0",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+        assert_eq!(service.telemetry().await.queued_visible, 0);
     }
 
     #[test]

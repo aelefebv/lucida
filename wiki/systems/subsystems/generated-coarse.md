@@ -1,6 +1,6 @@
 ---
 created: 2026-05-19
-modified: 2026-05-26
+modified: 2026-05-29
 ---
 
 # Generated Coarse
@@ -35,6 +35,8 @@ Generated chunks are materialized chunk-locally: the server maps the requested o
 Missing source Zarr chunks are treated as zero fill on both the normal source chunk path and the generated-source read path. Sparse OME-Zarrs therefore do not turn empty regions into transient fetch failures.
 
 Materialized chunks are written through `DerivedChunkCache`. On-disk writes are atomic, readiness indexes are persisted, and the cache can recover ready chunks on reopen. The generated-cache identity includes the generator version; when materialization semantics change, bumping that version prevents stale persisted failures or bytes from poisoning the new generator. Disk budget eviction withdraws missing ready chunks by publishing an `unavailable` readiness delta.
+
+`GeneratedCoarseService` is tied to a live server binding, not to the durable workspace record. When a live workspace is archived or idle-evicted, the workspace manager calls `shutdown`, which clears queued generated work, wakes worker loops so they exit, persists readiness indexes, and leaves any already materialized derived-cache bytes on disk for later lazy restore.
 
 ## Interactions
 
