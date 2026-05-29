@@ -22,9 +22,15 @@
 use std::io::Read;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lucida-server");
+
+fn serial_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 /// Reserve and immediately drop a loopback TCP port. The port is
 /// briefly available between the drop here and the spawned server's
@@ -168,6 +174,7 @@ fn drain(stream: &mut std::process::ChildStderr) -> String {
 
 #[test]
 fn loopback_default_starts_with_disabled_auth() {
+    let _guard = serial_test_lock();
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
     // No LUCIDA_AUTH set → loopback bind → auto-detect Disabled →
@@ -177,6 +184,7 @@ fn loopback_default_starts_with_disabled_auth() {
 
 #[test]
 fn explicit_disabled_loopback_starts() {
+    let _guard = serial_test_lock();
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
     assert_server_starts(port, &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "disabled")]);
@@ -184,6 +192,7 @@ fn explicit_disabled_loopback_starts() {
 
 #[test]
 fn explicit_disabled_non_loopback_with_insecure_starts() {
+    let _guard = serial_test_lock();
     // 0.0.0.0 is the wildcard bind: `Ipv4Addr::is_loopback()` returns
     // false for it (verified), so it correctly trips the "non-loopback"
     // branch of the auto-detect safety check. With LUCIDA_INSECURE=1
@@ -212,6 +221,7 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
 
 #[test]
 fn explicit_disabled_non_loopback_without_insecure_fails() {
+    let _guard = serial_test_lock();
     let port = pick_loopback_port();
     let bind = format!("0.0.0.0:{port}");
     let stderr = assert_server_fails(
@@ -228,6 +238,7 @@ fn explicit_disabled_non_loopback_without_insecure_fails() {
 
 #[test]
 fn explicit_google_without_credentials_fails() {
+    let _guard = serial_test_lock();
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
     assert_server_fails(
@@ -238,6 +249,7 @@ fn explicit_google_without_credentials_fails() {
 
 #[test]
 fn unknown_auth_mode_fails() {
+    let _guard = serial_test_lock();
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
     assert_server_fails(
@@ -248,5 +260,6 @@ fn unknown_auth_mode_fails() {
 
 #[test]
 fn invalid_bind_address_fails() {
+    let _guard = serial_test_lock();
     assert_server_fails(&[("LUCIDA_BIND", "not-a-socket-addr")], "LUCIDA_BIND");
 }
