@@ -14,6 +14,7 @@ This is a running log for workspace planning decisions before the umbrella PRD i
 - 2026-05-29: Shared workspace saved-view MVP added workspace-scoped saved-view rows/routes/UI. Editors can create/update/rename/delete; viewers can list/open/copy. Stored workspace saved-view payloads clear source URLs and key dataset state by `workspace_dataset_id`.
 - 2026-05-29: Workspace saved-view URL/default slice added `/w/:workspace_id#b=<saved_view_id>` resolution through the workspace-scoped API, URL collapse to inline `#view` after saved-view apply, and an editor-controlled `default_saved_view_id` for bare workspace opens.
 - 2026-05-29: Workspace recents/pins slice added `user_workspace_state` for per-user last-opened timestamps and personal pins. Link-shared workspaces remain absent from normal dashboard lists until the current user successfully opens the workspace URL.
+- 2026-05-29: Workspace archive/restore slice added owner-controlled archive and restore APIs, an owner archived-workspaces dashboard list, archived workspace access denial, and live-client `workspace_archived` notification.
 - 2026-05-28: Dev-auth testing slice added disabled-mode per-browser identity switching so workspace sharing roles can be manually tested locally without Google OAuth.
 
 ## Pipeline Shape

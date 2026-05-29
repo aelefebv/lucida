@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
+use lucida_core::protocol::ServerMessage;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde::{Deserialize, Serialize};
@@ -252,9 +253,20 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         principal: &AuthPrincipal,
     ) -> Result<Vec<WorkspaceSummary>, StoreError>;
 
+    async fn list_archived_workspaces(
+        &self,
+        principal: &AuthPrincipal,
+    ) -> Result<Vec<WorkspaceSummary>, StoreError>;
+
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError>;
 
     async fn role_for(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Option<WorkspaceRole>, StoreError>;
+
+    async fn owner_role_for_any_state(
         &self,
         workspace_id: &str,
         principal: &AuthPrincipal,
@@ -264,6 +276,16 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         &self,
         workspace_id: &str,
         name: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError>;
+
+    async fn archive_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError>;
+
+    async fn restore_workspace(
+        &self,
+        workspace_id: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError>;
 
     async fn persist_document(
@@ -633,6 +655,61 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         rows.into_iter().map(row_to_summary).collect()
     }
 
+    async fn list_archived_workspaces(
+        &self,
+        principal: &AuthPrincipal,
+    ) -> Result<Vec<WorkspaceSummary>, StoreError> {
+        let email = normalize_email(&principal.email);
+        let rows = if principal.is_admin {
+            sqlx::query(
+                r#"
+                SELECT
+                    w.id, w.name, w.created_by, w.created_at, w.updated_at,
+                    w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
+                    uws.last_opened_at, uws.pinned_at,
+                    COALESCE(COUNT(wd.id), 0) AS dataset_count
+                FROM workspaces w
+                LEFT JOIN user_workspace_state uws
+                    ON uws.workspace_id = w.id AND uws.user_email = ?
+                LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
+                WHERE w.archived_at IS NOT NULL
+                GROUP BY w.id
+                ORDER BY w.archived_at DESC, w.updated_at DESC
+                "#,
+            )
+            .bind(&email)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sql)?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT
+                    w.id, w.name, w.created_by, w.created_at, w.updated_at,
+                    w.archived_at, w.seq, w.default_saved_view_id, wm.role,
+                    uws.last_opened_at, uws.pinned_at,
+                    COALESCE(COUNT(wd.id), 0) AS dataset_count
+                FROM workspaces w
+                INNER JOIN workspace_members wm
+                    ON wm.workspace_id = w.id AND wm.email = ? AND wm.role = 'owner'
+                LEFT JOIN user_workspace_state uws
+                    ON uws.workspace_id = w.id AND uws.user_email = ?
+                LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
+                WHERE w.archived_at IS NOT NULL
+                GROUP BY w.id
+                ORDER BY w.archived_at DESC, w.updated_at DESC
+                "#,
+            )
+            .bind(&email)
+            .bind(&email)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sql)?
+        };
+
+        rows.into_iter().map(row_to_summary).collect()
+    }
+
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
         let row = sqlx::query(
             r#"
@@ -711,6 +788,49 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         Ok(None)
     }
 
+    async fn owner_role_for_any_state(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Option<WorkspaceRole>, StoreError> {
+        if principal.is_admin {
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM workspaces WHERE id = ?")
+                    .bind(workspace_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(map_sql)?;
+            if exists.is_some() {
+                return Ok(Some(WorkspaceRole::Owner));
+            }
+            return Ok(None);
+        }
+
+        let email = normalize_email(&principal.email);
+        let row = sqlx::query(
+            r#"
+            SELECT role
+            FROM workspace_members
+            WHERE workspace_id = ? AND email = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let role = WorkspaceRole::try_from(row.get::<String, _>("role").as_str())?;
+        if role.can_own() {
+            Ok(Some(role))
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn rename_workspace(
         &self,
         workspace_id: &str,
@@ -726,6 +846,53 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             "#,
         )
         .bind(name)
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_workspace(workspace_id).await
+    }
+
+    async fn archive_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET archived_at = ?, updated_at = ?
+            WHERE id = ? AND archived_at IS NULL
+            "#,
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_workspace(workspace_id).await
+    }
+
+    async fn restore_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET archived_at = NULL, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
         .bind(now)
         .bind(workspace_id)
         .execute(&self.pool)
@@ -1516,6 +1683,16 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
+    pub async fn list_archived_workspaces(
+        &self,
+        principal: &AuthPrincipal,
+    ) -> Result<Vec<WorkspaceSummary>, WorkspaceError> {
+        self.store
+            .list_archived_workspaces(principal)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
     pub async fn create_workspace(
         &self,
         principal: &AuthPrincipal,
@@ -1532,12 +1709,6 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
-        let role = self
-            .store
-            .role_for(workspace_id, principal)
-            .await
-            .map_err(WorkspaceError::Store)?
-            .ok_or(WorkspaceError::Forbidden)?;
         let record = self
             .store
             .get_workspace(workspace_id)
@@ -1547,6 +1718,12 @@ impl WorkspaceManager {
         if record.archived_at.is_some() {
             return Err(WorkspaceError::Archived);
         }
+        let role = self
+            .store
+            .role_for(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::Forbidden)?;
         Ok((record, role))
     }
 
@@ -1584,6 +1761,39 @@ impl WorkspaceManager {
             .await
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn archive_workspace(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
+        let role = self.require_owner(workspace_id, principal).await?;
+        let record = self
+            .store
+            .archive_workspace(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        self.notify_workspace_archived(workspace_id).await;
+        Ok((record, role))
+    }
+
+    pub async fn restore_workspace(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
+        let role = self
+            .require_owner_any_state(workspace_id, principal)
+            .await?;
+        let record = self
+            .store
+            .restore_workspace(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        Ok((record, role))
     }
 
     pub async fn sharing_settings(
@@ -1886,6 +2096,31 @@ impl WorkspaceManager {
         }
     }
 
+    pub async fn require_owner_any_state(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceRole, WorkspaceError> {
+        self.store
+            .owner_role_for_any_state(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::Forbidden)
+    }
+
+    async fn notify_workspace_archived(&self, workspace_id: &str) {
+        let live = self.live.lock().await.remove(workspace_id);
+        let Some(live) = live else {
+            return;
+        };
+        let msg = ServerMessage::WorkspaceArchived {
+            workspace_id: workspace_id.to_string(),
+        };
+        let _ = live.tx.send(BroadcastItem::WorkspaceArchived {
+            json: serde_json::to_string(&msg).unwrap(),
+        });
+    }
+
     pub async fn persist_applied_command(
         &self,
         live: &LiveWorkspace,
@@ -2072,6 +2307,7 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
             "/api/workspaces",
             get(list_workspaces).post(create_workspace),
         )
+        .route("/api/workspaces/archived", get(list_archived_workspaces))
         .route(
             "/api/workspaces/{workspace_id}",
             get(get_workspace)
@@ -2099,6 +2335,14 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/pin",
             patch(update_workspace_pin),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/archive",
+            post(archive_workspace),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/restore",
+            post(restore_workspace),
         )
         .route(
             "/api/workspaces/{workspace_id}/members",
@@ -2213,6 +2457,16 @@ async fn list_workspaces(
     }
 }
 
+async fn list_archived_workspaces(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+) -> Response {
+    match state.manager.list_archived_workspaces(&principal).await {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 async fn create_workspace(
     State(state): State<WorkspacesState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -2285,6 +2539,44 @@ async fn rename_workspace(
         Ok(record) => (
             StatusCode::OK,
             Json(WorkspaceResponse::from_record(record, WorkspaceRole::Owner)),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn archive_workspace(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state
+        .manager
+        .archive_workspace(&workspace_id, &principal)
+        .await
+    {
+        Ok((record, role)) => (
+            StatusCode::OK,
+            Json(WorkspaceResponse::from_record(record, role)),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn restore_workspace(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state
+        .manager
+        .restore_workspace(&workspace_id, &principal)
+        .await
+    {
+        Ok((record, role)) => (
+            StatusCode::OK,
+            Json(WorkspaceResponse::from_record(record, role)),
         )
             .into_response(),
         Err(e) => e.into_response(),
@@ -2570,6 +2862,16 @@ pub mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, workspace.id);
         assert_eq!(rows[0].role, WorkspaceRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn workspace_router_builds_with_archived_static_route() {
+        let store = fresh_store().await;
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store),
+            ProxyConfig::defaults(),
+        ));
+        let _router = router(manager);
     }
 
     #[tokio::test]
@@ -2902,6 +3204,167 @@ pub mod tests {
         assert!(state.last_opened_at.is_none());
         assert!(state.pinned_at.is_none());
         assert!(store.list_workspaces(&visitor).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_restore_is_owner_only_and_controls_dashboard_visibility() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Lifecycle"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let err = manager
+            .archive_workspace(&workspace.id, &editor)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+        let err = manager
+            .archive_workspace(&workspace.id, &viewer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        let (archived, role) = manager
+            .archive_workspace(&workspace.id, &owner)
+            .await
+            .unwrap();
+        assert_eq!(role, WorkspaceRole::Owner);
+        assert!(archived.archived_at.is_some());
+        assert!(store.list_workspaces(&owner).await.unwrap().is_empty());
+        assert!(store.list_workspaces(&editor).await.unwrap().is_empty());
+
+        let owner_archived = store.list_archived_workspaces(&owner).await.unwrap();
+        assert_eq!(owner_archived.len(), 1);
+        assert_eq!(owner_archived[0].id, workspace.id);
+        assert!(
+            store
+                .list_archived_workspaces(&editor)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let err = manager
+            .restore_workspace(&workspace.id, &viewer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        let (restored, role) = manager
+            .restore_workspace(&workspace.id, &owner)
+            .await
+            .unwrap();
+        assert_eq!(role, WorkspaceRole::Owner);
+        assert!(restored.archived_at.is_none());
+        assert_eq!(store.list_workspaces(&owner).await.unwrap().len(), 1);
+        assert_eq!(store.list_workspaces(&editor).await.unwrap().len(), 1);
+        assert!(
+            store
+                .list_archived_workspaces(&owner)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_workspace_blocks_new_access_until_restored() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Archived access"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        manager
+            .archive_workspace(&workspace.id, &owner)
+            .await
+            .unwrap();
+
+        let err = manager
+            .get_workspace_for(&workspace.id, &owner)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Archived));
+        let err = match manager.live_workspace(&workspace.id, &owner).await {
+            Ok(_) => panic!("archived workspace unexpectedly opened a live session"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, WorkspaceError::Archived));
+
+        manager
+            .restore_workspace(&workspace.id, &owner)
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .get_workspace_for(&workspace.id, &owner)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Live archive"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        let mut rx = live.tx.subscribe();
+
+        manager
+            .archive_workspace(&workspace.id, &owner)
+            .await
+            .unwrap();
+
+        assert!(!manager.live.lock().await.contains_key(&workspace.id));
+        let item = rx.recv().await.unwrap();
+        let BroadcastItem::WorkspaceArchived { json } = item else {
+            panic!("expected workspace archived broadcast");
+        };
+        let msg: ServerMessage = serde_json::from_str(&json).unwrap();
+        match msg {
+            ServerMessage::WorkspaceArchived { workspace_id } => {
+                assert_eq!(workspace_id, workspace.id);
+            }
+            _ => panic!("expected workspace archived server message"),
+        }
+
+        let err = manager
+            .require_editor(&workspace.id, &owner)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
     }
 
     #[tokio::test]

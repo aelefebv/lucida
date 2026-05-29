@@ -209,6 +209,9 @@ pub enum ServerMessage {
         action: BookmarkAction,
         dataset_urls: Vec<String>,
     },
+    /// A workspace was archived while this client was connected.
+    /// Workspace clients should stop reconnecting and leave the workspace route.
+    WorkspaceArchived { workspace_id: String },
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
@@ -764,6 +767,22 @@ mod tests {
                 ServerMessage::BookmarkChanged { action: a, .. } => assert_eq!(a, action),
                 _ => panic!("expected BookmarkChanged"),
             }
+        }
+    }
+
+    #[test]
+    fn workspace_archived_round_trips() {
+        let msg = ServerMessage::WorkspaceArchived {
+            workspace_id: "workspace-1".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"workspace_archived\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::WorkspaceArchived { workspace_id } => {
+                assert_eq!(workspace_id, "workspace-1");
+            }
+            _ => panic!("expected WorkspaceArchived"),
         }
     }
 

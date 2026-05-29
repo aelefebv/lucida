@@ -143,6 +143,7 @@ function App({
     setSelectedDatasetId,
     bumpDatasetsVersion,
     bumpRemoteDocumentVersion,
+    onWorkspaceArchived: onBackToDashboard,
   });
 
   // Resolves the selected-dataset wrinkle (option c, [[wiki/queue]]

@@ -311,6 +311,7 @@ async fn handle_client_inner(
                                     json
                                 }
                                 BroadcastItem::GeneratedAvailabilityUpdate { json } => json,
+                                BroadcastItem::WorkspaceArchived { json } => json,
                             };
                             if ws_tx
                                 .send(Message::Text(json.clone().into()))

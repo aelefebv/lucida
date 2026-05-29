@@ -78,6 +78,7 @@ export interface BridgeHandlers {
     action: BookmarkAction,
     datasetUrls: string[],
   ) => void;
+  onWorkspaceArchived?: (workspaceId: string) => void;
   onDisconnect?: () => void;
 }
 
@@ -226,6 +227,10 @@ export class Bridge {
             }
             break;
           }
+          case "workspace_archived":
+            this.handlers.onWorkspaceArchived?.(msg.workspace_id ?? "");
+            this.destroy();
+            break;
         }
       } catch (e) {
         bridgeLog("ws.bad_message", {
