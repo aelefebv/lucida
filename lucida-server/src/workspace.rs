@@ -23,7 +23,7 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::scene::DocumentState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
@@ -70,6 +70,34 @@ impl TryFrom<&str> for WorkspaceRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLinkAccess {
+    Restricted,
+    AnyoneWithLink,
+}
+
+impl WorkspaceLinkAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Restricted => "restricted",
+            Self::AnyoneWithLink => "anyone_with_link",
+        }
+    }
+}
+
+impl TryFrom<&str> for WorkspaceLinkAccess {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "restricted" => Ok(Self::Restricted),
+            "anyone_with_link" => Ok(Self::AnyoneWithLink),
+            other => Err(StoreError::InvalidLinkAccess(other.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceSummary {
     pub id: String,
@@ -103,6 +131,21 @@ pub struct WorkspaceDatasetSource {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceMember {
+    pub email: String,
+    pub role: WorkspaceRole,
+    pub display_name: String,
+    pub added_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceSharingSettings {
+    pub link_access: WorkspaceLinkAccess,
+    pub link_role: WorkspaceRole,
+    pub members: Vec<WorkspaceMember>,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("storage backend error: {0}")]
@@ -111,6 +154,8 @@ pub enum StoreError {
     InvalidDocument(String),
     #[error("workspace role is invalid: {0}")]
     InvalidRole(String),
+    #[error("workspace link access is invalid: {0}")]
+    InvalidLinkAccess(String),
 }
 
 fn map_sql(e: sqlx::Error) -> StoreError {
@@ -143,6 +188,15 @@ fn default_workspace_name(name: Option<&str>) -> String {
     let trimmed = name.unwrap_or("Untitled workspace").trim();
     if trimmed.is_empty() {
         "Untitled workspace".to_string()
+    } else {
+        trimmed.chars().take(200).collect()
+    }
+}
+
+fn default_member_display_name(email: &str, display_name: &str) -> String {
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() {
+        email.to_string()
     } else {
         trimmed.chars().take(200).collect()
     }
@@ -213,6 +267,35 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         dataset_source_id: &str,
     ) -> Result<Option<WorkspaceDatasetSource>, StoreError>;
+
+    async fn sharing_settings(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceSharingSettings>, StoreError>;
+
+    async fn upsert_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+        role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceMember>, StoreError>;
+
+    async fn update_member_role(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceMember>, StoreError>;
+
+    async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<bool, StoreError>;
+
+    async fn update_link_access(
+        &self,
+        workspace_id: &str,
+        link_access: WorkspaceLinkAccess,
+        link_role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceSharingSettings>, StoreError>;
 }
 
 #[derive(Clone)]
@@ -224,6 +307,80 @@ impl SqliteWorkspaceStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    async fn workspace_exists(&self, workspace_id: &str) -> Result<bool, StoreError> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM workspaces WHERE id = ? AND archived_at IS NULL")
+                .bind(workspace_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sql)?;
+        Ok(row.is_some())
+    }
+
+    async fn list_members(&self, workspace_id: &str) -> Result<Vec<WorkspaceMember>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT email, role, display_name, added_at
+            FROM workspace_members
+            WHERE workspace_id = ?
+            ORDER BY
+                CASE role
+                    WHEN 'owner' THEN 0
+                    WHEN 'editor' THEN 1
+                    ELSE 2
+                END,
+                email ASC
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        rows.into_iter().map(row_to_member).collect()
+    }
+
+    async fn member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+    ) -> Result<Option<WorkspaceMember>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT email, role, display_name, added_at
+            FROM workspace_members
+            WHERE workspace_id = ? AND email = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(normalize_email(email))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        row.map(row_to_member).transpose()
+    }
+}
+
+async fn touch_workspace(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    workspace_id: &str,
+    now: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        r#"
+        UPDATE workspaces
+        SET updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(now)
+    .bind(workspace_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sql)?;
+    Ok(())
 }
 
 #[async_trait]
@@ -371,20 +528,43 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         let email = normalize_email(&principal.email);
         let row = sqlx::query(
             r#"
-            SELECT wm.role
-            FROM workspace_members wm
-            INNER JOIN workspaces w ON w.id = wm.workspace_id
-            WHERE wm.workspace_id = ? AND wm.email = ? AND w.archived_at IS NULL
+            SELECT
+                wm.role AS member_role,
+                w.link_access,
+                w.link_role
+            FROM workspaces w
+            LEFT JOIN workspace_members wm
+                ON wm.workspace_id = w.id AND wm.email = ?
+            WHERE w.id = ? AND w.archived_at IS NULL
             "#,
         )
-        .bind(workspace_id)
         .bind(email)
+        .bind(workspace_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sql)?;
 
-        row.map(|r| WorkspaceRole::try_from(r.get::<String, _>("role").as_str()))
-            .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        if let Some(member_role) = row.get::<Option<String>, _>("member_role") {
+            return WorkspaceRole::try_from(member_role.as_str()).map(Some);
+        }
+
+        let link_access =
+            WorkspaceLinkAccess::try_from(row.get::<String, _>("link_access").as_str())?;
+        if link_access == WorkspaceLinkAccess::AnyoneWithLink {
+            let link_role = WorkspaceRole::try_from(row.get::<String, _>("link_role").as_str())?;
+            if link_role.can_own() {
+                return Err(StoreError::InvalidRole(
+                    "link role cannot grant owner".to_string(),
+                ));
+            }
+            return Ok(Some(link_role));
+        }
+
+        Ok(None)
     }
 
     async fn rename_workspace(
@@ -598,6 +778,161 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         Ok(row.map(row_to_dataset_source))
     }
+
+    async fn sharing_settings(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceSharingSettings>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT link_access, link_role
+            FROM workspaces
+            WHERE id = ? AND archived_at IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let members = self.list_members(workspace_id).await?;
+        Ok(Some(WorkspaceSharingSettings {
+            link_access: WorkspaceLinkAccess::try_from(
+                row.get::<String, _>("link_access").as_str(),
+            )?,
+            link_role: WorkspaceRole::try_from(row.get::<String, _>("link_role").as_str())?,
+            members,
+        }))
+    }
+
+    async fn upsert_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+        role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceMember>, StoreError> {
+        let email = normalize_email(email);
+        let display_name = default_member_display_name(&email, display_name);
+        if !self.workspace_exists(workspace_id).await? {
+            return Ok(None);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        sqlx::query(
+            r#"
+            INSERT INTO workspace_members
+                (workspace_id, email, role, display_name, added_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_id, email) DO UPDATE SET
+                role = excluded.role,
+                display_name = excluded.display_name
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&email)
+        .bind(role.as_str())
+        .bind(display_name)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+
+        self.member(workspace_id, &email).await
+    }
+
+    async fn update_member_role(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceMember>, StoreError> {
+        let email = normalize_email(email);
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE workspace_members
+            SET role = ?
+            WHERE workspace_id = ? AND email = ?
+            "#,
+        )
+        .bind(role.as_str())
+        .bind(workspace_id)
+        .bind(&email)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Ok(None);
+        }
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+
+        self.member(workspace_id, &email).await
+    }
+
+    async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<bool, StoreError> {
+        let email = normalize_email(email);
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let result =
+            sqlx::query("DELETE FROM workspace_members WHERE workspace_id = ? AND email = ?")
+                .bind(workspace_id)
+                .bind(&email)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Ok(false);
+        }
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+        Ok(true)
+    }
+
+    async fn update_link_access(
+        &self,
+        workspace_id: &str,
+        link_access: WorkspaceLinkAccess,
+        link_role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceSharingSettings>, StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET link_access = ?, link_role = ?, updated_at = ?
+            WHERE id = ? AND archived_at IS NULL
+            "#,
+        )
+        .bind(link_access.as_str())
+        .bind(link_role.as_str())
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.sharing_settings(workspace_id).await
+    }
 }
 
 fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
@@ -636,6 +971,15 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceRecord, StoreE
         archived_at: parse_opt_dt(row.get("archived_at"))?,
         seq: seq.max(0) as u64,
         document: serde_json::from_str(&document_json).map_err(map_json_in)?,
+    })
+}
+
+fn row_to_member(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceMember, StoreError> {
+    Ok(WorkspaceMember {
+        email: row.get("email"),
+        role: WorkspaceRole::try_from(row.get::<String, _>("role").as_str())?,
+        display_name: row.get("display_name"),
+        added_at: parse_dt(row.get("added_at"))?,
     })
 }
 
@@ -753,6 +1097,98 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)
     }
 
+    pub async fn sharing_settings(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceSharingSettings, WorkspaceError> {
+        self.require_owner(workspace_id, principal).await?;
+        self.store
+            .sharing_settings(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn upsert_member(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        email: &str,
+        display_name: Option<&str>,
+        role: WorkspaceRole,
+    ) -> Result<WorkspaceMember, WorkspaceError> {
+        self.require_owner(workspace_id, principal).await?;
+        let email = normalize_request_email(email)?;
+        let settings = self.current_sharing_settings(workspace_id).await?;
+        ensure_owner_retained(&settings, &email, Some(role))?;
+        self.store
+            .upsert_member(workspace_id, &email, display_name.unwrap_or(""), role)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn update_member_role(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        email: &str,
+        role: WorkspaceRole,
+    ) -> Result<WorkspaceMember, WorkspaceError> {
+        self.require_owner(workspace_id, principal).await?;
+        let email = normalize_request_email(email)?;
+        let settings = self.current_sharing_settings(workspace_id).await?;
+        ensure_owner_retained(&settings, &email, Some(role))?;
+        self.store
+            .update_member_role(workspace_id, &email, role)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn remove_member(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        email: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.require_owner(workspace_id, principal).await?;
+        let email = normalize_request_email(email)?;
+        let settings = self.current_sharing_settings(workspace_id).await?;
+        ensure_owner_retained(&settings, &email, None)?;
+        let removed = self
+            .store
+            .remove_member(workspace_id, &email)
+            .await
+            .map_err(WorkspaceError::Store)?;
+        if removed {
+            Ok(())
+        } else {
+            Err(WorkspaceError::NotFound)
+        }
+    }
+
+    pub async fn update_link_access(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        link_access: WorkspaceLinkAccess,
+        link_role: WorkspaceRole,
+    ) -> Result<WorkspaceSharingSettings, WorkspaceError> {
+        self.require_owner(workspace_id, principal).await?;
+        if link_role.can_own() {
+            return Err(WorkspaceError::BadRequest(
+                "link role cannot be owner".to_string(),
+            ));
+        }
+        self.store
+            .update_link_access(workspace_id, link_access, link_role)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
     pub async fn live_workspace(
         &self,
         workspace_id: &str,
@@ -805,6 +1241,24 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::Forbidden)?;
         if role.can_edit() {
+            Ok(role)
+        } else {
+            Err(WorkspaceError::Forbidden)
+        }
+    }
+
+    pub async fn require_owner(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceRole, WorkspaceError> {
+        let role = self
+            .store
+            .role_for(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::Forbidden)?;
+        if role.can_own() {
             Ok(role)
         } else {
             Err(WorkspaceError::Forbidden)
@@ -870,6 +1324,57 @@ impl WorkspaceManager {
             .await
             .map_err(WorkspaceError::Store)
     }
+
+    async fn current_sharing_settings(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceSharingSettings, WorkspaceError> {
+        self.store
+            .sharing_settings(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+}
+
+fn normalize_request_email(email: &str) -> Result<String, WorkspaceError> {
+    let normalized = normalize_email(email);
+    if normalized.is_empty() || !normalized.contains('@') {
+        return Err(WorkspaceError::BadRequest(
+            "member email is invalid".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn ensure_owner_retained(
+    settings: &WorkspaceSharingSettings,
+    target_email: &str,
+    next_role: Option<WorkspaceRole>,
+) -> Result<(), WorkspaceError> {
+    let Some(existing) = settings
+        .members
+        .iter()
+        .find(|member| member.email == target_email)
+    else {
+        return Ok(());
+    };
+    if existing.role != WorkspaceRole::Owner {
+        return Ok(());
+    }
+
+    let owners = settings
+        .members
+        .iter()
+        .filter(|member| member.role == WorkspaceRole::Owner)
+        .count();
+    let remains_owner = next_role == Some(WorkspaceRole::Owner);
+    if owners <= 1 && !remains_owner {
+        return Err(WorkspaceError::BadRequest(
+            "workspace must retain at least one owner".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -927,6 +1432,18 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
             "/api/workspaces/{workspace_id}",
             get(get_workspace).patch(rename_workspace),
         )
+        .route(
+            "/api/workspaces/{workspace_id}/sharing",
+            get(get_sharing_settings).patch(update_link_access),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/members",
+            axum::routing::post(upsert_member),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/members/{email}",
+            axum::routing::patch(update_member_role).delete(remove_member),
+        )
         .route("/ws/workspaces/{workspace_id}", get(workspace_ws))
         .with_state(WorkspacesState { manager })
 }
@@ -939,6 +1456,24 @@ pub struct CreateWorkspaceRequest {
 #[derive(Debug, Deserialize)]
 pub struct RenameWorkspaceRequest {
     pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertMemberRequest {
+    pub email: String,
+    pub role: WorkspaceRole,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberRoleRequest {
+    pub role: WorkspaceRole,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateLinkAccessRequest {
+    pub link_access: WorkspaceLinkAccess,
+    pub link_role: WorkspaceRole,
 }
 
 #[derive(Debug, Serialize)]
@@ -1033,6 +1568,90 @@ async fn rename_workspace(
     }
 }
 
+async fn get_sharing_settings(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state
+        .manager
+        .sharing_settings(&workspace_id, &principal)
+        .await
+    {
+        Ok(settings) => (StatusCode::OK, Json(settings)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn update_link_access(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpdateLinkAccessRequest>,
+) -> Response {
+    match state
+        .manager
+        .update_link_access(&workspace_id, &principal, body.link_access, body.link_role)
+        .await
+    {
+        Ok(settings) => (StatusCode::OK, Json(settings)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn upsert_member(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpsertMemberRequest>,
+) -> Response {
+    match state
+        .manager
+        .upsert_member(
+            &workspace_id,
+            &principal,
+            &body.email,
+            body.display_name.as_deref(),
+            body.role,
+        )
+        .await
+    {
+        Ok(member) => (StatusCode::OK, Json(member)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn update_member_role(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, email)): Path<(String, String)>,
+    Json(body): Json<UpdateMemberRoleRequest>,
+) -> Response {
+    match state
+        .manager
+        .update_member_role(&workspace_id, &principal, &email, body.role)
+        .await
+    {
+        Ok(member) => (StatusCode::OK, Json(member)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn remove_member(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, email)): Path<(String, String)>,
+) -> Response {
+    match state
+        .manager
+        .remove_member(&workspace_id, &principal, &email)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 async fn workspace_ws(
     State(state): State<WorkspacesState>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -1112,6 +1731,176 @@ pub mod tests {
         assert_eq!(
             store.role_for(&workspace.id, &admin).await.unwrap(),
             Some(WorkspaceRole::Owner),
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_can_add_explicit_member_role() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let other = principal("other@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Shared"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let member = manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                "Other@Example.com",
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(member.email, "other@example.com");
+        assert_eq!(
+            store.role_for(&workspace.id, &other).await.unwrap(),
+            Some(WorkspaceRole::Editor)
+        );
+        let rows = store.list_workspaces(&other).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, WorkspaceRole::Editor);
+    }
+
+    #[tokio::test]
+    async fn anyone_with_link_grants_configured_non_owner_role() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let other = principal("other@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Linked"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        assert_eq!(store.role_for(&workspace.id, &other).await.unwrap(), None);
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.role_for(&workspace.id, &other).await.unwrap(),
+            Some(WorkspaceRole::Viewer)
+        );
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.role_for(&workspace.id, &other).await.unwrap(),
+            Some(WorkspaceRole::Editor)
+        );
+
+        let err = manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Owner,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn explicit_membership_overrides_link_role() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let other = principal("other@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Linked member"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &other.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.role_for(&workspace.id, &other).await.unwrap(),
+            Some(WorkspaceRole::Editor)
+        );
+    }
+
+    #[tokio::test]
+    async fn last_owner_cannot_be_removed_or_demoted() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let other_owner = principal("other-owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Owners"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let err = manager
+            .update_member_role(&workspace.id, &owner, &owner.email, WorkspaceRole::Viewer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
+
+        let err = manager
+            .remove_member(&workspace.id, &owner, &owner.email)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
+
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &other_owner.email,
+                None,
+                WorkspaceRole::Owner,
+            )
+            .await
+            .unwrap();
+        manager
+            .update_member_role(&workspace.id, &owner, &owner.email, WorkspaceRole::Viewer)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.role_for(&workspace.id, &owner).await.unwrap(),
+            Some(WorkspaceRole::Viewer)
+        );
+        assert_eq!(
+            store.role_for(&workspace.id, &other_owner).await.unwrap(),
+            Some(WorkspaceRole::Owner)
         );
     }
 

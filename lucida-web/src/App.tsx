@@ -11,6 +11,7 @@ import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx"
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { BookmarkSidebar } from "./components/BookmarkSidebar.tsx";
+import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
@@ -386,6 +387,7 @@ function App({
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
+  const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   // Loaded dataset URLs derived from the live capture builder. The
   // BookmarkSidebar uses these to filter `GET /api/bookmarks?dataset=…`
@@ -525,8 +527,15 @@ function App({
               {workspaceName}
             </div>
           )}
-          <div className="workspace-id-label" title={workspaceId}>
-            {workspaceId}
+          <div className="workspace-chrome-actions">
+            {canRenameWorkspace && (
+              <button type="button" onClick={() => setShowWorkspaceSharing(true)}>
+                Share Workspace
+              </button>
+            )}
+            <div className="workspace-id-label" title={workspaceId}>
+              {workspaceId}
+            </div>
           </div>
         </div>
         {bridge.peers.size > 0 && (
@@ -754,6 +763,11 @@ function App({
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
         bridge={bridge.bridge}
+      />
+      <WorkspaceSharingDialog
+        workspaceId={workspaceId}
+        open={showWorkspaceSharing}
+        onClose={() => setShowWorkspaceSharing(false)}
       />
     </div>
   );

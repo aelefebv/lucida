@@ -6,6 +6,12 @@ Context: high-level `code` pipeline, Phase 1 design exploration for Lucida works
 
 This is a running log for workspace planning decisions before the umbrella PRD is written. It is not a formal ADR. Promote durable architectural choices into `wiki/decisions/` after the umbrella PRD hardens.
 
+## Implementation Progress
+
+- 2026-05-28: Workspace isolation tracer-bullet slice implemented create/list/open workspace, `/w/:id` routing, workspace-scoped document persistence, owner-only access, and restart restore.
+- 2026-05-28: Runtime identity slice migrated workspace sessions to opaque `workspace_dataset_id` values while keeping source/cache identity global for reuse across workspaces.
+- 2026-05-28: Sharing slice implemented owner-managed explicit members, viewer/editor/owner member roles, restricted vs anyone-with-link access, viewer/editor link roles, and owner-only sharing UI. Link-shared workspaces remain URL-accessible but are not globally listed; recents/pins for prior link visits remain a later `user_workspace_state` slice.
+
 ## Pipeline Shape
 
 - The first artifact should be an umbrella workspace PRD, not a giant implementation PRD.
