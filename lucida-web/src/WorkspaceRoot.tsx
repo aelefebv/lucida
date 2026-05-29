@@ -99,6 +99,7 @@ function WorkspaceViewerRoute({ workspaceId, onBackToDashboard }: WorkspaceViewe
     <App
       workspaceId={workspace.id}
       workspaceName={workspace.name}
+      workspaceRole={workspace.role}
       canRenameWorkspace={workspace.role === "owner"}
       onBackToDashboard={onBackToDashboard}
       onRenameWorkspace={handleRename}

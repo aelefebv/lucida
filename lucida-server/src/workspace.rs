@@ -13,13 +13,15 @@ use async_trait::async_trait;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::http::header::LOCATION;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, patch, post};
 use axum::{Extension, Router};
 use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
+use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -146,12 +148,26 @@ pub struct WorkspaceSharingSettings {
     pub members: Vec<WorkspaceMember>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceSavedView {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub created_by: String,
+    pub created_by_name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub view: SavedView,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("storage backend error: {0}")]
     Backend(String),
     #[error("workspace document json failed to parse: {0}")]
     InvalidDocument(String),
+    #[error("workspace saved-view json failed to parse: {0}")]
+    InvalidSavedView(String),
     #[error("workspace role is invalid: {0}")]
     InvalidRole(String),
     #[error("workspace link access is invalid: {0}")]
@@ -168,6 +184,14 @@ fn map_json_in(e: serde_json::Error) -> StoreError {
 
 fn map_json_out(e: serde_json::Error) -> StoreError {
     StoreError::Backend(format!("document_json serialize: {e}"))
+}
+
+fn map_saved_view_json_in(e: serde_json::Error) -> StoreError {
+    StoreError::InvalidSavedView(e.to_string())
+}
+
+fn map_saved_view_json_out(e: serde_json::Error) -> StoreError {
+    StoreError::Backend(format!("view_json serialize: {e}"))
 }
 
 fn parse_dt(raw: String) -> Result<DateTime<Utc>, StoreError> {
@@ -201,6 +225,8 @@ fn default_member_display_name(email: &str, display_name: &str) -> String {
         trimmed.chars().take(200).collect()
     }
 }
+
+const MAX_SAVED_VIEW_NAME_CHARS: usize = 200;
 
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync + 'static {
@@ -296,6 +322,39 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         link_access: WorkspaceLinkAccess,
         link_role: WorkspaceRole,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError>;
+
+    async fn list_saved_views(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<WorkspaceSavedView>, StoreError>;
+
+    async fn get_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError>;
+
+    async fn create_saved_view(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        created_by: &AuthPrincipal,
+        view: SavedView,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError>;
+
+    async fn update_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+        name: Option<&str>,
+        view: Option<SavedView>,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError>;
+
+    async fn delete_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+    ) -> Result<bool, StoreError>;
 }
 
 #[derive(Clone)]
@@ -933,6 +992,179 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         self.sharing_settings(workspace_id).await
     }
+
+    async fn list_saved_views(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<WorkspaceSavedView>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, workspace_id, name, created_by, created_by_name,
+                created_at, updated_at, view_json
+            FROM workspace_saved_views
+            WHERE workspace_id = ?
+            ORDER BY updated_at DESC
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        rows.into_iter().map(row_to_saved_view).collect()
+    }
+
+    async fn get_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id, workspace_id, name, created_by, created_by_name,
+                created_at, updated_at, view_json
+            FROM workspace_saved_views
+            WHERE workspace_id = ? AND id = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(saved_view_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        row.map(row_to_saved_view).transpose()
+    }
+
+    async fn create_saved_view(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        created_by: &AuthPrincipal,
+        view: SavedView,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError> {
+        if !self.workspace_exists(workspace_id).await? {
+            return Ok(None);
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let now_s = now.to_rfc3339();
+        let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+        let created_by_email = normalize_email(&created_by.email);
+
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        sqlx::query(
+            r#"
+            INSERT INTO workspace_saved_views
+                (id, workspace_id, name, created_by, created_by_name, created_at, updated_at, view_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(workspace_id)
+        .bind(name)
+        .bind(&created_by_email)
+        .bind(&created_by.display_name)
+        .bind(&now_s)
+        .bind(&now_s)
+        .bind(&view_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        touch_workspace(&mut tx, workspace_id, &now_s).await?;
+        tx.commit().await.map_err(map_sql)?;
+
+        Ok(Some(WorkspaceSavedView {
+            id,
+            workspace_id: workspace_id.to_string(),
+            name: name.to_string(),
+            created_by: created_by_email,
+            created_by_name: created_by.display_name.clone(),
+            created_at: now,
+            updated_at: now,
+            view,
+        }))
+    }
+
+    async fn update_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+        name: Option<&str>,
+        view: Option<SavedView>,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError> {
+        if !self.workspace_exists(workspace_id).await? {
+            return Ok(None);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let view_json = view
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(map_saved_view_json_out)?;
+
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE workspace_saved_views
+            SET
+                name = COALESCE(?, name),
+                view_json = COALESCE(?, view_json),
+                updated_at = ?
+            WHERE workspace_id = ? AND id = ?
+            "#,
+        )
+        .bind(name)
+        .bind(view_json)
+        .bind(&now)
+        .bind(workspace_id)
+        .bind(saved_view_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Ok(None);
+        }
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+        self.get_saved_view(workspace_id, saved_view_id).await
+    }
+
+    async fn delete_saved_view(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+    ) -> Result<bool, StoreError> {
+        if !self.workspace_exists(workspace_id).await? {
+            return Ok(false);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let result =
+            sqlx::query("DELETE FROM workspace_saved_views WHERE workspace_id = ? AND id = ?")
+                .bind(workspace_id)
+                .bind(saved_view_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Ok(false);
+        }
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+        Ok(true)
+    }
 }
 
 fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
@@ -980,6 +1212,20 @@ fn row_to_member(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceMember, StoreE
         role: WorkspaceRole::try_from(row.get::<String, _>("role").as_str())?,
         display_name: row.get("display_name"),
         added_at: parse_dt(row.get("added_at"))?,
+    })
+}
+
+fn row_to_saved_view(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSavedView, StoreError> {
+    let view_json: String = row.get("view_json");
+    Ok(WorkspaceSavedView {
+        id: row.get("id"),
+        workspace_id: row.get("workspace_id"),
+        name: row.get("name"),
+        created_by: row.get("created_by"),
+        created_by_name: row.get("created_by_name"),
+        created_at: parse_dt(row.get("created_at"))?,
+        updated_at: parse_dt(row.get("updated_at"))?,
+        view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
     })
 }
 
@@ -1189,6 +1435,91 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)
     }
 
+    pub async fn list_saved_views(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Vec<WorkspaceSavedView>, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        self.store
+            .list_saved_views(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    pub async fn get_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        self.store
+            .get_saved_view(workspace_id, saved_view_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn create_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        name: &str,
+        view: SavedView,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.require_editor(workspace_id, principal).await?;
+        let name = normalize_saved_view_name(name)?;
+        let view = workspace_saved_view_payload(view);
+        self.store
+            .create_saved_view(workspace_id, &name, principal, view)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn update_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+        name: Option<&str>,
+        view: Option<SavedView>,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.require_editor(workspace_id, principal).await?;
+        if name.is_none() && view.is_none() {
+            return Err(WorkspaceError::BadRequest(
+                "saved view patch is empty".to_string(),
+            ));
+        }
+        let name = name.map(normalize_saved_view_name).transpose()?;
+        let view = view.map(workspace_saved_view_payload);
+        self.store
+            .update_saved_view(workspace_id, saved_view_id, name.as_deref(), view)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn delete_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.require_editor(workspace_id, principal).await?;
+        let deleted = self
+            .store
+            .delete_saved_view(workspace_id, saved_view_id)
+            .await
+            .map_err(WorkspaceError::Store)?;
+        if deleted {
+            Ok(())
+        } else {
+            Err(WorkspaceError::NotFound)
+        }
+    }
+
     pub async fn live_workspace(
         &self,
         workspace_id: &str,
@@ -1227,6 +1558,18 @@ impl WorkspaceManager {
             .await
             .insert(workspace_id.to_string(), Arc::clone(&live));
         Ok(live)
+    }
+
+    pub async fn require_viewer(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceRole, WorkspaceError> {
+        self.store
+            .role_for(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::Forbidden)
     }
 
     pub async fn require_editor(
@@ -1347,6 +1690,29 @@ fn normalize_request_email(email: &str) -> Result<String, WorkspaceError> {
     Ok(normalized)
 }
 
+fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkspaceError::BadRequest(
+            "saved view name is empty".to_string(),
+        ));
+    }
+    if trimmed.chars().count() > MAX_SAVED_VIEW_NAME_CHARS {
+        return Err(WorkspaceError::BadRequest(format!(
+            "saved view name exceeds {MAX_SAVED_VIEW_NAME_CHARS} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn workspace_saved_view_payload(mut view: SavedView) -> SavedView {
+    // Workspace saved views refer to datasets by workspace-local ids in
+    // dataset_order/dataset_settings/active_layouts. Source URLs belong
+    // to workspace_datasets and must not be copied into the saved-view row.
+    view.datasets.clear();
+    view
+}
+
 fn ensure_owner_retained(
     settings: &WorkspaceSharingSettings,
     target_email: &str,
@@ -1437,12 +1803,22 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
             get(get_sharing_settings).patch(update_link_access),
         )
         .route(
+            "/api/workspaces/{workspace_id}/saved-views",
+            get(list_workspace_saved_views).post(create_workspace_saved_view),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/saved-views/{saved_view_id}",
+            get(get_workspace_saved_view)
+                .patch(update_workspace_saved_view)
+                .delete(delete_workspace_saved_view),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/members",
-            axum::routing::post(upsert_member),
+            post(upsert_member),
         )
         .route(
             "/api/workspaces/{workspace_id}/members/{email}",
-            axum::routing::patch(update_member_role).delete(remove_member),
+            patch(update_member_role).delete(remove_member),
         )
         .route("/ws/workspaces/{workspace_id}", get(workspace_ws))
         .with_state(WorkspacesState { manager })
@@ -1474,6 +1850,18 @@ pub struct UpdateMemberRoleRequest {
 pub struct UpdateLinkAccessRequest {
     pub link_access: WorkspaceLinkAccess,
     pub link_role: WorkspaceRole,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWorkspaceSavedViewRequest {
+    pub name: String,
+    pub view: SavedView,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceSavedViewRequest {
+    pub name: Option<String>,
+    pub view: Option<SavedView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1595,6 +1983,100 @@ async fn update_link_access(
         .await
     {
         Ok(settings) => (StatusCode::OK, Json(settings)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn list_workspace_saved_views(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state
+        .manager
+        .list_saved_views(&workspace_id, &principal)
+        .await
+    {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn get_workspace_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, saved_view_id)): Path<(String, String)>,
+) -> Response {
+    match state
+        .manager
+        .get_saved_view(&workspace_id, &principal, &saved_view_id)
+        .await
+    {
+        Ok(saved_view) => (StatusCode::OK, Json(saved_view)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn create_workspace_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<CreateWorkspaceSavedViewRequest>,
+) -> Response {
+    match state
+        .manager
+        .create_saved_view(&workspace_id, &principal, &body.name, body.view)
+        .await
+    {
+        Ok(saved_view) => {
+            let location = format!(
+                "/api/workspaces/{}/saved-views/{}",
+                saved_view.workspace_id, saved_view.id
+            );
+            (
+                StatusCode::CREATED,
+                [(LOCATION, location)],
+                Json(saved_view),
+            )
+                .into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn update_workspace_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, saved_view_id)): Path<(String, String)>,
+    Json(body): Json<UpdateWorkspaceSavedViewRequest>,
+) -> Response {
+    match state
+        .manager
+        .update_saved_view(
+            &workspace_id,
+            &principal,
+            &saved_view_id,
+            body.name.as_deref(),
+            body.view,
+        )
+        .await
+    {
+        Ok(saved_view) => (StatusCode::OK, Json(saved_view)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn delete_workspace_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, saved_view_id)): Path<(String, String)>,
+) -> Response {
+    match state
+        .manager
+        .delete_saved_view(&workspace_id, &principal, &saved_view_id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -1902,6 +2384,120 @@ pub mod tests {
             store.role_for(&workspace.id, &other_owner).await.unwrap(),
             Some(WorkspaceRole::Owner)
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_saved_views_are_scoped_and_strip_source_urls() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let a = store.create_workspace(&owner, Some("A")).await.unwrap();
+        let b = store.create_workspace(&owner, Some("B")).await.unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let mut view = SavedView::empty([800, 600]);
+        view.datasets.push("gs://bucket/source-url.zarr".into());
+        view.dataset_order.push(DatasetId("wds_workspace_a".into()));
+
+        let saved = manager
+            .create_saved_view(&a.id, &owner, "  morphology view  ", view)
+            .await
+            .unwrap();
+        assert_eq!(saved.workspace_id, a.id);
+        assert_eq!(saved.name, "morphology view");
+        assert!(saved.view.datasets.is_empty());
+        assert_eq!(
+            saved.view.dataset_order,
+            vec![DatasetId("wds_workspace_a".into())]
+        );
+
+        let listed_a = manager.list_saved_views(&a.id, &owner).await.unwrap();
+        assert_eq!(listed_a.len(), 1);
+        assert_eq!(listed_a[0].id, saved.id);
+        let listed_b = manager.list_saved_views(&b.id, &owner).await.unwrap();
+        assert!(listed_b.is_empty());
+
+        let mut replacement = SavedView::empty([640, 480]);
+        replacement
+            .datasets
+            .push("file:///should-not-store.zarr".into());
+        replacement
+            .dataset_order
+            .push(DatasetId("wds_workspace_a_reordered".into()));
+        let updated = manager
+            .update_saved_view(&a.id, &owner, &saved.id, Some("renamed"), Some(replacement))
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "renamed");
+        assert!(updated.view.datasets.is_empty());
+        assert_eq!(
+            updated.view.dataset_order,
+            vec![DatasetId("wds_workspace_a_reordered".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_saved_view_viewers_can_read_but_not_mutate() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Shared saved views"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let saved = manager
+            .create_saved_view(&workspace.id, &owner, "view", SavedView::empty([800, 600]))
+            .await
+            .unwrap();
+
+        let listed = manager
+            .list_saved_views(&workspace.id, &viewer)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, saved.id);
+        assert_eq!(
+            manager
+                .get_saved_view(&workspace.id, &viewer, &saved.id)
+                .await
+                .unwrap()
+                .id,
+            saved.id
+        );
+
+        let err = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer create",
+                SavedView::empty([800, 600]),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        let err = manager
+            .update_saved_view(&workspace.id, &viewer, &saved.id, Some("nope"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        let err = manager
+            .delete_saved_view(&workspace.id, &viewer, &saved.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
     }
 
     #[tokio::test]

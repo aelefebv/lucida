@@ -1,3 +1,5 @@
+import type { SavedView } from "./savedView/types.ts";
+
 export type WorkspaceRole = "viewer" | "editor" | "owner";
 export type WorkspaceLinkAccess = "restricted" | "anyone_with_link";
 
@@ -35,6 +37,17 @@ export interface WorkspaceSharingSettings {
   link_access: WorkspaceLinkAccess;
   link_role: Exclude<WorkspaceRole, "owner">;
   members: WorkspaceMember[];
+}
+
+export interface WorkspaceSavedView {
+  id: string;
+  workspace_id: string;
+  name: string;
+  created_by: string;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
+  view: SavedView;
 }
 
 async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -155,4 +168,59 @@ export function removeWorkspaceMember(id: string, email: string): Promise<void> 
     `/api/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(email)}`,
     { method: "DELETE" },
   );
+}
+
+function workspaceSavedViewsUrl(workspaceId: string): string {
+  return `/api/workspaces/${encodeURIComponent(workspaceId)}/saved-views`;
+}
+
+function workspaceSavedViewUrl(workspaceId: string, savedViewId: string): string {
+  return `${workspaceSavedViewsUrl(workspaceId)}/${encodeURIComponent(savedViewId)}`;
+}
+
+export function listWorkspaceSavedViews(workspaceId: string): Promise<WorkspaceSavedView[]> {
+  return requestJson<WorkspaceSavedView[]>(workspaceSavedViewsUrl(workspaceId));
+}
+
+export function getWorkspaceSavedView(
+  workspaceId: string,
+  savedViewId: string,
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(
+    workspaceSavedViewUrl(workspaceId, savedViewId),
+  );
+}
+
+export function createWorkspaceSavedView(
+  workspaceId: string,
+  name: string,
+  view: SavedView,
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(workspaceSavedViewsUrl(workspaceId), {
+    method: "POST",
+    body: JSON.stringify({ name, view }),
+  });
+}
+
+export function updateWorkspaceSavedView(
+  workspaceId: string,
+  savedViewId: string,
+  patch: { name?: string; view?: SavedView },
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(
+    workspaceSavedViewUrl(workspaceId, savedViewId),
+    {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    },
+  );
+}
+
+export function deleteWorkspaceSavedView(
+  workspaceId: string,
+  savedViewId: string,
+): Promise<void> {
+  return requestNoContent(workspaceSavedViewUrl(workspaceId, savedViewId), {
+    method: "DELETE",
+  });
 }
