@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::LOCATION;
 use axum::response::{IntoResponse, Json, Response};
@@ -30,6 +30,7 @@ use sqlx::{Row, Sqlite, SqlitePool};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
+use crate::auth::AdminRequired;
 use crate::handler;
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
@@ -172,6 +173,29 @@ pub struct WorkspaceUserState {
     pub pinned_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceAdminSummary {
+    pub id: String,
+    pub name: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub seq: u64,
+    pub dataset_count: i64,
+    pub member_count: i64,
+    pub owner_count: i64,
+    pub link_access: WorkspaceLinkAccess,
+    pub link_role: WorkspaceRole,
+    pub default_saved_view_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceAdminDetails {
+    pub workspace: WorkspaceAdminSummary,
+    pub members: Vec<WorkspaceMember>,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("storage backend error: {0}")]
@@ -258,6 +282,18 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         principal: &AuthPrincipal,
     ) -> Result<Vec<WorkspaceSummary>, StoreError>;
 
+    async fn admin_search_workspaces(
+        &self,
+        query: Option<&str>,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceAdminSummary>, StoreError>;
+
+    async fn admin_workspace_details(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceAdminDetails>, StoreError>;
+
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError>;
 
     async fn role_for(
@@ -338,6 +374,13 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         email: &str,
         display_name: &str,
         role: WorkspaceRole,
+    ) -> Result<Option<WorkspaceMember>, StoreError>;
+
+    async fn admin_upsert_owner(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
     ) -> Result<Option<WorkspaceMember>, StoreError>;
 
     async fn update_member_role(
@@ -708,6 +751,108 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         };
 
         rows.into_iter().map(row_to_summary).collect()
+    }
+
+    async fn admin_search_workspaces(
+        &self,
+        query: Option<&str>,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceAdminSummary>, StoreError> {
+        let limit = limit.clamp(1, 100) as i64;
+        let trimmed_query = query.map(str::trim).filter(|q| !q.is_empty());
+
+        let mut builder = sqlx::QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT
+                w.id, w.name, w.created_by, w.created_at, w.updated_at,
+                w.archived_at, w.seq, w.default_saved_view_id,
+                w.link_access, w.link_role,
+                COUNT(DISTINCT wd.id) AS dataset_count,
+                COUNT(DISTINCT wm.email) AS member_count,
+                COUNT(DISTINCT CASE WHEN wm.role = 'owner' THEN wm.email END) AS owner_count
+            FROM workspaces w
+            LEFT JOIN workspace_members wm ON wm.workspace_id = w.id
+            LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
+            WHERE 1 = 1
+            "#,
+        );
+
+        if !include_archived {
+            builder.push(" AND w.archived_at IS NULL");
+        }
+
+        if let Some(query) = trimmed_query {
+            let like = format!("%{}%", query.to_ascii_lowercase());
+            builder
+                .push(" AND (LOWER(w.id) LIKE ")
+                .push_bind(like.clone())
+                .push(" OR LOWER(w.name) LIKE ")
+                .push_bind(like.clone())
+                .push(" OR LOWER(w.created_by) LIKE ")
+                .push_bind(like.clone())
+                .push(
+                    r#" OR EXISTS (
+                        SELECT 1
+                        FROM workspace_members wm_search
+                        WHERE wm_search.workspace_id = w.id
+                            AND LOWER(wm_search.email) LIKE
+                    "#,
+                )
+                .push_bind(like)
+                .push("))");
+        }
+
+        builder.push(
+            r#"
+            GROUP BY w.id
+            ORDER BY
+                CASE WHEN w.archived_at IS NULL THEN 0 ELSE 1 END,
+                w.updated_at DESC
+            LIMIT
+            "#,
+        );
+        builder.push_bind(limit);
+
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        rows.into_iter().map(row_to_admin_summary).collect()
+    }
+
+    async fn admin_workspace_details(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceAdminDetails>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                w.id, w.name, w.created_by, w.created_at, w.updated_at,
+                w.archived_at, w.seq, w.default_saved_view_id,
+                w.link_access, w.link_role,
+                COUNT(DISTINCT wd.id) AS dataset_count,
+                COUNT(DISTINCT wm.email) AS member_count,
+                COUNT(DISTINCT CASE WHEN wm.role = 'owner' THEN wm.email END) AS owner_count
+            FROM workspaces w
+            LEFT JOIN workspace_members wm ON wm.workspace_id = w.id
+            LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
+            WHERE w.id = ?
+            GROUP BY w.id
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let workspace = row_to_admin_summary(row)?;
+        let members = self.list_members(workspace_id).await?;
+        Ok(Some(WorkspaceAdminDetails { workspace, members }))
     }
 
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
@@ -1160,6 +1305,49 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         self.member(workspace_id, &email).await
     }
 
+    async fn admin_upsert_owner(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+    ) -> Result<Option<WorkspaceMember>, StoreError> {
+        let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM workspaces WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+
+        let email = normalize_email(email);
+        let display_name = default_member_display_name(&email, display_name);
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        sqlx::query(
+            r#"
+            INSERT INTO workspace_members
+                (workspace_id, email, role, display_name, added_at)
+            VALUES (?, ?, 'owner', ?, ?)
+            ON CONFLICT(workspace_id, email) DO UPDATE SET
+                role = 'owner',
+                display_name = excluded.display_name
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&email)
+        .bind(display_name)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+
+        self.member(workspace_id, &email).await
+    }
+
     async fn update_member_role(
         &self,
         workspace_id: &str,
@@ -1576,6 +1764,25 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, Stor
     })
 }
 
+fn row_to_admin_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceAdminSummary, StoreError> {
+    let seq: i64 = row.get("seq");
+    Ok(WorkspaceAdminSummary {
+        id: row.get("id"),
+        name: row.get("name"),
+        created_by: row.get("created_by"),
+        created_at: parse_dt(row.get("created_at"))?,
+        updated_at: parse_dt(row.get("updated_at"))?,
+        archived_at: parse_opt_dt(row.get("archived_at"))?,
+        seq: seq.max(0) as u64,
+        dataset_count: row.get("dataset_count"),
+        member_count: row.get("member_count"),
+        owner_count: row.get("owner_count"),
+        link_access: WorkspaceLinkAccess::try_from(row.get::<String, _>("link_access").as_str())?,
+        link_role: WorkspaceRole::try_from(row.get::<String, _>("link_role").as_str())?,
+        default_saved_view_id: row.get("default_saved_view_id"),
+    })
+}
+
 fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceRecord, StoreError> {
     let seq: i64 = row.get("seq");
     let document_json: String = row.get("document_json");
@@ -1693,6 +1900,29 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
+    pub async fn admin_search_workspaces(
+        &self,
+        query: Option<&str>,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceAdminSummary>, WorkspaceError> {
+        self.store
+            .admin_search_workspaces(query, include_archived, limit)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    pub async fn admin_workspace_details(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceAdminDetails, WorkspaceError> {
+        self.store
+            .admin_workspace_details(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
     pub async fn create_workspace(
         &self,
         principal: &AuthPrincipal,
@@ -1796,6 +2026,31 @@ impl WorkspaceManager {
         Ok((record, role))
     }
 
+    pub async fn admin_archive_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceAdminDetails, WorkspaceError> {
+        self.store
+            .archive_workspace(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        self.notify_workspace_archived(workspace_id).await;
+        self.admin_workspace_details(workspace_id).await
+    }
+
+    pub async fn admin_restore_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceAdminDetails, WorkspaceError> {
+        self.store
+            .restore_workspace(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        self.admin_workspace_details(workspace_id).await
+    }
+
     pub async fn sharing_settings(
         &self,
         workspace_id: &str,
@@ -1823,6 +2078,20 @@ impl WorkspaceManager {
         ensure_owner_retained(&settings, &email, Some(role))?;
         self.store
             .upsert_member(workspace_id, &email, display_name.unwrap_or(""), role)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn admin_upsert_owner(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: Option<&str>,
+    ) -> Result<WorkspaceMember, WorkspaceError> {
+        let email = normalize_request_email(email)?;
+        self.store
+            .admin_upsert_owner(workspace_id, &email, display_name.unwrap_or(""))
             .await
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::NotFound)
@@ -2303,6 +2572,20 @@ pub struct WorkspacesState {
 
 pub fn router(manager: Arc<WorkspaceManager>) -> Router {
     Router::new()
+        .route("/admin/workspaces", get(admin_search_workspaces))
+        .route("/admin/workspaces/{workspace_id}", get(admin_get_workspace))
+        .route(
+            "/admin/workspaces/{workspace_id}/archive",
+            post(admin_archive_workspace),
+        )
+        .route(
+            "/admin/workspaces/{workspace_id}/restore",
+            post(admin_restore_workspace),
+        )
+        .route(
+            "/admin/workspaces/{workspace_id}/owners",
+            post(admin_upsert_owner),
+        )
         .route(
             "/api/workspaces",
             get(list_workspaces).post(create_workspace),
@@ -2406,6 +2689,33 @@ pub struct UpdateWorkspacePinRequest {
     pub pinned: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct AdminWorkspaceSearchQuery {
+    pub q: Option<String>,
+    pub include_archived: Option<bool>,
+    pub limit: Option<usize>,
+}
+
+impl AdminWorkspaceSearchQuery {
+    fn query(&self) -> Option<&str> {
+        self.q.as_deref().map(str::trim).filter(|q| !q.is_empty())
+    }
+
+    fn include_archived(&self) -> bool {
+        self.include_archived.unwrap_or(false)
+    }
+
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(25).clamp(1, 100)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminUpsertOwnerRequest {
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WorkspaceResponse {
     pub id: String,
@@ -2444,6 +2754,70 @@ impl WorkspaceResponse {
             last_opened_at: user_state.as_ref().and_then(|state| state.last_opened_at),
             pinned_at: user_state.as_ref().and_then(|state| state.pinned_at),
         }
+    }
+}
+
+async fn admin_search_workspaces(
+    _admin: AdminRequired,
+    State(state): State<WorkspacesState>,
+    Query(query): Query<AdminWorkspaceSearchQuery>,
+) -> Response {
+    match state
+        .manager
+        .admin_search_workspaces(query.query(), query.include_archived(), query.limit())
+        .await
+    {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn admin_get_workspace(
+    _admin: AdminRequired,
+    State(state): State<WorkspacesState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state.manager.admin_workspace_details(&workspace_id).await {
+        Ok(details) => (StatusCode::OK, Json(details)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn admin_archive_workspace(
+    _admin: AdminRequired,
+    State(state): State<WorkspacesState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state.manager.admin_archive_workspace(&workspace_id).await {
+        Ok(details) => (StatusCode::OK, Json(details)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn admin_restore_workspace(
+    _admin: AdminRequired,
+    State(state): State<WorkspacesState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state.manager.admin_restore_workspace(&workspace_id).await {
+        Ok(details) => (StatusCode::OK, Json(details)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn admin_upsert_owner(
+    _admin: AdminRequired,
+    State(state): State<WorkspacesState>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<AdminUpsertOwnerRequest>,
+) -> Response {
+    match state
+        .manager
+        .admin_upsert_owner(&workspace_id, &body.email, body.display_name.as_deref())
+        .await
+    {
+        Ok(member) => (StatusCode::OK, Json(member)).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -2822,7 +3196,10 @@ async fn workspace_ws(
 
 #[cfg(test)]
 pub mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use tower::ServiceExt;
 
     use super::*;
 
@@ -2850,6 +3227,28 @@ pub mod tests {
         SqliteWorkspaceStore::new(pool)
     }
 
+    fn workspace_router_with_principal(
+        manager: Arc<WorkspaceManager>,
+        principal: AuthPrincipal,
+    ) -> Router {
+        let principal = Arc::new(principal);
+        router(manager).layer(axum::middleware::from_fn(
+            move |mut req: Request<Body>, next: axum::middleware::Next| {
+                let principal = Arc::clone(&principal);
+                async move {
+                    req.extensions_mut()
+                        .insert(AuthPrincipal::clone(&*principal));
+                    next.run(req).await
+                }
+            },
+        ))
+    }
+
+    async fn response_json(res: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     #[tokio::test]
     async fn create_lists_owner_workspace() {
         let store = fresh_store().await;
@@ -2872,6 +3271,216 @@ pub mod tests {
             ProxyConfig::defaults(),
         ));
         let _router = router(manager);
+    }
+
+    #[tokio::test]
+    async fn admin_support_routes_require_admin_even_for_workspace_owner() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Support deny"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store),
+            ProxyConfig::defaults(),
+        ));
+        let app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
+
+        let requests = [
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/workspaces")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/admin/workspaces/{}", workspace.id))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/admin/workspaces/{}/archive", workspace.id))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/admin/workspaces/{}/restore", workspace.id))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/admin/workspaces/{}/owners", workspace.id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"email":"owner@example.com"}"#))
+                .unwrap(),
+        ];
+
+        for req in requests {
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_support_route_returns_details_without_membership() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let admin = principal("admin@example.com", true);
+        let workspace = store
+            .create_workspace(&owner, Some("Support details"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store),
+            ProxyConfig::defaults(),
+        ));
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                Some("Editor User"),
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        let app = workspace_router_with_principal(Arc::clone(&manager), admin);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/admin/workspaces/{}", workspace.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = response_json(res).await;
+        assert_eq!(body["workspace"]["id"], workspace.id);
+        assert_eq!(body["workspace"]["member_count"], 2);
+        assert_eq!(body["workspace"]["owner_count"], 1);
+        assert_eq!(body["members"][0]["email"], "owner@example.com");
+        assert_eq!(body["members"][1]["email"], "editor@example.com");
+    }
+
+    #[tokio::test]
+    async fn admin_support_search_and_lifecycle_override_without_membership() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Support lifecycle"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        let mut rx = live.tx.subscribe();
+
+        let rows = manager
+            .admin_search_workspaces(Some("editor@example.com"), false, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, workspace.id);
+        assert_eq!(rows[0].member_count, 2);
+        assert_eq!(rows[0].owner_count, 1);
+
+        let archived = manager
+            .admin_archive_workspace(&workspace.id)
+            .await
+            .unwrap();
+        assert!(archived.workspace.archived_at.is_some());
+        assert!(!manager.live.lock().await.contains_key(&workspace.id));
+        let item = rx.recv().await.unwrap();
+        assert!(matches!(item, BroadcastItem::WorkspaceArchived { .. }));
+        assert!(store.list_workspaces(&owner).await.unwrap().is_empty());
+
+        assert!(
+            manager
+                .admin_search_workspaces(Some("support lifecycle"), false, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let archived_rows = manager
+            .admin_search_workspaces(Some("support lifecycle"), true, 10)
+            .await
+            .unwrap();
+        assert_eq!(archived_rows.len(), 1);
+        assert!(archived_rows[0].archived_at.is_some());
+
+        let restored = manager
+            .admin_restore_workspace(&workspace.id)
+            .await
+            .unwrap();
+        assert!(restored.workspace.archived_at.is_none());
+        assert_eq!(store.list_workspaces(&owner).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_can_recover_orphaned_workspace_owner() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let recovered = principal("Recovered@Example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Orphaned"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        assert!(
+            store
+                .remove_member(&workspace.id, &owner.email)
+                .await
+                .unwrap()
+        );
+        let details = manager
+            .admin_workspace_details(&workspace.id)
+            .await
+            .unwrap();
+        assert_eq!(details.workspace.owner_count, 0);
+        let err = manager
+            .get_workspace_for(&workspace.id, &owner)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        let member = manager
+            .admin_upsert_owner(&workspace.id, &recovered.email, Some("Recovered Owner"))
+            .await
+            .unwrap();
+        assert_eq!(member.email, "recovered@example.com");
+        assert_eq!(member.role, WorkspaceRole::Owner);
+        assert_eq!(
+            store.role_for(&workspace.id, &recovered).await.unwrap(),
+            Some(WorkspaceRole::Owner)
+        );
+
+        let err = manager
+            .update_member_role(
+                &workspace.id,
+                &recovered,
+                &recovered.email,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
     }
 
     #[tokio::test]

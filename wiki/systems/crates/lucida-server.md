@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-26
+modified: 2026-05-29
 ---
 
 # lucida-server
@@ -27,7 +27,7 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - `generated.rs` — generated coarse planning, scheduling, cancellation, materialization, derived-cache recovery, and availability broadcasts
 - `proxy/` — legacy server-side proxy infrastructure: `ProxyCache` (per-dataset on-disk cache), `ProxyGenerator` (bounded-concurrency, in-flight dedup), `ServerProxySource` (adapter from `CachedStore` to `lucida-proxy`'s sync trait)
 - `auth/` — Google OAuth + session cookies + admin allowlist + cleanup sweep + audit logging. See [[auth]] for the deep-dive.
-- `workspace.rs` — workspace records, membership/link sharing, archive/restore lifecycle, authorization, lazy live-session restore, workspace-scoped document persistence, and REST/WebSocket routes under `/api/workspaces/*` and `/ws/workspaces/:id`.
+- `workspace.rs` — workspace records, membership/link sharing, archive/restore lifecycle, authorization, lazy live-session restore, workspace-scoped document persistence, explicit workspace admin support routes under `/admin/workspaces/*`, and REST/WebSocket routes under `/api/workspaces/*` and `/ws/workspaces/:id`.
 - `browse.rs` / `admin.rs` — HTTP routes for filesystem browsing and admin operations (e.g. clear proxy cache). `browse_handler`'s `path` query param is optional per [[decisions/0042-canonical-dataset-url-form]]: when absent, the response is a platform-default root — drives list (`c:`, `d:`, ...) on Windows via an A-Z `tokio::fs::metadata` scan, `/` listing on Unix. Returned `path` field is always in canonical-display form (`\\?\` and `\\?\UNC\` prefixes stripped, drive letter lowercased, forward-slashified). `data_dir` security constraint still enforced via segment-aware `starts_with` on canonicalized PathBufs.
 - `migrations/` — versioned SQL migrations applied at startup (sqlx). Persistent state grew with [[auth]] (`login_sessions`, `pending_auth`), [[saved-views]] (`bookmarks` + `bookmark_datasets`), and workspaces (`workspaces`, `workspace_members`, `workspace_dataset_sources`, `workspace_datasets`, `workspace_saved_views`, `user_workspace_state`).
 - `bookmarks/` — server side of [[saved-views]]: `store.rs` (deep, `BookmarkStore` trait + SQLite + memory impls), `handlers.rs` (REST `/api/bookmarks/*` gated by `AuthPrincipal`), `broadcast.rs` (best-effort `BookmarkChanged` dispatch scoped by overlapping loaded datasets).
@@ -39,6 +39,15 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - **Outputs to clients**: `ServerMessage` (snapshot, broadcasts, peer events, `DatasetOpened`, `OpenDatasetFailed`, `GeneratedAvailabilityUpdate`, `GeneratedChunkStatus`, legacy `AssetCatalogUpdate`), binary chunk frames (`[client_id u32 LE][key_len u16 LE][key][bytes]`), and legacy binary proxy frames (same envelope + 64-byte `lucida_proxy::ProxyHeader` + voxels).
 - **Auth gate**: every non-`/auth/*` route runs through middleware that extracts an `AuthPrincipal` from the `lucida_session` cookie. Public routes (`/auth/start`, `/auth/callback`, `/auth/error`, `/auth/dev/login` in dev) live in a separate router half. See [[auth]].
 - **Dependencies**: [[lucida-core]] for the Scene/document model, [[lucida-content]] for `DatasetManifest`, [[lucida-protocol]] for wire types, [[lucida-store]] for storage backends and import, [[lucida-proxy]] only for the legacy proxy bridge. `object_store` for cloud abstraction. `axum`, `tokio`, `tokio-tungstenite` for the network stack. `sqlx` (sqlite), `jsonwebtoken`, `reqwest` for auth.
+
+## Workspace Admin Support
+
+The v0 support surface is intentionally API-only and explicit. Lucida admins use `/admin/workspaces` routes rather than a broad admin dashboard:
+
+- `GET /admin/workspaces?q=<text>&include_archived=true&limit=25` searches by workspace id/name, creator email, or member email and returns limited metadata, member count, owner count, dataset count, link settings, and archive state.
+- `GET /admin/workspaces/:id` returns the same metadata plus ordered member summaries without adding the admin as a workspace member.
+- `POST /admin/workspaces/:id/archive` and `POST /admin/workspaces/:id/restore` use the normal archive/restore storage path; archive also broadcasts `workspace_archived` and drops the live workspace.
+- `POST /admin/workspaces/:id/owners` with `{"email":"user@example.com","display_name":"User"}` adds or promotes an owner, including for archived or orphaned workspaces. It never removes or demotes owners, so the normal last-owner invariant remains intact.
 
 ## Invariants
 
