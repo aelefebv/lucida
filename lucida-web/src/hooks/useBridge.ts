@@ -15,7 +15,6 @@ import { derivedBuildersFor } from "../pipeline/layoutBuilders.ts";
 import { Session } from "../session.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
-import type { VolumeData } from "../types.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
 /** Callback ref the SavedView applier registers into so it sees the
@@ -27,6 +26,7 @@ export interface SavedViewBridgeHooks {
 }
 
 interface Params {
+  workspaceId: string;
   wasmReady: boolean;
   wasmSceneRef: React.RefObject<WasmScene | null>;
   setWasmScene: React.Dispatch<React.SetStateAction<WasmScene | null>>;
@@ -48,12 +48,12 @@ interface Params {
   setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
   // Lifted state (from App)
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
-  setVolumeMap: React.Dispatch<React.SetStateAction<Map<string, VolumeData>>>;
   bumpDatasetsVersion: () => void;
   bumpRemoteDocumentVersion: () => void;
 }
 
 export function useBridge({
+  workspaceId,
   wasmReady,
   wasmSceneRef,
   setWasmScene,
@@ -68,7 +68,6 @@ export function useBridge({
   setT,
   setViewMode,
   setSelectedDatasetId,
-  setVolumeMap,
   savedViewHooksRef,
   bumpDatasetsVersion,
   bumpRemoteDocumentVersion,
@@ -479,7 +478,7 @@ export function useBridge({
         contentSource.rejectAll();
       },
     };
-    const bridge = new Bridge(handlers);
+    const bridge = new Bridge(handlers, undefined, workspaceId);
     sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
     // Publish the bridge as React state so consumer hooks
     // (useBookmarks subscribes to `bookmark_changed`) can take a
@@ -577,19 +576,6 @@ export function useBridge({
     }
     const t5 = performance.now();
 
-    const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
-    let hasCoarsestBuffer = false;
-    if (coarsestLevel) {
-      const [, , depth, height, width] = coarsestLevel.shape;
-      setVolumeMap(prev => {
-        const next = new Map(prev);
-        next.set(datasetId, { data: new Uint16Array(width * height * depth), width, height, depth });
-        return next;
-      });
-      hasCoarsestBuffer = true;
-    }
-    const t6 = performance.now();
-
     if (datasetsRef.current.size === 1) {
       setSelectedDatasetId(datasetId);
     }
@@ -600,15 +586,13 @@ export function useBridge({
       datasetId,
       registeredImages,
       channelCount,
-      hasCoarsestBuffer,
-      totalMs: +(t6 - t0).toFixed(1),
+      totalMs: +(t5 - t0).toFixed(1),
       stepsMs: {
         registerImages: +(t1 - t0).toFixed(2),
         datasetsRefSet: +(t2 - t1).toFixed(2),
         initLayerMaps: +(t3 - t2).toFixed(2),
         setChannelVisible: +(t4 - t3).toFixed(2),
         addDataset: +(t5 - t4).toFixed(2),
-        preallocBuffer: +(t6 - t5).toFixed(2),
       },
     });
   }

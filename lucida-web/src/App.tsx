@@ -17,7 +17,6 @@ import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
 import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
-import type { VolumeData } from "./types.ts";
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -27,11 +26,24 @@ import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
-import { usePreUpload } from "./hooks/usePreUpload.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import "./App.css";
 
-function App() {
+interface AppProps {
+  workspaceId: string;
+  workspaceName: string;
+  canRenameWorkspace: boolean;
+  onBackToDashboard: () => void;
+  onRenameWorkspace: (name: string) => Promise<void>;
+}
+
+function App({
+  workspaceId,
+  workspaceName,
+  canRenameWorkspace,
+  onBackToDashboard,
+  onRenameWorkspace,
+}: AppProps) {
   // Authenticated principal — provided by <AuthGate> above us; throws if
   // accessed unauthenticated. We forward the email to the BookmarkSidebar
   // for the "Mine only" filter (and to bookmark creation telemetry).
@@ -48,10 +60,16 @@ function App() {
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
-  const [volumeMap, setVolumeMap] = useState<Map<string, VolumeData>>(new Map());
   const [cameraMode, setCameraMode] = useState<string>("arcball");
+  const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
+    source: workspaceName,
+    value: workspaceName,
+  });
   const bumpDatasetsVersion = useCallback(() => setDatasetsVersion(v => v + 1), []);
   const bumpRemoteDocumentVersion = useCallback(() => setRemoteDocumentVersion(v => v + 1), []);
+  const workspaceNameDraft = workspaceNameEdit.source === workspaceName
+    ? workspaceNameEdit.value
+    : workspaceName;
 
   // Callback refs to break circular dependencies.
   // Populated after all hooks return but before effects run on first render.
@@ -96,6 +114,7 @@ function App() {
   });
 
   const bridge = useBridge({
+    workspaceId,
     wasmReady: scene.wasmReady,
     wasmSceneRef: scene.wasmSceneRef,
     setWasmScene: scene.setWasmScene,
@@ -111,7 +130,6 @@ function App() {
     setT: dims.setT,
     setViewMode: dims.setViewMode,
     setSelectedDatasetId,
-    setVolumeMap,
     bumpDatasetsVersion,
     bumpRemoteDocumentVersion,
   });
@@ -185,7 +203,7 @@ function App() {
   // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
   // changeTick alone doesn't bump on viewport-only mutations like
   // pan/zoom/T/C/Z/contrast). Used here AND threaded into SliceViewer /
-  // VolumeViewer / PlateSelector / handleCameraModeToggle / usePreUpload
+  // VolumeViewer / PlateSelector / handleCameraModeToggle
   // — anywhere a viewport mutation already calls bridge.emitPresence.
   const emitPresenceWithUrl = useCallback(() => {
     bridge.emitPresence();
@@ -218,7 +236,6 @@ function App() {
         }
         return prev;
       });
-      setVolumeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
       bridge.sessionRef.current?.contentSource.rejectDataset(id);
       bumpDatasetsVersion();
     },
@@ -265,16 +282,6 @@ function App() {
     sessionRef: bridge.sessionRef,
     datasetsRef,
     setDataRangeMap: layers.setDataRangeMap,
-  });
-
-  usePreUpload({
-    volumeMap,
-    clientReady: render.clientReady,
-    clientRef: render.clientRef,
-    datasetsRef,
-    loopRef: render.loopRef,
-    wasmSceneRef: scene.wasmSceneRef,
-    emitPresence: emitPresenceWithUrl,
   });
 
   const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);
@@ -422,6 +429,17 @@ function App() {
     datasets.handleUrlSubmit(path);
   }, [datasets]);
 
+  const commitWorkspaceName = useCallback(() => {
+    const next = workspaceNameDraft.trim();
+    if (!next || next === workspaceName) {
+      setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
+      return;
+    }
+    void onRenameWorkspace(next).catch(() => {
+      setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
+    });
+  }, [workspaceNameDraft, workspaceName, onRenameWorkspace]);
+
   // The JSX block below reads `.current` from refs returned by useRenderClient,
   // useWasmScene, useBridge, useLayout, etc. — passing them as props to
   // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays /
@@ -477,6 +495,39 @@ function App() {
       />
       <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
       <div className="main-content">
+        <div className="workspace-chrome">
+          <button className="workspace-back-button" onClick={onBackToDashboard}>
+            Workspaces
+          </button>
+          {canRenameWorkspace ? (
+            <input
+              className="workspace-name-input"
+              value={workspaceNameDraft}
+              onChange={(e) => setWorkspaceNameEdit({
+                source: workspaceName,
+                value: e.target.value,
+              })}
+              onBlur={commitWorkspaceName}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.currentTarget.blur();
+                }
+                if (e.key === "Escape") {
+                  setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
+                  e.currentTarget.blur();
+                }
+              }}
+              aria-label="Workspace name"
+            />
+          ) : (
+            <div className="workspace-name-label" title={workspaceName}>
+              {workspaceName}
+            </div>
+          )}
+          <div className="workspace-id-label" title={workspaceId}>
+            {workspaceId}
+          </div>
+        </div>
         {bridge.peers.size > 0 && (
           <div className="peer-list" style={{ fontSize: "0.85em", margin: "8px 0" }}>
             <strong>Peers ({bridge.peers.size}):</strong>

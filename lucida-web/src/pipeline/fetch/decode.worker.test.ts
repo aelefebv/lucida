@@ -92,9 +92,15 @@ describe("normalize", () => {
     expect(out).toBe(src);
   });
 
+  it("float32: normalizes unit-range samples to u16", () => {
+    const src = new Float32Array([-1, 0, 0.5, 1, 2, Number.NaN]).buffer;
+    const out = new Uint16Array(normalize(src, "float32"));
+    expect(Array.from(out)).toEqual([0, 0, 32768, 65535, 65535, 0]);
+  });
+
   it("default (unrecognized dataType): returns input unchanged", () => {
     const src = new Uint8Array([1, 2, 3]).buffer;
-    const out = normalize(src, "float32");
+    const out = normalize(src, "float64");
     expect(out).toBe(src);
   });
 });

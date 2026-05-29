@@ -112,7 +112,7 @@ export class Bridge {
    *  callbacks through React props. */
   private bookmarkChangedListeners: BookmarkChangedListener[] = [];
 
-  constructor(handlers: BridgeHandlers, urlOverride?: string) {
+  constructor(handlers: BridgeHandlers, urlOverride?: string, workspaceId?: string) {
     // Same-origin WebSocket so the lucida_session cookie is sent on
     // the upgrade handshake (browsers refuse cross-origin cookies on
     // WS upgrades with SameSite=Lax). Vite dev server proxies `/ws`
@@ -121,7 +121,10 @@ export class Bridge {
       this.url = urlOverride;
     } else {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      this.url = `${proto}//${window.location.host}/ws`;
+      const path = workspaceId
+        ? `/ws/workspaces/${encodeURIComponent(workspaceId)}`
+        : "/ws";
+      this.url = `${proto}//${window.location.host}${path}`;
     }
     this.handlers = handlers;
     this.connect();

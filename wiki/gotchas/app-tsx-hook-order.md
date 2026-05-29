@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-26
 ---
 
 # App.tsx Hook Order and Callback Refs
@@ -27,7 +27,7 @@ Resolution: define **callback refs at the top**, populated with no-op stubs init
 1. **Foundation hooks** — `useWasmScene`, `useRenderClient`, `useLayout`. These have no inter-dependencies and provide the WASM scene, the GPU worker client, and the layout state.
 2. **Shared refs and lifted state** — `datasetsRef`, `selectedDatasetId`, `cameraMode`, version counters.
 3. **Callback refs** — `bridgeCallbacksRef`, `datasetCallbacksRef` initialized with no-op stubs.
-4. **Domain hooks** — `useDimensions`, `useDatasetSettings`, `useBridge`, `useDatasets`, `useIntensityBatcher`, `usePreUpload`. Each reads from earlier hooks' returns and from the callback refs.
+4. **Domain hooks** — `useDimensions`, `useDatasetSettings`, `useBridge`, `useDatasets`, `useIntensityBatcher`. Each reads from earlier hooks' returns and from the callback refs.
 5. **Callback ref population** — assign real implementations to the refs (`bridgeCallbacksRef.current = {...}`, etc.).
 6. **Effects and renders** — by the time effects run, the refs have real callbacks.
 

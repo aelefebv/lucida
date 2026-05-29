@@ -327,7 +327,11 @@ export function useDatasetSettings({
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
   const handleRemoveLayer = useCallback((id: string) => {
-    if (!confirm(`Remove layer "${datasetsRef.current.get(id)?.name ?? id}"?`)) return;
+    if (
+      !confirm(
+        `Remove "${datasetsRef.current.get(id)?.name ?? id}" from this workspace? This only removes the workspace layer; it does not delete upstream storage or cached data.`,
+      )
+    ) return;
     const scene = wasmSceneRef.current;
     if (!scene) return;
     applyDocumentCommand(scene, { type: "remove_dataset", id }, bridgeCallbacksRef.current.sendCommand);

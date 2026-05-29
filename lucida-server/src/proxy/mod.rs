@@ -41,5 +41,5 @@ mod server_source;
 
 pub use cache::ProxyCache;
 pub use generator::{GeneratorError, ProxyGenerator};
-pub(crate) use server_source::fetch_dense_volume;
 pub use server_source::{BuildSourceError, ServerProxySource, build_server_proxy_source};
+pub(crate) use server_source::{VolumeRegion, fetch_volume_region};

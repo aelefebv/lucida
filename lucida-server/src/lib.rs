@@ -16,6 +16,7 @@ pub mod health;
 pub mod proxy;
 pub mod session;
 pub mod static_serve;
+pub mod workspace;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
