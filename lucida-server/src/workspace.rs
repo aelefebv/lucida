@@ -182,6 +182,7 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         document: &DocumentState,
     ) -> Result<(), StoreError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_dataset_opened(
         &self,
         workspace_id: &str,
@@ -431,6 +432,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_dataset_opened(
         &self,
         workspace_id: &str,
@@ -798,6 +800,7 @@ impl WorkspaceManager {
         .map_err(WorkspaceError::Store)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn persist_dataset_opened(
         &self,
         live: &LiveWorkspace,

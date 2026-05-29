@@ -305,6 +305,7 @@ pub(crate) async fn fetch_dense_volume(
 /// Fetch a dense spatial subregion from one `(t, c, level)` source volume.
 /// The returned buffer is row-major `[Z, Y, X]` over `region`, normalized to
 /// the generator/proxy u16 working representation.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_volume_region(
     _content: &DatasetManifest,
     image: &ImageSpec,
