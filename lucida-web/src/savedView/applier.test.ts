@@ -253,7 +253,7 @@ describe("SavedViewApplier", () => {
     expect(docCmds.find((c) => c.includes("ds-stale"))).toBeUndefined();
   });
 
-  it("workspace mode applies workspace-local ids without opening source URLs", async () => {
+  it("workspace mode applies workspace-local ids without opening source URLs or document commands", async () => {
     const scene = createMockScene({
       datasetIds: ["wds-a", "wds-extra"],
       availableLayouts: {
@@ -275,10 +275,15 @@ describe("SavedViewApplier", () => {
     v.dataset_order = ["wds-a"];
     v.active_layouts = { "wds-a": "L1" };
 
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await applier.apply(v);
 
     expect(openCalls).toEqual([]);
-    expect(docCmds.find((c) => c.includes('"wds-a"') && c.includes('"set_active_layout"'))).toBeDefined();
+    expect(docCmds.find((c) => c.includes('"wds-a"') && c.includes('"set_active_layout"'))).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("leaving shared layout unchanged"),
+    );
+    warn.mockRestore();
     const hideExtra = scene.calls.find(
       (c) => c.includes('"set_dataset_visible"') && c.includes('"wds-extra"'),
     );
@@ -287,6 +292,46 @@ describe("SavedViewApplier", () => {
       dataset_id: "wds-extra",
       visible: false,
     });
+  });
+
+  it("workspace mode warns and partially applies when a view references missing workspace datasets", async () => {
+    const scene = createMockScene({ datasetIds: ["wds-a"] });
+    const applier = new SavedViewApplier(
+      bridge,
+      () => scene as never,
+      fakeIdForUrl,
+      30_000,
+      "workspace-dataset-id",
+    );
+    const v = emptyView();
+    v.dataset_order = ["wds-a", "wds-missing"];
+    v.dataset_settings = {
+      "wds-a": {
+        visible: true,
+        opacity: 0.5,
+        contrast_min: 1,
+        contrast_max: 2,
+        gamma: 1,
+        blend_mode: "alpha",
+      },
+      "wds-missing": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+      },
+    };
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applier.apply(v);
+
+    expect(openCalls).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("wds-missing"));
+    expect(scene.calls.some((c) => c.includes('"wds-a"') && c.includes('"set_dataset_opacity"'))).toBe(true);
+    expect(scene.calls.some((c) => c.includes('"wds-missing"'))).toBe(false);
+    warn.mockRestore();
   });
 
   it("workspace mode does not hide every loaded dataset for camera-only hashes", async () => {

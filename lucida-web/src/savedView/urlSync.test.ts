@@ -30,11 +30,11 @@ class FakeApplier {
   isInProgress() { return this.inProgress; }
 }
 
-function makeFakeWindow(initialHash = ""): Window {
+function makeFakeWindow(initialHash = "", pathname = "/"): Window {
   const listeners: Record<string, Array<(e: Event) => void>> = {};
   const state: { state: unknown; href: string; hash: string } = {
     state: null,
-    href: `http://localhost/${initialHash}`,
+    href: `http://localhost${pathname}${initialHash}`,
     hash: initialHash,
   };
   return {
@@ -46,7 +46,7 @@ function makeFakeWindow(initialHash = ""): Window {
     },
     location: {
       get hash() { return state.hash; },
-      get pathname() { return "/"; },
+      get pathname() { return pathname; },
       get search() { return ""; },
       get href() { return state.href; },
     },
@@ -207,6 +207,19 @@ describe("UrlSync", () => {
     });
     await sync.flush();
     expect(win.location.hash.startsWith("#view=")).toBe(true);
+    sync.destroy();
+  });
+
+  it("flush preserves the current workspace route while writing #view", async () => {
+    win = makeFakeWindow("", "/w/ws-123");
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    const spy = vi.spyOn(win.history, "replaceState");
+
+    await sync.flush();
+
+    expect(spy).toHaveBeenCalledWith(null, "", expect.stringMatching(/^\/w\/ws-123#view=/));
     sync.destroy();
   });
 
