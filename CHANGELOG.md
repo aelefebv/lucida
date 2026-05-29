@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/aelefebv/lucida/compare/v0.5.1...v0.6.0) (2026-05-29)
+
+
+### Features
+
+* add dev auth user switcher ([8528bc7](https://github.com/aelefebv/lucida/commit/8528bc70adbbba9b13450bbe74e6d5ac1006d967))
+* add workspace isolation tracer bullet ([bbe2d54](https://github.com/aelefebv/lucida/commit/bbe2d5468c6f2dd8059f3f1c9ae12268106fa1f5))
+* add workspace sharing controls ([d882e63](https://github.com/aelefebv/lucida/commit/d882e63e4e3be367936f8095d5f2917e3858006f))
+* cross-platform local dataset paths (Windows + UNC) ([#710](https://github.com/aelefebv/lucida/issues/710)) ([88a75c3](https://github.com/aelefebv/lucida/commit/88a75c3b72001a11265d36f9b53bf0937be868bc))
+* use workspace-local dataset ids ([5a3b384](https://github.com/aelefebv/lucida/commit/5a3b38422116bfdfaaef1b86d82de467508423c9))
+
 ## [0.5.1](https://github.com/aelefebv/lucida/compare/v0.5.0...v0.5.1) (2026-05-21)
 
 
