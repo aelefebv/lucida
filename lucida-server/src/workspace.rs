@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::extract::ws::WebSocketUpgrade;
@@ -1838,6 +1839,8 @@ pub struct LiveWorkspace {
     pub tx: broadcast::Sender<BroadcastItem>,
     pub unicast_routes: UnicastRoutes,
     next_id: AtomicU64,
+    empty_since: Mutex<Option<Instant>>,
+    background_cancelled: AtomicBool,
 }
 
 impl LiveWorkspace {
@@ -1849,11 +1852,36 @@ impl LiveWorkspace {
             tx,
             unicast_routes: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(0),
+            empty_since: Mutex::new(Some(Instant::now())),
+            background_cancelled: AtomicBool::new(false),
         }
     }
 
     pub fn next_client_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn cancel_background(&self) -> bool {
+        !self.background_cancelled.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn background_cancelled(&self) -> bool {
+        self.background_cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceRuntimeConfig {
+    pub idle_ttl: Duration,
+    pub idle_sweep_interval: Duration,
+}
+
+impl Default for WorkspaceRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            idle_ttl: Duration::from_secs(60 * 60),
+            idle_sweep_interval: Duration::from_secs(60),
+        }
     }
 }
 
@@ -1861,14 +1889,24 @@ pub struct WorkspaceManager {
     store: Arc<dyn WorkspaceStore>,
     live: Mutex<HashMap<String, Arc<LiveWorkspace>>>,
     proxy_config: ProxyConfig,
+    runtime_config: WorkspaceRuntimeConfig,
 }
 
 impl WorkspaceManager {
     pub fn new(store: Arc<dyn WorkspaceStore>, proxy_config: ProxyConfig) -> Self {
+        Self::new_with_runtime_config(store, proxy_config, WorkspaceRuntimeConfig::default())
+    }
+
+    pub fn new_with_runtime_config(
+        store: Arc<dyn WorkspaceStore>,
+        proxy_config: ProxyConfig,
+        runtime_config: WorkspaceRuntimeConfig,
+    ) -> Self {
         Self {
             store,
             live: Mutex::new(HashMap::new()),
             proxy_config,
+            runtime_config,
         }
     }
 
@@ -1878,6 +1916,90 @@ impl WorkspaceManager {
 
     pub fn proxy_config(&self) -> ProxyConfig {
         self.proxy_config.clone()
+    }
+
+    pub fn runtime_config(&self) -> WorkspaceRuntimeConfig {
+        self.runtime_config
+    }
+
+    pub fn spawn_idle_eviction_loop(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let interval = manager
+                .runtime_config
+                .idle_sweep_interval
+                .max(Duration::from_secs(1));
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let evicted = manager.evict_idle_workspaces().await;
+                if evicted > 0 {
+                    tracing::info!(evicted, "workspace.live_idle_sweep_evicted");
+                }
+            }
+        })
+    }
+
+    pub async fn live_workspace_count(&self) -> usize {
+        self.live.lock().await.len()
+    }
+
+    pub async fn evict_idle_workspaces(&self) -> usize {
+        let ttl = self.runtime_config.idle_ttl;
+        let candidates: Vec<_> = self.live.lock().await.values().cloned().collect();
+        let mut evicted = 0usize;
+
+        for live in candidates {
+            let client_count = live.session.lock().await.clients.len();
+            if client_count > 0 {
+                *live.empty_since.lock().await = None;
+                tracing::debug!(
+                    workspace_id = %live.workspace_id,
+                    client_count,
+                    "workspace.live_eviction_skipped_active"
+                );
+                continue;
+            }
+
+            let idle_for = {
+                let mut empty_since = live.empty_since.lock().await;
+                let since = empty_since.get_or_insert_with(Instant::now);
+                since.elapsed()
+            };
+            if idle_for < ttl {
+                tracing::debug!(
+                    workspace_id = %live.workspace_id,
+                    idle_for_ms = idle_for.as_millis() as u64,
+                    idle_ttl_ms = ttl.as_millis() as u64,
+                    "workspace.live_eviction_skipped_ttl"
+                );
+                continue;
+            }
+
+            let removed = {
+                let mut live_map = self.live.lock().await;
+                match live_map.get(&live.workspace_id) {
+                    Some(current) if Arc::ptr_eq(current, &live) => {
+                        live_map.remove(&live.workspace_id)
+                    }
+                    _ => None,
+                }
+            };
+
+            let Some(removed) = removed else {
+                continue;
+            };
+            self.shutdown_live_workspace_background(&removed, "idle_eviction")
+                .await;
+            tracing::info!(
+                workspace_id = %removed.workspace_id,
+                idle_for_ms = idle_for.as_millis() as u64,
+                "workspace.live_evicted"
+            );
+            evicted += 1;
+        }
+
+        evicted
     }
 
     pub async fn list_workspaces(
@@ -2285,6 +2407,7 @@ impl WorkspaceManager {
         let (_record, _role) = self.get_workspace_for(workspace_id, principal).await?;
 
         if let Some(live) = self.live.lock().await.get(workspace_id).cloned() {
+            tracing::debug!(workspace_id, "workspace.live_reused");
             return Ok(live);
         }
 
@@ -2303,6 +2426,12 @@ impl WorkspaceManager {
             .list_dataset_sources(workspace_id)
             .await
             .map_err(WorkspaceError::Store)?;
+        tracing::info!(
+            workspace_id,
+            seq = record.seq,
+            dataset_sources = sources.len(),
+            "workspace.live_restore_started"
+        );
         handler::restore_workspace_bindings(
             Arc::clone(&live.session),
             live.tx.clone(),
@@ -2314,6 +2443,7 @@ impl WorkspaceManager {
             .lock()
             .await
             .insert(workspace_id.to_string(), Arc::clone(&live));
+        tracing::info!(workspace_id, "workspace.live_loaded");
         Ok(live)
     }
 
@@ -2388,6 +2518,30 @@ impl WorkspaceManager {
         let _ = live.tx.send(BroadcastItem::WorkspaceArchived {
             json: serde_json::to_string(&msg).unwrap(),
         });
+        self.shutdown_live_workspace_background(&live, "archive")
+            .await;
+        tracing::info!(workspace_id, "workspace.live_archived_cancelled");
+    }
+
+    async fn shutdown_live_workspace_background(&self, live: &LiveWorkspace, reason: &str) {
+        let first_cancel = live.cancel_background();
+        let services: Vec<_> = {
+            let sess = live.session.lock().await;
+            sess.server_bindings
+                .values()
+                .map(|binding| binding.generated_service.clone())
+                .collect()
+        };
+        for service in &services {
+            service.shutdown(reason).await;
+        }
+        tracing::info!(
+            workspace_id = %live.workspace_id,
+            reason,
+            first_cancel,
+            generated_services = services.len(),
+            "workspace.live_background_cancelled"
+        );
     }
 
     pub async fn persist_applied_command(
@@ -3227,6 +3381,13 @@ pub mod tests {
         SqliteWorkspaceStore::new(pool)
     }
 
+    fn idle_eviction_config() -> WorkspaceRuntimeConfig {
+        WorkspaceRuntimeConfig {
+            idle_ttl: Duration::ZERO,
+            idle_sweep_interval: Duration::from_secs(60),
+        }
+    }
+
     fn workspace_router_with_principal(
         manager: Arc<WorkspaceManager>,
         principal: AuthPrincipal,
@@ -3956,6 +4117,7 @@ pub mod tests {
             .await
             .unwrap();
 
+        assert!(live.background_cancelled());
         assert!(!manager.live.lock().await.contains_key(&workspace.id));
         let item = rx.recv().await.unwrap();
         let BroadcastItem::WorkspaceArchived { json } = item else {
@@ -3974,6 +4136,95 @@ pub mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_drops_empty_live_workspace_and_reopen_restores_document() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Idle restore"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+
+        store
+            .persist_document(&workspace.id, 7, &DocumentState::default())
+            .await
+            .unwrap();
+
+        let evicted = manager.evict_idle_workspaces().await;
+        assert_eq!(evicted, 1);
+        assert!(live.background_cancelled());
+        assert_eq!(manager.live_workspace_count().await, 0);
+
+        let reopened = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        assert!(!Arc::ptr_eq(&live, &reopened));
+        assert_eq!(reopened.session.lock().await.seq, 7);
+    }
+
+    #[tokio::test]
+    async fn active_live_workspace_is_not_idle_evicted() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Active"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        live.session.lock().await.add_client(42);
+
+        let evicted = manager.evict_idle_workspaces().await;
+        assert_eq!(evicted, 0);
+        assert!(!live.background_cancelled());
+        assert_eq!(manager.live_workspace_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_preserves_dataset_source_membership_for_reuse() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Reusable source"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+        let workspace_dataset_id = DatasetId("wds-reusable".into());
+
+        manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        store
+            .persist_dataset_opened(
+                &workspace.id,
+                &workspace_dataset_id,
+                "ds_reusable_source",
+                "file:///tmp/reusable.zarr",
+                "reusable.zarr",
+                &owner.email,
+                1,
+                &DocumentState::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manager.evict_idle_workspaces().await, 1);
+        let sources = store.list_dataset_sources(&workspace.id).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].workspace_dataset_id, workspace_dataset_id);
+        assert_eq!(sources[0].dataset_source_id, "ds_reusable_source");
     }
 
     #[tokio::test]

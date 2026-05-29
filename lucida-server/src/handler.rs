@@ -806,6 +806,25 @@ async fn handle_open_remote_dataset(
     let dataset_source_id = dataset_id_for_url(&canonical_url);
 
     if let Some(ctx) = workspace.as_ref()
+        && ctx.live.background_cancelled()
+    {
+        tracing::info!(
+            client_id = %client_id,
+            workspace_id = %ctx.live.workspace_id,
+            url = %canonical_url,
+            "open_remote_dataset.cancelled_workspace_runtime"
+        );
+        send_open_failed(
+            client_id,
+            &canonical_url,
+            "workspace runtime is closed",
+            &unicast_routes,
+        )
+        .await;
+        return;
+    }
+
+    if let Some(ctx) = workspace.as_ref()
         && let Err(e) = ctx
             .manager
             .require_editor(&ctx.live.workspace_id, &ctx.principal)
@@ -941,6 +960,19 @@ async fn handle_open_remote_dataset(
         }
     };
 
+    if let Some(ctx) = workspace.as_ref()
+        && ctx.live.background_cancelled()
+    {
+        tracing::info!(
+            client_id = %client_id,
+            workspace_id = %ctx.live.workspace_id,
+            dataset_id = %dataset_id,
+            dataset_source_id = %dataset_source_id,
+            "open_remote_dataset.cancelled_after_import"
+        );
+        return;
+    }
+
     // Log import result summary.
     let n_entities = result.manifest.entities().len();
     let n_images = result.manifest.images().len();
@@ -1049,6 +1081,7 @@ async fn handle_open_remote_dataset(
     // Clone for the (T=0, C=0) pre-generation task spawned below.
     let prefetch_generator = proxy_generator.clone();
     let prefetch_entries = catalog_entries.clone();
+    let prefetch_live = workspace.as_ref().map(|ctx| ctx.live.clone());
 
     let binding = ServerBinding {
         source_url: canonical_url.clone(),
@@ -1179,6 +1212,16 @@ async fn handle_open_remote_dataset(
         tokio::spawn(async move {
             for availability in prefetch_entries {
                 for kind in availability.kinds {
+                    if prefetch_live
+                        .as_ref()
+                        .is_some_and(|live| live.background_cancelled())
+                    {
+                        tracing::info!(
+                            dataset = %dataset_id_for_log,
+                            "background proxy pre-generation cancelled"
+                        );
+                        return;
+                    }
                     let spec = ProxySpec {
                         entity_id: availability.entity_id.clone(),
                         kind,
