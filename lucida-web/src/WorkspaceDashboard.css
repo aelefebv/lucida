@@ -60,7 +60,7 @@
 
 .workspace-list-row {
   display: grid;
-  grid-template-columns: minmax(10rem, 1fr) minmax(10rem, auto) minmax(12rem, auto);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 1rem;
   width: 100%;
@@ -74,6 +74,52 @@
 
 .workspace-list-row:hover {
   border-color: #646cff;
+}
+
+.workspace-list-row:focus-within {
+  border-color: #9aa0ff;
+}
+
+.workspace-list-open {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) minmax(10rem, auto) minmax(14rem, auto);
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.workspace-list-open:hover,
+.workspace-list-open:focus-visible {
+  outline: none;
+}
+
+.workspace-pin-button {
+  min-width: 4.75rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  background: #2b2b2b;
+  color: inherit;
+  font: inherit;
+}
+
+.workspace-pin-button[aria-pressed="true"] {
+  border-color: #8f9560;
+  background: #3a3a24;
+  color: #f0f3bc;
+}
+
+.workspace-pin-button:hover:not(:disabled) {
+  border-color: #9aa0ff;
+}
+
+.workspace-pin-button:disabled {
+  opacity: 0.6;
 }
 
 .workspace-list-name,
@@ -103,6 +149,15 @@
   .workspace-list-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.25rem;
+  }
+
+  .workspace-list-open {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
+  }
+
+  .workspace-pin-button {
+    justify-self: start;
   }
 
   .workspace-list-updated {
