@@ -4,8 +4,10 @@ import {
   deleteWorkspaceSavedView,
   getWorkspaceSavedView,
   listWorkspaceSavedViews,
+  openWorkspace,
   updateWorkspaceSavedView,
   updateWorkspaceDefaultSavedView,
+  updateWorkspacePin,
 } from "./workspaceApi.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./savedView/types.ts";
 
@@ -132,6 +134,8 @@ describe("workspace saved view API", () => {
       archived_at: null,
       seq: 1,
       default_saved_view_id: "view-1",
+      last_opened_at: null,
+      pinned_at: null,
     });
 
     await updateWorkspaceDefaultSavedView("workspace-1", "view-1");
@@ -153,11 +157,46 @@ describe("workspace saved view API", () => {
       archived_at: null,
       seq: 1,
       default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
     });
 
     await updateWorkspaceDefaultSavedView("workspace-1", null);
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({
       saved_view_id: null,
     });
+  });
+
+  it("POSTs to open a workspace and record recents", async () => {
+    responder = () => jsonResponse(200, {
+      id: "workspace-1",
+      name: "Workspace",
+      role: "viewer",
+      created_by: "alice@example.com",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-05-29T00:00:00Z",
+      archived_at: null,
+      seq: 1,
+      default_saved_view_id: null,
+      last_opened_at: "2026-05-29T01:00:00Z",
+      pinned_at: null,
+    });
+
+    await openWorkspace("workspace-1");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("/api/workspaces/workspace-1");
+  });
+
+  it("PATCHes personal workspace pin state", async () => {
+    responder = () => jsonResponse(200, {
+      workspace_id: "workspace-1",
+      last_opened_at: "2026-05-29T01:00:00Z",
+      pinned_at: "2026-05-29T02:00:00Z",
+    });
+
+    await updateWorkspacePin("workspace-1", true);
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe("/api/workspaces/workspace-1/pin");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ pinned: true });
   });
 });

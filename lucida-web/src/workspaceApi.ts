@@ -14,6 +14,8 @@ export interface WorkspaceSummary {
   seq: number;
   dataset_count: number;
   default_saved_view_id: string | null;
+  last_opened_at: string | null;
+  pinned_at: string | null;
 }
 
 export interface WorkspaceRecord {
@@ -26,6 +28,8 @@ export interface WorkspaceRecord {
   archived_at: string | null;
   seq: number;
   default_saved_view_id: string | null;
+  last_opened_at: string | null;
+  pinned_at: string | null;
 }
 
 export interface WorkspaceMember {
@@ -50,6 +54,12 @@ export interface WorkspaceSavedView {
   created_at: string;
   updated_at: string;
   view: SavedView;
+}
+
+export interface WorkspaceUserState {
+  workspace_id: string;
+  last_opened_at: string | null;
+  pinned_at: string | null;
 }
 
 async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -108,6 +118,12 @@ export function createWorkspace(name?: string): Promise<WorkspaceRecord> {
 
 export function getWorkspace(id: string): Promise<WorkspaceRecord> {
   return requestJson<WorkspaceRecord>(`/api/workspaces/${encodeURIComponent(id)}`);
+}
+
+export function openWorkspace(id: string): Promise<WorkspaceRecord> {
+  return requestJson<WorkspaceRecord>(`/api/workspaces/${encodeURIComponent(id)}`, {
+    method: "POST",
+  });
 }
 
 export function renameWorkspace(id: string, name: string): Promise<WorkspaceRecord> {
@@ -236,6 +252,19 @@ export function updateWorkspaceDefaultSavedView(
     {
       method: "PATCH",
       body: JSON.stringify({ saved_view_id: savedViewId }),
+    },
+  );
+}
+
+export function updateWorkspacePin(
+  workspaceId: string,
+  pinned: boolean,
+): Promise<WorkspaceUserState> {
+  return requestJson<WorkspaceUserState>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/pin`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ pinned }),
     },
   );
 }

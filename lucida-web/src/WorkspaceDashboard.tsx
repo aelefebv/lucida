@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createWorkspace, listWorkspaces, type WorkspaceSummary } from "./workspaceApi.ts";
+import {
+  createWorkspace,
+  listWorkspaces,
+  updateWorkspacePin,
+  type WorkspaceSummary,
+} from "./workspaceApi.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
+import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import "./WorkspaceDashboard.css";
 
 interface Props {
@@ -11,6 +17,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [pinningId, setPinningId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
@@ -33,8 +40,9 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLocaleLowerCase();
-    if (!q) return workspaces;
-    return workspaces.filter((w) => w.name.toLocaleLowerCase().includes(q));
+    const ordered = sortWorkspaceDashboardRows(workspaces);
+    if (!q) return ordered;
+    return ordered.filter((w) => w.name.toLocaleLowerCase().includes(q));
   }, [query, workspaces]);
 
   const handleCreate = useCallback(async () => {
@@ -49,6 +57,31 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
       setCreating(false);
     }
   }, [onOpenWorkspace]);
+
+  const handlePin = useCallback(async (workspace: WorkspaceSummary, pinned: boolean) => {
+    setPinningId(workspace.id);
+    setError(null);
+    try {
+      const state = await updateWorkspacePin(workspace.id, pinned);
+      setWorkspaces((rows) =>
+        sortWorkspaceDashboardRows(
+          rows.map((row) =>
+            row.id === workspace.id
+              ? {
+                ...row,
+                last_opened_at: state.last_opened_at ?? row.last_opened_at,
+                pinned_at: state.pinned_at,
+              }
+              : row
+          ),
+        )
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPinningId(null);
+    }
+  }, []);
 
   return (
     <div className="workspace-dashboard">
@@ -77,20 +110,38 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
         ) : (
           <div className="workspace-list">
             {filtered.map((workspace) => (
-              <button
+              <div
                 key={workspace.id}
                 className="workspace-list-row"
-                onClick={() => onOpenWorkspace(workspace.id)}
               >
-                <span className="workspace-list-name">{workspace.name}</span>
-                <span className="workspace-list-meta">
-                  {workspace.role} | {workspace.dataset_count} dataset
-                  {workspace.dataset_count === 1 ? "" : "s"}
-                </span>
-                <span className="workspace-list-updated">
-                  {new Date(workspace.updated_at).toLocaleString()}
-                </span>
-              </button>
+                <button
+                  className="workspace-list-open"
+                  onClick={() => onOpenWorkspace(workspace.id)}
+                  aria-label={`Open workspace ${workspace.name}`}
+                >
+                  <span className="workspace-list-name">{workspace.name}</span>
+                  <span className="workspace-list-meta">
+                    {workspace.role} | {workspace.dataset_count} dataset
+                    {workspace.dataset_count === 1 ? "" : "s"}
+                  </span>
+                  <span className="workspace-list-updated">
+                    {workspace.last_opened_at
+                      ? `Opened ${new Date(workspace.last_opened_at).toLocaleString()}`
+                      : `Updated ${new Date(workspace.updated_at).toLocaleString()}`}
+                  </span>
+                </button>
+                <button
+                  className="workspace-pin-button"
+                  disabled={pinningId === workspace.id}
+                  aria-pressed={Boolean(workspace.pinned_at)}
+                  aria-label={`${workspace.pinned_at ? "Unpin" : "Pin"} ${workspace.name}`}
+                  onClick={() => {
+                    void handlePin(workspace, !workspace.pinned_at);
+                  }}
+                >
+                  {workspace.pinned_at ? "Unpin" : "Pin"}
+                </button>
+              </div>
             ))}
           </div>
         )}

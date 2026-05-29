@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import App from "./App.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import {
-  getWorkspace,
+  openWorkspace,
   renameWorkspace,
   updateWorkspaceDefaultSavedView,
   type WorkspaceRecord,
@@ -66,7 +66,7 @@ function WorkspaceViewerRoute({ workspaceId, onBackToDashboard }: WorkspaceViewe
 
   useEffect(() => {
     let cancelled = false;
-    void getWorkspace(workspaceId)
+    void openWorkspace(workspaceId)
       .then((record) => {
         if (!cancelled) setWorkspace(record);
       })

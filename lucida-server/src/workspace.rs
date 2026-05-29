@@ -112,6 +112,8 @@ pub struct WorkspaceSummary {
     pub seq: u64,
     pub dataset_count: i64,
     pub default_saved_view_id: Option<String>,
+    pub last_opened_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +162,13 @@ pub struct WorkspaceSavedView {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub view: SavedView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceUserState {
+    pub workspace_id: String,
+    pub last_opened_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Error)]
@@ -363,6 +372,19 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         saved_view_id: Option<&str>,
     ) -> Result<Option<WorkspaceRecord>, StoreError>;
+
+    async fn record_workspace_open(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceUserState, StoreError>;
+
+    async fn set_workspace_pinned(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        pinned: bool,
+    ) -> Result<WorkspaceUserState, StoreError>;
 }
 
 #[derive(Clone)]
@@ -427,6 +449,34 @@ impl SqliteWorkspaceStore {
         .map_err(map_sql)?;
 
         row.map(row_to_member).transpose()
+    }
+
+    async fn get_user_workspace_state(
+        &self,
+        workspace_id: &str,
+        user_email: &str,
+    ) -> Result<WorkspaceUserState, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT workspace_id, last_opened_at, pinned_at
+            FROM user_workspace_state
+            WHERE workspace_id = ? AND user_email = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(user_email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        match row {
+            Some(row) => row_to_user_workspace_state(row),
+            None => Ok(WorkspaceUserState {
+                workspace_id: workspace_id.to_string(),
+                last_opened_at: None,
+                pinned_at: None,
+            }),
+        }
     }
 }
 
@@ -517,40 +567,64 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         principal: &AuthPrincipal,
     ) -> Result<Vec<WorkspaceSummary>, StoreError> {
+        let email = normalize_email(&principal.email);
         let rows = if principal.is_admin {
             sqlx::query(
                 r#"
                 SELECT
                     w.id, w.name, w.created_by, w.created_at, w.updated_at,
                     w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
+                    uws.last_opened_at, uws.pinned_at,
                     COALESCE(COUNT(wd.id), 0) AS dataset_count
                 FROM workspaces w
+                LEFT JOIN user_workspace_state uws
+                    ON uws.workspace_id = w.id AND uws.user_email = ?
                 LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
                 WHERE w.archived_at IS NULL
                 GROUP BY w.id
-                ORDER BY w.updated_at DESC
+                ORDER BY
+                    CASE WHEN uws.pinned_at IS NULL THEN 1 ELSE 0 END,
+                    COALESCE(uws.pinned_at, uws.last_opened_at, w.updated_at) DESC,
+                    w.updated_at DESC
                 "#,
             )
+            .bind(&email)
             .fetch_all(&self.pool)
             .await
             .map_err(map_sql)?
         } else {
-            let email = normalize_email(&principal.email);
             sqlx::query(
                 r#"
                 SELECT
                     w.id, w.name, w.created_by, w.created_at, w.updated_at,
-                    w.archived_at, w.seq, w.default_saved_view_id, wm.role,
+                    w.archived_at, w.seq, w.default_saved_view_id,
+                    COALESCE(wm.role, w.link_role) AS role,
+                    uws.last_opened_at, uws.pinned_at,
                     COALESCE(COUNT(wd.id), 0) AS dataset_count
                 FROM workspaces w
-                INNER JOIN workspace_members wm ON wm.workspace_id = w.id
+                LEFT JOIN workspace_members wm
+                    ON wm.workspace_id = w.id AND wm.email = ?
+                LEFT JOIN user_workspace_state uws
+                    ON uws.workspace_id = w.id AND uws.user_email = ?
                 LEFT JOIN workspace_datasets wd ON wd.workspace_id = w.id
-                WHERE wm.email = ? AND w.archived_at IS NULL
+                WHERE
+                    w.archived_at IS NULL
+                    AND (
+                        wm.email IS NOT NULL
+                        OR (
+                            uws.user_email IS NOT NULL
+                            AND w.link_access = 'anyone_with_link'
+                        )
+                    )
                 GROUP BY w.id
-                ORDER BY w.updated_at DESC
+                ORDER BY
+                    CASE WHEN uws.pinned_at IS NULL THEN 1 ELSE 0 END,
+                    COALESCE(uws.pinned_at, uws.last_opened_at, w.updated_at) DESC,
+                    w.updated_at DESC
                 "#,
             )
-            .bind(email)
+            .bind(&email)
+            .bind(&email)
             .fetch_all(&self.pool)
             .await
             .map_err(map_sql)?
@@ -1214,6 +1288,98 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         }
         self.get_workspace(workspace_id).await
     }
+
+    async fn record_workspace_open(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceUserState, StoreError> {
+        let email = normalize_email(&principal.email);
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO user_workspace_state
+                (user_email, workspace_id, created_at, updated_at, last_opened_at, pinned_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(user_email, workspace_id) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                last_opened_at = excluded.last_opened_at
+            "#,
+        )
+        .bind(&email)
+        .bind(workspace_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        self.get_user_workspace_state(workspace_id, &email).await
+    }
+
+    async fn set_workspace_pinned(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        pinned: bool,
+    ) -> Result<WorkspaceUserState, StoreError> {
+        let email = normalize_email(&principal.email);
+        let now = Utc::now().to_rfc3339();
+        if pinned {
+            sqlx::query(
+                r#"
+                INSERT INTO user_workspace_state
+                    (user_email, workspace_id, created_at, updated_at, last_opened_at, pinned_at)
+                VALUES (?, ?, ?, ?, NULL, ?)
+                ON CONFLICT(user_email, workspace_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    pinned_at = excluded.pinned_at
+                "#,
+            )
+            .bind(&email)
+            .bind(workspace_id)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        } else {
+            let mut tx = self.pool.begin().await.map_err(map_sql)?;
+            sqlx::query(
+                r#"
+                UPDATE user_workspace_state
+                SET pinned_at = NULL, updated_at = ?
+                WHERE user_email = ? AND workspace_id = ?
+                "#,
+            )
+            .bind(&now)
+            .bind(&email)
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+            sqlx::query(
+                r#"
+                DELETE FROM user_workspace_state
+                WHERE
+                    user_email = ?
+                    AND workspace_id = ?
+                    AND pinned_at IS NULL
+                    AND last_opened_at IS NULL
+                "#,
+            )
+            .bind(&email)
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+            tx.commit().await.map_err(map_sql)?;
+        }
+
+        self.get_user_workspace_state(workspace_id, &email).await
+    }
 }
 
 fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
@@ -1238,6 +1404,8 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, Stor
         seq: seq.max(0) as u64,
         dataset_count: row.get("dataset_count"),
         default_saved_view_id: row.get("default_saved_view_id"),
+        last_opened_at: parse_opt_dt(row.get("last_opened_at"))?,
+        pinned_at: parse_opt_dt(row.get("pinned_at"))?,
     })
 }
 
@@ -1277,6 +1445,16 @@ fn row_to_saved_view(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSavedView,
         created_at: parse_dt(row.get("created_at"))?,
         updated_at: parse_dt(row.get("updated_at"))?,
         view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
+    })
+}
+
+fn row_to_user_workspace_state(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<WorkspaceUserState, StoreError> {
+    Ok(WorkspaceUserState {
+        workspace_id: row.get("workspace_id"),
+        last_opened_at: parse_opt_dt(row.get("last_opened_at"))?,
+        pinned_at: parse_opt_dt(row.get("pinned_at"))?,
     })
 }
 
@@ -1370,6 +1548,20 @@ impl WorkspaceManager {
             return Err(WorkspaceError::Archived);
         }
         Ok((record, role))
+    }
+
+    pub async fn open_workspace_for(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<(WorkspaceRecord, WorkspaceRole, WorkspaceUserState), WorkspaceError> {
+        let (record, role) = self.get_workspace_for(workspace_id, principal).await?;
+        let user_state = self
+            .store
+            .record_workspace_open(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?;
+        Ok((record, role, user_state))
     }
 
     pub async fn rename_workspace(
@@ -1591,6 +1783,19 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)?
             .map(|record| (record, role))
             .ok_or(WorkspaceError::NotFound)
+    }
+
+    pub async fn set_workspace_pinned(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        pinned: bool,
+    ) -> Result<WorkspaceUserState, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        self.store
+            .set_workspace_pinned(workspace_id, principal, pinned)
+            .await
+            .map_err(WorkspaceError::Store)
     }
 
     pub async fn live_workspace(
@@ -1869,7 +2074,9 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
         )
         .route(
             "/api/workspaces/{workspace_id}",
-            get(get_workspace).patch(rename_workspace),
+            get(get_workspace)
+                .post(open_workspace)
+                .patch(rename_workspace),
         )
         .route(
             "/api/workspaces/{workspace_id}/sharing",
@@ -1888,6 +2095,10 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/default-saved-view",
             patch(update_workspace_default_saved_view),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pin",
+            patch(update_workspace_pin),
         )
         .route(
             "/api/workspaces/{workspace_id}/members",
@@ -1946,6 +2157,11 @@ pub struct UpdateWorkspaceDefaultSavedViewRequest {
     pub saved_view_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspacePinRequest {
+    pub pinned: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WorkspaceResponse {
     pub id: String,
@@ -1957,10 +2173,20 @@ pub struct WorkspaceResponse {
     pub archived_at: Option<DateTime<Utc>>,
     pub seq: u64,
     pub default_saved_view_id: Option<String>,
+    pub last_opened_at: Option<DateTime<Utc>>,
+    pub pinned_at: Option<DateTime<Utc>>,
 }
 
 impl WorkspaceResponse {
     fn from_record(record: WorkspaceRecord, role: WorkspaceRole) -> Self {
+        Self::from_record_and_user_state(record, role, None)
+    }
+
+    fn from_record_and_user_state(
+        record: WorkspaceRecord,
+        role: WorkspaceRole,
+        user_state: Option<WorkspaceUserState>,
+    ) -> Self {
         Self {
             id: record.id,
             name: record.name,
@@ -1971,6 +2197,8 @@ impl WorkspaceResponse {
             archived_at: record.archived_at,
             seq: record.seq,
             default_saved_view_id: record.default_saved_view_id,
+            last_opened_at: user_state.as_ref().and_then(|state| state.last_opened_at),
+            pinned_at: user_state.as_ref().and_then(|state| state.pinned_at),
         }
     }
 }
@@ -2014,6 +2242,29 @@ async fn get_workspace(
         Ok((record, role)) => (
             StatusCode::OK,
             Json(WorkspaceResponse::from_record(record, role)),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn open_workspace(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state
+        .manager
+        .open_workspace_for(&workspace_id, &principal)
+        .await
+    {
+        Ok((record, role, user_state)) => (
+            StatusCode::OK,
+            Json(WorkspaceResponse::from_record_and_user_state(
+                record,
+                role,
+                Some(user_state),
+            )),
         )
             .into_response(),
         Err(e) => e.into_response(),
@@ -2181,6 +2432,22 @@ async fn update_workspace_default_saved_view(
             Json(WorkspaceResponse::from_record(record, role)),
         )
             .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn update_workspace_pin(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpdateWorkspacePinRequest>,
+) -> Response {
+    match state
+        .manager
+        .set_workspace_pinned(&workspace_id, &principal, body.pinned)
+        .await
+    {
+        Ok(user_state) => (StatusCode::OK, Json(user_state)).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -2440,6 +2707,201 @@ pub mod tests {
             store.role_for(&workspace.id, &other).await.unwrap(),
             Some(WorkspaceRole::Editor)
         );
+    }
+
+    #[tokio::test]
+    async fn link_workspace_enters_recents_only_after_successful_open() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let visitor = principal("visitor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Linked recent"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        assert!(store.list_workspaces(&visitor).await.unwrap().is_empty());
+
+        let (_record, role, state) = manager
+            .open_workspace_for(&workspace.id, &visitor)
+            .await
+            .unwrap();
+        assert_eq!(role, WorkspaceRole::Viewer);
+        assert_eq!(state.workspace_id, workspace.id);
+        assert!(state.last_opened_at.is_some());
+
+        let rows = store.list_workspaces(&visitor).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, workspace.id);
+        assert_eq!(rows[0].role, WorkspaceRole::Viewer);
+        assert!(rows[0].last_opened_at.is_some());
+        assert!(rows[0].pinned_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn link_recents_do_not_make_workspaces_globally_discoverable() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let visitor = principal("visitor@example.com", false);
+        let stranger = principal("stranger@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Private link"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        manager
+            .open_workspace_for(&workspace.id, &visitor)
+            .await
+            .unwrap();
+
+        assert_eq!(store.list_workspaces(&visitor).await.unwrap().len(), 1);
+        assert!(store.list_workspaces(&stranger).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pins_are_personal_and_sort_before_recents() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let teammate = principal("teammate@example.com", false);
+        let first = store.create_workspace(&owner, Some("First")).await.unwrap();
+        let second = store
+            .create_workspace(&owner, Some("Second"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &first.id,
+                &owner,
+                &teammate.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        manager
+            .upsert_member(
+                &second.id,
+                &owner,
+                &teammate.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        manager
+            .open_workspace_for(&second.id, &owner)
+            .await
+            .unwrap();
+        manager.open_workspace_for(&first.id, &owner).await.unwrap();
+        manager
+            .set_workspace_pinned(&second.id, &owner, true)
+            .await
+            .unwrap();
+
+        let owner_rows = store.list_workspaces(&owner).await.unwrap();
+        assert_eq!(owner_rows[0].id, second.id);
+        assert!(owner_rows[0].pinned_at.is_some());
+
+        let teammate_rows = store.list_workspaces(&teammate).await.unwrap();
+        let teammate_second = teammate_rows
+            .iter()
+            .find(|row| row.id == second.id)
+            .expect("teammate can see second workspace");
+        assert!(teammate_second.pinned_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn link_only_recent_disappears_when_link_access_is_disabled() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let visitor = principal("visitor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Disable link"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        manager
+            .open_workspace_for(&workspace.id, &visitor)
+            .await
+            .unwrap();
+        manager
+            .set_workspace_pinned(&workspace.id, &visitor, true)
+            .await
+            .unwrap();
+
+        assert_eq!(store.list_workspaces(&visitor).await.unwrap().len(), 1);
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::Restricted,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        assert!(store.list_workspaces(&visitor).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unpin_without_existing_state_does_not_create_link_recent() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let visitor = principal("visitor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("No accidental recent"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .update_link_access(
+                &workspace.id,
+                &owner,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let state = manager
+            .set_workspace_pinned(&workspace.id, &visitor, false)
+            .await
+            .unwrap();
+        assert!(state.last_opened_at.is_none());
+        assert!(state.pinned_at.is_none());
+        assert!(store.list_workspaces(&visitor).await.unwrap().is_empty());
     }
 
     #[tokio::test]
