@@ -109,6 +109,10 @@ export function listWorkspaces(): Promise<WorkspaceSummary[]> {
   return requestJson<WorkspaceSummary[]>("/api/workspaces");
 }
 
+export function listArchivedWorkspaces(): Promise<WorkspaceSummary[]> {
+  return requestJson<WorkspaceSummary[]>("/api/workspaces/archived");
+}
+
 export function createWorkspace(name?: string): Promise<WorkspaceRecord> {
   return requestJson<WorkspaceRecord>("/api/workspaces", {
     method: "POST",
@@ -131,6 +135,20 @@ export function renameWorkspace(id: string, name: string): Promise<WorkspaceReco
     method: "PATCH",
     body: JSON.stringify({ name }),
   });
+}
+
+export function archiveWorkspace(id: string): Promise<WorkspaceRecord> {
+  return requestJson<WorkspaceRecord>(
+    `/api/workspaces/${encodeURIComponent(id)}/archive`,
+    { method: "POST" },
+  );
+}
+
+export function restoreWorkspace(id: string): Promise<WorkspaceRecord> {
+  return requestJson<WorkspaceRecord>(
+    `/api/workspaces/${encodeURIComponent(id)}/restore`,
+    { method: "POST" },
+  );
 }
 
 export function getWorkspaceSharing(id: string): Promise<WorkspaceSharingSettings> {

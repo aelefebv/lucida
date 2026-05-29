@@ -5,8 +5,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import {
+  archiveWorkspace,
   createWorkspace,
+  listArchivedWorkspaces,
   listWorkspaces,
+  restoreWorkspace,
   updateWorkspacePin,
   type WorkspaceSummary,
 } from "./workspaceApi.ts";
@@ -16,13 +19,19 @@ vi.mock("./auth/ProfileMenu.tsx", () => ({
 }));
 
 vi.mock("./workspaceApi.ts", () => ({
+  archiveWorkspace: vi.fn(),
   createWorkspace: vi.fn(),
+  listArchivedWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
+  restoreWorkspace: vi.fn(),
   updateWorkspacePin: vi.fn(),
 }));
 
+const archiveWorkspaceMock = vi.mocked(archiveWorkspace);
+const listArchivedWorkspacesMock = vi.mocked(listArchivedWorkspaces);
 const listWorkspacesMock = vi.mocked(listWorkspaces);
 const createWorkspaceMock = vi.mocked(createWorkspace);
+const restoreWorkspaceMock = vi.mocked(restoreWorkspace);
 const updateWorkspacePinMock = vi.mocked(updateWorkspacePin);
 
 function workspace(overrides: Partial<WorkspaceSummary>): WorkspaceSummary {
@@ -52,7 +61,7 @@ function openWorkspaceLabels(): string[] {
 
 afterEach(() => {
   cleanup();
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe("WorkspaceDashboard", () => {
@@ -140,6 +149,74 @@ describe("WorkspaceDashboard", () => {
 
     await waitFor(() => {
       expect(onOpenWorkspace).toHaveBeenCalledWith("created");
+    });
+  });
+
+  it("archives owner workspaces from the active dashboard", async () => {
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "alpha", name: "Alpha", role: "owner" }),
+    ]);
+    archiveWorkspaceMock.mockResolvedValue({
+      id: "alpha",
+      name: "Alpha",
+      role: "owner",
+      created_by: "owner@example.com",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-05-29T01:00:00Z",
+      archived_at: "2026-05-29T01:00:00Z",
+      seq: 1,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+
+    render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
+    await screen.findByRole("button", { name: "Archive Alpha" });
+    fireEvent.click(screen.getByRole("button", { name: "Archive Alpha" }));
+
+    await waitFor(() => {
+      expect(archiveWorkspaceMock).toHaveBeenCalledWith("alpha");
+      expect(screen.queryByRole("button", { name: "Open workspace Alpha" })).toBeNull();
+    });
+  });
+
+  it("shows archived workspaces and restores them", async () => {
+    listWorkspacesMock.mockResolvedValue([]);
+    listArchivedWorkspacesMock.mockResolvedValue([
+      workspace({
+        id: "archived",
+        name: "Archived",
+        role: "owner",
+        archived_at: "2026-05-29T01:00:00Z",
+      }),
+    ]);
+    restoreWorkspaceMock.mockResolvedValue({
+      id: "archived",
+      name: "Archived",
+      role: "owner",
+      created_by: "owner@example.com",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-05-29T01:00:00Z",
+      archived_at: null,
+      seq: 1,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+
+    render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Archived" }));
+
+    await waitFor(() => {
+      expect(listArchivedWorkspacesMock).toHaveBeenCalledTimes(1);
+      expect(openWorkspaceLabels()).toEqual(["Open workspace Archived"]);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore Archived" }));
+
+    await waitFor(() => {
+      expect(restoreWorkspaceMock).toHaveBeenCalledWith("archived");
+      expect(screen.queryByRole("button", { name: "Open workspace Archived" })).toBeNull();
     });
   });
 });

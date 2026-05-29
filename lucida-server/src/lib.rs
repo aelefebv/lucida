@@ -51,6 +51,8 @@ pub enum BroadcastItem {
     DatasetPresenceUpdate { sender: ClientId, json: String },
     /// Server-authored generated level metadata/readiness update.
     GeneratedAvailabilityUpdate { json: String },
+    /// Workspace was archived; connected workspace clients should leave.
+    WorkspaceArchived { json: String },
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).

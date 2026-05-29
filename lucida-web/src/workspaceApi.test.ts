@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  archiveWorkspace,
   createWorkspaceSavedView,
   deleteWorkspaceSavedView,
   getWorkspaceSavedView,
+  listArchivedWorkspaces,
   listWorkspaceSavedViews,
   openWorkspace,
+  restoreWorkspace,
   updateWorkspaceSavedView,
   updateWorkspaceDefaultSavedView,
   updateWorkspacePin,
@@ -198,5 +201,35 @@ describe("workspace saved view API", () => {
     expect(calls[0].method).toBe("PATCH");
     expect(calls[0].url).toBe("/api/workspaces/workspace-1/pin");
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({ pinned: true });
+  });
+
+  it("lists archived workspaces under the archived route", async () => {
+    await listArchivedWorkspaces();
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("/api/workspaces/archived");
+  });
+
+  it("POSTs archive and restore lifecycle actions", async () => {
+    responder = () => jsonResponse(200, {
+      id: "workspace-1",
+      name: "Workspace",
+      role: "owner",
+      created_by: "alice@example.com",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-05-29T00:00:00Z",
+      archived_at: "2026-05-29T03:00:00Z",
+      seq: 1,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+
+    await archiveWorkspace("workspace-1");
+    await restoreWorkspace("workspace-1");
+
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("/api/workspaces/workspace-1/archive");
+    expect(calls[1].method).toBe("POST");
+    expect(calls[1].url).toBe("/api/workspaces/workspace-1/restore");
   });
 });

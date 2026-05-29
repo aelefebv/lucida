@@ -50,6 +50,7 @@ interface Params {
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
   bumpDatasetsVersion: () => void;
   bumpRemoteDocumentVersion: () => void;
+  onWorkspaceArchived?: () => void;
 }
 
 export function useBridge({
@@ -71,6 +72,7 @@ export function useBridge({
   savedViewHooksRef,
   bumpDatasetsVersion,
   bumpRemoteDocumentVersion,
+  onWorkspaceArchived,
 }: Params) {
   const sessionRef = useRef<Session | null>(null);
   /** Mirrors `sessionRef.current?.bridge` as React state so consumers
@@ -472,6 +474,11 @@ export function useBridge({
           status,
           message,
         );
+      },
+      onWorkspaceArchived: () => {
+        setRemoteDatasetLoading(false);
+        contentSource.rejectAll();
+        onWorkspaceArchived?.();
       },
       onDisconnect: () => {
         setRemoteDatasetLoading(false);
