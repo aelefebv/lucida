@@ -8,7 +8,7 @@
 // out, or their session expired in the open tab). Cold-start unauth
 // is handled server-side before React boots.
 //
-// The resolved principal and the `signOut` action are published via
+// The resolved principal plus auth actions are published via
 // `AuthSessionContext` so the authed-subtree (ProfileMenu, future
 // consumers) can read them without prop-drilling.
 
@@ -22,7 +22,7 @@ interface AuthGateProps {
 }
 
 export function AuthGate({ children }: AuthGateProps) {
-  const { state, signOut } = useAuthState();
+  const { state, refresh, signOut } = useAuthState();
 
   if ("status" in state && state.status === "loading") {
     return <AuthLoading />;
@@ -38,7 +38,7 @@ export function AuthGate({ children }: AuthGateProps) {
   }
 
   return (
-    <AuthSessionContext.Provider value={{ principal: state.principal, signOut }}>
+    <AuthSessionContext.Provider value={{ principal: state.principal, refresh, signOut }}>
       {children}
     </AuthSessionContext.Provider>
   );

@@ -15,7 +15,7 @@ Two viable OAuth shapes for a SPA + backend application were considered. Backend
 
 The trait `PrincipalExtractor::extract(req) -> Result<AuthPrincipal, AuthError>` is the single boundary auth-using code consumes. Three implementations live in `auth/principal.rs`:
 
-- `StubPrincipalExtractor` — disabled-mode default. Ignores every header (cookie included) and unconditionally yields `dev@local` / `Local Dev` / `is_admin: true`. Bypasses the cookie/session/sweep machinery entirely: no DB hit, no idle-timeout enforcement, no `LUCIDA_ADMIN_EMAILS` lookup — admin is always true in disabled mode. Wired in by `build_extractor` when `AuthMode::Disabled` per [[decisions/0018-auth-mode-auto-detect-by-bind-address]].
+- `StubPrincipalExtractor` — disabled-mode default. Yields `dev@local` / `Local Dev` / `is_admin: true` unless the browser has a `lucida_dev_principal` cookie from `/auth/dev/login`. This lets separate browser profiles impersonate different non-admin dev users for local role testing without OAuth. Bypasses the session/sweep machinery entirely: no DB hit, no idle-timeout enforcement, no `LUCIDA_ADMIN_EMAILS` lookup. Wired in by `build_extractor` when `AuthMode::Disabled` per [[decisions/0018-auth-mode-auto-detect-by-bind-address]].
 - `SessionCookieExtractor` — production cookie path. Reads the cookie, looks up the session row, enforces idle/hard timeouts, recomputes `is_admin` from `LUCIDA_ADMIN_EMAILS`, fires off a fire-and-forget `last_used_at` bump.
 - `GoogleJwtPrincipalExtractor` — Bearer-JWT validator, wired but not the default request-time extractor. Reserved for future CLI/server-to-server flows; the OAuth callback uses it transitively via `principal_or_rejection_from_claims`.
 
@@ -70,6 +70,7 @@ All auth boundaries emit `tracing` events at `dot.scope` event names per [[decis
 - **`X-Forwarded-Proto` is not trusted** for `Secure` cookie auto-detection. Operators behind TLS-terminating proxies must set `LUCIDA_COOKIE_SECURE=always`. Documented inline in `auth/cookie.rs`.
 - **Cross-origin cookie wrinkle in dev**: lucida-server (`:9876`) and Vite (`:5173`) run on different origins; SameSite=Lax cookies aren't sent on cross-origin XHR/fetch even with `credentials: include`. The Vite proxy in `lucida-web/vite.config.ts` forwards `/auth`, `/api`, `/admin`, `/ws` to the backend so the browser sees one origin. Visit `:5173`, never `:9876` directly.
 - **Pre-auth `dev@local` bookmarks** created during PRD #454's design phase carry `created_by: "dev@local"`. Migration policy at the auth-cutover for production is recorded in [[queue]].
+- **Disabled-auth multi-user testing is cookie-scoped.** In local disabled mode, the profile menu's "Dev user" form calls `/auth/dev/login` and sets a browser-specific `lucida_dev_principal` cookie. Use a separate browser profile or incognito window for each fake user. Leave "Admin override" unchecked when testing workspace viewer/editor behavior; admin users bypass normal workspace membership.
 - **Ghostty/macOS bash 3.2 quirk**: `wait -n` doesn't exist; the `lucida-dev` script polls in a loop instead. Doesn't affect the auth subsystem itself but bites anyone scripting around it.
 
 ## Related

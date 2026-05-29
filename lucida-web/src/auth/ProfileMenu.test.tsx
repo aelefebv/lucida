@@ -17,18 +17,41 @@ const PRINCIPAL: AuthPrincipal = {
   is_admin: true,
 };
 
-let session: { principal: AuthPrincipal; signOut: () => Promise<void> } = {
+let session: {
+  principal: AuthPrincipal;
+  refresh: () => Promise<void>;
+  signOut: () => Promise<void>;
+} = {
   principal: PRINCIPAL,
+  refresh: async () => {},
   signOut: async () => {},
 };
+
+const fetchDevAuthStatus = vi.fn(async () => ({
+  enabled: false,
+  default_principal: PRINCIPAL,
+}));
+const postDevLogin = vi.fn(async (_body: unknown) => PRINCIPAL);
 
 vi.mock("./AuthSession.ts", () => ({
   useAuthSession: () => session,
 }));
 
+vi.mock("./whoami.ts", () => ({
+  fetchDevAuthStatus: () => fetchDevAuthStatus(),
+  postDevLogin: (body: unknown) => postDevLogin(body),
+}));
+
 afterEach(() => {
   cleanup();
-  session = { principal: PRINCIPAL, signOut: async () => {} };
+  session = { principal: PRINCIPAL, refresh: async () => {}, signOut: async () => {} };
+  fetchDevAuthStatus.mockClear();
+  fetchDevAuthStatus.mockResolvedValue({
+    enabled: false,
+    default_principal: PRINCIPAL,
+  });
+  postDevLogin.mockClear();
+  postDevLogin.mockResolvedValue(PRINCIPAL);
 });
 
 describe("ProfileMenu", () => {
@@ -52,7 +75,7 @@ describe("ProfileMenu", () => {
 
   it("calls signOut when Sign out is clicked", async () => {
     const signOut = vi.fn(async () => {});
-    session = { principal: PRINCIPAL, signOut };
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
     render(<ProfileMenu />);
 
     fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
@@ -71,7 +94,7 @@ describe("ProfileMenu", () => {
           resolveSignOut = resolve;
         }),
     );
-    session = { principal: PRINCIPAL, signOut };
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
     render(<ProfileMenu />);
 
     fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
@@ -90,11 +113,43 @@ describe("ProfileMenu", () => {
   it("renders an <img> avatar when picture_url is set", () => {
     session = {
       principal: { ...PRINCIPAL, picture_url: "https://example.com/me.png" },
+      refresh: async () => {},
       signOut: async () => {},
     };
     const { container } = render(<ProfileMenu />);
     const img = container.querySelector("img");
     expect(img).toBeTruthy();
     expect(img?.getAttribute("src")).toBe("https://example.com/me.png");
+  });
+
+  it("switches the local dev user when dev auth is enabled", async () => {
+    fetchDevAuthStatus.mockResolvedValueOnce({
+      enabled: true,
+      default_principal: PRINCIPAL,
+    });
+    const refresh = vi.fn(async () => {});
+    session = { principal: PRINCIPAL, refresh, signOut: async () => {} };
+
+    await act(async () => {
+      render(<ProfileMenu />);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    fireEvent.change(screen.getByLabelText(/dev user email/i), {
+      target: { value: "viewer@example.com" },
+    });
+    fireEvent.change(screen.getByLabelText(/dev display name/i), {
+      target: { value: "Viewer" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /switch dev user/i }));
+    });
+
+    expect(postDevLogin).toHaveBeenCalledWith({
+      email: "viewer@example.com",
+      display_name: "Viewer",
+      is_admin: false,
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

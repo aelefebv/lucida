@@ -7,6 +7,8 @@
 //!   credentials).
 //! - `cookie` — cookie reading + Set-Cookie building. One source of
 //!   truth for the `lucida_session` cookie's attribute set.
+//! - `dev` — disabled-auth identity switch cookie for local multi-user
+//!   testing. Not used by Google/production auth.
 //! - `session_store` — `LoginSessionStore` trait + the row type.
 //! - `session_store_sqlite` — production `SqliteSessionStore` backed by
 //!   `sqlx`. Runs migrations from `migrations/` on open.
@@ -44,6 +46,7 @@ mod audit_event_tests;
 pub mod cleanup;
 pub mod config;
 pub mod cookie;
+pub mod dev;
 pub mod error_page;
 pub mod extractors;
 pub mod google_oauth;

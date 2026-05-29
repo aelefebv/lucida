@@ -15,6 +15,8 @@ import type { AuthPrincipal } from "./types.ts";
  */
 export interface AuthSession {
   principal: AuthPrincipal;
+  /** Re-run /auth/whoami and publish the latest principal. */
+  refresh: () => Promise<void>;
   signOut: () => Promise<void>;
 }
 
