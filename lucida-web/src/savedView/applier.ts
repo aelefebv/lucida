@@ -3,14 +3,17 @@
 // Apply flow at the recipient:
 //
 //   1. Parse + validate (the encoder did this; we accept a parsed SavedView)
-//   2. Diff datasets — compute DatasetId for each URL via blake3 (delegated
-//      to the WASM `dataset_id_for_url`); open any that aren't loaded.
-//   3. Open missing via bridge.sendOpenRemoteDataset(url).
+//   2. Diff datasets. Source-url mode computes DatasetId for each URL
+//      via blake3 and opens missing datasets. Workspace-dataset-id mode
+//      treats ids as already-loaded workspace members and never opens
+//      hidden source URLs.
+//   3. In source-url mode, open missing via bridge.sendOpenRemoteDataset(url).
 //   4. Wait for DatasetOpened to come back via CommandBroadcast.
 //   5. For currently-loaded datasets NOT in the link, send
 //      SetDatasetVisible(false) — a ViewportCommand (recipient-only).
-//   6. Apply SetActiveLayout for any dataset where the link's layout
-//      differs from the live scene (DocumentCommand).
+//   6. In source-url mode, apply SetActiveLayout for any dataset where
+//      the link's layout differs from the live scene (DocumentCommand).
+//      Workspace inline views do not mutate shared active layout.
 //   7. SetDatasetOrder, then per-dataset SetDatasetVisible/Opacity/contrast/
 //      gamma/blend/render mode/per-channel colormap+contrast+gamma.
 //   8. SetContrast / SetGamma / SetMultiChannel.
@@ -120,6 +123,14 @@ function workspaceDatasetIdsForView(view: SavedView): string[] {
   for (const id of Object.keys(view.auto_contrast ?? {})) add(id);
 
   return out;
+}
+
+function warnWorkspaceMissingDatasets(loadedIds: Set<string>, requestedIds: Set<string>): void {
+  const missing = Array.from(requestedIds).filter((id) => !loadedIds.has(id));
+  if (missing.length === 0) return;
+  console.warn(
+    `[SavedViewApplier] workspace view references ${missing.length} missing dataset(s): ${missing.join(", ")}`,
+  );
 }
 
 export class SavedViewApplier {
@@ -276,6 +287,9 @@ export class SavedViewApplier {
         JSON.parse(sceneAfter.dataset_ids()) as string[],
       );
       const requestedSet = new Set(requestedIds.map((r) => r.id));
+      if (this.datasetReferenceMode === "workspace-dataset-id") {
+        warnWorkspaceMissingDatasets(loadedAfter, requestedSet);
+      }
 
       // Step 5: hide datasets that are loaded but not in the link
       // (recipient-only, ViewportCommand).
@@ -308,6 +322,12 @@ export class SavedViewApplier {
           continue;
         }
         if (currentActive !== layoutId) {
+          if (this.datasetReferenceMode === "workspace-dataset-id") {
+            console.warn(
+              `[SavedViewApplier] workspace inline view expects layout ${JSON.stringify(layoutId)} for dataset ${id}, but active layout is ${JSON.stringify(currentActive)}; leaving shared layout unchanged`,
+            );
+            continue;
+          }
           this.applyDocument({
             type: "set_active_layout",
             dataset_id: id,
