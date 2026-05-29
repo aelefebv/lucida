@@ -253,6 +253,57 @@ describe("SavedViewApplier", () => {
     expect(docCmds.find((c) => c.includes("ds-stale"))).toBeUndefined();
   });
 
+  it("workspace mode applies workspace-local ids without opening source URLs", async () => {
+    const scene = createMockScene({
+      datasetIds: ["wds-a", "wds-extra"],
+      availableLayouts: {
+        "wds-a": [
+          { id: "L0", name: "default", active: true },
+          { id: "L1", name: "alt" },
+        ],
+      },
+    });
+    const applier = new SavedViewApplier(
+      bridge,
+      () => scene as never,
+      fakeIdForUrl,
+      30_000,
+      "workspace-dataset-id",
+    );
+    const v = emptyView();
+    v.datasets = [];
+    v.dataset_order = ["wds-a"];
+    v.active_layouts = { "wds-a": "L1" };
+
+    await applier.apply(v);
+
+    expect(openCalls).toEqual([]);
+    expect(docCmds.find((c) => c.includes('"wds-a"') && c.includes('"set_active_layout"'))).toBeDefined();
+    const hideExtra = scene.calls.find(
+      (c) => c.includes('"set_dataset_visible"') && c.includes('"wds-extra"'),
+    );
+    expect(JSON.parse(hideExtra!)).toMatchObject({
+      type: "set_dataset_visible",
+      dataset_id: "wds-extra",
+      visible: false,
+    });
+  });
+
+  it("workspace mode does not hide every loaded dataset for camera-only hashes", async () => {
+    const scene = createMockScene({ datasetIds: ["wds-a"] });
+    const applier = new SavedViewApplier(
+      bridge,
+      () => scene as never,
+      fakeIdForUrl,
+      30_000,
+      "workspace-dataset-id",
+    );
+
+    await applier.apply(emptyView());
+
+    expect(scene.calls.find((c) => c.includes('"set_dataset_visible"'))).toBeUndefined();
+  });
+
   it("applies explicit dataset detail level override", async () => {
     const scene = createMockScene({ datasetIds: ["ds-a"] });
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);

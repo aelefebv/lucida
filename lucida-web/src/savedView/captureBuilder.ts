@@ -15,6 +15,7 @@ import type {
   DatasetId,
   DatasetDisplaySettings,
   DisplayState,
+  DatasetReferenceMode,
   LayoutId,
   SavedView,
   ViewState,
@@ -22,8 +23,8 @@ import type {
 import { SAVED_VIEW_VERSION } from "./types.ts";
 
 /**
- * Maps a `DatasetId` (server's `ds-{blake3-prefix}`) back to the URL it
- * was opened from. Populated whenever the local client calls
+ * Maps a source-derived global `DatasetId` (`ds-{blake3-prefix}`) back
+ * to the URL it was opened from. Populated whenever the local client calls
  * `sendOpenRemoteDataset(url)` and persists across the session — peers'
  * `DatasetOpened` broadcasts re-fill it through `dataset_id_for_url`.
  *
@@ -39,6 +40,11 @@ export interface CaptureInputs {
   scene: WasmScene;
   /** URL→DatasetId map maintained alongside dataset opens. */
   urlByDatasetId: UrlByDatasetId;
+  /** Global saved views identify datasets by source URL. Workspace
+   *  inline views identify already-loaded datasets by workspace-local
+   *  DatasetId and intentionally leave `datasets` empty so source URLs
+   *  do not enter copied links. */
+  datasetReferenceMode?: DatasetReferenceMode;
   /** Per-dataset auto-contrast flag, sourced from
    *  `useDatasetSettings.autoContrastMap`. Optional — omitted when no
    *  per-dataset preference has been set. */
@@ -52,7 +58,12 @@ export interface CaptureInputs {
  * them to a recipient. (See [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]
  * for the local-file warning that the share button surfaces.)
  */
-export function buildCapture({ scene, urlByDatasetId, autoContrastByDatasetId }: CaptureInputs): SavedView {
+export function buildCapture({
+  scene,
+  urlByDatasetId,
+  datasetReferenceMode = "source-url",
+  autoContrastByDatasetId,
+}: CaptureInputs): SavedView {
   const presence = JSON.parse(scene.export_presence()) as {
     camera: Camera;
     view: ViewState;
@@ -80,18 +91,23 @@ export function buildCapture({ scene, urlByDatasetId, autoContrastByDatasetId }:
     }
   }
 
-  // Datasets list: ordered to match `dataset_order` so the recipient
-  // opens them in the same order; URLs we don't know are skipped.
+  // Datasets list: in global mode, ordered source URLs tell the
+  // recipient what to open. In workspace mode, membership is owned by
+  // the workspace document already, so the view only carries
+  // workspace-local dataset IDs in `dataset_order`/settings/layouts and
+  // leaves source URLs out of the copied hash.
   const orderedUrls: string[] = [];
-  for (const dsId of datasetPresence.dataset_order) {
-    const url = urlByDatasetId.get(dsId);
-    if (url !== undefined) orderedUrls.push(url);
-  }
-  // Pick up any datasets not in the order list (defensive — should be rare).
-  for (const dsId of datasetIds) {
-    if (datasetPresence.dataset_order.includes(dsId)) continue;
-    const url = urlByDatasetId.get(dsId);
-    if (url !== undefined) orderedUrls.push(url);
+  if (datasetReferenceMode === "source-url") {
+    for (const dsId of datasetPresence.dataset_order) {
+      const url = urlByDatasetId.get(dsId);
+      if (url !== undefined) orderedUrls.push(url);
+    }
+    // Pick up any datasets not in the order list (defensive — should be rare).
+    for (const dsId of datasetIds) {
+      if (datasetPresence.dataset_order.includes(dsId)) continue;
+      const url = urlByDatasetId.get(dsId);
+      if (url !== undefined) orderedUrls.push(url);
+    }
   }
 
   // auto-contrast: capture the per-dataset preference for every dataset

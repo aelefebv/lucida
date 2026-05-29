@@ -167,6 +167,7 @@ function App({
     setViewMode: dims.setViewMode,
     autoContrastMapRef: layers.autoContrastMapRef,
     setAutoContrastMap: layers.setAutoContrastMap,
+    datasetReferenceMode: "workspace-dataset-id",
   });
 
   // The three callback-ref population sites below (savedViewHooksRef,

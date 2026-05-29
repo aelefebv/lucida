@@ -1,6 +1,7 @@
 // Wires the savedView module suite into the React tree:
-//   - URL→DatasetId tracking (populated on local opens; resolved on
-//     incoming DatasetOpened broadcasts via blake3-prefix derivation).
+//   - URL→DatasetId tracking in source-url mode (populated on local
+//     opens; resolved on incoming DatasetOpened broadcasts via
+//     blake3-prefix derivation).
 //   - SavedViewApplier (recipient apply orchestrator).
 //   - UrlSync (debounced URL writes + bootstrap + popstate).
 //
@@ -15,7 +16,7 @@ import { dataset_id_for_url } from "lucida-core";
 import { SavedViewApplier } from "../savedView/applier.ts";
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
-import type { SavedView } from "../savedView/types.ts";
+import type { DatasetReferenceMode, SavedView } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 
@@ -54,6 +55,7 @@ interface Params {
    *  captured contrast values via the intensity batcher. */
   autoContrastMapRef: React.RefObject<Map<string, boolean>>;
   setAutoContrastMap: React.Dispatch<React.SetStateAction<Map<string, boolean>>>;
+  datasetReferenceMode?: DatasetReferenceMode;
 }
 
 interface SyncBundle {
@@ -76,6 +78,7 @@ export function useSavedViewSync({
   setViewMode,
   autoContrastMapRef,
   setAutoContrastMap,
+  datasetReferenceMode = "source-url",
 }: Params): {
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
@@ -100,6 +103,7 @@ export function useSavedViewSync({
         return buildCapture({
           scene,
           urlByDatasetId,
+          datasetReferenceMode,
           autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
         });
       } catch (e) {
@@ -110,13 +114,17 @@ export function useSavedViewSync({
     const applier = new SavedViewApplier(
       {
         sendOpenRemoteDataset: (url: string) => {
-          urlByDatasetId.set(dataset_id_for_url(url), url);
+          if (datasetReferenceMode === "source-url") {
+            urlByDatasetId.set(dataset_id_for_url(url), url);
+          }
           sendOpenRemoteDataset(url);
         },
         sendCommand,
       },
       getScene,
       dataset_id_for_url,
+      30_000,
+      datasetReferenceMode,
     );
     const urlSync = new UrlSync(captureFn, applier, { debounceMs });
     return { applier, urlSync, urlByDatasetId };
@@ -130,20 +138,23 @@ export function useSavedViewSync({
       return buildCapture({
         scene,
         urlByDatasetId: bundle.urlByDatasetId,
+        datasetReferenceMode,
         autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
       });
     } catch (e) {
       console.warn("[SavedView] capture failed:", e);
       return null;
     }
-  }, [getScene, bundle.urlByDatasetId, autoContrastMapRef]);
+  }, [getScene, bundle.urlByDatasetId, datasetReferenceMode, autoContrastMapRef]);
 
   // Wrap user-facing sendOpenRemoteDataset so URL→DatasetId tracking
   // catches every local open (FileBrowser, URL bar, applier).
   const trackedSendOpen = useCallback((url: string) => {
-    bundle.urlByDatasetId.set(dataset_id_for_url(url), url);
+    if (datasetReferenceMode === "source-url") {
+      bundle.urlByDatasetId.set(dataset_id_for_url(url), url);
+    }
     sendOpenRemoteDataset(url);
-  }, [bundle.urlByDatasetId, sendOpenRemoteDataset]);
+  }, [bundle.urlByDatasetId, datasetReferenceMode, sendOpenRemoteDataset]);
 
   // Mount popstate listener; tear it down on unmount.
   useEffect(() => {
