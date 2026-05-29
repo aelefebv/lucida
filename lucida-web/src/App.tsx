@@ -10,7 +10,7 @@ import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
-import { BookmarkSidebar } from "./components/BookmarkSidebar.tsx";
+import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
@@ -28,11 +28,14 @@ import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
+import type { SavedView } from "./savedView/types.ts";
+import type { WorkspaceRole } from "./workspaceApi.ts";
 import "./App.css";
 
 interface AppProps {
   workspaceId: string;
   workspaceName: string;
+  workspaceRole: WorkspaceRole;
   canRenameWorkspace: boolean;
   onBackToDashboard: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
@@ -41,13 +44,14 @@ interface AppProps {
 function App({
   workspaceId,
   workspaceName,
+  workspaceRole,
   canRenameWorkspace,
   onBackToDashboard,
   onRenameWorkspace,
 }: AppProps) {
   // Authenticated principal — provided by <AuthGate> above us; throws if
-  // accessed unauthenticated. We forward the email to the BookmarkSidebar
-  // for the "Mine only" filter (and to bookmark creation telemetry).
+  // accessed unauthenticated. We forward the email to saved-view UI for
+  // the "Mine only" filter.
   const authSession = useAuthSession();
 
   // Foundation hooks
@@ -388,21 +392,11 @@ function App({
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
+  const canEditWorkspace = workspaceRole !== "viewer";
 
-  // Loaded dataset URLs derived from the live capture builder. The
-  // BookmarkSidebar uses these to filter `GET /api/bookmarks?dataset=…`
-  // — so the user only sees bookmarks that touch the datasets they
-  // currently have open. Recomputed on every dataset/document change
-  // (datasetsVersion + remoteDocumentVersion).
-  const loadedDatasetUrls = useMemo(() => {
-    const view = savedViewSync.captureBuilder();
-    return view ? view.datasets : [];
-    // Both versions force a recompute when datasets change. The
-    // captureBuilder identity is stable across renders.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [savedViewSync.captureBuilder, datasetsVersion, remoteDocumentVersion]);
+  const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
 
-  // Active layout name for the default bookmark name (e.g. "plate · Grid").
+  // Active layout name for the default saved-view name.
   // Falls back to null when no dataset/layout is selected.
   const activeLayoutName = useMemo(() => {
     if (!selectedDatasetId) return null;
@@ -431,6 +425,13 @@ function App({
   const handleFileBrowserSelect = useCallback((path: string) => {
     datasets.handleUrlSubmit(path);
   }, [datasets]);
+
+  const savedViewApplier = savedViewSync.applier;
+  const notifySavedViewChange = savedViewSync.notifyChange;
+  const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView) => {
+    await savedViewApplier.apply(view);
+    notifySavedViewChange();
+  }, [savedViewApplier, notifySavedViewChange]);
 
   const commitWorkspaceName = useCallback(() => {
     const next = workspaceNameDraft.trim();
@@ -732,7 +733,7 @@ function App({
           <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
           <button
             onClick={() => setShowBookmarkSidebar((v) => !v)}
-            title={showBookmarkSidebar ? "Hide bookmarks" : "Show bookmarks"}
+            title={showBookmarkSidebar ? "Hide saved views" : "Show saved views"}
             style={{
               padding: "0.375rem 0.75rem",
               fontSize: "0.875rem",
@@ -741,7 +742,7 @@ function App({
               color: showBookmarkSidebar ? "#fff" : undefined,
             }}
           >
-            Bookmarks
+            Saved Views
           </button>
         </div>
         {showFileBrowser && (
@@ -755,14 +756,16 @@ function App({
           <p style={{ color: "#f44" }}>{render.renderError || bridge.remoteDatasetError}</p>
         )}
       </div>
-      <BookmarkSidebar
-        loadedDatasets={loadedDatasetUrls}
+      <WorkspaceSavedViewsSidebar
+        workspaceId={workspaceId}
         currentUserEmail={authSession.principal.email}
+        canEdit={canEditWorkspace}
         getCurrentSavedView={savedViewSync.captureBuilder}
+        onOpenSavedView={handleOpenWorkspaceSavedView}
+        loadedDatasetNames={loadedDatasetNames}
         activeLayoutName={activeLayoutName}
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
-        bridge={bridge.bridge}
       />
       <WorkspaceSharingDialog
         workspaceId={workspaceId}

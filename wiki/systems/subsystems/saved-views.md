@@ -1,14 +1,15 @@
 ---
 created: 2026-05-08
-modified: 2026-05-26
+modified: 2026-05-29
 ---
 
 # Saved Views
 
-Cross-cutting subsystem spanning [[lucida-core]] (the `SavedView` schema), [[lucida-web]] (encoder, applier, URL sync, sidebar UI), and [[lucida-server]] (SQLite-backed bookmark store, REST API, broadcast). Provides two surfaces over one capture record:
+Cross-cutting subsystem spanning [[lucida-core]] (the `SavedView` schema), [[lucida-web]] (encoder, applier, URL sync, sidebar UI), and [[lucida-server]] (SQLite-backed bookmark/workspace saved-view stores, REST API, broadcast). Provides three surfaces over one capture record:
 
 1. **Live URL** (`#view=…`) — debounced `window.history.replaceState` keeps the URL hash a current snapshot of the view. Sharing = copy URL. Refresh preserves view. No server involvement.
 2. **Named bookmarks** (`#b=<id>`) — server-stored entries with name + creator + timestamp; visible in a sidebar filtered to bookmarks for currently-loaded datasets; live cross-peer updates via `BookmarkChanged` broadcast.
+3. **Workspace saved views** — workspace-scoped named entries under `/api/workspaces/:workspace_id/saved-views`. Editors can create/update/rename/delete; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
 
 ## Why two surfaces, one record
 
@@ -47,6 +48,18 @@ The `subscribeApplyResult` channel on the applier is the seam for UI-state that 
 
 Bookmarks are the second persistent state added to [[lucida-server]] (after auth's `login_sessions` and `pending_auth`). Same SQLite file, same connection pool.
 
+## Server side: workspace saved views
+
+Workspace saved views live in `lucida-server/src/workspace.rs` alongside workspace authorization and dataset membership. The `workspace_saved_views` table stores `view_json` plus name/creator timestamps, keyed by `workspace_id`; there is no dataset URL side table because source identity belongs to `workspace_datasets`.
+
+All routes are workspace-scoped:
+
+- `GET /api/workspaces/:workspace_id/saved-views`
+- `POST /api/workspaces/:workspace_id/saved-views`
+- `GET/PATCH/DELETE /api/workspaces/:workspace_id/saved-views/:saved_view_id`
+
+The manager enforces viewer-or-better for list/get and editor-or-better for create/update/delete. On create/update, the server clears `SavedView.datasets` before persistence; workspace saved views are expected to key `dataset_order`, `dataset_settings`, `active_layouts`, and `auto_contrast` by `workspace_dataset_id`.
+
 ## `BookmarkChanged` is unsequenced
 
 `ServerMessage::BookmarkChanged { id, action, dataset_urls }` (in `lucida-core/src/protocol.rs`) is the **first `ServerMessage` variant without a `seq`** — it's a session-scoped notification, not a sequenced document command. Per [[decisions/0001-document-vs-viewport-split]] and [[decisions/0015-server-stored-bookmarks-and-auth-seam]]: bookmark mutations are durable on the server (in SQLite) but the live-update broadcast that informs other tabs is closer to presence than to a document command — there's no need for ordering, no replay-on-reconnect, and a missed broadcast just means the next dataset-loaded refetch picks up the canonical state.
@@ -70,7 +83,7 @@ Resolution (option c per [[queue]]): the applier auto-selects the first *visible
 
 ## Interactions
 
-- **Producer (web)**: every viewport-mutating action triggers urlSync's debounce. The toolbar `ShareToolbarButton` reads the current URL and copies to clipboard with size + local-file warnings. The `BookmarkSidebar` "Save current view" calls `captureBuilder` → POST `/api/bookmarks`.
+- **Producer (web)**: every viewport-mutating action triggers urlSync's debounce. The toolbar `ShareToolbarButton` reads the current URL and copies to clipboard with size + local-file warnings. The legacy `BookmarkSidebar` "Save current view" calls `captureBuilder` → POST `/api/bookmarks`; the workspace sidebar calls `captureBuilder` → POST `/api/workspaces/:workspace_id/saved-views`.
 - **Producer (server)**: REST handlers under `/api/bookmarks` mutate the store; `broadcast.rs` dispatches `BookmarkChanged` after success.
 - **Consumer (web)**: `urlSync` bootstrap recognizes `#view=…` and `#b=<id>` on load and `popstate`. `useBookmarks` lists by current dataset URLs and subscribes to `BookmarkChanged` for live updates. `LoadingViewBanner` subscribes to applier state for recipient-apply progress.
 - **Auth gate**: every `/api/bookmarks/*` route runs through `AuthPrincipal` middleware (the existing `SessionCookieExtractor`). Unauthed `#b=<id>` URLs go through `UnauthLanding`, which preserves the hash through the OAuth flow, so the bookmark loads after sign-in transparently.
@@ -91,6 +104,7 @@ Resolution (option c per [[queue]]): the applier auto-selects the first *visible
 - **`captureBuilder` excludes a dataset from a `SavedView` if `dataset_settings[id]` doesn't exist** — happens for datasets opened by a peer (URL not in this client's URL→DatasetId map). The exclusion is silent.
 - **Pre-auth `dev@local` bookmarks** created during the auth design phase carry `created_by: "dev@local"`. Cutover policy at production rollout is recorded in [[queue]].
 - **Dataset URLs in saved views are visible to anyone with the link.** Presigned URLs and similar credentialed URLs are exposed via clipboard, browser history, screenshots, copy-paste. See [[gotchas/saved-view-credentials-in-urls]].
+- **Workspace saved views are not source-open recipes.** In workspace mode, `SavedView.datasets` is empty and the applier never opens source URLs. Missing `workspace_dataset_id` references partially apply with warnings.
 - **`UrlSync` is one-shot-by-default in dev.** React Strict-Mode double-invokes mount effects; without re-arming `start()` after `destroy()`, the URL silently never updates. Bit us in PR #483 hours after shipping. See [[gotchas/strict-mode-destroyable-classes]].
 - **JS-only preferences don't round-trip without a dedicated SavedView field.** WASM scene state captures cleanly via `export_presence`; React-state preferences (e.g. `autoContrastMap`) that *mutate* WASM state from the JS side will be silently overridden by the recipient's defaults. Caught with auto-contrast in PR #484. See [[gotchas/saved-view-client-only-state]] for the fix pattern when adding new client-only preferences.
 
