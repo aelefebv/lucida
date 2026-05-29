@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { encode } from "../savedView/encoder.ts";
 import { relativeTimeFromIso } from "../savedView/useBookmarks.ts";
 import {
   defaultWorkspaceSavedViewName,
@@ -23,6 +22,8 @@ export interface WorkspaceSavedViewsSidebarProps {
   onOpenSavedView: (view: SavedView) => void | Promise<void>;
   loadedDatasetNames: readonly string[];
   activeLayoutName?: string | null;
+  defaultSavedViewId: string | null;
+  onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
   style?: React.CSSProperties;
   visible: boolean;
 }
@@ -50,6 +51,8 @@ export function WorkspaceSavedViewsSidebar({
   onOpenSavedView,
   loadedDatasetNames,
   activeLayoutName,
+  defaultSavedViewId,
+  onSetDefaultSavedView,
   style,
   visible,
 }: WorkspaceSavedViewsSidebarProps) {
@@ -164,10 +167,28 @@ export function WorkspaceSavedViewsSidebar({
     [getCurrentSavedView, replaceSavedView, showToast],
   );
 
+  const handleSetDefault = useCallback(
+    async (view: WorkspaceSavedView) => {
+      const nextDefaultId = defaultSavedViewId === view.id ? null : view.id;
+      try {
+        await onSetDefaultSavedView(nextDefaultId);
+        showToast(nextDefaultId === null ? "Default view cleared" : `"${view.name}" set as default`);
+      } catch (e) {
+        showToast(`Default update failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      }
+    },
+    [defaultSavedViewId, onSetDefaultSavedView, showToast],
+  );
+
   const handleDelete = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await deleteSavedView(view.id);
+        if (defaultSavedViewId === view.id) {
+          await onSetDefaultSavedView(null).catch((e) => {
+            console.warn("[WorkspaceSavedViewsSidebar] default clear after delete failed:", e);
+          });
+        }
         showToast(`Deleted "${view.name}"`);
       } catch (e) {
         showToast(`Delete failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
@@ -175,14 +196,13 @@ export function WorkspaceSavedViewsSidebar({
         setConfirmDelete(null);
       }
     },
-    [deleteSavedView, showToast],
+    [defaultSavedViewId, deleteSavedView, onSetDefaultSavedView, showToast],
   );
 
   const handleCopyLink = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
-        const payload = await encode(view.view);
-        const url = `${window.location.origin}${window.location.pathname}${window.location.search}#view=${payload}`;
+        const url = `${window.location.origin}${window.location.pathname}${window.location.search}#b=${encodeURIComponent(view.id)}`;
         await navigator.clipboard.writeText(url);
         showToast("View link copied");
       } catch (e) {
@@ -281,6 +301,7 @@ export function WorkspaceSavedViewsSidebar({
             </div>
             <div className="bookmark-row-meta">
               {view.created_by_name || view.created_by} | {relativeTimeFromIso(view.updated_at)}
+              {defaultSavedViewId === view.id ? " | default" : ""}
             </div>
           </div>
         ))}
@@ -292,9 +313,15 @@ export function WorkspaceSavedViewsSidebar({
           x={menu.x}
           y={menu.y}
           canEdit={canEdit}
+          isDefault={defaultSavedViewId === menu.savedViewId}
           onRename={() => {
             setRenameId(menu.savedViewId);
             setMenu(null);
+          }}
+          onSetDefault={() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            setMenu(null);
+            if (view) void handleSetDefault(view);
           }}
           onReplace={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
@@ -398,7 +425,9 @@ function WorkspaceSavedViewActionsMenu({
   x,
   y,
   canEdit,
+  isDefault,
   onRename,
+  onSetDefault,
   onReplace,
   onDelete,
   onCopyLink,
@@ -406,7 +435,9 @@ function WorkspaceSavedViewActionsMenu({
   x: number;
   y: number;
   canEdit: boolean;
+  isDefault: boolean;
   onRename: () => void;
+  onSetDefault: () => void;
   onReplace: () => void;
   onDelete: () => void;
   onCopyLink: () => void;
@@ -420,6 +451,9 @@ function WorkspaceSavedViewActionsMenu({
       <button type="button" role="menuitem" onClick={onCopyLink}>Copy view link</button>
       {canEdit && (
         <>
+          <button type="button" role="menuitem" onClick={onSetDefault}>
+            {isDefault ? "Clear default" : "Set as default"}
+          </button>
           <button type="button" role="menuitem" onClick={onReplace}>Update from current view</button>
           <button type="button" role="menuitem" onClick={onRename}>Rename</button>
           <button type="button" role="menuitem" className="danger" onClick={onDelete}>
@@ -517,4 +551,3 @@ function ConfirmDeleteModal({
     </div>
   );
 }
-

@@ -253,7 +253,7 @@ describe("SavedViewApplier", () => {
     expect(docCmds.find((c) => c.includes("ds-stale"))).toBeUndefined();
   });
 
-  it("workspace mode applies workspace-local ids without opening source URLs or document commands", async () => {
+  it("workspace viewer mode applies workspace-local ids without opening source URLs or document commands", async () => {
     const scene = createMockScene({
       datasetIds: ["wds-a", "wds-extra"],
       availableLayouts: {
@@ -269,6 +269,7 @@ describe("SavedViewApplier", () => {
       fakeIdForUrl,
       30_000,
       "workspace-dataset-id",
+      false,
     );
     const v = emptyView();
     v.datasets = [];
@@ -283,6 +284,9 @@ describe("SavedViewApplier", () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("leaving shared layout unchanged"),
     );
+    expect(applier.getState().warnings.some((warning) => (
+      warning.includes("leaving shared layout unchanged")
+    ))).toBe(true);
     warn.mockRestore();
     const hideExtra = scene.calls.find(
       (c) => c.includes('"set_dataset_visible"') && c.includes('"wds-extra"'),
@@ -291,6 +295,39 @@ describe("SavedViewApplier", () => {
       type: "set_dataset_visible",
       dataset_id: "wds-extra",
       visible: false,
+    });
+  });
+
+  it("workspace editor mode can apply active-layout document commands", async () => {
+    const scene = createMockScene({
+      datasetIds: ["wds-a"],
+      availableLayouts: {
+        "wds-a": [
+          { id: "L0", name: "default", active: true },
+          { id: "L1", name: "alt" },
+        ],
+      },
+    });
+    const applier = new SavedViewApplier(
+      bridge,
+      () => scene as never,
+      fakeIdForUrl,
+      30_000,
+      "workspace-dataset-id",
+      true,
+    );
+    const v = emptyView();
+    v.dataset_order = ["wds-a"];
+    v.active_layouts = { "wds-a": "L1" };
+
+    await applier.apply(v);
+
+    expect(openCalls).toEqual([]);
+    const setActive = docCmds.find((c) => c.includes('"set_active_layout"'));
+    expect(JSON.parse(setActive!)).toMatchObject({
+      type: "set_active_layout",
+      dataset_id: "wds-a",
+      layout_id: "L1",
     });
   });
 
@@ -329,6 +366,7 @@ describe("SavedViewApplier", () => {
 
     expect(openCalls).toEqual([]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("wds-missing"));
+    expect(applier.getState().warnings.some((warning) => warning.includes("wds-missing"))).toBe(true);
     expect(scene.calls.some((c) => c.includes('"wds-a"') && c.includes('"set_dataset_opacity"'))).toBe(true);
     expect(scene.calls.some((c) => c.includes('"wds-missing"'))).toBe(false);
     warn.mockRestore();

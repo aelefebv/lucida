@@ -29,6 +29,7 @@ import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import type { SavedView } from "./savedView/types.ts";
+import { getWorkspaceSavedView } from "./workspaceApi.ts";
 import type { WorkspaceRole } from "./workspaceApi.ts";
 import "./App.css";
 
@@ -36,18 +37,22 @@ interface AppProps {
   workspaceId: string;
   workspaceName: string;
   workspaceRole: WorkspaceRole;
+  defaultSavedViewId: string | null;
   canRenameWorkspace: boolean;
   onBackToDashboard: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
+  onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
 }
 
 function App({
   workspaceId,
   workspaceName,
   workspaceRole,
+  defaultSavedViewId,
   canRenameWorkspace,
   onBackToDashboard,
   onRenameWorkspace,
+  onSetDefaultSavedView,
 }: AppProps) {
   // Authenticated principal — provided by <AuthGate> above us; throws if
   // accessed unauthenticated. We forward the email to saved-view UI for
@@ -75,6 +80,7 @@ function App({
   const workspaceNameDraft = workspaceNameEdit.source === workspaceName
     ? workspaceNameEdit.value
     : workspaceName;
+  const canEditWorkspace = workspaceRole !== "viewer";
 
   // Callback refs to break circular dependencies.
   // Populated after all hooks return but before effects run on first render.
@@ -149,6 +155,17 @@ function App({
     setSelectedDatasetId(firstVisibleId);
   }, []);
 
+  const fetchWorkspaceSavedViewById = useCallback(async (id: string) => {
+    const savedView = await getWorkspaceSavedView(workspaceId, id);
+    return { id: savedView.id, view: savedView.view };
+  }, [workspaceId]);
+
+  const fetchDefaultWorkspaceSavedView = useCallback(async () => {
+    if (!defaultSavedViewId) return null;
+    const savedView = await getWorkspaceSavedView(workspaceId, defaultSavedViewId);
+    return { id: savedView.id, view: savedView.view };
+  }, [workspaceId, defaultSavedViewId]);
+
   // SavedView wiring. Mounts the URL→scene sync, exposes the
   // share-button capture, gives the loading banner a handle on apply
   // progress, and forwards apply summaries for the selectedDatasetId
@@ -173,6 +190,9 @@ function App({
     autoContrastMapRef: layers.autoContrastMapRef,
     setAutoContrastMap: layers.setAutoContrastMap,
     datasetReferenceMode: "workspace-dataset-id",
+    fetchSavedViewById: fetchWorkspaceSavedViewById,
+    fetchDefaultSavedView: fetchDefaultWorkspaceSavedView,
+    allowDocumentLayoutMutation: canEditWorkspace,
   });
 
   // The three callback-ref population sites below (savedViewHooksRef,
@@ -392,7 +412,6 @@ function App({
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
-  const canEditWorkspace = workspaceRole !== "viewer";
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
 
@@ -764,6 +783,8 @@ function App({
         onOpenSavedView={handleOpenWorkspaceSavedView}
         loadedDatasetNames={loadedDatasetNames}
         activeLayoutName={activeLayoutName}
+        defaultSavedViewId={defaultSavedViewId}
+        onSetDefaultSavedView={onSetDefaultSavedView}
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />

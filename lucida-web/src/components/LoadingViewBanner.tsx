@@ -33,16 +33,18 @@ export function LoadingViewBanner({ applier }: Props) {
     inProgressPrevRef.current = state.inProgress;
   }, [state.inProgress]);
 
-  // Auto-hide after success (no failures): wait 1.5s then dismiss.
+  // Auto-hide after success (no failures/warnings): wait 1.5s then dismiss.
   useEffect(() => {
     if (state.inProgress) return;
     if (state.openStatuses.length === 0) return;
     if (state.anyOpenFailed) return;
+    if (state.warnings.length > 0) return;
     const t = setTimeout(() => setDismissed(true), 1500);
     return () => clearTimeout(t);
-  }, [state.inProgress, state.openStatuses.length, state.anyOpenFailed]);
+  }, [state.inProgress, state.openStatuses.length, state.anyOpenFailed, state.warnings.length]);
 
-  const visible = !dismissed && (state.inProgress || state.openStatuses.length > 0);
+  const hasWarnings = state.warnings.length > 0;
+  const visible = !dismissed && (state.inProgress || state.openStatuses.length > 0 || hasWarnings);
   if (!visible) return null;
 
   const total = state.totalToOpen;
@@ -57,11 +59,11 @@ export function LoadingViewBanner({ applier }: Props) {
         top: 12,
         left: "50%",
         transform: "translateX(-50%)",
-        background: state.anyOpenFailed ? "#5a3a00" : "#1a3a5a",
+        background: state.anyOpenFailed || hasWarnings ? "#5a3a00" : "#1a3a5a",
         color: "#fff",
         padding: "0.5rem 0.875rem",
         borderRadius: 6,
-        border: state.anyOpenFailed ? "1px solid #b88500" : "1px solid #4080c0",
+        border: state.anyOpenFailed || hasWarnings ? "1px solid #b88500" : "1px solid #4080c0",
         fontSize: "0.85rem",
         zIndex: 50,
         maxWidth: 480,
@@ -75,8 +77,19 @@ export function LoadingViewBanner({ applier }: Props) {
             : "Loading shared view…"
           : state.anyOpenFailed
           ? `Loaded ${ok} of ${total} datasets — some failed.`
+          : hasWarnings
+          ? "Loaded shared view with warnings."
           : `Loaded shared view`}
       </div>
+      {hasWarnings && (
+        <ul style={{ margin: "0.4rem 0 0 1rem", padding: 0, listStyle: "disc" }}>
+          {state.warnings.map((warning) => (
+            <li key={warning} style={{ fontSize: "0.8rem", opacity: 0.92 }}>
+              {warning}
+            </li>
+          ))}
+        </ul>
+      )}
       {state.anyOpenFailed && (
         <ul style={{ margin: "0.4rem 0 0 1rem", padding: 0, listStyle: "disc" }}>
           {state.openStatuses

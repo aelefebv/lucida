@@ -12,7 +12,7 @@
 //     SavedViewApplier so the same step-ordered logic runs in both cases.
 //     Two recognized payload shapes:
 //       * `#view=<inline base64+gzip>` — inline payload
-//       * `#b=<bookmark-id>` — fetched via `/api/bookmarks/:id` then
+//       * `#b=<saved-view-id>` — fetched via the configured resolver then
 //         handed to the applier; the URL is then collapsed to its live
 //         `#view=…` form so further pans don't drift the recipient
 //         back to a stale snapshot.
@@ -22,7 +22,12 @@
 import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
 import { SavedViewApplier } from "./applier.ts";
-import { getBookmark, type Bookmark } from "./bookmarksApi.ts";
+import { getBookmark } from "./bookmarksApi.ts";
+
+export interface ResolvedSavedView {
+  id: string;
+  view: SavedView;
+}
 
 export interface UrlSyncOptions {
   /** ms of idle to wait before writing the URL. Default 350 (mid-range
@@ -30,18 +35,22 @@ export interface UrlSyncOptions {
   debounceMs?: number;
   /** Override `window` for testing. */
   window?: Window;
-  /** Resolve `#b=<id>` to a bookmark. Defaults to the production REST
+  /** Resolve `#b=<id>` to a saved view. Defaults to the production REST
    *  helper; tests inject a stub so they don't need a fetch mock. */
-  fetchBookmark?: (id: string) => Promise<Bookmark | null>;
+  fetchBookmark?: (id: string) => Promise<ResolvedSavedView | null>;
+  fetchSavedViewById?: (id: string) => Promise<ResolvedSavedView | null>;
+  /** Resolve the workspace default saved view for bare workspace URLs. */
+  fetchDefaultSavedView?: () => Promise<ResolvedSavedView | null>;
 }
 
 export type CaptureBuilder = () => SavedView | null;
 
-export type FetchBookmark = (id: string) => Promise<Bookmark | null>;
+export type FetchSavedViewById = (id: string) => Promise<ResolvedSavedView | null>;
+export type FetchDefaultSavedView = () => Promise<ResolvedSavedView | null>;
 
 /** Default `#b=<id>` resolver — the REST helper. Tests inject their
  *  own to avoid the production fetch path. */
-const defaultFetchBookmark: FetchBookmark = (id) => getBookmark(id);
+const defaultFetchSavedViewById: FetchSavedViewById = (id) => getBookmark(id);
 
 export class UrlSync {
   private debounceMs: number;
@@ -55,7 +64,9 @@ export class UrlSync {
 
   private readonly captureBuilder: CaptureBuilder;
   private readonly applier: SavedViewApplier;
-  private readonly fetchBookmark: FetchBookmark;
+  private readonly fetchSavedViewById: FetchSavedViewById;
+  private readonly fetchDefaultSavedView: FetchDefaultSavedView | null;
+  private suppressNextEmptyHashFlush = false;
 
   constructor(
     captureBuilder: CaptureBuilder,
@@ -66,7 +77,9 @@ export class UrlSync {
     this.applier = applier;
     this.debounceMs = options.debounceMs ?? 350;
     this.win = options.window ?? window;
-    this.fetchBookmark = options.fetchBookmark ?? defaultFetchBookmark;
+    this.fetchSavedViewById =
+      options.fetchSavedViewById ?? options.fetchBookmark ?? defaultFetchSavedViewById;
+    this.fetchDefaultSavedView = options.fetchDefaultSavedView ?? null;
   }
 
   /** Hook the popstate listener. Idempotent + re-armable after `destroy()`
@@ -105,38 +118,44 @@ export class UrlSync {
    * error). Safe to call multiple times — guarded by the applier's own
    * "in progress" check so we never re-enter mid-apply.
    *
-   * For `#b=<id>`: fetches the bookmark via the REST endpoint, applies
-   * its `view`, then `replaceState`s the URL to the inline `#view=…`
+   * For `#b=<id>`: fetches the saved view via the configured resolver,
+   * applies its `view`, then `replaceState`s the URL to the inline `#view=…`
    * form so further pans don't drift the recipient back to a stale
    * snapshot every time the URL is re-applied.
    */
   async bootstrap(): Promise<void> {
     if (this.applier.isInProgress()) return;
 
-    const bookmarkId = parseBookmarkHash(this.win.location.hash);
+    const hash = this.win.location.hash;
+    const bookmarkId = parseBookmarkHash(hash);
     if (bookmarkId !== null) {
-      let bookmark: Bookmark | null;
+      let savedView: ResolvedSavedView | null;
       try {
-        bookmark = await this.fetchBookmark(bookmarkId);
+        savedView = await this.fetchSavedViewById(bookmarkId);
       } catch (e) {
-        console.warn("[UrlSync] failed to fetch bookmark:", e);
+        console.warn("[UrlSync] failed to fetch saved view:", e);
         return;
       }
-      if (bookmark === null) {
-        console.warn(`[UrlSync] bookmark ${bookmarkId} not found`);
+      if (savedView === null) {
+        console.warn(`[UrlSync] saved view ${bookmarkId} not found`);
         return;
       }
-      await this.applier.apply(bookmark.view);
+      await this.applier.apply(savedView.view);
       // Collapse `#b=<id>` to the live `#view=…` form so the URL reflects
-      // the current scene, not the bookmark's frozen snapshot. Skip if
+      // the current scene, not the saved view's frozen snapshot. Skip if
       // the apply was a no-op (no scene yet); the next bootstrap will
       // rewrite when the scene is ready.
-      await this.flushAfterBookmarkApply();
+      await this.flushAfterSavedViewApply();
       return;
     }
 
-    const payload = parseViewHash(this.win.location.hash);
-    if (payload === null) return;
+    const payload = parseViewHash(hash);
+    if (payload === null) {
+      if (isEmptyHash(hash) && this.fetchDefaultSavedView) {
+        await this.applyDefaultSavedView();
+      }
+      return;
+    }
     let view: SavedView;
     try {
       view = await decode(payload);
@@ -147,10 +166,23 @@ export class UrlSync {
     await this.applier.apply(view);
   }
 
-  /** Encode and write `#view=…` immediately after a bookmark apply.
+  private async applyDefaultSavedView(): Promise<void> {
+    let savedView: ResolvedSavedView | null;
+    try {
+      savedView = await this.fetchDefaultSavedView?.() ?? null;
+    } catch (e) {
+      console.warn("[UrlSync] failed to fetch default saved view:", e);
+      return;
+    }
+    if (savedView === null) return;
+    this.suppressNextEmptyHashFlush = true;
+    await this.applier.apply(savedView.view);
+  }
+
+  /** Encode and write `#view=…` immediately after a saved-view apply.
    *  Bypasses the in-progress guard because `apply` has already returned;
    *  the dedupe-against-lastWritten branch keeps this from looping. */
-  private async flushAfterBookmarkApply(): Promise<void> {
+  private async flushAfterSavedViewApply(): Promise<void> {
     if (this.destroyed) return;
     const view = this.captureBuilder();
     if (view === null) return;
@@ -189,6 +221,10 @@ export class UrlSync {
   async flush(): Promise<void> {
     if (this.destroyed) return;
     if (this.applier.isInProgress()) return;
+    if (this.suppressNextEmptyHashFlush && isEmptyHash(this.win.location.hash)) {
+      this.suppressNextEmptyHashFlush = false;
+      return;
+    }
     const view = this.captureBuilder();
     if (view === null) return;
     let payload: string;
@@ -204,6 +240,10 @@ export class UrlSync {
     this.lastWritten = url;
     this.win.history.replaceState(this.win.history.state, "", url);
   }
+}
+
+function isEmptyHash(hash: string): boolean {
+  return !hash || hash === "#";
 }
 
 /** Parse a `#view=…` URL hash and return the encoded payload, or null
