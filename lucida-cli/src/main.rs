@@ -5,11 +5,13 @@ mod dataset;
 mod error;
 mod output;
 mod status;
+mod view;
 mod workspace;
 
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use lucida_core::command::ViewportCommand;
 
 use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
@@ -25,6 +27,7 @@ use crate::dataset::{
 use crate::error::{CliError, ErrorKind};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
+use crate::view::{ViewApplyOutput, ViewWorkspaceClient, format_view_apply_human};
 use crate::workspace::{
     WorkspaceClient, WorkspaceListOutput, WorkspaceLookupMode, WorkspaceOpenOutput,
     WorkspaceOutput, WorkspaceUseOutput, format_workspace_human, format_workspace_list_human,
@@ -77,6 +80,28 @@ enum Command {
     Dataset {
         #[command(subcommand)]
         command: DatasetCommand,
+    },
+    /// Update local view state in the selected workspace
+    View {
+        /// Start from an explicit peer's presence instead of this CLI session
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+        /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: ViewCommand,
+    },
+    /// Update local camera state in the selected workspace
+    Camera {
+        /// Start from an explicit peer's presence instead of this CLI session
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+        /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: CameraCommand,
     },
     /// Read or write local Lucida CLI configuration
     Config {
@@ -194,6 +219,190 @@ enum DatasetCommand {
         #[arg(long, default_value_t = 60)]
         timeout_seconds: u64,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ViewCommand {
+    /// Pan the 2D slice camera in screen pixels
+    Pan {
+        #[arg(long, allow_hyphen_values = true)]
+        dx: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        dy: f64,
+    },
+    /// Multiply the 2D slice zoom by a factor
+    Zoom {
+        #[arg(long, allow_hyphen_values = true)]
+        factor: f64,
+    },
+    /// Set the absolute 2D slice zoom
+    SetZoom {
+        #[arg(long, allow_hyphen_values = true)]
+        value: f64,
+    },
+    /// Set the 2D slice camera center
+    Center {
+        #[arg(long, allow_hyphen_values = true)]
+        x: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        y: f64,
+    },
+    /// Set one selected dimension index
+    Slice { axis: SliceAxis, index: u32 },
+    /// Set the selected Z slab range
+    ZRange { start: u32, end: u32 },
+    /// Set camera viewport size in pixels
+    ViewportSize { width: u32, height: u32 },
+}
+
+impl ViewCommand {
+    fn viewport_command(&self) -> Result<ViewportCommand, CliError> {
+        Ok(match self {
+            ViewCommand::Pan { dx, dy } => ViewportCommand::Pan { dx: *dx, dy: *dy },
+            ViewCommand::Zoom { factor } => {
+                if *factor <= 0.0 {
+                    return Err(CliError::config("view zoom --factor must be positive"));
+                }
+                ViewportCommand::ZoomBy { factor: *factor }
+            }
+            ViewCommand::SetZoom { value } => {
+                if *value <= 0.0 {
+                    return Err(CliError::config("view set-zoom --value must be positive"));
+                }
+                ViewportCommand::SetZoom { value: *value }
+            }
+            ViewCommand::Center { x, y } => ViewportCommand::SetCenter { x: *x, y: *y },
+            ViewCommand::Slice { axis, index } => match axis {
+                SliceAxis::Z => ViewportCommand::SetZ { z: *index },
+                SliceAxis::T => ViewportCommand::SetT { t: *index },
+                SliceAxis::C => ViewportCommand::SetC { c: *index },
+            },
+            ViewCommand::ZRange { start, end } => {
+                if end <= start {
+                    return Err(CliError::config(
+                        "view z-range end must be greater than start",
+                    ));
+                }
+                ViewportCommand::SetZRange {
+                    start: *start,
+                    end: *end,
+                }
+            }
+            ViewCommand::ViewportSize { width, height } => {
+                if *width == 0 || *height == 0 {
+                    return Err(CliError::config(
+                        "view viewport-size width and height must be positive",
+                    ));
+                }
+                ViewportCommand::SetViewport {
+                    width: *width,
+                    height: *height,
+                }
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SliceAxis {
+    Z,
+    T,
+    C,
+}
+
+#[derive(Subcommand, Debug)]
+enum CameraCommand {
+    /// Switch camera mode
+    Mode { mode: CameraMode },
+    /// Rotate the arcball camera
+    Rotate {
+        #[arg(long, allow_hyphen_values = true)]
+        d_theta: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        d_phi: f64,
+    },
+    /// Pan the arcball camera
+    Pan {
+        #[arg(long, allow_hyphen_values = true)]
+        dx: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        dy: f64,
+    },
+    /// Zoom the arcball camera by a relative delta
+    Zoom {
+        #[arg(long, allow_hyphen_values = true)]
+        delta: f64,
+    },
+    /// Advance the fly camera by one input tick
+    FlyTick {
+        #[arg(
+            long,
+            default_value_t = 0.016666666666666666,
+            allow_hyphen_values = true
+        )]
+        dt: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        forward: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        right: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        up: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        yaw: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        pitch: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        roll: f64,
+    },
+}
+
+impl CameraCommand {
+    fn viewport_command(&self) -> Result<ViewportCommand, CliError> {
+        Ok(match self {
+            CameraCommand::Mode { mode } => match mode {
+                CameraMode::Slice => ViewportCommand::SetMode2D,
+                CameraMode::Arcball => ViewportCommand::SetMode3D,
+                CameraMode::Fly => ViewportCommand::SetModeFly,
+            },
+            CameraCommand::Rotate { d_theta, d_phi } => ViewportCommand::Rotate3D {
+                d_theta: *d_theta,
+                d_phi: *d_phi,
+            },
+            CameraCommand::Pan { dx, dy } => ViewportCommand::Pan3D { dx: *dx, dy: *dy },
+            CameraCommand::Zoom { delta } => ViewportCommand::Zoom3D { delta: *delta },
+            CameraCommand::FlyTick {
+                dt,
+                forward,
+                right,
+                up,
+                yaw,
+                pitch,
+                roll,
+            } => {
+                if *dt < 0.0 {
+                    return Err(CliError::config(
+                        "camera fly-tick --dt must be non-negative",
+                    ));
+                }
+                ViewportCommand::FlyTick {
+                    dt: *dt,
+                    forward: *forward,
+                    right: *right,
+                    up: *up,
+                    yaw: *yaw,
+                    pitch: *pitch,
+                    roll: *roll,
+                }
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CameraMode {
+    Slice,
+    Arcball,
+    Fly,
 }
 
 #[derive(Subcommand, Debug)]
@@ -600,6 +809,36 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 })?;
             }
         },
+        Command::View {
+            from_peer,
+            timeout_seconds,
+            command,
+        } => {
+            emit_viewport_command(
+                &cli,
+                &config,
+                output,
+                command.viewport_command()?,
+                *from_peer,
+                *timeout_seconds,
+            )
+            .await?;
+        }
+        Command::Camera {
+            from_peer,
+            timeout_seconds,
+            command,
+        } => {
+            emit_viewport_command(
+                &cli,
+                &config,
+                output,
+                command.viewport_command()?,
+                *from_peer,
+                *timeout_seconds,
+            )
+            .await?;
+        }
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -646,6 +885,39 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         },
     }
 
+    Ok(())
+}
+
+async fn emit_viewport_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: ViewportCommand,
+    from_peer: Option<u64>,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let view_client = ViewWorkspaceClient::new(target.ws_url.clone(), token);
+    let result = view_client
+        .apply(command, from_peer, Duration::from_secs(timeout_seconds))
+        .await?;
+    let output_payload = ViewApplyOutput {
+        server,
+        workspace,
+        target,
+        result,
+    };
+    output.print_either(&output_payload, || format_view_apply_human(&output_payload))?;
     Ok(())
 }
 
@@ -777,6 +1049,8 @@ mod tests {
         assert!(help.contains("auth"));
         assert!(help.contains("workspace"));
         assert!(help.contains("dataset"));
+        assert!(help.contains("view"));
+        assert!(help.contains("camera"));
         assert!(help.contains("config"));
         assert!(!help.contains("visible-chunks"));
         assert!(!help.contains("set-mode-2d"));
@@ -978,6 +1252,106 @@ mod tests {
                 assert_eq!(timeout_seconds, 9);
             }
             _ => panic!("expected dataset remove"),
+        }
+    }
+
+    #[test]
+    fn view_pan_parses_negative_numbers_and_maps_to_viewport_command() {
+        let cli = parse(&[
+            "--workspace",
+            "w1",
+            "view",
+            "--from-peer",
+            "7",
+            "--timeout-seconds",
+            "4",
+            "pan",
+            "--dx",
+            "-10.5",
+            "--dy",
+            "-2.25",
+        ]);
+
+        assert_eq!(cli.workspace.as_deref(), Some("w1"));
+        match cli.command {
+            Command::View {
+                from_peer,
+                timeout_seconds,
+                command,
+            } => {
+                assert_eq!(from_peer, Some(7));
+                assert_eq!(timeout_seconds, 4);
+                match command.viewport_command().unwrap() {
+                    ViewportCommand::Pan { dx, dy } => {
+                        assert_eq!(dx, -10.5);
+                        assert_eq!(dy, -2.25);
+                    }
+                    _ => panic!("expected pan command"),
+                }
+            }
+            _ => panic!("expected view pan"),
+        }
+    }
+
+    #[test]
+    fn view_slice_and_z_range_map_to_viewport_commands() {
+        let slice = parse(&["view", "slice", "t", "12"]);
+        match slice.command {
+            Command::View { command, .. } => match command.viewport_command().unwrap() {
+                ViewportCommand::SetT { t } => assert_eq!(t, 12),
+                _ => panic!("expected set t"),
+            },
+            _ => panic!("expected view slice"),
+        }
+
+        let range = parse(&["view", "z-range", "3", "9"]);
+        match range.command {
+            Command::View { command, .. } => match command.viewport_command().unwrap() {
+                ViewportCommand::SetZRange { start, end } => {
+                    assert_eq!(start, 3);
+                    assert_eq!(end, 9);
+                }
+                _ => panic!("expected z range"),
+            },
+            _ => panic!("expected view z-range"),
+        }
+    }
+
+    #[test]
+    fn camera_commands_parse_and_map_to_viewport_commands() {
+        let mode = parse(&["camera", "mode", "fly"]);
+        match mode.command {
+            Command::Camera { command, .. } => {
+                assert!(matches!(
+                    command.viewport_command().unwrap(),
+                    ViewportCommand::SetModeFly
+                ));
+            }
+            _ => panic!("expected camera mode"),
+        }
+
+        let rotate = parse(&["camera", "rotate", "--d-theta", "-0.1", "--d-phi", "-0.2"]);
+        match rotate.command {
+            Command::Camera { command, .. } => match command.viewport_command().unwrap() {
+                ViewportCommand::Rotate3D { d_theta, d_phi } => {
+                    assert_eq!(d_theta, -0.1);
+                    assert_eq!(d_phi, -0.2);
+                }
+                _ => panic!("expected rotate"),
+            },
+            _ => panic!("expected camera rotate"),
+        }
+
+        let tick = parse(&["camera", "fly-tick", "--forward", "1", "--yaw", "-0.5"]);
+        match tick.command {
+            Command::Camera { command, .. } => match command.viewport_command().unwrap() {
+                ViewportCommand::FlyTick { forward, yaw, .. } => {
+                    assert_eq!(forward, 1.0);
+                    assert_eq!(yaw, -0.5);
+                }
+                _ => panic!("expected fly tick"),
+            },
+            _ => panic!("expected camera fly tick"),
         }
     }
 
