@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod credentials;
+mod dataset;
 mod error;
 mod output;
 mod status;
@@ -15,6 +16,7 @@ use crate::auth::{
 };
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
 use crate::credentials::{clear_local_token, resolve_token, store_local_token};
+use crate::dataset::{DatasetOpenClient, DatasetOpenOutput, format_dataset_open_human};
 use crate::error::{CliError, ErrorKind};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
@@ -65,6 +67,11 @@ enum Command {
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
+    },
+    /// Open and inspect datasets in the selected workspace
+    Dataset {
+        #[command(subcommand)]
+        command: DatasetCommand,
     },
     /// Read or write local Lucida CLI configuration
     Config {
@@ -141,6 +148,19 @@ enum WorkspaceCommand {
         /// Do not attempt to open a browser automatically
         #[arg(long)]
         no_browser: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DatasetCommand {
+    /// Open a dataset path or URL in the selected workspace
+    Open {
+        /// Dataset path or URL visible to the Lucida server
+        #[arg(value_name = "PATH_OR_URL")]
+        source: String,
+        /// Seconds to wait for the server to finish opening the dataset
+        #[arg(long, default_value_t = 300)]
+        timeout_seconds: u64,
     },
 }
 
@@ -416,6 +436,37 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 })?;
             }
         },
+        Command::Dataset { command } => match command {
+            DatasetCommand::Open {
+                source,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let dataset_client = DatasetOpenClient::new(target.ws_url.clone(), token);
+                let dataset = dataset_client
+                    .open(source, &workspace.id, Duration::from_secs(*timeout_seconds))
+                    .await?;
+                let output_payload = DatasetOpenOutput {
+                    server,
+                    workspace,
+                    target,
+                    dataset,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_open_human(&output_payload)
+                })?;
+            }
+        },
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -592,8 +643,8 @@ mod tests {
         assert!(help.contains("server"));
         assert!(help.contains("auth"));
         assert!(help.contains("workspace"));
+        assert!(help.contains("dataset"));
         assert!(help.contains("config"));
-        assert!(!help.contains("open"));
         assert!(!help.contains("visible-chunks"));
         assert!(!help.contains("set-mode-2d"));
         assert!(!help.contains("steer"));
@@ -709,6 +760,34 @@ mod tests {
                 assert!(no_browser);
             }
             _ => panic!("expected workspace open"),
+        }
+    }
+
+    #[test]
+    fn dataset_open_parses_product_shape() {
+        let cli = parse(&[
+            "--workspace",
+            "w1",
+            "dataset",
+            "open",
+            "/data/demo.ome.zarr",
+            "--timeout-seconds",
+            "12",
+        ]);
+
+        assert_eq!(cli.workspace.as_deref(), Some("w1"));
+        match cli.command {
+            Command::Dataset {
+                command:
+                    DatasetCommand::Open {
+                        source,
+                        timeout_seconds,
+                    },
+            } => {
+                assert_eq!(source, "/data/demo.ome.zarr");
+                assert_eq!(timeout_seconds, 12);
+            }
+            _ => panic!("expected dataset open"),
         }
     }
 
