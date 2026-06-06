@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lucida_core::command::ViewportCommand;
+use lucida_core::scene::{BlendMode, Colormap, RenderMode};
 
 use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
@@ -27,6 +28,7 @@ use crate::dataset::{
 use crate::error::{CliError, ErrorKind};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
+use crate::view::{DatasetDisplayCommand, DatasetPresenceOutput, format_dataset_presence_human};
 use crate::view::{ViewApplyOutput, ViewWorkspaceClient, format_view_apply_human};
 use crate::workspace::{
     WorkspaceClient, WorkspaceListOutput, WorkspaceLookupMode, WorkspaceOpenOutput,
@@ -102,6 +104,28 @@ enum Command {
         timeout_seconds: u64,
         #[command(subcommand)]
         command: CameraCommand,
+    },
+    /// Update dataset layer display state in the selected workspace
+    Layer {
+        /// Start from an explicit peer's dataset presence instead of this CLI session
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+        /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: LayerCommand,
+    },
+    /// Update channel display state in the selected workspace
+    Channel {
+        /// Start from an explicit peer's dataset presence instead of this CLI session
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+        /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: ChannelCommand,
     },
     /// Read or write local Lucida CLI configuration
     Config {
@@ -403,6 +427,350 @@ enum CameraMode {
     Slice,
     Arcball,
     Fly,
+}
+
+#[derive(Subcommand, Debug)]
+enum LayerCommand {
+    /// List loaded dataset layers and display settings
+    List,
+    /// Put named datasets first in layer order; unnamed loaded datasets keep their relative order after them
+    Order {
+        #[arg(required = true)]
+        datasets: Vec<String>,
+    },
+    /// Show a dataset layer
+    Show { dataset: String },
+    /// Hide a dataset layer
+    Hide { dataset: String },
+    /// Set dataset layer opacity
+    Opacity { dataset: String, opacity: f32 },
+    /// Set contrast for the current or explicit channel of a layer
+    Contrast {
+        dataset: String,
+        #[arg(long, allow_hyphen_values = true)]
+        min: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        max: f64,
+        #[arg(long)]
+        channel: Option<u32>,
+    },
+    /// Set gamma for the current or explicit channel of a layer
+    Gamma {
+        dataset: String,
+        #[arg(long, allow_hyphen_values = true)]
+        gamma: f64,
+        #[arg(long)]
+        channel: Option<u32>,
+    },
+    /// Set colormap for the current or explicit channel of a layer
+    Colormap {
+        dataset: String,
+        colormap: ColormapValue,
+        #[arg(long)]
+        channel: Option<u32>,
+    },
+    /// Set dataset blend mode
+    BlendMode {
+        dataset: String,
+        mode: BlendModeValue,
+    },
+    /// Set volume render mode
+    RenderMode {
+        dataset: String,
+        mode: RenderModeValue,
+    },
+    /// Set or clear selectable detail-level override
+    DetailLevel { dataset: String, level: Option<u32> },
+}
+
+impl LayerCommand {
+    fn display_command(&self) -> Result<Option<DatasetDisplayCommand>, CliError> {
+        Ok(match self {
+            LayerCommand::List => None,
+            LayerCommand::Order { datasets } => Some(DatasetDisplayCommand::SetOrder {
+                selectors: datasets.clone(),
+            }),
+            LayerCommand::Show { dataset } => Some(DatasetDisplayCommand::SetDatasetVisible {
+                selector: dataset.clone(),
+                visible: true,
+            }),
+            LayerCommand::Hide { dataset } => Some(DatasetDisplayCommand::SetDatasetVisible {
+                selector: dataset.clone(),
+                visible: false,
+            }),
+            LayerCommand::Opacity { dataset, opacity } => {
+                if !(0.0..=1.0).contains(opacity) {
+                    return Err(CliError::config("layer opacity must be between 0 and 1"));
+                }
+                Some(DatasetDisplayCommand::SetDatasetOpacity {
+                    selector: dataset.clone(),
+                    opacity: *opacity,
+                })
+            }
+            LayerCommand::Contrast {
+                dataset,
+                min,
+                max,
+                channel,
+            } => {
+                validate_contrast(*min, *max)?;
+                Some(DatasetDisplayCommand::SetCurrentChannelContrast {
+                    selector: dataset.clone(),
+                    channel: *channel,
+                    min: *min,
+                    max: *max,
+                })
+            }
+            LayerCommand::Gamma {
+                dataset,
+                gamma,
+                channel,
+            } => {
+                validate_gamma(*gamma)?;
+                Some(DatasetDisplayCommand::SetCurrentChannelGamma {
+                    selector: dataset.clone(),
+                    channel: *channel,
+                    gamma: *gamma,
+                })
+            }
+            LayerCommand::Colormap {
+                dataset,
+                colormap,
+                channel,
+            } => Some(DatasetDisplayCommand::SetCurrentChannelColormap {
+                selector: dataset.clone(),
+                channel: *channel,
+                colormap: (*colormap).into(),
+            }),
+            LayerCommand::BlendMode { dataset, mode } => {
+                Some(DatasetDisplayCommand::SetDatasetBlendMode {
+                    selector: dataset.clone(),
+                    blend_mode: (*mode).into(),
+                })
+            }
+            LayerCommand::RenderMode { dataset, mode } => {
+                Some(DatasetDisplayCommand::SetDatasetRenderMode {
+                    selector: dataset.clone(),
+                    render_mode: (*mode).into(),
+                })
+            }
+            LayerCommand::DetailLevel { dataset, level } => {
+                Some(DatasetDisplayCommand::SetDatasetDetailLevelOverride {
+                    selector: dataset.clone(),
+                    level: *level,
+                })
+            }
+        })
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum ChannelCommand {
+    /// Switch single-channel or multichannel rendering mode
+    Mode { mode: ChannelMode },
+    /// Show a dataset channel
+    Show { dataset: String, channel: u32 },
+    /// Hide a dataset channel
+    Hide { dataset: String, channel: u32 },
+    /// Set a dataset channel colormap
+    Colormap {
+        dataset: String,
+        channel: u32,
+        colormap: ColormapValue,
+    },
+    /// Set a dataset channel contrast window
+    Contrast {
+        dataset: String,
+        channel: u32,
+        #[arg(long, allow_hyphen_values = true)]
+        min: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        max: f64,
+    },
+    /// Set a dataset channel gamma
+    Gamma {
+        dataset: String,
+        channel: u32,
+        #[arg(long, allow_hyphen_values = true)]
+        gamma: f64,
+    },
+    /// Set the dataset channel blend mode
+    BlendMode {
+        dataset: String,
+        mode: BlendModeValue,
+    },
+}
+
+#[derive(Debug)]
+enum ChannelCommandAction {
+    Viewport(ViewportCommand),
+    Dataset(DatasetDisplayCommand),
+}
+
+impl ChannelCommand {
+    fn action(&self) -> Result<ChannelCommandAction, CliError> {
+        Ok(match self {
+            ChannelCommand::Mode { mode } => {
+                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel {
+                    enabled: *mode == ChannelMode::Multi,
+                })
+            }
+            ChannelCommand::Show { dataset, channel } => {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelVisible {
+                    selector: dataset.clone(),
+                    channel: *channel,
+                    visible: true,
+                })
+            }
+            ChannelCommand::Hide { dataset, channel } => {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelVisible {
+                    selector: dataset.clone(),
+                    channel: *channel,
+                    visible: false,
+                })
+            }
+            ChannelCommand::Colormap {
+                dataset,
+                channel,
+                colormap,
+            } => ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelColormap {
+                selector: dataset.clone(),
+                channel: *channel,
+                colormap: (*colormap).into(),
+            }),
+            ChannelCommand::Contrast {
+                dataset,
+                channel,
+                min,
+                max,
+            } => {
+                validate_contrast(*min, *max)?;
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelContrast {
+                    selector: dataset.clone(),
+                    channel: *channel,
+                    min: *min,
+                    max: *max,
+                })
+            }
+            ChannelCommand::Gamma {
+                dataset,
+                channel,
+                gamma,
+            } => {
+                validate_gamma(*gamma)?;
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelGamma {
+                    selector: dataset.clone(),
+                    channel: *channel,
+                    gamma: *gamma,
+                })
+            }
+            ChannelCommand::BlendMode { dataset, mode } => {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelBlendMode {
+                    selector: dataset.clone(),
+                    blend_mode: (*mode).into(),
+                })
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ChannelMode {
+    Single,
+    Multi,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BlendModeValue {
+    Alpha,
+    Additive,
+    Max,
+}
+
+impl From<BlendModeValue> for BlendMode {
+    fn from(value: BlendModeValue) -> Self {
+        match value {
+            BlendModeValue::Alpha => BlendMode::Alpha,
+            BlendModeValue::Additive => BlendMode::Additive,
+            BlendModeValue::Max => BlendMode::Max,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RenderModeValue {
+    Translucent,
+    #[value(name = "max-intensity")]
+    MaxIntensity,
+}
+
+impl From<RenderModeValue> for RenderMode {
+    fn from(value: RenderModeValue) -> Self {
+        match value {
+            RenderModeValue::Translucent => RenderMode::Translucent,
+            RenderModeValue::MaxIntensity => RenderMode::MaxIntensity,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ColormapValue {
+    Gray,
+    Magenta,
+    Green,
+    Cyan,
+    Red,
+    Blue,
+    Yellow,
+    Viridis,
+    Inferno,
+    Plasma,
+    Magma,
+    Turbo,
+    Hot,
+    Cool,
+    Jet,
+}
+
+impl From<ColormapValue> for Colormap {
+    fn from(value: ColormapValue) -> Self {
+        match value {
+            ColormapValue::Gray => Colormap::Gray,
+            ColormapValue::Magenta => Colormap::Magenta,
+            ColormapValue::Green => Colormap::Green,
+            ColormapValue::Cyan => Colormap::Cyan,
+            ColormapValue::Red => Colormap::Red,
+            ColormapValue::Blue => Colormap::Blue,
+            ColormapValue::Yellow => Colormap::Yellow,
+            ColormapValue::Viridis => Colormap::Viridis,
+            ColormapValue::Inferno => Colormap::Inferno,
+            ColormapValue::Plasma => Colormap::Plasma,
+            ColormapValue::Magma => Colormap::Magma,
+            ColormapValue::Turbo => Colormap::Turbo,
+            ColormapValue::Hot => Colormap::Hot,
+            ColormapValue::Cool => Colormap::Cool,
+            ColormapValue::Jet => Colormap::Jet,
+        }
+    }
+}
+
+fn validate_contrast(min: f64, max: f64) -> Result<(), CliError> {
+    if !min.is_finite() || !max.is_finite() {
+        return Err(CliError::config("contrast bounds must be finite"));
+    }
+    if max <= min {
+        return Err(CliError::config(
+            "contrast --max must be greater than --min",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gamma(gamma: f64) -> Result<(), CliError> {
+    if !gamma.is_finite() || gamma <= 0.0 {
+        return Err(CliError::config("gamma must be positive and finite"));
+    }
+    Ok(())
 }
 
 #[derive(Subcommand, Debug)]
@@ -839,6 +1207,42 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             )
             .await?;
         }
+        Command::Layer {
+            from_peer,
+            timeout_seconds,
+            command,
+        } => {
+            emit_dataset_presence_command(
+                &cli,
+                &config,
+                output,
+                command.display_command()?,
+                *from_peer,
+                *timeout_seconds,
+            )
+            .await?;
+        }
+        Command::Channel {
+            from_peer,
+            timeout_seconds,
+            command,
+        } => match command.action()? {
+            ChannelCommandAction::Viewport(command) => {
+                emit_viewport_command(&cli, &config, output, command, *from_peer, *timeout_seconds)
+                    .await?;
+            }
+            ChannelCommandAction::Dataset(command) => {
+                emit_dataset_presence_command(
+                    &cli,
+                    &config,
+                    output,
+                    Some(command),
+                    *from_peer,
+                    *timeout_seconds,
+                )
+                .await?;
+            }
+        },
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -918,6 +1322,47 @@ async fn emit_viewport_command(
         result,
     };
     output.print_either(&output_payload, || format_view_apply_human(&output_payload))?;
+    Ok(())
+}
+
+async fn emit_dataset_presence_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: Option<DatasetDisplayCommand>,
+    from_peer: Option<u64>,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let view_client = ViewWorkspaceClient::new(target.ws_url.clone(), token);
+    let result = if let Some(command) = command {
+        view_client
+            .apply_dataset(command, from_peer, Duration::from_secs(timeout_seconds))
+            .await?
+    } else {
+        view_client
+            .dataset_state(from_peer, Duration::from_secs(timeout_seconds))
+            .await?
+    };
+    let output_payload = DatasetPresenceOutput {
+        server,
+        workspace,
+        target,
+        result,
+    };
+    output.print_either(&output_payload, || {
+        format_dataset_presence_human(&output_payload)
+    })?;
     Ok(())
 }
 
@@ -1051,6 +1496,8 @@ mod tests {
         assert!(help.contains("dataset"));
         assert!(help.contains("view"));
         assert!(help.contains("camera"));
+        assert!(help.contains("layer"));
+        assert!(help.contains("channel"));
         assert!(help.contains("config"));
         assert!(!help.contains("visible-chunks"));
         assert!(!help.contains("set-mode-2d"));
@@ -1352,6 +1799,114 @@ mod tests {
                 _ => panic!("expected fly tick"),
             },
             _ => panic!("expected camera fly tick"),
+        }
+    }
+
+    #[test]
+    fn layer_commands_parse_and_map_to_dataset_presence_commands() {
+        let opacity = parse(&["layer", "opacity", "demo.zarr", "0.5"]);
+        match opacity.command {
+            Command::Layer { command, .. } => match command.display_command().unwrap().unwrap() {
+                DatasetDisplayCommand::SetDatasetOpacity { selector, opacity } => {
+                    assert_eq!(selector, "demo.zarr");
+                    assert_eq!(opacity, 0.5);
+                }
+                _ => panic!("expected layer opacity"),
+            },
+            _ => panic!("expected layer opacity"),
+        }
+
+        let contrast = parse(&[
+            "layer",
+            "contrast",
+            "demo.zarr",
+            "--min",
+            "-1",
+            "--max",
+            "99",
+            "--channel",
+            "1",
+        ]);
+        match contrast.command {
+            Command::Layer { command, .. } => match command.display_command().unwrap().unwrap() {
+                DatasetDisplayCommand::SetCurrentChannelContrast {
+                    selector,
+                    channel,
+                    min,
+                    max,
+                } => {
+                    assert_eq!(selector, "demo.zarr");
+                    assert_eq!(channel, Some(1));
+                    assert_eq!(min, -1.0);
+                    assert_eq!(max, 99.0);
+                }
+                _ => panic!("expected layer contrast"),
+            },
+            _ => panic!("expected layer contrast"),
+        }
+
+        let order = parse(&["layer", "order", "b.zarr", "a.zarr"]);
+        match order.command {
+            Command::Layer { command, .. } => match command.display_command().unwrap().unwrap() {
+                DatasetDisplayCommand::SetOrder { selectors } => {
+                    assert_eq!(selectors, vec!["b.zarr", "a.zarr"]);
+                }
+                _ => panic!("expected layer order"),
+            },
+            _ => panic!("expected layer order"),
+        }
+    }
+
+    #[test]
+    fn channel_commands_parse_and_map_to_presence_or_dataset_presence() {
+        let mode = parse(&["channel", "mode", "multi"]);
+        match mode.command {
+            Command::Channel { command, .. } => match command.action().unwrap() {
+                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel { enabled }) => {
+                    assert!(enabled);
+                }
+                _ => panic!("expected multi-channel view command"),
+            },
+            _ => panic!("expected channel mode"),
+        }
+
+        let colormap = parse(&["channel", "colormap", "demo.zarr", "1", "viridis"]);
+        match colormap.command {
+            Command::Channel { command, .. } => match command.action().unwrap() {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelColormap {
+                    selector,
+                    channel,
+                    colormap,
+                }) => {
+                    assert_eq!(selector, "demo.zarr");
+                    assert_eq!(channel, 1);
+                    assert_eq!(colormap, Colormap::Viridis);
+                }
+                _ => panic!("expected channel colormap"),
+            },
+            _ => panic!("expected channel colormap"),
+        }
+    }
+
+    #[test]
+    fn layer_and_channel_validation_reject_bad_numbers() {
+        let opacity = parse(&["layer", "opacity", "demo.zarr", "2.0"]);
+        match opacity.command {
+            Command::Layer { command, .. } => {
+                assert_eq!(
+                    command.display_command().unwrap_err().kind,
+                    ErrorKind::Config
+                );
+            }
+            _ => panic!("expected layer opacity"),
+        }
+
+        let gamma = parse(&["channel", "gamma", "demo.zarr", "1", "--gamma", "0"]);
+        match gamma.command {
+            Command::Channel { command, .. } => {
+                assert_eq!(command.action().unwrap_err().kind, ErrorKind::Config);
+            }
+            _ => panic!("expected channel gamma"),
         }
     }
 
