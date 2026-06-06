@@ -26,9 +26,10 @@ use super::cleanup::{CleanupState, sweep_once};
 use super::config::AuthConfig;
 use super::pending_auth::{PendingAuth, PendingAuthStore};
 use super::pending_auth_memory::MemoryPendingAuthStore;
-use super::principal::{PrincipalExtractor, SessionCookieExtractor};
+use super::principal::{BearerTokenExtractor, PrincipalExtractor, SessionCookieExtractor};
 use super::session_store::{LoginSession, LoginSessionStore};
 use super::session_store_memory::MemorySessionStore;
+use super::{BearerToken, BearerTokenStore, MemoryBearerTokenStore, hash_bearer_token};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One captured tracing event: the event name (the message-position
@@ -233,6 +234,32 @@ fn parts_with_cookie(cookie_value: Option<&str>) -> axum::http::request::Parts {
     b.body(()).unwrap().into_parts().0
 }
 
+fn parts_with_bearer(raw_token: &str) -> axum::http::request::Parts {
+    axum::http::Request::builder()
+        .uri("http://localhost/")
+        .header("authorization", format!("Bearer {raw_token}"))
+        .body(())
+        .unwrap()
+        .into_parts()
+        .0
+}
+
+fn bearer_token_row(id: &str, raw_token: &str, email: &str) -> BearerToken {
+    let now = Utc::now();
+    BearerToken {
+        id: id.into(),
+        token_hash: hash_bearer_token(raw_token),
+        name: "audit test".into(),
+        email: email.into(),
+        display_name: "Audit Test".into(),
+        picture_url: None,
+        created_at: now,
+        last_used_at: None,
+        expires_at: now + ChronoDuration::hours(1),
+        revoked_at: None,
+    }
+}
+
 #[tokio::test]
 async fn cleanup_emits_auth_session_cleanup_event_with_counts() {
     let sessions = Arc::new(MemorySessionStore::new());
@@ -286,6 +313,69 @@ async fn unknown_session_emits_auth_failure_event() {
     })
     .await;
     require_event(&events, "auth.failure.unknown_session", Level::DEBUG);
+}
+
+// auth.failure.unknown_bearer_token — bearer token hash has no row
+#[tokio::test]
+async fn unknown_bearer_token_emits_auth_failure_event() {
+    let store = Arc::new(MemoryBearerTokenStore::new());
+    let extractor = BearerTokenExtractor::new(
+        Arc::new(AuthConfig::for_tests()),
+        store as Arc<dyn BearerTokenStore>,
+    );
+
+    let (events, _) = capture_async(|| async {
+        let parts = parts_with_bearer("lucida_pat_unknown");
+        let _ = extractor.extract(&parts).await;
+    })
+    .await;
+    require_event(&events, "auth.failure.unknown_bearer_token", Level::DEBUG);
+}
+
+// auth.bearer.expired — extractor finds past-expires_at bearer row
+#[tokio::test]
+async fn expired_bearer_token_emits_auth_bearer_expired() {
+    let raw_token = "lucida_pat_expired_audit";
+    let store = Arc::new(MemoryBearerTokenStore::new());
+    let mut row = bearer_token_row("expired-token", raw_token, "cli@example.com");
+    row.expires_at = Utc::now() - ChronoDuration::seconds(1);
+    store.create(row).await.unwrap();
+    let extractor = BearerTokenExtractor::new(
+        Arc::new(AuthConfig::for_tests()),
+        store as Arc<dyn BearerTokenStore>,
+    );
+
+    let (events, _) = capture_async(|| async {
+        let parts = parts_with_bearer(raw_token);
+        let _ = extractor.extract(&parts).await;
+    })
+    .await;
+    let evt = require_event(&events, "auth.bearer.expired", Level::DEBUG);
+    assert_eq!(evt.field("email"), Some("cli@example.com"));
+    assert_eq!(evt.field("token_id"), Some("expired-token"));
+}
+
+// auth.bearer.revoked — extractor finds revoked bearer row
+#[tokio::test]
+async fn revoked_bearer_token_emits_auth_bearer_revoked() {
+    let raw_token = "lucida_pat_revoked_audit";
+    let store = Arc::new(MemoryBearerTokenStore::new());
+    let mut row = bearer_token_row("revoked-token", raw_token, "cli@example.com");
+    row.revoked_at = Some(Utc::now());
+    store.create(row).await.unwrap();
+    let extractor = BearerTokenExtractor::new(
+        Arc::new(AuthConfig::for_tests()),
+        store as Arc<dyn BearerTokenStore>,
+    );
+
+    let (events, _) = capture_async(|| async {
+        let parts = parts_with_bearer(raw_token);
+        let _ = extractor.extract(&parts).await;
+    })
+    .await;
+    let evt = require_event(&events, "auth.bearer.revoked", Level::DEBUG);
+    assert_eq!(evt.field("email"), Some("cli@example.com"));
+    assert_eq!(evt.field("token_id"), Some("revoked-token"));
 }
 
 // auth.session.expired.idle — extractor finds idle-expired row
@@ -462,5 +552,20 @@ fn logout_event_fires_at_info_with_email_field() {
         tracing::info!(email = %"alice@calicolabs.com", "auth.logout");
     });
     let evt = require_event(&events, "auth.logout", Level::INFO);
+    assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
+}
+
+// auth.bearer.revoke_current — emitted in bearer-token logout handler
+#[test]
+fn bearer_revoke_current_event_fires_at_info_with_token_id_and_email() {
+    let (events, _) = capture(|| {
+        tracing::info!(
+            token_id = %"token-123",
+            email = %"alice@calicolabs.com",
+            "auth.bearer.revoke_current",
+        );
+    });
+    let evt = require_event(&events, "auth.bearer.revoke_current", Level::INFO);
+    assert_eq!(evt.field("token_id"), Some("token-123"));
     assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
 }

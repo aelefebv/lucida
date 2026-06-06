@@ -324,18 +324,32 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         }
     };
     let session_store_dyn: Arc<dyn auth::LoginSessionStore> = session_store.clone();
+    let bearer_token_store: Arc<dyn auth::BearerTokenStore> = Arc::new(
+        auth::SqliteBearerTokenStore::new(session_store.pool().clone()),
+    );
+    let cli_authorization_store: Arc<dyn auth::CliTokenAuthorizationStore> = Arc::new(
+        auth::SqliteCliTokenAuthorizationStore::new(session_store.pool().clone()),
+    );
     // Pending-auth store rides the same SQLite pool the session store
     // opened (one DB, one migration system, one connection budget).
     let pending_store: Arc<dyn auth::PendingAuthStore> = Arc::new(
         auth::SqlitePendingAuthStore::new(session_store.pool().clone()),
     );
 
-    let extractor =
-        auth::middleware::build_extractor(Arc::clone(&auth_config), Arc::clone(&session_store_dyn));
+    let extractor = auth::middleware::build_extractor(
+        Arc::clone(&auth_config),
+        Arc::clone(&session_store_dyn),
+        Arc::clone(&bearer_token_store),
+    );
 
     let logout_state = auth::handlers::LogoutState {
         config: Arc::clone(&auth_config),
         store: Arc::clone(&session_store_dyn),
+    };
+    let cli_auth_state = auth::handlers::CliAuthState {
+        config: Arc::clone(&auth_config),
+        token_store: Arc::clone(&bearer_token_store),
+        cli_store: Arc::clone(&cli_authorization_store),
     };
 
     // Two auth-route flavors so the OAuth flow doesn't bounce itself:
@@ -349,6 +363,16 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     //     loop).
     let authed_auth_router: Router<()> = Router::new()
         .route("/auth/whoami", get(auth::handlers::whoami))
+        .route(
+            "/auth/cli/approve/{request_id}",
+            get(auth::handlers::cli_auth_approve_page)
+                .post(auth::handlers::cli_auth_approve_submit)
+                .with_state(cli_auth_state.clone()),
+        )
+        .route(
+            "/auth/tokens/revoke-current",
+            post(auth::handlers::revoke_current_bearer_token).with_state(cli_auth_state.clone()),
+        )
         .route(
             "/auth/logout",
             post(auth::handlers::logout).with_state(logout_state),
@@ -402,6 +426,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     };
     let mut public_auth_router: Router<()> = Router::new()
         .route("/auth/error", get(auth::error_page::auth_error))
+        .route(
+            "/auth/cli/start",
+            post(auth::handlers::cli_auth_start).with_state(cli_auth_state.clone()),
+        )
+        .route(
+            "/auth/cli/poll/{request_id}",
+            get(auth::handlers::cli_auth_poll).with_state(cli_auth_state.clone()),
+        )
         .route(
             "/auth/dev/status",
             get(auth::handlers::dev_status).with_state(dev_auth_state.clone()),

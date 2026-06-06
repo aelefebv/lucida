@@ -13,6 +13,14 @@ impl Output {
         Self { json, quiet }
     }
 
+    pub fn json(self) -> bool {
+        self.json
+    }
+
+    pub fn quiet(self) -> bool {
+        self.quiet
+    }
+
     pub fn print_json<T: Serialize>(self, value: &T) -> Result<(), CliError> {
         if self.quiet {
             return Ok(());

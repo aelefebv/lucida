@@ -3353,7 +3353,14 @@ pub mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tower::ServiceExt;
+
+    use crate::auth::{
+        AuthConfig, AuthMode, BearerToken, BearerTokenStore, LoginSessionStore,
+        MemoryBearerTokenStore, MemorySessionStore, hash_bearer_token,
+    };
+    use crate::auth::{DualCredentialExtractor, PrincipalExtractor};
 
     use super::*;
 
@@ -3422,6 +3429,74 @@ pub mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, workspace.id);
         assert_eq!(rows[0].role, WorkspaceRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn bearer_authenticates_workspace_websocket_upgrade() {
+        let store = fresh_store().await;
+        let owner = principal("cli@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Bearer WS"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store),
+            ProxyConfig::defaults(),
+        ));
+
+        let raw_token = "lucida_pat_ws_test";
+        let now = Utc::now();
+        let bearer_store = Arc::new(MemoryBearerTokenStore::new());
+        bearer_store
+            .create(BearerToken {
+                id: "ws-token".into(),
+                token_hash: hash_bearer_token(raw_token),
+                name: "ws test".into(),
+                email: owner.email.clone(),
+                display_name: owner.display_name.clone(),
+                picture_url: owner.picture_url.clone(),
+                created_at: now,
+                last_used_at: None,
+                expires_at: now + chrono::Duration::hours(1),
+                revoked_at: None,
+            })
+            .await
+            .unwrap();
+        let mut config = AuthConfig::for_tests();
+        config.mode = AuthMode::Google;
+        let extractor: Arc<dyn PrincipalExtractor> = Arc::new(DualCredentialExtractor::new(
+            Arc::new(config),
+            Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
+            Arc::clone(&bearer_store) as Arc<dyn BearerTokenStore>,
+        ));
+        let app = router(manager).layer(axum::middleware::from_fn_with_state(
+            extractor,
+            crate::auth::middleware::auth_middleware,
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!(
+            "ws://{addr}/ws/workspaces/{}",
+            urlencoding::encode(&workspace.id)
+        );
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {raw_token}").parse().unwrap(),
+        );
+
+        let (socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SWITCHING_PROTOCOLS
+        );
+        drop(socket);
+        server.abort();
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ modified: 2026-06-06
 
 The Rust crate that builds Lucida's product CLI binary, `lucida`. The crate name remains `lucida-cli` as a Cargo workspace identity, but the user-facing command is no longer `lucida-cli`.
 
-The CLI is moving to a workspace-first client surface that mirrors the web app's nouns. The first foundation slice exposes `lucida status`, `lucida server ...`, and `lucida config ...`; later slices add workspace, dataset, view, layer, channel, layout, saved-view, peer, debug/plan, admin, and Python parity.
+The CLI is moving to a workspace-first client surface that mirrors the web app's nouns. The first foundation slices expose `lucida status`, `lucida server ...`, `lucida auth ...`, and `lucida config ...`; later slices add workspace, dataset, view, layer, channel, layout, saved-view, peer, debug/plan, admin, and Python parity.
 
 ## Why a CLI client
 
@@ -26,6 +26,9 @@ Visible foundation commands:
 - `lucida status` — summarize effective server, health/readiness/version, and auth status.
 - `lucida server status` — same server-oriented health check surface.
 - `lucida server version` — print server version.
+- `lucida auth login` — start browser-assisted CLI bearer credential provisioning.
+- `lucida auth whoami` — print the authenticated principal using `LUCIDA_TOKEN` or the stored token.
+- `lucida auth logout` — revoke the current server-side bearer token and remove the local token; `--local-only` skips server revocation.
 - `lucida config set server <base-url>` — persist the default server.
 - `lucida config get server` — print the effective default server.
 - `lucida config path` — print the config file path.
@@ -39,6 +42,7 @@ Global visible flags:
 ## Interactions
 
 - Config is local JSON under `$LUCIDA_CONFIG_PATH`, `$XDG_CONFIG_HOME/lucida/config.json`, or `~/.config/lucida/config.json`.
+- Bearer credentials are sourced from `LUCIDA_TOKEN` first, then macOS Keychain when available, then the local config file. The file fallback is written with `0600` permissions on Unix.
 - HTTP status checks call the same public/protected server endpoints the web app uses: `/healthz`, `/readyz`, `/version`, and `/auth/whoami`.
 - Future noun commands should reuse the same config, output, error, target-resolution, HTTP, and WebSocket modules instead of adding one-off flag parsing.
 
@@ -52,5 +56,5 @@ Global visible flags:
 
 ## Gotchas
 
-- **Auth status is best-effort until bearer credentials land.** `lucida status` can call `/auth/whoami`, but durable CLI/Python auth arrives in the bearer-credential slice.
+- **Keychain is opportunistic.** `lucida auth login` stores the approved token in macOS Keychain when available. If Keychain rejects the write or the platform has no supported keychain integration, the CLI falls back to the `0600` config file.
 - **No retry loop yet.** The foundation status/config commands make single HTTP requests. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.

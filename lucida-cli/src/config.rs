@@ -1,5 +1,8 @@
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +17,8 @@ pub struct CliConfig {
     pub server: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,12 +82,37 @@ impl ConfigStore {
         }
 
         let raw = serde_json::to_string_pretty(config)?;
-        fs::write(&self.path, format!("{raw}\n")).map_err(|error| {
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path).map_err(|error| {
             CliError::config(format!(
                 "failed to write config {}: {error}",
                 self.path.display()
             ))
-        })
+        })?;
+        file.write_all(format!("{raw}\n").as_bytes())
+            .map_err(|error| {
+                CliError::config(format!(
+                    "failed to write config {}: {error}",
+                    self.path.display()
+                ))
+            })?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    CliError::config(format!(
+                        "failed to set permissions on {}: {error}",
+                        self.path.display()
+                    ))
+                },
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -205,6 +235,7 @@ mod tests {
         let config = CliConfig {
             server: Some("http://127.0.0.1:9988".to_string()),
             workspace: None,
+            token: Some("lucida_pat_test".to_string()),
         };
 
         store.save(&config).unwrap();

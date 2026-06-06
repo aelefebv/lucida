@@ -83,7 +83,7 @@ The trait is also the natural carrier for evolving capabilities: today `is_admin
 - `lucida-server/src/bookmarks/broadcast.rs` — best-effort affected-client computation + dispatch. Empty `dataset_urls` falls through as broadcast-to-all.
 - `lucida-server/migrations/20260508000003_create_bookmarks.sql` — versioned migration; runs on startup via the existing sqlx pipeline that auth set up.
 - `lucida-core/src/auth_principal.rs` — `AuthPrincipal` struct (shared seam type). Lives in `lucida-core` so future provider extractors don't pull in lucida-server.
-- `lucida-server/src/auth/principal.rs` — `PrincipalExtractor` trait + `SessionCookieExtractor` (production path; cookie-based, not pure-JWT) + `GoogleJwtPrincipalExtractor` (Bearer-JWT for future CLI/server-to-server flows). The originally-sketched `StubPrincipalExtractor` was never built — auth landed first so bookmarks consume the real extractor directly.
+- `lucida-server/src/auth/principal.rs` — `PrincipalExtractor` trait + `SessionCookieExtractor` (browser cookie path), `BearerTokenExtractor` / `DualCredentialExtractor` (CLI/Python bearer path), `GoogleJwtPrincipalExtractor` (Google ID-token validator helper), and `StubPrincipalExtractor` (disabled-mode local-dev path).
 - `lucida-core/src/saved_view.rs` — the `SavedView` schema, shared between web and server.
 - `lucida-core/src/protocol.rs` — `ServerMessage::BookmarkChanged { id, action, dataset_urls }` variant + `BookmarkAction` enum. **First `ServerMessage` variant without a `seq`** — session-scoped notification, not a sequenced document command. See [[saved-views]] §"BookmarkChanged is unsequenced."
 

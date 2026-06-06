@@ -68,15 +68,17 @@ Add first-class opaque bearer credentials for CLI/Python clients, resolving thro
 
 ### Acceptance criteria
 
-- [ ] Server has a bearer credential store with name, expiry, revocation state, created/last-used metadata, and audit events.
-- [ ] Server auth extraction accepts either existing httpOnly cookie sessions or `Authorization: Bearer <token>` and yields the same `AuthPrincipal` type.
-- [ ] WebSocket workspace upgrades accept bearer auth for non-browser clients.
-- [ ] `lucida auth login` opens the browser approval flow and stores the returned token.
-- [ ] `lucida auth whoami` works with the stored token and with `LUCIDA_TOKEN`.
-- [ ] `lucida auth logout` removes local credentials and can revoke the server-side credential.
-- [ ] Missing, expired, revoked, and unauthorized credentials produce structured errors.
-- [ ] Tests cover token creation, lookup, expiry, revocation, last-used updates, audit events, HTTP auth, and WebSocket auth.
-- [ ] The flow never copies browser cookies, Google ID tokens, Google refresh tokens, or OAuth provider credentials into CLI/Python clients.
+- [x] Server has a bearer credential store with name, expiry, revocation state, created/last-used metadata, and audit events.
+- [x] Server auth extraction accepts either existing httpOnly cookie sessions or `Authorization: Bearer <token>` and yields the same `AuthPrincipal` type.
+- [x] WebSocket workspace upgrades accept bearer auth for non-browser clients through the shared protected-router middleware.
+- [x] `lucida auth login` opens the browser approval flow and stores the approved local token.
+- [x] `lucida auth whoami` works with the stored token and with `LUCIDA_TOKEN`.
+- [x] `lucida auth logout` removes local credentials and can revoke the server-side credential.
+- [x] Missing, expired, revoked, and unauthorized credentials produce structured errors.
+- [x] Tests cover token creation, lookup, expiry, revocation, last-used updates, audit events, HTTP auth, and WebSocket auth.
+- [x] The flow never copies browser cookies, Google ID tokens, Google refresh tokens, or OAuth provider credentials into CLI/Python clients.
+
+Current implementation note: opaque bearer credentials, browser-assisted approval, macOS Keychain storage with `0600` config fallback, token revocation, CLI auth commands, explicit bearer audit tests, and explicit bearer WebSocket upgrade coverage have landed on `codex/cli-open-dataset`.
 
 ### Wiki context
 

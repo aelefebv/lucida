@@ -1,12 +1,20 @@
+mod auth;
 mod config;
+mod credentials;
 mod error;
 mod output;
 mod status;
 
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 
+use crate::auth::{
+    AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
+};
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
-use crate::error::CliError;
+use crate::credentials::{clear_local_token, resolve_token, store_local_token};
+use crate::error::{CliError, ErrorKind};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
 
@@ -38,6 +46,11 @@ enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// Authenticate the CLI with a Lucida server
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Read or write local Lucida CLI configuration
     Config {
         #[command(subcommand)]
@@ -51,6 +64,33 @@ enum ServerCommand {
     Status,
     /// Print server version
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthCommand {
+    /// Start a browser-assisted CLI login
+    Login {
+        /// Human-readable name for this credential
+        #[arg(long, default_value = "Lucida CLI")]
+        name: String,
+        /// Token lifetime in days
+        #[arg(long, default_value_t = 30)]
+        ttl_days: u64,
+        /// Do not attempt to open a browser automatically
+        #[arg(long)]
+        no_browser: bool,
+        /// Seconds to wait for browser approval
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+    },
+    /// Print the authenticated principal
+    Whoami,
+    /// Remove the local token and revoke it server-side by default
+    Logout {
+        /// Only remove the local token; skip server-side revocation
+        #[arg(long)]
+        local_only: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,6 +162,88 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 output.print_either(&report, || format_version_human(&report))?;
             }
         },
+        Command::Auth { command } => match command {
+            AuthCommand::Login {
+                name,
+                ttl_days,
+                no_browser,
+                timeout_seconds,
+            } => {
+                let result = login(
+                    cli.server.as_deref(),
+                    &mut config,
+                    &store,
+                    name,
+                    *ttl_days,
+                    *no_browser,
+                    Duration::from_secs(*timeout_seconds),
+                    &output,
+                )
+                .await?;
+                output.print_either(&result, || {
+                    format!(
+                        "Logged in as {}\nToken: {}\nStorage: {}\nConfig: {}",
+                        result.approved_email.as_deref().unwrap_or("approved user"),
+                        result.token_name.as_deref().unwrap_or("Lucida CLI"),
+                        result.token_storage.as_str(),
+                        result.config_path
+                    )
+                })?;
+            }
+            AuthCommand::Whoami => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = AuthClient::new(server.url);
+                let principal = client
+                    .whoami(token.as_ref().map(|effective| effective.token.as_str()))
+                    .await?;
+                output.print_either(&principal, || {
+                    if principal.is_admin {
+                        format!("{} (admin)", principal.email)
+                    } else {
+                        principal.email.clone()
+                    }
+                })?;
+            }
+            AuthCommand::Logout { local_only } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let mut revoked = false;
+                if !*local_only {
+                    let effective = token.as_ref().ok_or_else(|| {
+                        CliError::new(ErrorKind::Unauthenticated, "no configured token to revoke")
+                    })?;
+                    let client = AuthClient::new(server.url.clone());
+                    revoked = client.revoke_current(&effective.token).await?;
+                }
+                let local_removed = clear_local_token(&server.url, &mut config);
+                store.save(&config)?;
+                let payload = serde_json::json!({
+                    "local_removed": local_removed,
+                    "server_revoked": revoked,
+                    "config_path": store.path(),
+                });
+                output.print_either(&payload, || {
+                    if *local_only {
+                        if local_removed {
+                            format!("Removed local token\nConfig: {}", store.path().display())
+                        } else {
+                            "No local token found".to_string()
+                        }
+                    } else if revoked {
+                        format!(
+                            "Revoked server token and removed local token\nConfig: {}",
+                            store.path().display()
+                        )
+                    } else {
+                        format!(
+                            "Removed local token; server token was already invalid\nConfig: {}",
+                            store.path().display()
+                        )
+                    }
+                })?;
+            }
+        },
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -164,8 +286,79 @@ async fn load_status(
     config: &CliConfig,
 ) -> Result<StatusReport, CliError> {
     let server = resolve_server(server_override, config)?;
-    let client = ServerClient::new(server.url.clone());
+    let token = resolve_token(&server.url, config).map(|effective| effective.token);
+    let client = ServerClient::new(server.url.clone(), token);
     Ok(client.status_report(server).await)
+}
+
+async fn login(
+    server_override: Option<&str>,
+    config: &mut CliConfig,
+    store: &ConfigStore,
+    name: &str,
+    ttl_days: u64,
+    no_browser: bool,
+    timeout: Duration,
+    output: &Output,
+) -> Result<LoginResult, CliError> {
+    let server = resolve_server(server_override, config)?;
+    let client = AuthClient::new(server.url.clone());
+    let raw_token = generate_raw_token();
+    let ttl_seconds = ttl_days.saturating_mul(24 * 60 * 60);
+    let start = client
+        .start_login(name, &raw_token, Some(ttl_seconds))
+        .await?;
+    let approval_url = format!("{}{}", server.url, start.approval_path);
+
+    if output.json() {
+        eprintln!("Open this URL to approve CLI access:");
+        eprintln!("{approval_url}");
+        eprintln!("Code: {}", start.user_code);
+    } else if !output.quiet() {
+        println!("Open this URL to approve CLI access:");
+        println!("{approval_url}");
+        println!("Code: {}", start.user_code);
+    }
+    if !no_browser {
+        let _ = open_browser(&approval_url);
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match client
+            .poll_login(&start.poll_path, &start.poll_token)
+            .await?
+        {
+            PollOutcome::Approved(approved) => {
+                let storage = store_local_token(&server.url, &raw_token, config);
+                store.save(config)?;
+                return Ok(LoginResult {
+                    server: server.url,
+                    approved_email: approved.email,
+                    token_id: approved.token_id,
+                    token_name: approved.token_name,
+                    token_expires_at: approved.token_expires_at,
+                    token_storage: storage,
+                    config_path: store.path().display().to_string(),
+                });
+            }
+            PollOutcome::Expired => {
+                return Err(CliError::new(
+                    ErrorKind::Unauthenticated,
+                    "CLI login request expired before approval",
+                ));
+            }
+            PollOutcome::Pending => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(CliError::new(
+                        ErrorKind::Unauthenticated,
+                        "timed out waiting for browser approval",
+                    ));
+                }
+                tokio::time::sleep(poll_interval()).await;
+            }
+        }
+    }
 }
 
 fn format_version_human(report: &StatusReport) -> String {
@@ -206,6 +399,7 @@ mod tests {
 
         assert!(help.contains("status"));
         assert!(help.contains("server"));
+        assert!(help.contains("auth"));
         assert!(help.contains("config"));
         assert!(!help.contains("open"));
         assert!(!help.contains("visible-chunks"));
@@ -241,6 +435,18 @@ mod tests {
                     },
             } => assert_eq!(base_url, "http://127.0.0.1:9988"),
             _ => panic!("expected config set server"),
+        }
+    }
+
+    #[test]
+    fn auth_login_parses_product_shape() {
+        let cli = parse(&["auth", "login", "--name", "Laptop"]);
+
+        match cli.command {
+            Command::Auth {
+                command: AuthCommand::Login { name, .. },
+            } => assert_eq!(name, "Laptop"),
+            _ => panic!("expected auth login"),
         }
     }
 

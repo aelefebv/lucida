@@ -39,13 +39,15 @@ pub enum AuthCheck {
 
 pub struct ServerClient {
     base_url: String,
+    token: Option<String>,
     http: reqwest::Client,
 }
 
 impl ServerClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            token,
             http: reqwest::Client::new(),
         }
     }
@@ -95,12 +97,14 @@ impl ServerClient {
 
     async fn auth_check(&self) -> AuthCheck {
         let url = format!("{}/auth/whoami", self.base_url);
-        let response = self
+        let mut request = self
             .http
             .get(url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await;
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(token) = self.token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await;
         match response {
             Ok(response) if response.status().is_success() => {
                 match response.json::<AuthPrincipal>().await {

@@ -6,13 +6,13 @@
 //! per-user feature consume the resulting `AuthPrincipal` and never
 //! see provider-specific details.
 //!
-//! Three implementations live here: [`SessionCookieExtractor`] (the
-//! production cookie+session lookup), [`GoogleJwtPrincipalExtractor`]
-//! (Bearer-token validator for non-cookie call sites), and
-//! [`StubPrincipalExtractor`] (the disabled-mode extractor that yields
-//! `dev@local` unless a local-dev identity cookie overrides it).
-//! `build_extractor` in [`crate::auth::middleware`] picks between them
-//! based on `AuthMode`.
+//! The production protected surface uses [`DualCredentialExtractor`]:
+//! explicit `Authorization: Bearer ...` credentials are resolved through
+//! [`BearerTokenExtractor`], while browser requests without an
+//! Authorization header fall back to [`SessionCookieExtractor`].
+//! Disabled auth still uses [`StubPrincipalExtractor`]. The older
+//! [`GoogleJwtPrincipalExtractor`] remains available for tests and
+//! integrations that validate Google ID tokens directly.
 
 use std::sync::Arc;
 
@@ -23,6 +23,7 @@ use tracing::{debug, error};
 
 use lucida_core::auth_principal::AuthPrincipal;
 
+use super::bearer_token::{BearerTokenStore, hash_bearer_token};
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
 use super::dev::{default_dev_principal, read_dev_principal_cookie};
@@ -87,6 +88,23 @@ impl AuthError {
 #[async_trait]
 pub trait PrincipalExtractor: Send + Sync + 'static {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError>;
+}
+
+/// Read an RFC 6750-style bearer token from an Authorization header.
+/// Returns `None` for missing, malformed, or empty values. Callers that
+/// need to reject any Authorization header should first check whether
+/// the header is present and then call this helper.
+pub(crate) fn read_bearer_token(req: &Parts) -> Option<&str> {
+    let header = req
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())?;
+    let (scheme, token) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
 }
 
 /// Production extractor: read the `lucida_session` cookie, look up the
@@ -221,6 +239,114 @@ impl PrincipalExtractor for SessionCookieExtractor {
             picture_url: row.picture_url,
             is_admin,
         })
+    }
+}
+
+/// Production bearer-token extractor for CLI/Python clients.
+pub struct BearerTokenExtractor {
+    config: Arc<AuthConfig>,
+    store: Arc<dyn BearerTokenStore>,
+}
+
+impl BearerTokenExtractor {
+    pub fn new(config: Arc<AuthConfig>, store: Arc<dyn BearerTokenStore>) -> Self {
+        Self { config, store }
+    }
+}
+
+#[async_trait]
+impl PrincipalExtractor for BearerTokenExtractor {
+    async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
+        let raw = read_bearer_token(req).ok_or(AuthError::Unauthenticated)?;
+        let token_hash = hash_bearer_token(raw);
+
+        let user_agent = req
+            .headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let ip = client_ip(req).unwrap_or_default();
+
+        let row = match self.store.get_by_hash(&token_hash).await.map_err(|e| {
+            error!(error = %e, "bearer_token_store.get.failed");
+            AuthError::Internal(e.to_string())
+        })? {
+            Some(row) => row,
+            None => {
+                debug!(
+                    ip = %ip,
+                    user_agent = %user_agent,
+                    "auth.failure.unknown_bearer_token",
+                );
+                return Err(AuthError::Unauthenticated);
+            }
+        };
+
+        let now = Utc::now();
+        if row.revoked_at.is_some() {
+            debug!(
+                token_id = %row.id,
+                email = %row.email,
+                ip = %ip,
+                user_agent = %user_agent,
+                "auth.bearer.revoked",
+            );
+            return Err(AuthError::Unauthenticated);
+        }
+        if row.expires_at <= now {
+            debug!(
+                token_id = %row.id,
+                email = %row.email,
+                ip = %ip,
+                user_agent = %user_agent,
+                "auth.bearer.expired",
+            );
+            return Err(AuthError::Unauthenticated);
+        }
+
+        let store = Arc::clone(&self.store);
+        let id = row.id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store.touch_last_used(&id, now).await {
+                debug!(token_id = %id, error = %e, "bearer_extractor.touch.failed");
+            }
+        });
+
+        Ok(row.principal(&self.config))
+    }
+}
+
+/// Cookie + bearer extractor used by protected app routes.
+///
+/// If the request carries any Authorization header, treat it as an
+/// explicit bearer-auth attempt. This prevents a bad bearer token from
+/// silently falling back to an unrelated browser cookie.
+pub struct DualCredentialExtractor {
+    cookie: SessionCookieExtractor,
+    bearer: BearerTokenExtractor,
+}
+
+impl DualCredentialExtractor {
+    pub fn new(
+        config: Arc<AuthConfig>,
+        session_store: Arc<dyn LoginSessionStore>,
+        token_store: Arc<dyn BearerTokenStore>,
+    ) -> Self {
+        Self {
+            cookie: SessionCookieExtractor::new(Arc::clone(&config), session_store),
+            bearer: BearerTokenExtractor::new(config, token_store),
+        }
+    }
+}
+
+#[async_trait]
+impl PrincipalExtractor for DualCredentialExtractor {
+    async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
+        if req.headers.contains_key(axum::http::header::AUTHORIZATION) {
+            self.bearer.extract(req).await
+        } else {
+            self.cookie.extract(req).await
+        }
     }
 }
 
@@ -369,14 +495,7 @@ impl GoogleJwtPrincipalExtractor {
 #[async_trait]
 impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
-        let header = req
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AuthError::Unauthenticated)?;
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(AuthError::Unauthenticated)?;
+        let token = read_bearer_token(req).ok_or(AuthError::Unauthenticated)?;
 
         match self.google.validate_id_token(token).await {
             Ok(claims) => Ok(principal_from_claims(&claims)),
@@ -463,6 +582,8 @@ pub(crate) mod test_helpers {
 mod tests {
     use super::test_helpers::*;
     use super::*;
+    use crate::auth::bearer_token::{BearerToken, hash_bearer_token};
+    use crate::auth::bearer_token_memory::MemoryBearerTokenStore;
     use crate::auth::dev::{build_dev_principal_cookie, normalize_dev_principal};
     use crate::auth::session_store_memory::MemorySessionStore;
     use axum::http::Request;
@@ -484,6 +605,32 @@ mod tests {
             .unwrap()
             .into_parts()
             .0
+    }
+
+    fn parts_with_bearer(raw: &str) -> Parts {
+        Request::builder()
+            .uri("http://localhost/")
+            .header("authorization", format!("Bearer {raw}"))
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
+    fn bearer_row(raw: &str) -> BearerToken {
+        let now = Utc::now();
+        BearerToken {
+            id: "bearer-1".to_string(),
+            token_hash: hash_bearer_token(raw),
+            name: "laptop".to_string(),
+            email: "cli@example.com".to_string(),
+            display_name: "CLI User".to_string(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: None,
+            expires_at: now + ChronoDuration::hours(1),
+            revoked_at: None,
+        }
     }
 
     #[tokio::test]
@@ -566,6 +713,124 @@ mod tests {
         let parts = parts_with_cookie(Some("admin-mixed"));
         let p = ext.extract(&parts).await.unwrap();
         assert!(p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn bearer_extractor_returns_principal_for_active_token() {
+        let raw = "lucida_pat_active";
+        let store = Arc::new(MemoryBearerTokenStore::new());
+        store.create(bearer_row(raw)).await.unwrap();
+        let ext = BearerTokenExtractor::new(
+            Arc::new(AuthConfig::for_tests()),
+            store.clone() as Arc<dyn BearerTokenStore>,
+        );
+
+        let p = ext.extract(&parts_with_bearer(raw)).await.unwrap();
+        assert_eq!(p.email, "cli@example.com");
+        assert_eq!(p.display_name, "CLI User");
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(
+            store
+                .get_by_hash(&hash_bearer_token(raw))
+                .await
+                .unwrap()
+                .unwrap()
+                .last_used_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_extractor_rejects_expired_and_revoked_tokens() {
+        let raw_expired = "lucida_pat_expired";
+        let raw_revoked = "lucida_pat_revoked";
+        let store = Arc::new(MemoryBearerTokenStore::new());
+
+        let mut expired = bearer_row(raw_expired);
+        expired.id = "expired".into();
+        expired.expires_at = Utc::now() - ChronoDuration::seconds(1);
+        store.create(expired).await.unwrap();
+
+        let mut revoked = bearer_row(raw_revoked);
+        revoked.id = "revoked".into();
+        revoked.revoked_at = Some(Utc::now());
+        store.create(revoked).await.unwrap();
+
+        let ext = BearerTokenExtractor::new(
+            Arc::new(AuthConfig::for_tests()),
+            store as Arc<dyn BearerTokenStore>,
+        );
+        assert_eq!(
+            ext.extract(&parts_with_bearer(raw_expired))
+                .await
+                .unwrap_err(),
+            AuthError::Unauthenticated
+        );
+        assert_eq!(
+            ext.extract(&parts_with_bearer(raw_revoked))
+                .await
+                .unwrap_err(),
+            AuthError::Unauthenticated
+        );
+    }
+
+    #[tokio::test]
+    async fn dual_extractor_prefers_explicit_bearer_over_cookie() {
+        let raw = "lucida_pat_dual";
+        let session_store = Arc::new(MemorySessionStore::new());
+        session_store
+            .create(fresh_session("cookie-ok"))
+            .await
+            .unwrap();
+
+        let token_store = Arc::new(MemoryBearerTokenStore::new());
+        token_store.create(bearer_row(raw)).await.unwrap();
+
+        let ext = DualCredentialExtractor::new(
+            Arc::new(AuthConfig::for_tests()),
+            session_store as Arc<dyn LoginSessionStore>,
+            token_store as Arc<dyn BearerTokenStore>,
+        );
+        let parts = Request::builder()
+            .uri("http://localhost/")
+            .header("cookie", "lucida_session=cookie-ok")
+            .header("authorization", format!("Bearer {raw}"))
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+
+        let p = ext.extract(&parts).await.unwrap();
+        assert_eq!(p.email, "cli@example.com");
+    }
+
+    #[tokio::test]
+    async fn dual_extractor_does_not_fallback_to_cookie_for_bad_authorization_header() {
+        let session_store = Arc::new(MemorySessionStore::new());
+        session_store
+            .create(fresh_session("cookie-ok"))
+            .await
+            .unwrap();
+        let token_store = Arc::new(MemoryBearerTokenStore::new());
+        let ext = DualCredentialExtractor::new(
+            Arc::new(AuthConfig::for_tests()),
+            session_store as Arc<dyn LoginSessionStore>,
+            token_store as Arc<dyn BearerTokenStore>,
+        );
+        let parts = Request::builder()
+            .uri("http://localhost/")
+            .header("cookie", "lucida_session=cookie-ok")
+            .header("authorization", "Bearer missing")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+
+        assert_eq!(
+            ext.extract(&parts).await.unwrap_err(),
+            AuthError::Unauthenticated
+        );
     }
 
     #[tokio::test]

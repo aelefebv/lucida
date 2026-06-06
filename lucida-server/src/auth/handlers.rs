@@ -6,11 +6,12 @@
 //! directly from [`crate::auth::principal::StubPrincipalExtractor`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Extension;
-use axum::extract::{Query, State};
-use axum::http::header::{LOCATION, SET_COOKIE};
-use axum::http::{Request, StatusCode};
+use axum::extract::{Form, Path, Query, State};
+use axum::http::header::{AUTHORIZATION, LOCATION, SET_COOKIE};
+use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{AppendHeaders, IntoResponse, Json, Response};
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -20,6 +21,8 @@ use tracing::{error, info, warn};
 
 use lucida_core::auth_principal::AuthPrincipal;
 
+use super::bearer_token::{BearerToken, BearerTokenStore, hash_bearer_token};
+use super::cli_authorization::{CliTokenAuthorization, CliTokenAuthorizationStore};
 use super::config::AuthConfig;
 use super::cookie::{
     build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
@@ -33,6 +36,11 @@ use super::google_oauth::{GoogleOAuthClient, OAuthError, Prompt};
 use super::pending_auth::{PendingAuth, PendingAuthStore};
 use super::principal::{RejectionReason, principal_or_rejection_from_claims};
 use super::session_store::{LoginSession, LoginSessionStore};
+
+const CLI_AUTH_REQUEST_TTL: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_CLI_TOKEN_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const MIN_CLI_TOKEN_TTL: Duration = Duration::from_secs(60);
+const MAX_CLI_TOKEN_NAME_LEN: usize = 80;
 
 /// `GET /auth/whoami` — returns the current `AuthPrincipal` JSON when
 /// the auth middleware attached one, or 401 otherwise. The middleware
@@ -48,6 +56,503 @@ pub async fn whoami(principal: Option<Extension<AuthPrincipal>>) -> Response {
         )
             .into_response(),
     }
+}
+
+// -- CLI/Python bearer credential provisioning ---------------------------
+
+#[derive(Clone)]
+pub struct CliAuthState {
+    pub config: Arc<AuthConfig>,
+    pub token_store: Arc<dyn BearerTokenStore>,
+    pub cli_store: Arc<dyn CliTokenAuthorizationStore>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CliAuthStartRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub token_hash: String,
+    #[serde(default)]
+    pub expires_in_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CliAuthStartResponse {
+    pub status: &'static str,
+    pub request_id: String,
+    pub user_code: String,
+    pub approval_path: String,
+    pub poll_path: String,
+    pub poll_token: String,
+    pub expires_at: chrono::DateTime<Utc>,
+    pub token_expires_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CliAuthPollResponse {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// `POST /auth/cli/start` — public endpoint used by `lucida auth login`.
+///
+/// The CLI has already generated the raw token and sends only its hash.
+/// The response contains a short-lived poll secret and a browser URL
+/// path the user must approve while authenticated.
+pub async fn cli_auth_start(
+    State(state): State<CliAuthState>,
+    Json(payload): Json<CliAuthStartRequest>,
+) -> Response {
+    let name = match normalize_cli_token_name(payload.name.as_deref()) {
+        Ok(name) => name,
+        Err(detail) => return bad_request(detail),
+    };
+    if !valid_token_hash(&payload.token_hash) {
+        return bad_request("token_hash must be a 64-character lowercase hex digest");
+    }
+
+    let now = Utc::now();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let poll_token = random_url_secret();
+    let poll_token_hash = hash_bearer_token(&poll_token);
+    let user_code = random_user_code();
+    let expires_at =
+        now + ChronoDuration::from_std(CLI_AUTH_REQUEST_TTL).unwrap_or(ChronoDuration::minutes(10));
+    let token_ttl = requested_token_ttl(payload.expires_in_seconds, &state.config);
+    let token_expires_at =
+        now + ChronoDuration::from_std(token_ttl).unwrap_or(ChronoDuration::hours(720));
+
+    let row = CliTokenAuthorization {
+        id: request_id.clone(),
+        poll_token_hash,
+        token_hash: payload.token_hash,
+        user_code: user_code.clone(),
+        name,
+        created_at: now,
+        expires_at,
+        token_expires_at,
+        approved_at: None,
+        approved_token_id: None,
+        approved_email: None,
+    };
+    if let Err(e) = state.cli_store.create(row).await {
+        error!(error = %e, "auth.cli.start.create_failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal" })),
+        )
+            .into_response();
+    }
+
+    info!(request_id = %request_id, "auth.cli.start");
+    Json(CliAuthStartResponse {
+        status: "pending",
+        approval_path: format!("/auth/cli/approve/{request_id}"),
+        poll_path: format!("/auth/cli/poll/{request_id}"),
+        request_id,
+        user_code,
+        poll_token,
+        expires_at,
+        token_expires_at,
+    })
+    .into_response()
+}
+
+/// `GET /auth/cli/approve/{request_id}` — authenticated browser page.
+pub async fn cli_auth_approve_page(
+    State(state): State<CliAuthState>,
+    Path(request_id): Path<String>,
+    Extension(principal): Extension<AuthPrincipal>,
+) -> Response {
+    let row = match load_cli_request(&state, &request_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, cli_auth_missing_html()),
+        Err(response) => return response,
+    };
+
+    let now = Utc::now();
+    if row.is_expired_at(now) {
+        return html_response(StatusCode::GONE, cli_auth_expired_html(&row));
+    }
+    if row.is_approved() {
+        return html_response(StatusCode::OK, cli_auth_already_approved_html(&row));
+    }
+
+    html_response(StatusCode::OK, cli_auth_approve_html(&row, &principal))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CliAuthApprovalForm {
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+/// `POST /auth/cli/approve/{request_id}` — authenticated browser approval.
+pub async fn cli_auth_approve_submit(
+    State(state): State<CliAuthState>,
+    Path(request_id): Path<String>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Form(form): Form<CliAuthApprovalForm>,
+) -> Response {
+    if form.action.as_deref().unwrap_or("approve") != "approve" {
+        return bad_request("unsupported CLI authorization action");
+    }
+
+    let row = match load_cli_request(&state, &request_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, cli_auth_missing_html()),
+        Err(response) => return response,
+    };
+    let now = Utc::now();
+    if row.is_expired_at(now) {
+        return html_response(StatusCode::GONE, cli_auth_expired_html(&row));
+    }
+    if row.is_approved() {
+        return html_response(StatusCode::OK, cli_auth_already_approved_html(&row));
+    }
+
+    let token_id = uuid::Uuid::new_v4().to_string();
+    let token = BearerToken {
+        id: token_id.clone(),
+        token_hash: row.token_hash.clone(),
+        name: row.name.clone(),
+        email: principal.email.clone(),
+        display_name: principal.display_name.clone(),
+        picture_url: principal.picture_url.clone(),
+        created_at: now,
+        last_used_at: None,
+        expires_at: row.token_expires_at,
+        revoked_at: None,
+    };
+    if let Err(e) = state.token_store.create(token).await {
+        warn!(
+            request_id = %row.id,
+            email = %principal.email,
+            error = %e,
+            "auth.cli.approve.token_create_failed",
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "token_create_failed" })),
+        )
+            .into_response();
+    }
+    if let Err(e) = state
+        .cli_store
+        .mark_approved(&row.id, &token_id, &principal.email, now)
+        .await
+    {
+        error!(
+            request_id = %row.id,
+            token_id = %token_id,
+            error = %e,
+            "auth.cli.approve.mark_failed",
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal" })),
+        )
+            .into_response();
+    }
+
+    info!(
+        request_id = %row.id,
+        token_id = %token_id,
+        email = %principal.email,
+        name = %row.name,
+        "auth.cli.approve.success",
+    );
+    html_response(StatusCode::OK, cli_auth_success_html(&row, &principal))
+}
+
+/// `GET /auth/cli/poll/{request_id}` — public polling endpoint for CLI.
+pub async fn cli_auth_poll(
+    State(state): State<CliAuthState>,
+    Path(request_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let poll_token = match read_bearer_from_headers(req.headers()) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthenticated" })),
+            )
+                .into_response();
+        }
+    };
+    let poll_hash = hash_bearer_token(poll_token);
+    let row = match state.cli_store.get_for_poll(&request_id, &poll_hash).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthenticated" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            error!(request_id = %request_id, error = %e, "auth.cli.poll.failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+
+    if row.is_expired_at(Utc::now()) {
+        return (
+            StatusCode::GONE,
+            Json(CliAuthPollResponse {
+                status: "expired",
+                email: None,
+                token_id: None,
+                token_name: None,
+                token_expires_at: None,
+            }),
+        )
+            .into_response();
+    }
+    if row.is_approved() {
+        return Json(CliAuthPollResponse {
+            status: "approved",
+            email: row.approved_email,
+            token_id: row.approved_token_id,
+            token_name: Some(row.name),
+            token_expires_at: Some(row.token_expires_at),
+        })
+        .into_response();
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(CliAuthPollResponse {
+            status: "pending",
+            email: None,
+            token_id: None,
+            token_name: None,
+            token_expires_at: None,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /auth/tokens/revoke-current` — revoke the bearer token used
+/// for this request. Cookie-authenticated callers get a 400 because
+/// there is no current bearer credential to revoke.
+pub async fn revoke_current_bearer_token(
+    State(state): State<CliAuthState>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let Some(raw) = read_bearer_from_headers(req.headers()) else {
+        return bad_request("request was authenticated without a bearer token");
+    };
+    let hash = hash_bearer_token(raw);
+    match state.token_store.revoke_by_hash(&hash, Utc::now()).await {
+        Ok(Some(row)) => {
+            info!(
+                token_id = %row.id,
+                email = %row.email,
+                "auth.bearer.revoke_current",
+            );
+            Json(json!({ "revoked": true, "token_id": row.id })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthenticated" })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!(error = %e, "auth.bearer.revoke_current.failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn load_cli_request(
+    state: &CliAuthState,
+    request_id: &str,
+) -> Result<Option<CliTokenAuthorization>, Response> {
+    state.cli_store.get(request_id).await.map_err(|e| {
+        error!(request_id = %request_id, error = %e, "auth.cli.request_load_failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal" })),
+        )
+            .into_response()
+    })
+}
+
+fn requested_token_ttl(requested_seconds: Option<u64>, config: &AuthConfig) -> Duration {
+    let requested = requested_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_CLI_TOKEN_TTL);
+    let max = config.hard_cap.max(MIN_CLI_TOKEN_TTL);
+    requested.clamp(MIN_CLI_TOKEN_TTL, max)
+}
+
+fn normalize_cli_token_name(raw: Option<&str>) -> Result<String, &'static str> {
+    let name = raw.unwrap_or("Lucida CLI").trim();
+    if name.is_empty() {
+        return Err("token name cannot be empty");
+    }
+    if name.chars().count() > MAX_CLI_TOKEN_NAME_LEN {
+        return Err("token name is too long");
+    }
+    Ok(name.to_string())
+}
+
+fn valid_token_hash(raw: &str) -> bool {
+    raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn read_bearer_from_headers(headers: &HeaderMap) -> Option<&str> {
+    let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())?;
+    let (scheme, token) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
+}
+
+fn random_url_secret() -> String {
+    let bytes: [u8; 32] = rand::random();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn random_user_code() -> String {
+    let raw: u32 = rand::random();
+    format!("{:04X}-{:04X}", raw >> 16, raw & 0xFFFF)
+}
+
+fn bad_request(detail: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "bad_request", "detail": detail.into() })),
+    )
+        .into_response()
+}
+
+fn html_response(status: StatusCode, body: String) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn cli_auth_missing_html() -> String {
+    auth_html_page(
+        "Lucida CLI authorization not found",
+        "<p>This CLI authorization request does not exist or was already removed.</p>",
+    )
+}
+
+fn cli_auth_expired_html(row: &CliTokenAuthorization) -> String {
+    auth_html_page(
+        "Lucida CLI authorization expired",
+        &format!(
+            "<p>The request for <strong>{}</strong> expired at {}.</p>",
+            html_escape(&row.name),
+            html_escape(&row.expires_at.to_rfc3339())
+        ),
+    )
+}
+
+fn cli_auth_already_approved_html(row: &CliTokenAuthorization) -> String {
+    auth_html_page(
+        "Lucida CLI authorization already approved",
+        &format!(
+            "<p>The request for <strong>{}</strong> has already been approved.</p>",
+            html_escape(&row.name)
+        ),
+    )
+}
+
+fn cli_auth_approve_html(row: &CliTokenAuthorization, principal: &AuthPrincipal) -> String {
+    auth_html_page(
+        "Approve Lucida CLI access",
+        &format!(
+            r#"
+            <p>Approve a CLI/Python bearer credential for <strong>{email}</strong>.</p>
+            <dl>
+              <dt>Name</dt><dd>{name}</dd>
+              <dt>Code</dt><dd><code>{code}</code></dd>
+              <dt>Token expires</dt><dd>{token_expires}</dd>
+              <dt>Approval expires</dt><dd>{expires}</dd>
+            </dl>
+            <form method="post">
+              <button type="submit" name="action" value="approve">Approve credential</button>
+            </form>
+            "#,
+            email = html_escape(&principal.email),
+            name = html_escape(&row.name),
+            code = html_escape(&row.user_code),
+            token_expires = html_escape(&row.token_expires_at.to_rfc3339()),
+            expires = html_escape(&row.expires_at.to_rfc3339()),
+        ),
+    )
+}
+
+fn cli_auth_success_html(row: &CliTokenAuthorization, principal: &AuthPrincipal) -> String {
+    auth_html_page(
+        "Lucida CLI access approved",
+        &format!(
+            "<p><strong>{}</strong> can now use Lucida as <strong>{}</strong>.</p>",
+            html_escape(&row.name),
+            html_escape(&principal.email)
+        ),
+    )
+}
+
+fn auth_html_page(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 3rem auto; max-width: 42rem; padding: 0 1rem; line-height: 1.5; color: #172026; }}
+    h1 {{ font-size: 1.6rem; line-height: 1.2; }}
+    dl {{ display: grid; grid-template-columns: 9rem 1fr; gap: .5rem 1rem; }}
+    dt {{ font-weight: 650; color: #4a5560; }}
+    dd {{ margin: 0; }}
+    code {{ font-size: 1.1rem; letter-spacing: .04em; }}
+    button {{ appearance: none; border: 0; border-radius: 6px; background: #176b5f; color: white; font: inherit; font-weight: 650; padding: .7rem 1rem; cursor: pointer; }}
+  </style>
+</head>
+<body>
+  <h1>{title}</h1>
+  {body}
+</body>
+</html>"#,
+        title = html_escape(title),
+        body = body,
+    )
+}
+
+fn html_escape(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// State for disabled-auth developer identity routes.
@@ -561,11 +1066,16 @@ fn first_nonempty<'a>(opts: &[Option<&'a str>]) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::bearer_token::hash_bearer_token;
     use crate::auth::middleware::{SharedExtractor, auth_middleware};
     use crate::auth::principal::SessionCookieExtractor;
     use crate::auth::session_store_memory::MemorySessionStore;
+    use crate::auth::{
+        AuthMode, BearerTokenStore, CliTokenAuthorizationStore, MemoryBearerTokenStore,
+        MemoryCliTokenAuthorizationStore,
+    };
     use axum::Router;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::middleware::from_fn_with_state;
     use axum::routing::{get, post};
@@ -600,6 +1110,120 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn cli_auth_flow_approves_bearer_token_for_cookie_principal() {
+        let mut config = AuthConfig::for_tests();
+        config.mode = AuthMode::Google;
+        let config = Arc::new(config);
+
+        let session_store = Arc::new(MemorySessionStore::new());
+        let now = Utc::now();
+        session_store
+            .create(LoginSession {
+                id: "browser-cookie".into(),
+                email: "dev@local".into(),
+                display_name: "Local Dev".into(),
+                picture_url: None,
+                created_at: now,
+                last_used_at: now,
+                expires_at: now + ChronoDuration::hours(24),
+            })
+            .await
+            .unwrap();
+
+        let token_store = Arc::new(MemoryBearerTokenStore::new());
+        let cli_store = Arc::new(MemoryCliTokenAuthorizationStore::new());
+        let cli_state = CliAuthState {
+            config: Arc::clone(&config),
+            token_store: Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
+            cli_store: Arc::clone(&cli_store) as Arc<dyn CliTokenAuthorizationStore>,
+        };
+        let extractor: SharedExtractor = crate::auth::middleware::build_extractor(
+            Arc::clone(&config),
+            Arc::clone(&session_store) as Arc<dyn LoginSessionStore>,
+            Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
+        );
+        let authed = Router::new()
+            .route("/auth/whoami", get(whoami))
+            .route(
+                "/auth/cli/approve/{request_id}",
+                get(cli_auth_approve_page)
+                    .post(cli_auth_approve_submit)
+                    .with_state(cli_state.clone()),
+            )
+            .layer(from_fn_with_state(extractor, auth_middleware));
+        let public = Router::new()
+            .route(
+                "/auth/cli/start",
+                post(cli_auth_start).with_state(cli_state.clone()),
+            )
+            .route(
+                "/auth/cli/poll/{request_id}",
+                get(cli_auth_poll).with_state(cli_state),
+            );
+        let app = authed.merge(public);
+
+        let raw_token = "lucida_pat_route_test";
+        let start = Request::builder()
+            .method("POST")
+            .uri("/auth/cli/start")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "name": "route test",
+                    "token_hash": hash_bearer_token(raw_token),
+                    "expires_in_seconds": 3600
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let start_res = app.clone().oneshot(start).await.unwrap();
+        assert_eq!(start_res.status(), StatusCode::OK);
+        let body = to_bytes(start_res.into_body(), 64 * 1024).await.unwrap();
+        let start_body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let approval_path = start_body["approval_path"].as_str().unwrap().to_string();
+        let poll_path = start_body["poll_path"].as_str().unwrap().to_string();
+        let poll_token = start_body["poll_token"].as_str().unwrap().to_string();
+
+        let pending = Request::builder()
+            .uri(&poll_path)
+            .header("authorization", format!("Bearer {poll_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let pending_res = app.clone().oneshot(pending).await.unwrap();
+        assert_eq!(pending_res.status(), StatusCode::ACCEPTED);
+
+        let approve = Request::builder()
+            .method("POST")
+            .uri(&approval_path)
+            .header("cookie", "lucida_session=browser-cookie")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("action=approve"))
+            .unwrap();
+        let approve_res = app.clone().oneshot(approve).await.unwrap();
+        assert_eq!(approve_res.status(), StatusCode::OK);
+        assert_eq!(token_store.len(), 1);
+
+        let approved = Request::builder()
+            .uri(&poll_path)
+            .header("authorization", format!("Bearer {poll_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let approved_res = app.clone().oneshot(approved).await.unwrap();
+        assert_eq!(approved_res.status(), StatusCode::OK);
+
+        let whoami_req = Request::builder()
+            .uri("/auth/whoami")
+            .header("authorization", format!("Bearer {raw_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let whoami_res = app.oneshot(whoami_req).await.unwrap();
+        assert_eq!(whoami_res.status(), StatusCode::OK);
+        let body = to_bytes(whoami_res.into_body(), 64 * 1024).await.unwrap();
+        let principal: AuthPrincipal = serde_json::from_slice(&body).unwrap();
+        assert_eq!(principal.email, "dev@local");
     }
 
     // -- /auth/dev/* -----------------------------------------------------
