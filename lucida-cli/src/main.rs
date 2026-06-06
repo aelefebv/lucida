@@ -1,5 +1,7 @@
 mod connection;
 
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 
 use lucida_core::camera::Camera;
@@ -30,6 +32,14 @@ struct Cli {
 enum Sub {
     /// Print document state and peers as JSON
     State,
+    /// Ask the server to open a dataset URL/path and wait for confirmation
+    Open {
+        /// Dataset URL or server-local path
+        url: String,
+        /// Seconds to wait for DatasetOpened or OpenDatasetFailed
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
     /// Print chunk plan for the current viewport
     VisibleChunks,
     /// Pan the viewport
@@ -103,7 +113,7 @@ enum Sub {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let (mut sink, _stream, snapshot) = connection::connect(&cli.server).await?;
+    let (mut sink, mut stream, snapshot) = connection::connect(&cli.server).await?;
 
     // If --steer is set, send a steer message first.
     if let Some(steer_client) = cli.steer {
@@ -117,6 +127,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "document": snapshot.document,
                 "peers": snapshot.peers,
                 "your_id": snapshot.your_id,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        Sub::Open { url, timeout_secs } => {
+            connection::send_open_remote_dataset(&mut sink, &url).await?;
+            let outcome =
+                connection::wait_for_open_dataset(&mut stream, Duration::from_secs(timeout_secs))
+                    .await?;
+            let out = serde_json::json!({
+                "status": "opened",
+                "seq": outcome.seq,
+                "dataset_id": outcome.dataset_id,
+                "name": outcome.name,
+                "images": outcome.image_count,
+                "entities": outcome.entity_count,
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
@@ -170,7 +195,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Sub::SetMode2d => ViewportCommand::SetMode2D,
                 Sub::SetMode3d => ViewportCommand::SetMode3D,
-                Sub::State | Sub::VisibleChunks | Sub::Steer { .. } => unreachable!(),
+                Sub::State | Sub::Open { .. } | Sub::VisibleChunks | Sub::Steer { .. } => {
+                    unreachable!()
+                }
             };
 
             scene.apply(command.into());
@@ -213,4 +240,39 @@ fn build_scene(snapshot: &connection::Snapshot, peer_id: Option<ClientId>) -> Sc
     }
 
     scene
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::parse_from(std::iter::once("lucida-cli").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn open_command_parses_url_with_default_timeout() {
+        let cli = parse(&["open", "/tmp/data.ome.zarr"]);
+
+        match cli.command {
+            Sub::Open { url, timeout_secs } => {
+                assert_eq!(url, "/tmp/data.ome.zarr");
+                assert_eq!(timeout_secs, 120);
+            }
+            _ => panic!("expected open command"),
+        }
+    }
+
+    #[test]
+    fn open_command_parses_timeout_override() {
+        let cli = parse(&["open", "/tmp/data.ome.zarr", "--timeout-secs", "5"]);
+
+        match cli.command {
+            Sub::Open { url, timeout_secs } => {
+                assert_eq!(url, "/tmp/data.ome.zarr");
+                assert_eq!(timeout_secs, 5);
+            }
+            _ => panic!("expected open command"),
+        }
+    }
 }

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-06-06
 ---
 
 # lucida-cli
@@ -24,6 +24,7 @@ The CLI also serves as the simplest possible reference implementation of the wir
 Defined via `clap` derive in `main.rs`:
 
 - `state` — print snapshot's document + peers as JSON
+- `open <url>` — ask the server to open a dataset and wait for `DatasetOpened` or `OpenDatasetFailed`
 - `visible-chunks` — reconstruct the Scene locally and print the chunk plan
 - `pan`, `zoom`, `set-zoom`, `center` — 2D viewport commands
 - `set-mode-2d`, `set-mode-3d`, `rotate` — 3D camera commands
@@ -32,7 +33,7 @@ Defined via `clap` derive in `main.rs`:
 - `steer --client <id>` — tell another client to follow this CLI
 
 Global flags:
-- `--server <url>` — defaults to `ws://localhost:9876`
+- `--server <url>` — defaults to `ws://localhost:9876/ws`
 - `--peer <id>` — start from a peer's viewport instead of defaults
 - `--steer <id>` — make a client follow before sending the command
 
@@ -40,13 +41,15 @@ Global flags:
 
 - Connects via `tokio-tungstenite` and ingests one `Snapshot` message before doing anything else (sequential by design — see `connection::connect`).
 - Builds a [[lucida-core]] `Scene` from the snapshot, applies the requested `ViewportCommand`, and sends the resulting `ClientMessage::Presence` (camera + view + display).
-- Document mutations (e.g. open a dataset) are not exposed by the CLI; it's a viewport-only client. To open a dataset, use a browser and let the server broadcast — the CLI will see the next snapshot reflect it.
+- `open <url>` is the first document-side command exposed by the CLI. It sends `ClientMessage::OpenRemoteDataset` and stays connected until the server broadcasts `DatasetOpened` or unicasts `OpenDatasetFailed`. The browser and CLI both observe the same `DatasetOpened` broadcast.
+- Other document mutations are still not exposed by the CLI; the remaining command surface is viewport/presence-oriented.
 
 ## Invariants
 
 - **The CLI reconstructs derived state on every invocation** via `Scene::rebuild_derived` after restoring document state from snapshot. Derived state isn't serialized over the wire (correctly so — it's a function of document state and layouts).
 - **Peer adoption is opt-in** via `--peer`. With no flag, the CLI uses defaults; if any peer exists, it adopts the first peer's viewport. This means scripted CLIs may end up at unexpected positions if a browser is also connected.
 - **One command per invocation.** The CLI is a one-shot — it connects, sends, and exits. No long-lived sessions.
+- **Dataset open is the exception to "send and exit."** `open <url>` waits because the server import runs asynchronously and the useful success signal is the later broadcast, not the WebSocket write.
 
 ## Gotchas
 
