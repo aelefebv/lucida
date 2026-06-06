@@ -4,6 +4,7 @@ mod credentials;
 mod error;
 mod output;
 mod status;
+mod workspace;
 
 use std::time::Duration;
 
@@ -17,6 +18,11 @@ use crate::credentials::{clear_local_token, resolve_token, store_local_token};
 use crate::error::{CliError, ErrorKind};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
+use crate::workspace::{
+    WorkspaceClient, WorkspaceListOutput, WorkspaceLookupMode, WorkspaceOpenOutput,
+    WorkspaceOutput, WorkspaceUseOutput, format_workspace_human, format_workspace_list_human,
+    resolve_workspace_record, target_for,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "lucida", about = "Command line client for Lucida", version)]
@@ -24,6 +30,10 @@ struct Cli {
     /// Lucida server base URL
     #[arg(long, value_name = "BASE_URL", global = true)]
     server: Option<String>,
+
+    /// Workspace name or id for commands that target a workspace
+    #[arg(long, value_name = "ID_OR_NAME", global = true)]
+    workspace: Option<String>,
 
     /// Emit machine-readable JSON
     #[arg(long, global = true)]
@@ -50,6 +60,11 @@ enum Command {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
+    },
+    /// Discover and select Lucida workspaces
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
     },
     /// Read or write local Lucida CLI configuration
     Config {
@@ -94,6 +109,42 @@ enum AuthCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum WorkspaceCommand {
+    /// List accessible workspaces
+    List {
+        /// List archived workspaces instead of active workspaces
+        #[arg(long)]
+        archived: bool,
+    },
+    /// Create a workspace
+    Create {
+        /// Optional workspace name
+        name: Option<String>,
+    },
+    /// Show workspace details and derived target URLs
+    Info {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+        /// Allow resolving archived workspaces by name
+        #[arg(long)]
+        archived: bool,
+    },
+    /// Persist the default workspace
+    Use {
+        /// Workspace id or unambiguous name
+        selector: String,
+    },
+    /// Mark a workspace as recently opened and print/open its browser URL
+    Open {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+        /// Do not attempt to open a browser automatically
+        #[arg(long)]
+        no_browser: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ConfigCommand {
     /// Set a configuration value
     Set {
@@ -122,6 +173,8 @@ enum ConfigSetCommand {
 enum ConfigGetCommand {
     /// Print the effective default server
     Server,
+    /// Print the effective default workspace
+    Workspace,
 }
 
 #[tokio::main]
@@ -244,6 +297,125 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 })?;
             }
         },
+        Command::Workspace { command } => match command {
+            WorkspaceCommand::List { archived } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspaces = client.list(*archived).await?;
+                let output_payload = WorkspaceListOutput {
+                    server,
+                    include_archived: *archived,
+                    workspaces,
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_list_human(&output_payload.workspaces)
+                })?;
+            }
+            WorkspaceCommand::Create { name } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspace = client.create(name.as_deref()).await?;
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspaceOutput {
+                    server,
+                    workspace,
+                    target,
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_human(&output_payload.workspace, &output_payload.target)
+                })?;
+            }
+            WorkspaceCommand::Info { selector, archived } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspace = resolve_workspace_record(
+                    &client,
+                    first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                    &config,
+                    if *archived {
+                        WorkspaceLookupMode::IncludeArchived
+                    } else {
+                        WorkspaceLookupMode::ActiveOnly
+                    },
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspaceOutput {
+                    server,
+                    workspace,
+                    target,
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_human(&output_payload.workspace, &output_payload.target)
+                })?;
+            }
+            WorkspaceCommand::Use { selector } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspace = resolve_workspace_record(
+                    &client,
+                    Some(selector.as_str()),
+                    &config,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                config.workspace = Some(workspace.id.clone());
+                store.save(&config)?;
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspaceUseOutput {
+                    server,
+                    workspace,
+                    target,
+                    config_path: store.path().display().to_string(),
+                };
+                output.print_either(&output_payload, || {
+                    format!(
+                        "{}\nDefault workspace set to {}\nConfig: {}",
+                        format_workspace_human(&output_payload.workspace, &output_payload.target),
+                        output_payload.workspace.id,
+                        output_payload.config_path
+                    )
+                })?;
+            }
+            WorkspaceCommand::Open {
+                selector,
+                no_browser,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspace = resolve_workspace_record(
+                    &client,
+                    first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                    &config,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let workspace = client.open(&workspace.id).await?;
+                let target = target_for(&server.url, &workspace)?;
+                let opened = if *no_browser {
+                    false
+                } else {
+                    open_browser(&target.web_url)
+                };
+                let output_payload = WorkspaceOpenOutput {
+                    server,
+                    workspace,
+                    target,
+                    opened,
+                };
+                output.print_either(&output_payload, || {
+                    format!(
+                        "{}\nOpened: {}",
+                        output_payload.target.web_url, output_payload.opened
+                    )
+                })?;
+            }
+        },
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -268,6 +440,18 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     let effective = resolve_server(None, &config)?;
                     output.print_either(&effective, || {
                         format!("{} ({})", effective.url, effective.source.as_str())
+                    })?;
+                }
+                ConfigGetCommand::Workspace => {
+                    let payload = serde_json::json!({
+                        "workspace": config.workspace,
+                        "source": if config.workspace.is_some() { "config" } else { "unset" },
+                    });
+                    output.print_either(&payload, || {
+                        config
+                            .workspace
+                            .clone()
+                            .unwrap_or_else(|| "unset".to_string())
                     })?;
                 }
             },
@@ -380,6 +564,13 @@ fn format_version_human(report: &StatusReport) -> String {
     }
 }
 
+fn first_workspace_selector<'a>(
+    command_selector: Option<&'a str>,
+    global_selector: Option<&'a str>,
+) -> Option<&'a str> {
+    command_selector.or(global_selector)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +591,7 @@ mod tests {
         assert!(help.contains("status"));
         assert!(help.contains("server"));
         assert!(help.contains("auth"));
+        assert!(help.contains("workspace"));
         assert!(help.contains("config"));
         assert!(!help.contains("open"));
         assert!(!help.contains("visible-chunks"));
@@ -451,6 +643,76 @@ mod tests {
     }
 
     #[test]
+    fn workspace_list_parses_product_shape() {
+        let cli = parse(&["workspace", "list", "--archived"]);
+
+        match cli.command {
+            Command::Workspace {
+                command: WorkspaceCommand::List { archived },
+            } => assert!(archived),
+            _ => panic!("expected workspace list"),
+        }
+    }
+
+    #[test]
+    fn workspace_create_parses_optional_name() {
+        let cli = parse(&["workspace", "create", "Analysis"]);
+
+        match cli.command {
+            Command::Workspace {
+                command: WorkspaceCommand::Create { name },
+            } => assert_eq!(name.as_deref(), Some("Analysis")),
+            _ => panic!("expected workspace create"),
+        }
+    }
+
+    #[test]
+    fn workspace_info_uses_positional_selector_with_global_workspace_available() {
+        let cli = parse(&[
+            "--workspace",
+            "Default",
+            "workspace",
+            "info",
+            "Explicit",
+            "--archived",
+        ]);
+
+        assert_eq!(cli.workspace.as_deref(), Some("Default"));
+        match cli.command {
+            Command::Workspace {
+                command: WorkspaceCommand::Info { selector, archived },
+            } => {
+                assert_eq!(selector.as_deref(), Some("Explicit"));
+                assert!(archived);
+            }
+            _ => panic!("expected workspace info"),
+        }
+        assert_eq!(
+            first_workspace_selector(Some("Explicit"), Some("Default")),
+            Some("Explicit")
+        );
+    }
+
+    #[test]
+    fn workspace_open_parses_no_browser() {
+        let cli = parse(&["workspace", "open", "w1", "--no-browser"]);
+
+        match cli.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Open {
+                        selector,
+                        no_browser,
+                    },
+            } => {
+                assert_eq!(selector.as_deref(), Some("w1"));
+                assert!(no_browser);
+            }
+            _ => panic!("expected workspace open"),
+        }
+    }
+
+    #[test]
     fn flat_open_command_is_not_accepted() {
         assert!(try_parse(&["open", "/tmp/data.ome.zarr"]).is_err());
     }
@@ -459,5 +721,6 @@ mod tests {
     fn removed_steer_and_peer_flags_are_not_accepted() {
         assert!(try_parse(&["--steer", "1", "status"]).is_err());
         assert!(try_parse(&["--peer", "1", "status"]).is_err());
+        assert!(try_parse(&["config", "set", "workspace", "w1"]).is_err());
     }
 }
