@@ -1,278 +1,257 @@
-mod connection;
-
-use std::time::Duration;
+mod config;
+mod error;
+mod output;
+mod status;
 
 use clap::{Parser, Subcommand};
 
-use lucida_core::camera::Camera;
-use lucida_core::command::ViewportCommand;
-use lucida_core::protocol::ClientId;
-use lucida_core::scene::Scene;
+use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
+use crate::error::CliError;
+use crate::output::Output;
+use crate::status::{ServerClient, StatusReport, format_status_human};
 
-#[derive(Parser)]
-#[command(name = "lucida-cli", about = "CLI client for lucida-server")]
+#[derive(Parser, Debug)]
+#[command(name = "lucida", about = "Command line client for Lucida", version)]
 struct Cli {
-    /// Server WebSocket URL
-    #[arg(long, default_value = "ws://localhost:9876/ws", global = true)]
-    server: String,
+    /// Lucida server base URL
+    #[arg(long, value_name = "BASE_URL", global = true)]
+    server: Option<String>,
 
-    /// Start from a peer's viewport instead of defaults
+    /// Emit machine-readable JSON
     #[arg(long, global = true)]
-    peer: Option<ClientId>,
+    json: bool,
 
-    /// Steer a client (make it follow the CLI) before sending viewport commands
+    /// Suppress success output
     #[arg(long, global = true)]
-    steer: Option<ClientId>,
+    quiet: bool,
 
     #[command(subcommand)]
-    command: Sub,
+    command: Command,
 }
 
-#[derive(Subcommand)]
-enum Sub {
-    /// Print document state and peers as JSON
-    State,
-    /// Ask the server to open a dataset URL/path and wait for confirmation
-    Open {
-        /// Dataset URL or server-local path
-        url: String,
-        /// Seconds to wait for DatasetOpened or OpenDatasetFailed
-        #[arg(long, default_value_t = 120)]
-        timeout_secs: u64,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Summarize configured server, auth, and connection health
+    Status,
+    /// Inspect the configured Lucida server
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
     },
-    /// Print chunk plan for the current viewport
-    VisibleChunks,
-    /// Pan the viewport
-    Pan {
-        #[arg(long, default_value_t = 0.0)]
-        dx: f64,
-        #[arg(long, default_value_t = 0.0)]
-        dy: f64,
+    /// Read or write local Lucida CLI configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
-    /// Zoom by a factor
-    Zoom {
-        #[arg(long)]
-        factor: f64,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServerCommand {
+    /// Check server health, readiness, version, and auth status
+    Status,
+    /// Print server version
+    Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Set a configuration value
+    Set {
+        #[command(subcommand)]
+        command: ConfigSetCommand,
     },
-    /// Set z/t/c slice
-    Slice {
-        #[arg(long)]
-        axis: String,
-        #[arg(long)]
-        index: u32,
+    /// Get a configuration value
+    Get {
+        #[command(subcommand)]
+        command: ConfigGetCommand,
     },
-    /// Set contrast window
-    Contrast {
-        #[arg(long)]
-        min: f64,
-        #[arg(long)]
-        max: f64,
+    /// Print the config file path
+    Path,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigSetCommand {
+    /// Persist the default Lucida server base URL
+    Server {
+        /// Server base URL, e.g. http://127.0.0.1:9876
+        base_url: String,
     },
-    /// Set gamma
-    Gamma {
-        #[arg(long)]
-        gamma: f64,
-    },
-    /// Set camera center
-    Center {
-        #[arg(long)]
-        x: f64,
-        #[arg(long)]
-        y: f64,
-    },
-    /// Set absolute zoom level
-    SetZoom {
-        #[arg(long)]
-        value: f64,
-    },
-    /// Rotate the 3D camera
-    Rotate {
-        /// Horizontal rotation in degrees
-        #[arg(long, default_value_t = 0.0)]
-        theta: f64,
-        /// Vertical rotation in degrees
-        #[arg(long, default_value_t = 0.0)]
-        phi: f64,
-        /// Interpret angles as radians instead of degrees
-        #[arg(long, default_value_t = false)]
-        radians: bool,
-    },
-    /// Switch to 2D mode
-    #[command(name = "set-mode-2d")]
-    SetMode2d,
-    /// Switch to 3D mode
-    #[command(name = "set-mode-3d")]
-    SetMode3d,
-    /// Make a client follow the CLI (standalone steer)
-    Steer {
-        #[arg(long)]
-        client: ClientId,
-    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigGetCommand {
+    /// Print the effective default server
+    Server,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let cli = Cli::parse();
-    let (mut sink, mut stream, snapshot) = connection::connect(&cli.server).await?;
-
-    // If --steer is set, send a steer message first.
-    if let Some(steer_client) = cli.steer {
-        connection::send_steer(&mut sink, steer_client).await?;
+    let json_errors = cli.json;
+    if let Err(error) = run(cli).await {
+        if json_errors {
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&error.to_json())
+                    .unwrap_or_else(|_| error.to_string())
+            );
+        } else {
+            eprintln!("error[{}]: {}", error.kind.as_str(), error.message);
+        }
+        std::process::exit(error.exit_code());
     }
+}
 
-    match cli.command {
-        Sub::State => {
-            let out = serde_json::json!({
-                "seq": snapshot.seq,
-                "document": snapshot.document,
-                "peers": snapshot.peers,
-                "your_id": snapshot.your_id,
-            });
-            println!("{}", serde_json::to_string_pretty(&out)?);
-        }
-        Sub::Open { url, timeout_secs } => {
-            connection::send_open_remote_dataset(&mut sink, &url).await?;
-            let outcome =
-                connection::wait_for_open_dataset(&mut stream, Duration::from_secs(timeout_secs))
-                    .await?;
-            let out = serde_json::json!({
-                "status": "opened",
-                "seq": outcome.seq,
-                "dataset_id": outcome.dataset_id,
-                "name": outcome.name,
-                "images": outcome.image_count,
-                "entities": outcome.entity_count,
-            });
-            println!("{}", serde_json::to_string_pretty(&out)?);
-        }
-        Sub::VisibleChunks => {
-            let scene = build_scene(&snapshot, cli.peer);
-            let plan = scene.chunk_plan();
-            println!("{}", serde_json::to_string_pretty(&plan)?);
-        }
-        Sub::Steer { client } => {
-            connection::send_steer(&mut sink, client).await?;
-        }
-        cmd => {
-            let mut scene = build_scene(&snapshot, cli.peer);
-            let command = match cmd {
-                Sub::Pan { dx, dy } => ViewportCommand::Pan { dx, dy },
-                Sub::Zoom { factor } => match scene.camera {
-                    Camera::Slice(_) => ViewportCommand::ZoomBy { factor },
-                    Camera::Arcball(_) | Camera::Fly(_) => ViewportCommand::Zoom3D {
-                        delta: 1.0 / factor - 1.0,
-                    },
-                },
-                Sub::Slice { axis, index } => match axis.as_str() {
-                    "z" => ViewportCommand::SetZ { z: index },
-                    "t" => ViewportCommand::SetT { t: index },
-                    "c" => ViewportCommand::SetC { c: index },
-                    _ => return Err(format!("unknown axis: {axis}").into()),
-                },
-                Sub::Contrast { min, max } => ViewportCommand::SetContrast { min, max },
-                Sub::Gamma { gamma } => ViewportCommand::SetGamma { gamma },
-                Sub::Center { x, y } => ViewportCommand::SetCenter { x, y },
-                Sub::SetZoom { value } => match scene.camera {
-                    Camera::Slice(_) => ViewportCommand::SetZoom { value },
-                    Camera::Arcball(_) | Camera::Fly(_) => {
-                        return Err("set-zoom is only supported in 2D mode".into());
-                    }
-                },
-                Sub::Rotate {
-                    theta,
-                    phi,
-                    radians,
-                } => {
-                    let (t, p) = if radians {
-                        (theta, phi)
-                    } else {
-                        (theta.to_radians(), phi.to_radians())
-                    };
-                    ViewportCommand::Rotate3D {
-                        d_theta: t,
-                        d_phi: p,
-                    }
-                }
-                Sub::SetMode2d => ViewportCommand::SetMode2D,
-                Sub::SetMode3d => ViewportCommand::SetMode3D,
-                Sub::State | Sub::Open { .. } | Sub::VisibleChunks | Sub::Steer { .. } => {
-                    unreachable!()
-                }
-            };
+async fn run(cli: Cli) -> Result<(), CliError> {
+    let output = Output::new(cli.json, cli.quiet);
+    let store = ConfigStore::default()?;
+    let mut config = store.load()?;
 
-            scene.apply(command.into());
-            connection::send_presence(&mut sink, &scene.camera, &scene.view, &scene.display)
-                .await?;
+    match &cli.command {
+        Command::Status => {
+            let report = load_status(cli.server.as_deref(), &config).await?;
+            output.print_either(&report, || format_status_human(&report))?;
         }
+        Command::Server { command } => match command {
+            ServerCommand::Status => {
+                let report = load_status(cli.server.as_deref(), &config).await?;
+                output.print_either(&report, || format_status_human(&report))?;
+            }
+            ServerCommand::Version => {
+                let report = load_status(cli.server.as_deref(), &config).await?;
+                output.print_either(&report, || format_version_human(&report))?;
+            }
+        },
+        Command::Config { command } => match command {
+            ConfigCommand::Set { command } => match command {
+                ConfigSetCommand::Server { base_url } => {
+                    let normalized = normalize_server_base_url(base_url)?;
+                    config.server = Some(normalized.clone());
+                    store.save(&config)?;
+                    let payload = serde_json::json!({
+                        "server": normalized,
+                        "config_path": store.path(),
+                    });
+                    output.print_either(&payload, || {
+                        format!(
+                            "Server set to {}\nConfig: {}",
+                            payload["server"].as_str().unwrap_or_default(),
+                            store.path().display()
+                        )
+                    })?;
+                }
+            },
+            ConfigCommand::Get { command } => match command {
+                ConfigGetCommand::Server => {
+                    let effective = resolve_server(None, &config)?;
+                    output.print_either(&effective, || {
+                        format!("{} ({})", effective.url, effective.source.as_str())
+                    })?;
+                }
+            },
+            ConfigCommand::Path => {
+                let payload = serde_json::json!({ "config_path": store.path() });
+                output.print_either(&payload, || store.path().display().to_string())?;
+            }
+        },
     }
 
     Ok(())
 }
 
-/// Reconstruct a Scene from the snapshot, optionally starting from a peer's viewport.
-fn build_scene(snapshot: &connection::Snapshot, peer_id: Option<ClientId>) -> Scene {
-    let mut scene = Scene::new([800, 600]);
-    // Restore document state
-    scene.document = snapshot.document.clone();
-    // Rebuild derived state (not serialized, so must be reconstructed)
-    scene.rebuild_derived();
+async fn load_status(
+    server_override: Option<&str>,
+    config: &CliConfig,
+) -> Result<StatusReport, CliError> {
+    let server = resolve_server(server_override, config)?;
+    let client = ServerClient::new(server.url.clone());
+    Ok(client.status_report(server).await)
+}
 
-    // If --peer was specified, adopt that peer's viewport
-    if let Some(pid) = peer_id {
-        if let Some(peer) = snapshot.peers.iter().find(|p| p.client_id == pid) {
-            scene.camera = peer.camera.clone();
-            scene.view = peer.view.clone();
-            scene.display = peer.display.clone();
-            scene.dataset_order = peer.dataset_order.clone();
-            scene.dataset_settings = peer.dataset_settings.clone();
-            return scene;
-        }
-        eprintln!("warning: peer {pid} not found, using defaults");
+fn format_version_human(report: &StatusReport) -> String {
+    if report.checks.version.ok {
+        report
+            .checks
+            .version
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    } else if let Some(error) = report.checks.version.error.as_deref() {
+        format!("unreachable ({error})")
+    } else if let Some(status) = report.checks.version.status {
+        format!("failed (HTTP {status})")
+    } else {
+        "failed".to_string()
     }
-
-    // Use defaults — if any peer exists, adopt the first peer's viewport
-    if let Some(peer) = snapshot.peers.first() {
-        scene.camera = peer.camera.clone();
-        scene.view = peer.view.clone();
-        scene.display = peer.display.clone();
-        scene.dataset_order = peer.dataset_order.clone();
-        scene.dataset_settings = peer.dataset_settings.clone();
-    }
-
-    scene
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Cli {
-        Cli::parse_from(std::iter::once("lucida-cli").chain(args.iter().copied()))
+        Cli::parse_from(std::iter::once("lucida").chain(args.iter().copied()))
+    }
+
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("lucida").chain(args.iter().copied()))
     }
 
     #[test]
-    fn open_command_parses_url_with_default_timeout() {
-        let cli = parse(&["open", "/tmp/data.ome.zarr"]);
+    fn help_shows_only_product_foundation_surface() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(help.contains("status"));
+        assert!(help.contains("server"));
+        assert!(help.contains("config"));
+        assert!(!help.contains("open"));
+        assert!(!help.contains("visible-chunks"));
+        assert!(!help.contains("set-mode-2d"));
+        assert!(!help.contains("steer"));
+    }
+
+    #[test]
+    fn status_parses_shared_flags() {
+        let cli = parse(&[
+            "--server",
+            "http://127.0.0.1:9988",
+            "--json",
+            "--quiet",
+            "status",
+        ]);
+
+        assert_eq!(cli.server.as_deref(), Some("http://127.0.0.1:9988"));
+        assert!(cli.json);
+        assert!(cli.quiet);
+        assert!(matches!(cli.command, Command::Status));
+    }
+
+    #[test]
+    fn config_set_server_parses_product_shape() {
+        let cli = parse(&["config", "set", "server", "http://127.0.0.1:9988"]);
 
         match cli.command {
-            Sub::Open { url, timeout_secs } => {
-                assert_eq!(url, "/tmp/data.ome.zarr");
-                assert_eq!(timeout_secs, 120);
-            }
-            _ => panic!("expected open command"),
+            Command::Config {
+                command:
+                    ConfigCommand::Set {
+                        command: ConfigSetCommand::Server { base_url },
+                    },
+            } => assert_eq!(base_url, "http://127.0.0.1:9988"),
+            _ => panic!("expected config set server"),
         }
     }
 
     #[test]
-    fn open_command_parses_timeout_override() {
-        let cli = parse(&["open", "/tmp/data.ome.zarr", "--timeout-secs", "5"]);
+    fn flat_open_command_is_not_accepted() {
+        assert!(try_parse(&["open", "/tmp/data.ome.zarr"]).is_err());
+    }
 
-        match cli.command {
-            Sub::Open { url, timeout_secs } => {
-                assert_eq!(url, "/tmp/data.ome.zarr");
-                assert_eq!(timeout_secs, 5);
-            }
-            _ => panic!("expected open command"),
-        }
+    #[test]
+    fn removed_steer_and_peer_flags_are_not_accepted() {
+        assert!(try_parse(&["--steer", "1", "status"]).is_err());
+        assert!(try_parse(&["--peer", "1", "status"]).is_err());
     }
 }
