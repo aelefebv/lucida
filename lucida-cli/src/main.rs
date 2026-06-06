@@ -3,6 +3,7 @@ mod config;
 mod credentials;
 mod dataset;
 mod error;
+mod layout;
 mod output;
 mod status;
 mod view;
@@ -26,6 +27,10 @@ use crate::dataset::{
     format_dataset_open_human, format_dataset_remove_human,
 };
 use crate::error::{CliError, ErrorKind};
+use crate::layout::{
+    LayoutActiveOutput, LayoutListOutput, LayoutSetOutput, LayoutWorkspaceClient,
+    format_layout_active_human, format_layout_list_human, format_layout_set_human,
+};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{DatasetDisplayCommand, DatasetPresenceOutput, format_dataset_presence_human};
@@ -126,6 +131,14 @@ enum Command {
         timeout_seconds: u64,
         #[command(subcommand)]
         command: ChannelCommand,
+    },
+    /// Inspect and change shared dataset layouts in the selected workspace
+    Layout {
+        /// Seconds to wait for the workspace snapshot or command acknowledgement
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: LayoutCommand,
     },
     /// Read or write local Lucida CLI configuration
     Config {
@@ -678,6 +691,27 @@ impl ChannelCommand {
 enum ChannelMode {
     Single,
     Multi,
+}
+
+#[derive(Subcommand, Debug)]
+enum LayoutCommand {
+    /// List available source and registered layouts
+    List {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: Option<String>,
+    },
+    /// Show the active and effective layout
+    Active {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: Option<String>,
+    },
+    /// Set the active layout for a dataset
+    Set {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// Layout id or unambiguous layout name
+        layout: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1243,6 +1277,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 .await?;
             }
         },
+        Command::Layout {
+            timeout_seconds,
+            command,
+        } => {
+            emit_layout_command(&cli, &config, output, command, *timeout_seconds).await?;
+        }
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -1363,6 +1403,80 @@ async fn emit_dataset_presence_command(
     output.print_either(&output_payload, || {
         format_dataset_presence_human(&output_payload)
     })?;
+    Ok(())
+}
+
+async fn emit_layout_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &LayoutCommand,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let layout_client = LayoutWorkspaceClient::new(target.ws_url.clone(), token);
+    match command {
+        LayoutCommand::List { dataset } => {
+            let (seq, datasets) = layout_client
+                .list(dataset.as_deref(), Duration::from_secs(timeout_seconds))
+                .await?;
+            let output_payload = LayoutListOutput {
+                server,
+                workspace,
+                target,
+                seq,
+                datasets,
+            };
+            output.print_either(&output_payload, || {
+                format_layout_list_human(&output_payload)
+            })?;
+        }
+        LayoutCommand::Active { dataset } => {
+            let (seq, datasets) = layout_client
+                .active(dataset.as_deref(), Duration::from_secs(timeout_seconds))
+                .await?;
+            let output_payload = LayoutActiveOutput {
+                server,
+                workspace,
+                target,
+                seq,
+                datasets,
+            };
+            output.print_either(&output_payload, || {
+                format_layout_active_human(&output_payload)
+            })?;
+        }
+        LayoutCommand::Set { dataset, layout } => {
+            let (seq, requested_layout_id, warning, dataset_state) = layout_client
+                .set(
+                    dataset,
+                    layout,
+                    &workspace,
+                    Duration::from_secs(timeout_seconds),
+                )
+                .await?;
+            let output_payload = LayoutSetOutput {
+                server,
+                workspace,
+                target,
+                seq,
+                requested_layout_id,
+                warning,
+                dataset: dataset_state,
+            };
+            output.print_either(&output_payload, || format_layout_set_human(&output_payload))?;
+        }
+    }
     Ok(())
 }
 
@@ -1498,6 +1612,7 @@ mod tests {
         assert!(help.contains("camera"));
         assert!(help.contains("layer"));
         assert!(help.contains("channel"));
+        assert!(help.contains("layout"));
         assert!(help.contains("config"));
         assert!(!help.contains("visible-chunks"));
         assert!(!help.contains("set-mode-2d"));
@@ -1907,6 +2022,47 @@ mod tests {
                 assert_eq!(command.action().unwrap_err().kind, ErrorKind::Config);
             }
             _ => panic!("expected channel gamma"),
+        }
+    }
+
+    #[test]
+    fn layout_commands_parse_product_shape() {
+        let list = parse(&["layout", "--timeout-seconds", "9", "list", "demo.zarr"]);
+        match list.command {
+            Command::Layout {
+                timeout_seconds,
+                command,
+            } => {
+                assert_eq!(timeout_seconds, 9);
+                match command {
+                    LayoutCommand::List { dataset } => {
+                        assert_eq!(dataset.as_deref(), Some("demo.zarr"));
+                    }
+                    _ => panic!("expected layout list"),
+                }
+            }
+            _ => panic!("expected layout list"),
+        }
+
+        let active = parse(&["layout", "active"]);
+        match active.command {
+            Command::Layout { command, .. } => match command {
+                LayoutCommand::Active { dataset } => assert!(dataset.is_none()),
+                _ => panic!("expected layout active"),
+            },
+            _ => panic!("expected layout active"),
+        }
+
+        let set = parse(&["layout", "set", "wds-test", "layout-source"]);
+        match set.command {
+            Command::Layout { command, .. } => match command {
+                LayoutCommand::Set { dataset, layout } => {
+                    assert_eq!(dataset, "wds-test");
+                    assert_eq!(layout, "layout-source");
+                }
+                _ => panic!("expected layout set"),
+            },
+            _ => panic!("expected layout set"),
         }
     }
 
