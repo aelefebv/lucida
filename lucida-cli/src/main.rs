@@ -16,7 +16,12 @@ use crate::auth::{
 };
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
 use crate::credentials::{clear_local_token, resolve_token, store_local_token};
-use crate::dataset::{DatasetOpenClient, DatasetOpenOutput, format_dataset_open_human};
+use crate::dataset::{
+    DatasetBrowseOutput, DatasetHttpClient, DatasetInfoOutput, DatasetListOutput,
+    DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput, DatasetWorkspaceClient,
+    format_dataset_browse_human, format_dataset_info_human, format_dataset_list_human,
+    format_dataset_open_human, format_dataset_remove_human,
+};
 use crate::error::{CliError, ErrorKind};
 use crate::output::Output;
 use crate::status::{ServerClient, StatusReport, format_status_human};
@@ -153,6 +158,11 @@ enum WorkspaceCommand {
 
 #[derive(Subcommand, Debug)]
 enum DatasetCommand {
+    /// Browse server-visible filesystem paths
+    Browse {
+        /// Directory path to browse. Omit for the server root.
+        path: Option<String>,
+    },
     /// Open a dataset path or URL in the selected workspace
     Open {
         /// Dataset path or URL visible to the Lucida server
@@ -160,6 +170,28 @@ enum DatasetCommand {
         source: String,
         /// Seconds to wait for the server to finish opening the dataset
         #[arg(long, default_value_t = 300)]
+        timeout_seconds: u64,
+    },
+    /// List datasets loaded in the selected workspace
+    List {
+        /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+    },
+    /// Show loaded dataset metadata from the selected workspace
+    Info {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+    },
+    /// Remove a loaded dataset from the selected workspace
+    Remove {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// Seconds to wait for command acknowledgement
+        #[arg(long, default_value_t = 60)]
         timeout_seconds: u64,
     },
 }
@@ -437,6 +469,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         },
         Command::Dataset { command } => match command {
+            DatasetCommand::Browse { path } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = DatasetHttpClient::new(server.url.clone(), token);
+                let browse = client.browse(path.as_deref()).await?;
+                let output_payload = DatasetBrowseOutput {
+                    server,
+                    path: browse.path,
+                    entries: browse.entries,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_browse_human(&output_payload)
+                })?;
+            }
             DatasetCommand::Open {
                 source,
                 timeout_seconds,
@@ -464,6 +510,93 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 };
                 output.print_either(&output_payload, || {
                     format_dataset_open_human(&output_payload)
+                })?;
+            }
+            DatasetCommand::List { timeout_seconds } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token);
+                let (seq, datasets) = dataset_client
+                    .list(Duration::from_secs(*timeout_seconds))
+                    .await?;
+                let output_payload = DatasetListOutput {
+                    server,
+                    workspace,
+                    target,
+                    seq,
+                    datasets,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_list_human(&output_payload)
+                })?;
+            }
+            DatasetCommand::Info {
+                dataset,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token);
+                let (seq, dataset) = dataset_client
+                    .info(dataset, Duration::from_secs(*timeout_seconds))
+                    .await?;
+                let output_payload = DatasetInfoOutput {
+                    server,
+                    workspace,
+                    target,
+                    seq,
+                    dataset,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_info_human(&output_payload)
+                })?;
+            }
+            DatasetCommand::Remove {
+                dataset,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token);
+                let (seq, removed) = dataset_client
+                    .remove(dataset, &workspace, Duration::from_secs(*timeout_seconds))
+                    .await?;
+                let output_payload = DatasetRemoveOutput {
+                    server,
+                    workspace,
+                    target,
+                    seq,
+                    removed,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_remove_human(&output_payload)
                 })?;
             }
         },
@@ -788,6 +921,63 @@ mod tests {
                 assert_eq!(timeout_seconds, 12);
             }
             _ => panic!("expected dataset open"),
+        }
+    }
+
+    #[test]
+    fn dataset_browse_parses_optional_path() {
+        let cli = parse(&["dataset", "browse", "/data"]);
+
+        match cli.command {
+            Command::Dataset {
+                command: DatasetCommand::Browse { path },
+            } => assert_eq!(path.as_deref(), Some("/data")),
+            _ => panic!("expected dataset browse"),
+        }
+    }
+
+    #[test]
+    fn dataset_list_and_info_parse_timeout_shape() {
+        let list = parse(&["dataset", "list", "--timeout-seconds", "7"]);
+        match list.command {
+            Command::Dataset {
+                command: DatasetCommand::List { timeout_seconds },
+            } => assert_eq!(timeout_seconds, 7),
+            _ => panic!("expected dataset list"),
+        }
+
+        let info = parse(&["dataset", "info", "wds-1", "--timeout-seconds", "8"]);
+        match info.command {
+            Command::Dataset {
+                command:
+                    DatasetCommand::Info {
+                        dataset,
+                        timeout_seconds,
+                    },
+            } => {
+                assert_eq!(dataset, "wds-1");
+                assert_eq!(timeout_seconds, 8);
+            }
+            _ => panic!("expected dataset info"),
+        }
+    }
+
+    #[test]
+    fn dataset_remove_parses_product_shape() {
+        let cli = parse(&["dataset", "remove", "wds-1", "--timeout-seconds", "9"]);
+
+        match cli.command {
+            Command::Dataset {
+                command:
+                    DatasetCommand::Remove {
+                        dataset,
+                        timeout_seconds,
+                    },
+            } => {
+                assert_eq!(dataset, "wds-1");
+                assert_eq!(timeout_seconds, 9);
+            }
+            _ => panic!("expected dataset remove"),
         }
     }
 
