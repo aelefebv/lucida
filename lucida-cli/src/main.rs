@@ -5,6 +5,7 @@ mod dataset;
 mod error;
 mod layout;
 mod output;
+mod saved_view;
 mod status;
 mod view;
 mod workspace;
@@ -32,6 +33,14 @@ use crate::layout::{
     format_layout_active_human, format_layout_list_human, format_layout_set_human,
 };
 use crate::output::Output;
+use crate::saved_view::{
+    SavedViewApplyOutput, SavedViewCaptureOutput, SavedViewDefaultOutput, SavedViewDeleteOutput,
+    SavedViewLinkOutput, SavedViewListOutput, SavedViewOutput, WorkspaceSavedViewClient,
+    format_saved_view_apply_human, format_saved_view_capture_human,
+    format_saved_view_default_human, format_saved_view_delete_human, format_saved_view_human,
+    format_saved_view_link_human, format_saved_view_list_human, resolve_saved_view_record,
+    saved_view_link, saved_view_summaries, saved_view_summary,
+};
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{DatasetDisplayCommand, DatasetPresenceOutput, format_dataset_presence_human};
 use crate::view::{ViewApplyOutput, ViewWorkspaceClient, format_view_apply_human};
@@ -139,6 +148,14 @@ enum Command {
         timeout_seconds: u64,
         #[command(subcommand)]
         command: LayoutCommand,
+    },
+    /// Manage workspace saved views
+    SavedView {
+        /// Seconds to wait for workspace capture/apply state
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: SavedViewCommand,
     },
     /// Read or write local Lucida CLI configuration
     Config {
@@ -714,6 +731,65 @@ enum LayoutCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum SavedViewCommand {
+    /// List saved views in the selected workspace
+    List,
+    /// Show a saved view by id or unambiguous name
+    Show {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+    /// Apply a saved view to the current CLI/browser workspace state
+    Apply {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+    /// Capture the current workspace state as a saved view
+    Capture {
+        /// Saved-view name
+        name: String,
+        /// Capture from an explicit peer's presence instead of this CLI session
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+    },
+    /// Rename a saved view
+    Rename {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+        /// New saved-view name
+        name: String,
+    },
+    /// Replace a saved view with the current workspace state
+    Update {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+        /// Replace the saved-view payload with the current workspace state
+        #[arg(long)]
+        from_current: bool,
+        /// Capture from an explicit peer's presence instead of this CLI session
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+    },
+    /// Delete a saved view
+    Delete {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+    /// Set the workspace default saved view
+    SetDefault {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+    /// Clear the workspace default saved view
+    ClearDefault,
+    /// Print a browser link to a workspace saved view
+    Link {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum BlendModeValue {
     Alpha,
@@ -1283,6 +1359,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         } => {
             emit_layout_command(&cli, &config, output, command, *timeout_seconds).await?;
         }
+        Command::SavedView {
+            timeout_seconds,
+            command,
+        } => {
+            emit_saved_view_command(&cli, &config, output, command, *timeout_seconds).await?;
+        }
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -1327,6 +1409,194 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 output.print_either(&payload, || store.path().display().to_string())?;
             }
         },
+    }
+
+    Ok(())
+}
+
+async fn emit_saved_view_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &SavedViewCommand,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let saved_view_client =
+        WorkspaceSavedViewClient::new(server.url.clone(), target.ws_url.clone(), token);
+    let wait = Duration::from_secs(timeout_seconds);
+
+    match command {
+        SavedViewCommand::List => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let default_saved_view_id = workspace.default_saved_view_id.clone();
+            let output_payload = SavedViewListOutput {
+                server,
+                workspace,
+                target,
+                saved_views: saved_view_summaries(&saved_views, default_saved_view_id.as_deref()),
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_list_human(&output_payload)
+            })?;
+        }
+        SavedViewCommand::Show { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let saved_view = saved_view_client.get(&workspace, &resolved.id).await?;
+            let output_payload = SavedViewOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+            };
+            output.print_either(&output_payload, || format_saved_view_human(&output_payload))?;
+        }
+        SavedViewCommand::Apply { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let saved_view = saved_view_client.get(&workspace, &resolved.id).await?;
+            let default_saved_view_id = workspace.default_saved_view_id.clone();
+            let summary = saved_view_summary(&saved_view, default_saved_view_id.as_deref());
+            let result = saved_view_client
+                .apply(&workspace, &saved_view.view, wait)
+                .await?;
+            let output_payload = SavedViewApplyOutput {
+                server,
+                workspace,
+                target,
+                saved_view: summary,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_apply_human(&output_payload)
+            })?;
+        }
+        SavedViewCommand::Capture { name, from_peer } => {
+            let (source, view) = saved_view_client.capture(*from_peer, wait).await?;
+            let saved_view = saved_view_client.create(&workspace, name, &view).await?;
+            let output_payload = SavedViewCaptureOutput {
+                server,
+                workspace,
+                target,
+                source,
+                saved_view,
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_capture_human(&output_payload)
+            })?;
+        }
+        SavedViewCommand::Rename { saved_view, name } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let saved_view = saved_view_client
+                .rename(&workspace, &resolved.id, name)
+                .await?;
+            let output_payload = SavedViewOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+            };
+            output.print_either(&output_payload, || format_saved_view_human(&output_payload))?;
+        }
+        SavedViewCommand::Update {
+            saved_view,
+            from_current,
+            from_peer,
+        } => {
+            if !from_current {
+                return Err(CliError::config(
+                    "saved-view update currently requires --from-current",
+                ));
+            }
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let (_source, view) = saved_view_client.capture(*from_peer, wait).await?;
+            let saved_view = saved_view_client
+                .update_view(&workspace, &resolved.id, &view)
+                .await?;
+            let output_payload = SavedViewOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+            };
+            output.print_either(&output_payload, || format_saved_view_human(&output_payload))?;
+        }
+        SavedViewCommand::Delete { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let default_saved_view_id = workspace.default_saved_view_id.clone();
+            let deleted = saved_view_summary(&resolved, default_saved_view_id.as_deref());
+            saved_view_client.delete(&workspace, &resolved.id).await?;
+            let output_payload = SavedViewDeleteOutput {
+                server,
+                workspace,
+                target,
+                deleted,
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_delete_human(&output_payload)
+            })?;
+        }
+        SavedViewCommand::SetDefault { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let workspace = saved_view_client
+                .set_default(&workspace, Some(&resolved.id))
+                .await?;
+            let default_saved_view_id = workspace.default_saved_view_id.clone();
+            let output_payload = SavedViewDefaultOutput {
+                server,
+                workspace,
+                target,
+                default_saved_view_id,
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_default_human(&output_payload)
+            })?;
+        }
+        SavedViewCommand::ClearDefault => {
+            let workspace = saved_view_client.set_default(&workspace, None).await?;
+            let default_saved_view_id = workspace.default_saved_view_id.clone();
+            let output_payload = SavedViewDefaultOutput {
+                server,
+                workspace,
+                target,
+                default_saved_view_id,
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_default_human(&output_payload)
+            })?;
+        }
+        SavedViewCommand::Link { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let default_saved_view_id = workspace.default_saved_view_id.clone();
+            let saved_view = saved_view_summary(&resolved, default_saved_view_id.as_deref());
+            let url = saved_view_link(&target, &resolved.id)?;
+            let output_payload = SavedViewLinkOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+                url,
+            };
+            output.print_either(&output_payload, || {
+                format_saved_view_link_human(&output_payload)
+            })?;
+        }
     }
 
     Ok(())
@@ -1613,6 +1883,7 @@ mod tests {
         assert!(help.contains("layer"));
         assert!(help.contains("channel"));
         assert!(help.contains("layout"));
+        assert!(help.contains("saved-view"));
         assert!(help.contains("config"));
         assert!(!help.contains("visible-chunks"));
         assert!(!help.contains("set-mode-2d"));
@@ -2063,6 +2334,121 @@ mod tests {
                 _ => panic!("expected layout set"),
             },
             _ => panic!("expected layout set"),
+        }
+    }
+
+    #[test]
+    fn saved_view_commands_parse_product_shape() {
+        let list = parse(&["saved-view", "--timeout-seconds", "9", "list"]);
+        match list.command {
+            Command::SavedView {
+                timeout_seconds,
+                command: SavedViewCommand::List,
+            } => assert_eq!(timeout_seconds, 9),
+            _ => panic!("expected saved-view list"),
+        }
+
+        let show = parse(&["saved-view", "show", "sv-1"]);
+        match show.command {
+            Command::SavedView {
+                command: SavedViewCommand::Show { saved_view },
+                ..
+            } => assert_eq!(saved_view, "sv-1"),
+            _ => panic!("expected saved-view show"),
+        }
+
+        let apply = parse(&["saved-view", "apply", "Nice view"]);
+        match apply.command {
+            Command::SavedView {
+                command: SavedViewCommand::Apply { saved_view },
+                ..
+            } => assert_eq!(saved_view, "Nice view"),
+            _ => panic!("expected saved-view apply"),
+        }
+
+        let capture = parse(&["saved-view", "capture", "Current", "--from-peer", "7"]);
+        match capture.command {
+            Command::SavedView {
+                command: SavedViewCommand::Capture { name, from_peer },
+                ..
+            } => {
+                assert_eq!(name, "Current");
+                assert_eq!(from_peer, Some(7));
+            }
+            _ => panic!("expected saved-view capture"),
+        }
+
+        let rename = parse(&["saved-view", "rename", "sv-1", "Renamed"]);
+        match rename.command {
+            Command::SavedView {
+                command: SavedViewCommand::Rename { saved_view, name },
+                ..
+            } => {
+                assert_eq!(saved_view, "sv-1");
+                assert_eq!(name, "Renamed");
+            }
+            _ => panic!("expected saved-view rename"),
+        }
+
+        let update = parse(&[
+            "saved-view",
+            "update",
+            "sv-1",
+            "--from-current",
+            "--from-peer",
+            "8",
+        ]);
+        match update.command {
+            Command::SavedView {
+                command:
+                    SavedViewCommand::Update {
+                        saved_view,
+                        from_current,
+                        from_peer,
+                    },
+                ..
+            } => {
+                assert_eq!(saved_view, "sv-1");
+                assert!(from_current);
+                assert_eq!(from_peer, Some(8));
+            }
+            _ => panic!("expected saved-view update"),
+        }
+
+        let delete = parse(&["saved-view", "delete", "sv-1"]);
+        match delete.command {
+            Command::SavedView {
+                command: SavedViewCommand::Delete { saved_view },
+                ..
+            } => assert_eq!(saved_view, "sv-1"),
+            _ => panic!("expected saved-view delete"),
+        }
+
+        let set_default = parse(&["saved-view", "set-default", "sv-1"]);
+        match set_default.command {
+            Command::SavedView {
+                command: SavedViewCommand::SetDefault { saved_view },
+                ..
+            } => assert_eq!(saved_view, "sv-1"),
+            _ => panic!("expected saved-view set-default"),
+        }
+
+        let clear_default = parse(&["saved-view", "clear-default"]);
+        assert!(matches!(
+            clear_default.command,
+            Command::SavedView {
+                command: SavedViewCommand::ClearDefault,
+                ..
+            }
+        ));
+
+        let link = parse(&["saved-view", "link", "sv-1"]);
+        match link.command {
+            Command::SavedView {
+                command: SavedViewCommand::Link { saved_view },
+                ..
+            } => assert_eq!(saved_view, "sv-1"),
+            _ => panic!("expected saved-view link"),
         }
     }
 
