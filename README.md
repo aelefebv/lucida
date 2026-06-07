@@ -56,6 +56,52 @@ Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876)
 
 Visit <http://localhost:5173>.
 
+### Use the CLI and Python client
+
+The product CLI command is `lucida`. From a source checkout, run the same binary with `cargo run -p lucida-cli -- ...`.
+
+For an auth-disabled local server:
+
+```bash
+lucida --server http://127.0.0.1:9876 status
+lucida --server http://127.0.0.1:9876 workspace list
+lucida --server http://127.0.0.1:9876 workspace create "local analysis"
+lucida --server http://127.0.0.1:9876 workspace use "local analysis"
+lucida --server http://127.0.0.1:9876 workspace open --no-browser
+```
+
+For protected deployments, authenticate first:
+
+```bash
+lucida --server https://lucida.example.org auth login
+lucida auth whoami
+```
+
+To open a dataset and verify it in the browser, keep a browser on the workspace URL printed by `workspace open`, then run:
+
+```bash
+lucida dataset browse /var/lib/lucida/data
+lucida dataset open /var/lib/lucida/data/sample.ome.zarr
+lucida dataset list
+lucida viewer state
+lucida viewer screenshot current-view.png
+```
+
+The already-open browser workspace should update when `dataset open`, layout, saved-view, or other shared workspace commands land. View, camera, layer, and channel commands update the selected durable headless viewer profile by default, and can also broadcast ephemeral presence while connected.
+
+Python scripts use the same server/client model:
+
+```python
+from lucida import LucidaClient
+
+client = LucidaClient("http://127.0.0.1:9876")
+workspace = client.workspaces.use("local analysis")
+workspace.datasets.open("/var/lib/lucida/data/sample.ome.zarr")
+print(workspace.datasets.list())
+```
+
+`LucidaClient` reads explicit constructor tokens, `LUCIDA_TOKEN`, macOS Keychain credentials created by `lucida auth login`, and the CLI-compatible config file.
+
 ### Useful options
 
 Add to any of the `docker run` recipes above.

@@ -441,12 +441,14 @@ Finish the clean cut: update user-facing docs, examples, package metadata, and w
 
 ### Acceptance criteria
 
-- [ ] README and wiki examples use `lucida` noun commands and workspace-first flows.
-- [ ] Old flat `lucida-cli` commands are removed, hidden, or explicitly marked non-contractual according to implementation reality.
-- [ ] Package/binary metadata exposes `lucida` as the product command.
-- [ ] The local browser verification flow for `lucida dataset open` is documented.
-- [ ] #737-#743 are either closed by child slice PRs or explicitly linked as superseded by #745 and its child issues.
-- [ ] Wiki updates capture any new auth/token, target-resolution, or Python-client boundaries discovered during implementation.
+- [x] README and wiki examples use `lucida` noun commands and workspace-first flows.
+- [x] Old flat `lucida-cli` commands are removed, hidden, or explicitly marked non-contractual according to implementation reality.
+- [x] Package/binary metadata exposes `lucida` as the product command.
+- [x] The local browser verification flow for `lucida dataset open` is documented.
+- [x] #737-#743 are either closed by child slice PRs or explicitly linked as superseded by #745 and its child issues.
+- [x] Wiki updates capture any new auth/token, target-resolution, or Python-client boundaries discovered during implementation.
+
+Current implementation note: README now documents the workspace-first `lucida` CLI flow, source-checkout invocation via `cargo run -p lucida-cli -- ...`, protected-deployment `auth login`, browser verification for `lucida dataset open`, durable viewer screenshots, and the matching `LucidaClient` Python flow. `wiki/systems/crates/lucida-cli.md` now lists the current noun command tree, documents browser verification, and explicitly marks the old flat command taxonomy as non-contractual; parser tests already reject flat `open`, root `visible-chunks`, `--steer`, `--peer`, and `config set workspace`. `lucida-cli/Cargo.toml` now describes the package as installing the `lucida` product binary. GitHub issues #737-#743 were closed as superseded by #745 and its child implementation slices.
 
 ### Wiki context
 

@@ -7,7 +7,7 @@ modified: 2026-06-07
 
 The Rust crate that builds Lucida's product CLI binary, `lucida`. The crate name remains `lucida-cli` as a Cargo workspace identity, but the user-facing command is no longer `lucida-cli`.
 
-The CLI is moving to a workspace-first client surface that mirrors the web app's nouns. The first foundation slices expose `lucida status`, `lucida server ...`, `lucida auth ...`, and `lucida config ...`; later slices add workspace, dataset, view, layer, channel, layout, saved-view, peer, debug/plan, admin, and Python parity.
+The CLI is a workspace-first client surface that mirrors the web app's nouns. It exposes server/config/auth discovery, workspace selection, dataset open/list/info/remove, view/camera/layer/channel mutation, layout and saved-view management, durable headless viewer profiles, peer diagnostics, plan/debug diagnostics, and remote admin support.
 
 ## Why a CLI client
 
@@ -21,7 +21,7 @@ The CLI should remain a reference client for the HTTP control plane and WebSocke
 
 ## Subcommands
 
-Visible foundation commands:
+Current product commands:
 
 - `lucida status` — summarize effective server, health/readiness/version, and auth status.
 - `lucida server status` — same server-oriented health check surface.
@@ -29,9 +29,23 @@ Visible foundation commands:
 - `lucida auth login` — start browser-assisted CLI bearer credential provisioning.
 - `lucida auth whoami` — print the authenticated principal using `LUCIDA_TOKEN` or the stored token.
 - `lucida auth logout` — revoke the current server-side bearer token and remove the local token; `--local-only` skips server revocation.
-- `lucida config set server <base-url>` — persist the default server.
-- `lucida config get server` — print the effective default server.
-- `lucida config path` — print the config file path.
+- `lucida workspace list [--archived]` — list active or archived workspaces visible to the current principal.
+- `lucida workspace create [name]` — create a workspace.
+- `lucida workspace info [id-or-name] [--archived]` — show workspace details and derived target URLs.
+- `lucida workspace use <id-or-name>` — persist the default workspace.
+- `lucida workspace open [id-or-name] [--no-browser]` — mark the workspace as opened and print/open `/w/:workspace_id`.
+- `lucida dataset browse [path]` — browse server-visible filesystem roots and directories.
+- `lucida dataset open <path-or-url>` — open a dataset in the selected workspace and wait for completion.
+- `lucida dataset list` — list loaded datasets in the selected workspace.
+- `lucida dataset info <dataset>` — show manifest/image/channel/layout summary for a loaded dataset.
+- `lucida dataset remove <dataset>` — remove a loaded workspace dataset.
+- `lucida view pan|zoom|set-zoom|center|slice|z-range|viewport-size` — update the selected durable viewer profile's 2D slice view.
+- `lucida camera mode|rotate|pan|zoom|fly-tick` — update slice/arcball/fly camera state.
+- `lucida layer list|order|show|hide|opacity|contrast|gamma|colormap|blend-mode|render-mode|detail-level` — inspect or update dataset display state.
+- `lucida channel mode|show|hide|colormap|contrast|gamma|blend-mode` — update multichannel display state.
+- `lucida viewer state|link|screenshot|overview` — inspect or render a durable headless viewer profile.
+- `lucida layout list|active|set` — inspect or change shared dataset layouts.
+- `lucida saved-view list|show|apply|capture|rename|update|delete|set-default|clear-default|link` — manage workspace saved views.
 - `lucida peer list` — list live workspace clients from the WebSocket snapshot, including follow state and compact presence summaries.
 - `lucida peer follow <client-id>` / `lucida peer unfollow` — voluntarily follow or stop following a live client using the same protocol path as the web app.
 - `lucida peer cursor set|clear` — explicit diagnostic/test cursor presence updates.
@@ -41,12 +55,21 @@ Visible foundation commands:
 - `lucida admin workspace info|archive|restore <workspace-id>` — inspect or mutate one workspace through the authenticated remote admin API.
 - `lucida admin workspace owner add|promote <workspace-id> <email>` — add or promote a workspace owner through the remote admin API.
 - `lucida admin clear-proxy-cache [--dataset <url>]` — clear the remote server proxy cache via `/admin/clear-proxy-cache`.
+- `lucida config set server <base-url>` — persist the default server.
+- `lucida config get server` — print the effective default server.
+- `lucida config get workspace` — print the effective default workspace.
+- `lucida config path` — print the config file path.
 
 Global visible flags:
 
 - `--server <base-url>` — override the configured/default server for one invocation.
+- `--workspace <id-or-name>` — override the configured/default workspace for one invocation.
 - `--json` — emit stable machine-readable JSON.
 - `--quiet` — suppress success output.
+
+## Browser verification flow
+
+Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for `DatasetOpened`, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
 
 ## Interactions
 
@@ -59,6 +82,7 @@ Global visible flags:
 ## Invariants
 
 - **The product command is `lucida`.** `lucida-cli` is the crate/package implementation detail.
+- **The old flat command taxonomy is not a compatibility contract.** Flat `open`, root `visible-chunks`, `--steer`, `--peer`, and `config set workspace` are intentionally rejected in parser tests.
 - **Server input is a base HTTP URL.** Commands that need a session derive WebSocket URLs internally from the base server target.
 - **Every scriptable command needs `--json`.** Human output can be concise, but automation should not parse tables.
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
@@ -72,3 +96,4 @@ Global visible flags:
 - **No retry loop yet.** The foundation status/config commands make single HTTP requests. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
 - **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.
 - **Admin workspace commands are id-based.** Search can discover ids, but `admin workspace info/archive/restore/owner` intentionally do not reuse member-scoped workspace name resolution.
+- **Negative numeric flags use clap's accepted forms.** The parser accepts `--flag=-2` and the relevant commands enable hyphen values where practical; scripts should prefer equals-style values for clarity.

@@ -3,6 +3,7 @@ name = "lucida-cli"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+description = "Lucida product command-line client; installs the `lucida` binary."
 
 [[bin]]
 name = "lucida"
