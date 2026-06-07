@@ -41,12 +41,15 @@ export interface UrlSyncOptions {
   fetchSavedViewById?: (id: string) => Promise<ResolvedSavedView | null>;
   /** Resolve the workspace default saved view for bare workspace URLs. */
   fetchDefaultSavedView?: () => Promise<ResolvedSavedView | null>;
+  /** Resolve `?viewer_profile=<name>` to a private viewer profile. */
+  fetchViewerProfile?: (profile: string) => Promise<ResolvedSavedView | null>;
 }
 
 export type CaptureBuilder = () => SavedView | null;
 
 export type FetchSavedViewById = (id: string) => Promise<ResolvedSavedView | null>;
 export type FetchDefaultSavedView = () => Promise<ResolvedSavedView | null>;
+export type FetchViewerProfile = (profile: string) => Promise<ResolvedSavedView | null>;
 
 /** Default `#b=<id>` resolver — the REST helper. Tests inject their
  *  own to avoid the production fetch path. */
@@ -66,6 +69,7 @@ export class UrlSync {
   private readonly applier: SavedViewApplier;
   private readonly fetchSavedViewById: FetchSavedViewById;
   private readonly fetchDefaultSavedView: FetchDefaultSavedView | null;
+  private readonly fetchViewerProfile: FetchViewerProfile | null;
   private suppressNextEmptyHashFlush = false;
 
   constructor(
@@ -80,6 +84,7 @@ export class UrlSync {
     this.fetchSavedViewById =
       options.fetchSavedViewById ?? options.fetchBookmark ?? defaultFetchSavedViewById;
     this.fetchDefaultSavedView = options.fetchDefaultSavedView ?? null;
+    this.fetchViewerProfile = options.fetchViewerProfile ?? null;
   }
 
   /** Hook the popstate listener. Idempotent + re-armable after `destroy()`
@@ -151,6 +156,11 @@ export class UrlSync {
 
     const payload = parseViewHash(hash);
     if (payload === null) {
+      const viewerProfile = parseViewerProfileSearch(this.win.location.search);
+      if (viewerProfile !== null && this.fetchViewerProfile) {
+        await this.applyViewerProfile(viewerProfile);
+        return;
+      }
       if (isEmptyHash(hash) && this.fetchDefaultSavedView) {
         await this.applyDefaultSavedView();
       }
@@ -164,6 +174,19 @@ export class UrlSync {
       return;
     }
     await this.applier.apply(view);
+  }
+
+  private async applyViewerProfile(profile: string): Promise<void> {
+    let savedView: ResolvedSavedView | null;
+    try {
+      savedView = await this.fetchViewerProfile?.(profile) ?? null;
+    } catch (e) {
+      console.warn("[UrlSync] failed to fetch viewer profile:", e);
+      return;
+    }
+    if (savedView === null) return;
+    this.suppressNextEmptyHashFlush = true;
+    await this.applier.apply(savedView.view);
   }
 
   private async applyDefaultSavedView(): Promise<void> {
@@ -280,4 +303,12 @@ export function parseBookmarkHash(hash: string): string | null {
     return raw;
   }
   return null;
+}
+
+export function parseViewerProfileSearch(search: string): string | null {
+  if (!search || search === "?") return null;
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const raw = params.get("viewer_profile");
+  if (!raw || !/^[A-Za-z0-9._-]+$/.test(raw)) return null;
+  return raw;
 }

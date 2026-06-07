@@ -168,6 +168,17 @@ pub struct WorkspaceSavedView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceViewerProfile {
+    pub workspace_id: String,
+    pub user_email: String,
+    pub profile: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub seed_source: Option<String>,
+    pub view: SavedView,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceUserState {
     pub workspace_id: String,
     pub last_opened_at: Option<DateTime<Utc>>,
@@ -264,6 +275,7 @@ fn default_member_display_name(email: &str, display_name: &str) -> String {
 }
 
 const MAX_SAVED_VIEW_NAME_CHARS: usize = 200;
+const MAX_VIEWER_PROFILE_NAME_CHARS: usize = 64;
 
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync + 'static {
@@ -438,6 +450,22 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         saved_view_id: Option<&str>,
     ) -> Result<Option<WorkspaceRecord>, StoreError>;
+
+    async fn get_viewer_profile(
+        &self,
+        workspace_id: &str,
+        user_email: &str,
+        profile: &str,
+    ) -> Result<Option<WorkspaceViewerProfile>, StoreError>;
+
+    async fn upsert_viewer_profile(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        profile: &str,
+        seed_source: Option<&str>,
+        view: SavedView,
+    ) -> Result<Option<WorkspaceViewerProfile>, StoreError>;
 
     async fn record_workspace_open(
         &self,
@@ -1645,6 +1673,72 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         self.get_workspace(workspace_id).await
     }
 
+    async fn get_viewer_profile(
+        &self,
+        workspace_id: &str,
+        user_email: &str,
+        profile: &str,
+    ) -> Result<Option<WorkspaceViewerProfile>, StoreError> {
+        let email = normalize_email(user_email);
+        let row = sqlx::query(
+            r#"
+            SELECT
+                workspace_id, user_email, profile, created_at, updated_at,
+                seed_source, view_json
+            FROM workspace_viewer_profiles
+            WHERE workspace_id = ? AND user_email = ? AND profile = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&email)
+        .bind(profile)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        row.map(row_to_viewer_profile).transpose()
+    }
+
+    async fn upsert_viewer_profile(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        profile: &str,
+        seed_source: Option<&str>,
+        view: SavedView,
+    ) -> Result<Option<WorkspaceViewerProfile>, StoreError> {
+        if !self.workspace_exists(workspace_id).await? {
+            return Ok(None);
+        }
+
+        let email = normalize_email(&principal.email);
+        let now = Utc::now().to_rfc3339();
+        let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+        sqlx::query(
+            r#"
+            INSERT INTO workspace_viewer_profiles
+                (workspace_id, user_email, profile, created_at, updated_at, seed_source, view_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_id, user_email, profile) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                seed_source = COALESCE(excluded.seed_source, workspace_viewer_profiles.seed_source),
+                view_json = excluded.view_json
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&email)
+        .bind(profile)
+        .bind(&now)
+        .bind(&now)
+        .bind(seed_source)
+        .bind(&view_json)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        self.get_viewer_profile(workspace_id, &email, profile).await
+    }
+
     async fn record_workspace_open(
         &self,
         workspace_id: &str,
@@ -1819,6 +1913,21 @@ fn row_to_saved_view(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSavedView,
         created_by_name: row.get("created_by_name"),
         created_at: parse_dt(row.get("created_at"))?,
         updated_at: parse_dt(row.get("updated_at"))?,
+        view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
+    })
+}
+
+fn row_to_viewer_profile(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<WorkspaceViewerProfile, StoreError> {
+    let view_json: String = row.get("view_json");
+    Ok(WorkspaceViewerProfile {
+        workspace_id: row.get("workspace_id"),
+        user_email: row.get("user_email"),
+        profile: row.get("profile"),
+        created_at: parse_dt(row.get("created_at"))?,
+        updated_at: parse_dt(row.get("updated_at"))?,
+        seed_source: row.get("seed_source"),
         view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
     })
 }
@@ -2386,6 +2495,38 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)
     }
 
+    pub async fn get_viewer_profile(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        profile: &str,
+    ) -> Result<Option<WorkspaceViewerProfile>, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        let profile = normalize_viewer_profile_name(profile)?;
+        self.store
+            .get_viewer_profile(workspace_id, &principal.email, &profile)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    pub async fn upsert_viewer_profile(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        profile: &str,
+        seed_source: Option<&str>,
+        view: SavedView,
+    ) -> Result<WorkspaceViewerProfile, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        let profile = normalize_viewer_profile_name(profile)?;
+        let view = workspace_saved_view_payload(view);
+        self.store
+            .upsert_viewer_profile(workspace_id, principal, &profile, seed_source, view)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
     pub async fn set_workspace_pinned(
         &self,
         workspace_id: &str,
@@ -2641,6 +2782,29 @@ fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
     Ok(trimmed.to_string())
 }
 
+fn normalize_viewer_profile_name(raw: &str) -> Result<String, WorkspaceError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkspaceError::BadRequest(
+            "viewer profile name is empty".to_string(),
+        ));
+    }
+    if trimmed.chars().count() > MAX_VIEWER_PROFILE_NAME_CHARS {
+        return Err(WorkspaceError::BadRequest(format!(
+            "viewer profile name exceeds {MAX_VIEWER_PROFILE_NAME_CHARS} characters"
+        )));
+    }
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(WorkspaceError::BadRequest(
+            "viewer profile may contain only letters, numbers, '-', '_', or '.'".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn workspace_saved_view_payload(mut view: SavedView) -> SavedView {
     // Workspace saved views refer to datasets by workspace-local ids in
     // dataset_order/dataset_settings/active_layouts. Source URLs belong
@@ -2766,6 +2930,10 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
                 .delete(delete_workspace_saved_view),
         )
         .route(
+            "/api/workspaces/{workspace_id}/viewer-profiles/{profile}",
+            get(get_workspace_viewer_profile).put(upsert_workspace_viewer_profile),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/default-saved-view",
             patch(update_workspace_default_saved_view),
         )
@@ -2836,6 +3004,13 @@ pub struct UpdateWorkspaceSavedViewRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateWorkspaceDefaultSavedViewRequest {
     pub saved_view_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertWorkspaceViewerProfileRequest {
+    pub view: SavedView,
+    #[serde(default)]
+    pub seed_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3232,6 +3407,44 @@ async fn delete_workspace_saved_view(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn get_workspace_viewer_profile(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, profile)): Path<(String, String)>,
+) -> Response {
+    match state
+        .manager
+        .get_viewer_profile(&workspace_id, &principal, &profile)
+        .await
+    {
+        Ok(Some(profile)) => (StatusCode::OK, Json(profile)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn upsert_workspace_viewer_profile(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, profile)): Path<(String, String)>,
+    Json(body): Json<UpsertWorkspaceViewerProfileRequest>,
+) -> Response {
+    match state
+        .manager
+        .upsert_viewer_profile(
+            &workspace_id,
+            &principal,
+            &profile,
+            body.seed_source.as_deref(),
+            body.view,
+        )
+        .await
+    {
+        Ok(profile) => (StatusCode::OK, Json(profile)).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -4462,6 +4675,93 @@ pub mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn workspace_viewer_profiles_are_private_and_strip_source_urls() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Headless viewer state"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let mut view = SavedView::empty([800, 600]);
+        view.datasets.push("/tmp/source.zarr".into());
+        view.dataset_order.push(DatasetId("wds_headless".into()));
+
+        let saved = manager
+            .upsert_viewer_profile(
+                &workspace.id,
+                &viewer,
+                "default",
+                Some("document_defaults"),
+                view,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(saved.workspace_id, workspace.id);
+        assert_eq!(saved.user_email, viewer.email);
+        assert_eq!(saved.profile, "default");
+        assert_eq!(saved.seed_source.as_deref(), Some("document_defaults"));
+        assert!(saved.view.datasets.is_empty());
+        assert_eq!(
+            saved.view.dataset_order,
+            vec![DatasetId("wds_headless".into())]
+        );
+
+        let owner_profile = manager
+            .get_viewer_profile(&workspace.id, &owner, "default")
+            .await
+            .unwrap();
+        assert!(owner_profile.is_none());
+
+        let viewer_profile = manager
+            .get_viewer_profile(&workspace.id, &viewer, "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(viewer_profile.user_email, viewer.email);
+        assert_eq!(
+            viewer_profile.view.dataset_order,
+            vec![DatasetId("wds_headless".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_viewer_profiles_reject_invalid_profile_names() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Headless viewer profile names"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let err = manager
+            .upsert_viewer_profile(
+                &workspace.id,
+                &owner,
+                "../escape",
+                None,
+                SavedView::empty([800, 600]),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
     }
 
     #[tokio::test]

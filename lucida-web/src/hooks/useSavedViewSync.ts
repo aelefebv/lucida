@@ -58,6 +58,7 @@ interface Params {
   datasetReferenceMode?: DatasetReferenceMode;
   fetchSavedViewById?: (id: string) => Promise<{ id: string; view: SavedView } | null>;
   fetchDefaultSavedView?: () => Promise<{ id: string; view: SavedView } | null>;
+  fetchViewerProfile?: (profile: string) => Promise<{ id: string; view: SavedView } | null>;
   allowDocumentLayoutMutation?: boolean;
 }
 
@@ -84,6 +85,7 @@ export function useSavedViewSync({
   datasetReferenceMode = "source-url",
   fetchSavedViewById,
   fetchDefaultSavedView,
+  fetchViewerProfile,
   allowDocumentLayoutMutation = true,
 }: Params): {
   applier: SavedViewApplier;
@@ -96,10 +98,13 @@ export function useSavedViewSync({
 } {
   const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
   const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
+  const fetchViewerProfileRef = useRef(fetchViewerProfile);
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
   // eslint-disable-next-line react-hooks/refs
   fetchDefaultSavedViewRef.current = fetchDefaultSavedView;
+  // eslint-disable-next-line react-hooks/refs
+  fetchViewerProfileRef.current = fetchViewerProfile;
 
   // Construct everything lazily on first render via useState's initializer
   // (runs exactly once). The captured `autoContrastMapRef` is read at
@@ -144,6 +149,7 @@ export function useSavedViewSync({
       debounceMs,
       fetchSavedViewById: async (id) => fetchSavedViewByIdRef.current?.(id) ?? null,
       fetchDefaultSavedView: async () => fetchDefaultSavedViewRef.current?.() ?? null,
+      fetchViewerProfile: async (profile) => fetchViewerProfileRef.current?.(profile) ?? null,
     });
     return { applier, urlSync, urlByDatasetId };
   });

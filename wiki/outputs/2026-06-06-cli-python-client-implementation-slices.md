@@ -18,11 +18,12 @@ These slices convert the parent PRD into tracer-bullet issues. Each slice should
 7. Layer and channel command tree
 8. Layout command tree
 9. Workspace saved views command tree
-10. Peer, presence, and follow diagnostics
-11. Plan/debug diagnostics
-12. Remote admin/support commands
-13. Python server-client MVP
-14. Docs, packaging, and legacy cleanup
+10. Headless viewer state and visual capture
+11. Peer, presence, and follow diagnostics
+12. Plan/debug diagnostics
+13. Remote admin/support commands
+14. Python server-client MVP
+15. Docs, packaging, and cleanup
 
 Slices 1-5 should remain mostly serial because they create shared config, HTTP, auth, target-resolution, and WebSocket-client modules. After slice 5, several command-surface slices could be implemented in parallel only if the command mapper has a stable extension pattern; otherwise the parser and mapper files will conflict.
 
@@ -47,7 +48,7 @@ Introduce the new user-facing `lucida` command shape and the shared CLI foundati
 - [ ] Human output is concise by default; `--json` emits stable machine-readable objects.
 - [ ] Errors are normalized into the PRD categories where applicable: unreachable server, unauthenticated, unauthorized, missing resource, ambiguous name, archived workspace, dataset-open failure, session disconnect, rejected command.
 - [ ] Parser tests cover the new top-level shape and `--json` / `--quiet` / `--server` behavior.
-- [ ] Documentation examples stop presenting the old flat CLI as the product surface.
+- [ ] Documentation examples present only the noun-based product surface.
 
 ### Wiki context
 
@@ -132,7 +133,7 @@ Fold the currently working dataset-open behavior into the workspace-first produc
 
 - [ ] `lucida dataset open <path-or-url>` targets the persisted workspace by default.
 - [ ] `--workspace` overrides the persisted workspace for this command.
-- [ ] The command connects to `/ws/workspaces/:id`, not the legacy global `/ws`, during normal use.
+- [ ] The command connects to `/ws/workspaces/:id`, not the old global `/ws`, during normal use.
 - [ ] Success output includes workspace ID, workspace dataset ID, name, image count, entity count, and sequence.
 - [ ] Failure output distinguishes unsupported path/URL, permission failure, import failure, timeout, and disconnected session where the server exposes those distinctions.
 - [ ] The command remains visibly verifiable in an already-open browser workspace.
@@ -279,7 +280,44 @@ Expose workspace saved views as the durable view-sharing surface: list/show/appl
 - `wiki/gotchas/saved-view-credentials-in-urls.md`
 - `wiki/gotchas/saved-view-client-only-state.md`
 
-## Slice 10: Peer, Presence, And Follow Diagnostics
+## Slice 10: Headless Viewer State And Visual Capture
+
+Type: HITL
+Blocked by: Slices 6, 7, 8, 9
+User stories covered: 55, 56, 57, 58, 59, 60, 61, 48, 50, 51, 52
+
+### What to build
+
+Give CLI users a durable private "current view" that behaves like a headless browser tab. View/camera/layer/channel commands should build on this selected viewer profile across separate CLI invocations, and the CLI should be able to render a screenshot or overview from that same state. This is not durable presence: cursor, follow target, client id, and peer liveness remain ephemeral.
+
+The preferred v1 rendering path is to reuse the web renderer through a headless browser or equivalent render helper, not to implement a second native CLI renderer. Protected deployments need a short-lived render-auth bridge or authenticated browser context that never serializes bearer tokens, browser cookies, source URLs, or saved-view payloads into shareable URLs.
+
+### Acceptance criteria
+
+- [ ] Add a private durable viewer-state model keyed by workspace, user/principal, and viewer profile, with a default profile for ordinary CLI use.
+- [ ] Stored viewer state uses the saved-view-shaped payload where practical: camera, view, display, dataset order, dataset settings, active layouts, and client-only preferences keyed by `workspace_dataset_id`; `datasets` is empty for workspace mode.
+- [ ] Durable viewer state explicitly excludes presence-only fields: client id, cursor, follow target, peer liveness, and transient WebSocket connection identity.
+- [ ] `lucida viewer state` prints the selected profile, seed source, camera/view/display summary, layer order, and updated time in human and JSON modes.
+- [ ] `lucida view`, `camera`, `layer`, and `channel` commands read-modify-write the selected viewer profile by default instead of starting from a fresh CLI presence on every invocation.
+- [ ] Commands retain explicit seed/adoption paths, e.g. from a saved view, current peer, workspace default saved view, or document defaults, and output which source initialized a missing profile.
+- [ ] Mutating viewer commands may still broadcast ephemeral presence while connected so an open browser can observe the current command, but persistence does not depend on the peer remaining connected.
+- [ ] `lucida saved-view capture <name>` can capture the selected durable viewer profile directly, while retaining explicit peer capture for live browser state.
+- [ ] `lucida viewer screenshot <path>` renders the selected viewer profile to an image using the web renderer and writes the requested file.
+- [ ] `lucida viewer overview <path>` or equivalent overview mode helps recover spatial context when the current viewport is off-target.
+- [ ] Render capture has a protected-deployment auth path that does not put bearer tokens, cookies, source URLs, or raw saved-view payloads in URLs.
+- [ ] Render capture reports renderer startup failures, auth failures, render-ready timeout, and missing dataset references as structured errors.
+- [ ] Tests cover profile initialization, repeated command persistence, saved-view-shaped serialization, absence of durable presence fields, screenshot request/auth construction, timeout/error handling, and a smoke-level nonblank image assertion.
+
+### Wiki context
+
+- `wiki/systems/subsystems/presence-and-follow-mode.md`
+- `wiki/systems/subsystems/saved-views.md`
+- `wiki/flows/saved-view-recipient-apply.md`
+- `wiki/systems/crates/lucida-cli.md`
+- `wiki/systems/crates/lucida-web.md`
+- `wiki/gotchas/saved-view-credentials-in-urls.md`
+
+## Slice 11: Peer, Presence, And Follow Diagnostics
 
 Type: AFK
 Blocked by: Slice 6
@@ -305,7 +343,7 @@ Expose collaboration diagnostics and voluntary follow without making steer/prese
 - `wiki/flows/presence-propagation.md`
 - `wiki/systems/crates/lucida-server.md`
 
-## Slice 11: Plan/Debug Diagnostics
+## Slice 12: Plan/Debug Diagnostics
 
 Type: AFK
 Blocked by: Slices 6, 7
@@ -332,7 +370,7 @@ Reframe `visible-chunks` under `lucida plan` or `lucida debug` and add read-only
 - `wiki/systems/crates/lucida-core.md`
 - `wiki/systems/crates/lucida-cli.md`
 
-## Slice 12: Remote Admin/Support Commands
+## Slice 13: Remote Admin/Support Commands
 
 Type: AFK
 Blocked by: Slices 2, 3
@@ -356,7 +394,7 @@ Expose authenticated remote support APIs under `lucida admin` while keeping loca
 - `wiki/systems/subsystems/auth.md`
 - `wiki/systems/crates/lucida-cli.md`
 
-## Slice 13: Python Server-Client MVP
+## Slice 14: Python Server-Client MVP
 
 Type: HITL
 Blocked by: Slices 2, 3, 4, 6, 7
@@ -382,10 +420,10 @@ Add a pure-Python server-client layer in `lucida-py` that mirrors the CLI noun m
 - `wiki/systems/crates/lucida-core.md`
 - `wiki/flows/dataset-opening.md`
 
-## Slice 14: Docs, Packaging, And Legacy Cleanup
+## Slice 15: Docs, Packaging, And Legacy Cleanup
 
 Type: AFK
-Blocked by: Slices 1-13
+Blocked by: Slices 1-14
 User stories covered: 52, 53, 54
 Related prior issues: #737, #738, #739, #740, #741, #742, #743
 

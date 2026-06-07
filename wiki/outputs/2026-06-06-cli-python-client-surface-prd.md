@@ -31,6 +31,7 @@ Define a shared Lucida client model for CLI and Python, with the CLI as the firs
 - `channel`
 - `layout`
 - `saved-view`
+- `viewer` / `capture`
 - `peer` / `presence`
 - `debug` / `plan`
 - `admin`
@@ -112,12 +113,19 @@ Debug/plan surfaces are read-only first. Presenter/steer controls are not promot
 52. As a maintainer, I want README/wiki examples for workspace-first CLI flows, so that the terminal UX remains discoverable.
 53. As a maintainer, I want the old flat command taxonomy treated as non-contractual, so that implementation can optimize for the new architecture.
 54. As a maintainer, I want #737-#743 covered by one parent PRD, so that the CLI work lands as a coherent product surface rather than a sequence of disconnected patches.
+55. As a headless CLI user, I want the CLI to maintain a current workspace view across commands, so that `view pan`, `view zoom`, layer changes, and later captures build on the same state instead of starting from a fresh transient presence each time.
+56. As a headless CLI user, I want to inspect my current viewer state, so that I can understand the camera, slice, display, layer order, and selected viewer profile without opening the GUI.
+57. As a headless CLI user, I want to capture a screenshot from my current CLI-controlled view, so that I can iteratively pan/zoom/check results from a terminal workflow.
+58. As a headless CLI user, I want an overview capture mode, so that I can recover when I am spatially far from the data or unsure where the current viewport is.
+59. As a script author, I want separate named viewer profiles where needed, so that automation does not stomp my personal last view state and concurrent scripts can be isolated.
+60. As a protected-deployment user, I want screenshot capture to authenticate without putting bearer tokens, cookies, source URLs, or saved-view payloads in shareable URLs.
+61. As a maintainer, I want headless visual capture to reuse the web renderer for v1, so that CLI screenshots match what the GUI would show and do not require a second renderer implementation.
 
 ## Implementation Decisions
 
 - The PRD defines a shared CLI/Python client model, with the CLI as the first implementation target.
 - The user-facing command is `lucida`, not `lucida-cli`. Existing crate/package naming can remain an implementation detail during migration, but the product command name is `lucida`.
-- There is no compatibility requirement for the current flat CLI shape. Legacy aliases may exist temporarily during implementation, but the product contract is the noun-based command tree.
+- The current flat CLI shape is not a product requirement. The product contract is the noun-based command tree, and old flat aliases should not be retained as user-facing paths.
 - The client model uses an HTTP control plane for discovery/durable resources and a WebSocket session plane for live workspace interaction.
 - Target resolution is a deep module: it consumes configured defaults, per-command overrides, workspace IDs/names, and base URLs, then produces authenticated HTTP endpoints and workspace WebSocket URLs.
 - Client configuration stores at least default server and default workspace. It should be inspectable and overrideable.
@@ -141,8 +149,16 @@ Debug/plan surfaces are read-only first. Presenter/steer controls are not promot
 - Dataset commands target workspaces by default and never require the user to hand-construct `/ws/workspaces/:id`.
 - Dataset IDs exposed in workspace sessions are workspace-local IDs. Source URLs are not saved-view identity and should not leak into workspace links.
 - View/layer/channel commands are local/presence state unless they explicitly map to document state.
+- CLI view/layer/channel commands should gain a durable private headless viewer state. That state is not presence: it excludes cursor, follow target, connected-client identity, and other live-only fields.
+- Durable headless viewer state should be private per user, workspace, and viewer profile. A default profile supports normal interactive CLI usage; an explicit profile selector supports automation and concurrent scripts.
+- Durable headless viewer state should reuse the `SavedView` payload shape where practical: camera, view, display, dataset order, dataset settings, active layouts, and client-only preferences keyed by `workspace_dataset_id`, with `datasets` cleared for workspace mode.
+- CLI view/layer/channel commands should read-modify-write the selected durable viewer state when no explicit peer/snapshot source is requested, and may also broadcast an ephemeral presence update while connected so live browser clients can observe the change.
+- Initial durable viewer state should be seedable from an explicit saved view, an explicit peer, the workspace default saved view, or workspace document defaults. The CLI should report which seed source was used when initializing a missing profile.
 - Active layout is shared workspace document state and requires editor-or-better permission.
-- Workspace saved views are the product surface. Global bookmarks are prior art, not a compatibility target.
+- Workspace saved views are the product surface. Global bookmarks are prior art, not a migration target.
+- Saved-view capture from CLI should be able to capture the selected durable viewer profile directly, while retaining explicit peer capture for browser/live-session workflows.
+- Headless visual capture should reuse the web renderer as the v1 rendering oracle. A browser/renderer bootstrap path may be CLI-launched headless Chrome or an equivalent render helper, but it must render the same workspace/view state as the GUI rather than duplicating projection/rendering logic in the CLI.
+- Protected headless visual capture needs an auth bridge that does not expose durable credentials in URLs. Acceptable approaches include a short-lived render session/cookie minted from the CLI bearer credential or authenticated browser context headers; bearer tokens, browser cookies, and source URLs must not be serialized into screenshot URLs.
 - Peer follow is a v1 collaboration surface. Steer/presenter behavior is either role-gated or deferred until a deliberate presenter-control design exists.
 - Debug and planning surfaces are read-only first. CLI/Python can inspect state, but should not mutate planning config in v1.
 - Planning diagnostics must use shared `lucida-core` scene truth where applicable and must not reimplement projection or visibility math. Chosen to honor [[principles/planning#5-wasm-owns-truth-planning-consumes-a-snapshot]].
@@ -175,6 +191,8 @@ A good test for this PRD checks externally observable behavior: command parsing,
 - View/layer/channel tests cover parser shape and protocol message shape for the `ViewportCommand` variants in #737.
 - Presence tests cover follow/unfollow, cursor update/clear if included, dataset presence emission after display changes, and intentionally omitted presence messages.
 - Saved-view tests cover list/show/apply/capture/update/delete/default/link behavior and role failures.
+- Headless viewer-state tests cover profile initialization, read-modify-write behavior across successive CLI commands, saved-view-shaped serialization with source URLs cleared, explicit seed selection, and absence of cursor/follow/client identity from durable state.
+- Headless visual-capture tests cover screenshot command request construction, render-auth bootstrap without token-in-URL leakage, renderer-ready timeout/error handling, output file creation, and a smoke-level pixel/nonblank assertion against a loaded workspace.
 - Debug/plan tests cover multi-dataset and tiered output shape where available, plus explicit labeling when output is lower-level scene diagnostics.
 - Admin tests cover remote admin request construction and permission failures.
 - Python tests cover the pure-Python server client resource model, auth token sourcing, workspace/dataset/view basics, and parity with CLI naming where practical.
@@ -189,9 +207,11 @@ Prior art:
 
 ## Out of Scope
 
-- Maintaining the old flat `lucida-cli` command surface as a compatibility contract.
+- Maintaining the old flat `lucida-cli` command surface.
 - Preserving the old global viewer/session model as a first-class target.
 - Migrating or promoting global bookmarks.
+- Persisting presence itself, including connected client IDs, cursors, follow relationships, or peer liveness.
+- Implementing a second native CLI renderer in v1. Headless capture should reuse the web renderer until there is a deliberate rendering-runtime PRD.
 - Copying browser cookies, Google ID tokens, Google refresh tokens, or OAuth provider credentials into CLI/Python clients.
 - Granular token scopes, service-account tokens, and offline bearer-token validation.
 - Full presenter-control design beyond voluntary follow and clearly gated/deferred steer behavior.
@@ -205,7 +225,8 @@ Prior art:
 
 - This PRD should become the umbrella issue for #737-#743. Those issues can either remain as child slices or be closed/superseded as the PRD is broken into implementation issues.
 - The clean-cut policy is intentional because there are no active users of the old CLI contract.
-- The likely implementation order is: target resolution/config, auth tokens, workspace discovery, workspace-targeted dataset operations, view/layer/channel command mapping, saved views, peer/presence, debug/admin, then Python parity over the same model.
+- The likely implementation order is: target resolution/config, auth tokens, workspace discovery, workspace-targeted dataset operations, view/layer/channel command mapping, saved views, headless viewer state/capture, peer/presence, debug/admin, then Python parity over the same model.
 - The WebSocket and HTTP clients should share auth and target-resolution code so behavior does not drift.
 - Python should present resource objects and methods that mirror CLI nouns, not a separate vocabulary.
 - If the user opens a browser alongside CLI commands, the browser should visibly reflect workspace session changes, especially dataset open and shared document mutations.
+- Headless viewer state is the CLI/Python equivalent of "my current tab view," while saved views remain the explicit durable/shareable snapshot mechanism.

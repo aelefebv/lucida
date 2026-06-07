@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { UrlSync, parseViewHash, parseBookmarkHash, type ResolvedSavedView } from "./urlSync.ts";
+import {
+  UrlSync,
+  parseViewHash,
+  parseBookmarkHash,
+  parseViewerProfileSearch,
+  type ResolvedSavedView,
+} from "./urlSync.ts";
 import { encode } from "./encoder.ts";
 import { SavedViewApplier } from "./applier.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
@@ -29,11 +35,11 @@ class FakeApplier {
   isInProgress() { return this.inProgress; }
 }
 
-function makeFakeWindow(initialHash = "", pathname = "/"): Window {
+function makeFakeWindow(initialHash = "", pathname = "/", search = ""): Window {
   const listeners: Record<string, Array<(e: Event) => void>> = {};
   const state: { state: unknown; href: string; hash: string } = {
     state: null,
-    href: `http://localhost${pathname}${initialHash}`,
+    href: `http://localhost${pathname}${search}${initialHash}`,
     hash: initialHash,
   };
   return {
@@ -46,7 +52,7 @@ function makeFakeWindow(initialHash = "", pathname = "/"): Window {
     location: {
       get hash() { return state.hash; },
       get pathname() { return pathname; },
-      get search() { return ""; },
+      get search() { return search; },
       get href() { return state.href; },
     },
     history: {
@@ -85,6 +91,19 @@ describe("parseViewHash", () => {
 
   it("extracts view from multi-key hash", () => {
     expect(parseViewHash("#foo=bar&view=xyz&baz=1")).toBe("xyz");
+  });
+});
+
+describe("parseViewerProfileSearch", () => {
+  it("extracts a conservative viewer profile name", () => {
+    expect(parseViewerProfileSearch("?viewer_profile=cli.default")).toBe("cli.default");
+    expect(parseViewerProfileSearch("viewer_profile=cli_default-1")).toBe("cli_default-1");
+  });
+
+  it("rejects empty or unsafe viewer profile names", () => {
+    expect(parseViewerProfileSearch("")).toBeNull();
+    expect(parseViewerProfileSearch("?viewer_profile=")).toBeNull();
+    expect(parseViewerProfileSearch("?viewer_profile=../default")).toBeNull();
   });
 });
 
@@ -166,6 +185,26 @@ describe("UrlSync", () => {
     });
     await sync.bootstrap();
     expect(applier.apply).not.toHaveBeenCalled();
+  });
+
+  it("bootstraps from ?viewer_profile= when no hash is present", async () => {
+    const v = emptyView();
+    v.view.t = 12;
+    win = makeFakeWindow("", "/w/ws-1", "?viewer_profile=cli.default");
+    const fetchViewerProfile = vi.fn(async (profile: string): Promise<ResolvedSavedView | null> => ({
+      id: `viewer_profile:${profile}`,
+      view: v,
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchViewerProfile,
+    });
+
+    await sync.bootstrap();
+
+    expect(fetchViewerProfile).toHaveBeenCalledWith("cli.default");
+    expect(applier.apply).toHaveBeenCalledTimes(1);
+    expect(applier.applied[0].view.t).toBe(12);
   });
 
   it("handles popstate by re-applying", async () => {
