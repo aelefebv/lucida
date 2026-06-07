@@ -68,9 +68,12 @@ use crate::view::{
     format_view_apply_human, format_viewer_profile_human,
 };
 use crate::workspace::{
-    WorkspaceClient, WorkspaceListOutput, WorkspaceLookupMode, WorkspaceOpenOutput,
-    WorkspaceOutput, WorkspaceTarget, WorkspaceUseOutput, format_workspace_human,
-    format_workspace_list_human, resolve_workspace_record, target_for,
+    WorkspaceClient, WorkspaceLifecycleOutput, WorkspaceLinkAccess, WorkspaceListOutput,
+    WorkspaceLookupMode, WorkspaceMemberOutput, WorkspaceOpenOutput, WorkspaceOutput,
+    WorkspacePinOutput, WorkspaceRole, WorkspaceSharingOutput, WorkspaceTarget, WorkspaceUseOutput,
+    format_workspace_human, format_workspace_lifecycle_human, format_workspace_list_human,
+    format_workspace_member_human, format_workspace_pin_human, format_workspace_sharing_human,
+    resolve_workspace_record, target_for,
 };
 
 #[derive(Parser, Debug)]
@@ -319,6 +322,106 @@ enum WorkspaceCommand {
         /// Do not attempt to open a browser automatically
         #[arg(long)]
         no_browser: bool,
+    },
+    /// Pin a workspace in your personal workspace list
+    Pin {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Remove a workspace from your personal pins
+    Unpin {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Archive a workspace you own
+    Archive {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Restore an archived workspace you own
+    Restore {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Inspect and update workspace link sharing
+    Share {
+        #[command(subcommand)]
+        command: WorkspaceShareCommand,
+    },
+    /// Manage explicit workspace members
+    Member {
+        #[command(subcommand)]
+        command: WorkspaceMemberCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum WorkspaceShareCommand {
+    /// Show link sharing and explicit members
+    Show {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Set link sharing to off, viewer, or editor
+    Link {
+        /// Link sharing mode
+        mode: WorkspaceLinkMode,
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkspaceLinkMode {
+    Off,
+    Viewer,
+    Editor,
+}
+
+impl WorkspaceLinkMode {
+    fn access_and_role(self) -> (WorkspaceLinkAccess, WorkspaceRole) {
+        match self {
+            Self::Off => (WorkspaceLinkAccess::Restricted, WorkspaceRole::Viewer),
+            Self::Viewer => (WorkspaceLinkAccess::AnyoneWithLink, WorkspaceRole::Viewer),
+            Self::Editor => (WorkspaceLinkAccess::AnyoneWithLink, WorkspaceRole::Editor),
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum WorkspaceMemberCommand {
+    /// List explicit workspace members
+    List {
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Add a member or update an existing member
+    Add {
+        /// Member email
+        email: String,
+        /// Member role
+        role: WorkspaceRole,
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+        /// Display name to store when adding a member
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    /// Update an existing member's role
+    SetRole {
+        /// Member email
+        email: String,
+        /// Member role
+        role: WorkspaceRole,
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
+    },
+    /// Remove a member
+    Remove {
+        /// Member email
+        email: String,
+        /// Workspace id or unambiguous name. Defaults to --workspace/config.
+        selector: Option<String>,
     },
 }
 
@@ -1397,6 +1500,276 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     )
                 })?;
             }
+            WorkspaceCommand::Pin { selector } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let mut workspace = resolve_workspace_record(
+                    &client,
+                    first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let user_state = client.set_pinned(&workspace.id, true).await?;
+                workspace.pinned_at = user_state.pinned_at.clone();
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspacePinOutput {
+                    server,
+                    workspace,
+                    target,
+                    user_state,
+                    pinned: true,
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_pin_human(&output_payload)
+                })?;
+            }
+            WorkspaceCommand::Unpin { selector } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let mut workspace = resolve_workspace_record(
+                    &client,
+                    first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let user_state = client.set_pinned(&workspace.id, false).await?;
+                workspace.pinned_at = user_state.pinned_at.clone();
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspacePinOutput {
+                    server,
+                    workspace,
+                    target,
+                    user_state,
+                    pinned: false,
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_pin_human(&output_payload)
+                })?;
+            }
+            WorkspaceCommand::Archive { selector } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspace = resolve_workspace_record(
+                    &client,
+                    first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let workspace = client.archive(&workspace.id).await?;
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspaceLifecycleOutput {
+                    server,
+                    workspace,
+                    target,
+                    action: "Archived",
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_lifecycle_human(&output_payload)
+                })?;
+            }
+            WorkspaceCommand::Restore { selector } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let client = WorkspaceClient::new(server.url.clone(), token);
+                let workspace = resolve_workspace_record(
+                    &client,
+                    first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::IncludeArchived,
+                )
+                .await?;
+                let workspace = client.restore(&workspace.id).await?;
+                let target = target_for(&server.url, &workspace)?;
+                let output_payload = WorkspaceLifecycleOutput {
+                    server,
+                    workspace,
+                    target,
+                    action: "Restored",
+                };
+                output.print_either(&output_payload, || {
+                    format_workspace_lifecycle_human(&output_payload)
+                })?;
+            }
+            WorkspaceCommand::Share { command } => match command {
+                WorkspaceShareCommand::Show { selector } => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let token = resolve_token(&server.url, &config);
+                    let client = WorkspaceClient::new(server.url.clone(), token);
+                    let workspace = resolve_workspace_record(
+                        &client,
+                        first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                        &config,
+                        &server.url,
+                        WorkspaceLookupMode::ActiveOnly,
+                    )
+                    .await?;
+                    let target = target_for(&server.url, &workspace)?;
+                    let sharing = client.sharing(&workspace.id).await?;
+                    let output_payload = WorkspaceSharingOutput {
+                        server,
+                        workspace,
+                        target,
+                        sharing,
+                    };
+                    output.print_either(&output_payload, || {
+                        format_workspace_sharing_human(&output_payload)
+                    })?;
+                }
+                WorkspaceShareCommand::Link { mode, selector } => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let token = resolve_token(&server.url, &config);
+                    let client = WorkspaceClient::new(server.url.clone(), token);
+                    let workspace = resolve_workspace_record(
+                        &client,
+                        first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                        &config,
+                        &server.url,
+                        WorkspaceLookupMode::ActiveOnly,
+                    )
+                    .await?;
+                    let target = target_for(&server.url, &workspace)?;
+                    let (link_access, link_role) = mode.access_and_role();
+                    let sharing = client
+                        .update_link_access(&workspace.id, link_access, link_role)
+                        .await?;
+                    let output_payload = WorkspaceSharingOutput {
+                        server,
+                        workspace,
+                        target,
+                        sharing,
+                    };
+                    output.print_either(&output_payload, || {
+                        format_workspace_sharing_human(&output_payload)
+                    })?;
+                }
+            },
+            WorkspaceCommand::Member { command } => match command {
+                WorkspaceMemberCommand::List { selector } => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let token = resolve_token(&server.url, &config);
+                    let client = WorkspaceClient::new(server.url.clone(), token);
+                    let workspace = resolve_workspace_record(
+                        &client,
+                        first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                        &config,
+                        &server.url,
+                        WorkspaceLookupMode::ActiveOnly,
+                    )
+                    .await?;
+                    let target = target_for(&server.url, &workspace)?;
+                    let sharing = client.sharing(&workspace.id).await?;
+                    let output_payload = WorkspaceSharingOutput {
+                        server,
+                        workspace,
+                        target,
+                        sharing,
+                    };
+                    output.print_either(&output_payload, || {
+                        format_workspace_sharing_human(&output_payload)
+                    })?;
+                }
+                WorkspaceMemberCommand::Add {
+                    email,
+                    role,
+                    selector,
+                    display_name,
+                } => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let token = resolve_token(&server.url, &config);
+                    let client = WorkspaceClient::new(server.url.clone(), token);
+                    let workspace = resolve_workspace_record(
+                        &client,
+                        first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                        &config,
+                        &server.url,
+                        WorkspaceLookupMode::ActiveOnly,
+                    )
+                    .await?;
+                    let target = target_for(&server.url, &workspace)?;
+                    let member = client
+                        .upsert_member(&workspace.id, email, *role, display_name.as_deref())
+                        .await?;
+                    let output_payload = WorkspaceMemberOutput {
+                        server,
+                        workspace,
+                        target,
+                        member: Some(member),
+                        email: None,
+                        action: "Saved member",
+                    };
+                    output.print_either(&output_payload, || {
+                        format_workspace_member_human(&output_payload)
+                    })?;
+                }
+                WorkspaceMemberCommand::SetRole {
+                    email,
+                    role,
+                    selector,
+                } => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let token = resolve_token(&server.url, &config);
+                    let client = WorkspaceClient::new(server.url.clone(), token);
+                    let workspace = resolve_workspace_record(
+                        &client,
+                        first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                        &config,
+                        &server.url,
+                        WorkspaceLookupMode::ActiveOnly,
+                    )
+                    .await?;
+                    let target = target_for(&server.url, &workspace)?;
+                    let member = client
+                        .update_member_role(&workspace.id, email, *role)
+                        .await?;
+                    let output_payload = WorkspaceMemberOutput {
+                        server,
+                        workspace,
+                        target,
+                        member: Some(member),
+                        email: None,
+                        action: "Updated member",
+                    };
+                    output.print_either(&output_payload, || {
+                        format_workspace_member_human(&output_payload)
+                    })?;
+                }
+                WorkspaceMemberCommand::Remove { email, selector } => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let token = resolve_token(&server.url, &config);
+                    let client = WorkspaceClient::new(server.url.clone(), token);
+                    let workspace = resolve_workspace_record(
+                        &client,
+                        first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
+                        &config,
+                        &server.url,
+                        WorkspaceLookupMode::ActiveOnly,
+                    )
+                    .await?;
+                    let target = target_for(&server.url, &workspace)?;
+                    client.remove_member(&workspace.id, email).await?;
+                    let output_payload = WorkspaceMemberOutput {
+                        server,
+                        workspace,
+                        target,
+                        member: None,
+                        email: Some(email.clone()),
+                        action: "Removed member",
+                    };
+                    output.print_either(&output_payload, || {
+                        format_workspace_member_human(&output_payload)
+                    })?;
+                }
+            },
         },
         Command::Dataset { command } => match command {
             DatasetCommand::Browse { path } => {
@@ -3172,6 +3545,165 @@ mod tests {
                 assert!(no_browser);
             }
             _ => panic!("expected workspace open"),
+        }
+    }
+
+    #[test]
+    fn workspace_lifecycle_commands_parse_product_shape() {
+        let pin = parse(&["workspace", "pin", "w1"]);
+        match pin.command {
+            Command::Workspace {
+                command: WorkspaceCommand::Pin { selector },
+            } => assert_eq!(selector.as_deref(), Some("w1")),
+            _ => panic!("expected workspace pin"),
+        }
+
+        let unpin = parse(&["workspace", "unpin"]);
+        assert!(matches!(
+            unpin.command,
+            Command::Workspace {
+                command: WorkspaceCommand::Unpin { selector: None },
+            }
+        ));
+
+        let archive = parse(&["workspace", "archive", "w1"]);
+        assert!(matches!(
+            archive.command,
+            Command::Workspace {
+                command: WorkspaceCommand::Archive { .. },
+            }
+        ));
+
+        let restore = parse(&["workspace", "restore", "w1"]);
+        assert!(matches!(
+            restore.command,
+            Command::Workspace {
+                command: WorkspaceCommand::Restore { .. },
+            }
+        ));
+    }
+
+    #[test]
+    fn workspace_share_commands_parse_product_shape() {
+        let show = parse(&["workspace", "share", "show", "w1"]);
+        match show.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Share {
+                        command: WorkspaceShareCommand::Show { selector },
+                    },
+            } => assert_eq!(selector.as_deref(), Some("w1")),
+            _ => panic!("expected workspace share show"),
+        }
+
+        let link = parse(&["workspace", "share", "link", "editor", "w1"]);
+        match link.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Share {
+                        command: WorkspaceShareCommand::Link { mode, selector },
+                    },
+            } => {
+                assert_eq!(selector.as_deref(), Some("w1"));
+                assert!(matches!(mode, WorkspaceLinkMode::Editor));
+                assert_eq!(
+                    mode.access_and_role(),
+                    (WorkspaceLinkAccess::AnyoneWithLink, WorkspaceRole::Editor)
+                );
+            }
+            _ => panic!("expected workspace share link"),
+        }
+
+        let off = parse(&["workspace", "share", "link", "off"]);
+        assert!(matches!(
+            off.command,
+            Command::Workspace {
+                command: WorkspaceCommand::Share {
+                    command: WorkspaceShareCommand::Link {
+                        mode: WorkspaceLinkMode::Off,
+                        selector: None,
+                    },
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn workspace_member_commands_parse_product_shape() {
+        let list = parse(&["workspace", "member", "list", "w1"]);
+        match list.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Member {
+                        command: WorkspaceMemberCommand::List { selector },
+                    },
+            } => assert_eq!(selector.as_deref(), Some("w1")),
+            _ => panic!("expected workspace member list"),
+        }
+
+        let add = parse(&[
+            "workspace",
+            "member",
+            "add",
+            "editor@example.com",
+            "editor",
+            "w1",
+            "--display-name",
+            "Editor",
+        ]);
+        match add.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Member {
+                        command:
+                            WorkspaceMemberCommand::Add {
+                                email,
+                                role,
+                                selector,
+                                display_name,
+                            },
+                    },
+            } => {
+                assert_eq!(email, "editor@example.com");
+                assert_eq!(role, WorkspaceRole::Editor);
+                assert_eq!(selector.as_deref(), Some("w1"));
+                assert_eq!(display_name.as_deref(), Some("Editor"));
+            }
+            _ => panic!("expected workspace member add"),
+        }
+
+        let set_role = parse(&[
+            "workspace",
+            "member",
+            "set-role",
+            "viewer@example.com",
+            "viewer",
+        ]);
+        assert!(matches!(
+            set_role.command,
+            Command::Workspace {
+                command: WorkspaceCommand::Member {
+                    command: WorkspaceMemberCommand::SetRole {
+                        role: WorkspaceRole::Viewer,
+                        selector: None,
+                        ..
+                    },
+                },
+            }
+        ));
+
+        let remove = parse(&["workspace", "member", "remove", "viewer@example.com", "w1"]);
+        match remove.command {
+            Command::Workspace {
+                command:
+                    WorkspaceCommand::Member {
+                        command: WorkspaceMemberCommand::Remove { email, selector },
+                    },
+            } => {
+                assert_eq!(email, "viewer@example.com");
+                assert_eq!(selector.as_deref(), Some("w1"));
+            }
+            _ => panic!("expected workspace member remove"),
         }
     }
 

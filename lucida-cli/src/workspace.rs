@@ -1,10 +1,11 @@
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{CliConfig, EffectiveServer};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceRole {
     Viewer,
@@ -20,6 +21,13 @@ impl WorkspaceRole {
             Self::Owner => "owner",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLinkAccess {
+    Restricted,
+    AnyoneWithLink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +59,29 @@ pub struct WorkspaceRecord {
     pub default_saved_view_id: Option<String>,
     pub last_opened_at: Option<String>,
     pub pinned_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceUserState {
+    pub workspace_id: String,
+    pub user_email: String,
+    pub last_opened_at: Option<String>,
+    pub pinned_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceMember {
+    pub email: String,
+    pub role: WorkspaceRole,
+    pub display_name: String,
+    pub added_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSharingSettings {
+    pub link_access: WorkspaceLinkAccess,
+    pub link_role: WorkspaceRole,
+    pub members: Vec<WorkspaceMember>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +123,41 @@ pub struct WorkspaceOpenOutput {
     pub workspace: WorkspaceRecord,
     pub target: WorkspaceTarget,
     pub opened: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspacePinOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub user_state: WorkspaceUserState,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceLifecycleOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub action: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceSharingOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub sharing: WorkspaceSharingSettings,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceMemberOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub member: Option<WorkspaceMember>,
+    pub email: Option<String>,
+    pub action: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +225,147 @@ impl WorkspaceClient {
         .json::<WorkspaceRecord>()
         .await
         .map_err(CliError::from)
+    }
+
+    pub async fn set_pinned(
+        &self,
+        workspace_id: &str,
+        pinned: bool,
+    ) -> Result<WorkspaceUserState, CliError> {
+        let body = serde_json::json!({ "pinned": pinned });
+        self.send(
+            self.http
+                .patch(workspace_api_url_with_suffix(
+                    &self.base_url,
+                    workspace_id,
+                    &["pin"],
+                )?)
+                .json(&body),
+        )
+        .await?
+        .json::<WorkspaceUserState>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn archive(&self, workspace_id: &str) -> Result<WorkspaceRecord, CliError> {
+        self.send(self.http.post(workspace_api_url_with_suffix(
+            &self.base_url,
+            workspace_id,
+            &["archive"],
+        )?))
+        .await?
+        .json::<WorkspaceRecord>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn restore(&self, workspace_id: &str) -> Result<WorkspaceRecord, CliError> {
+        self.send(self.http.post(workspace_api_url_with_suffix(
+            &self.base_url,
+            workspace_id,
+            &["restore"],
+        )?))
+        .await?
+        .json::<WorkspaceRecord>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn sharing(&self, workspace_id: &str) -> Result<WorkspaceSharingSettings, CliError> {
+        self.send(self.http.get(workspace_api_url_with_suffix(
+            &self.base_url,
+            workspace_id,
+            &["sharing"],
+        )?))
+        .await?
+        .json::<WorkspaceSharingSettings>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn update_link_access(
+        &self,
+        workspace_id: &str,
+        link_access: WorkspaceLinkAccess,
+        link_role: WorkspaceRole,
+    ) -> Result<WorkspaceSharingSettings, CliError> {
+        let body = serde_json::json!({
+            "link_access": link_access,
+            "link_role": link_role,
+        });
+        self.send(
+            self.http
+                .patch(workspace_api_url_with_suffix(
+                    &self.base_url,
+                    workspace_id,
+                    &["sharing"],
+                )?)
+                .json(&body),
+        )
+        .await?
+        .json::<WorkspaceSharingSettings>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn upsert_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        role: WorkspaceRole,
+        display_name: Option<&str>,
+    ) -> Result<WorkspaceMember, CliError> {
+        let body = serde_json::json!({
+            "email": email,
+            "role": role,
+            "display_name": display_name,
+        });
+        self.send(
+            self.http
+                .post(workspace_api_url_with_suffix(
+                    &self.base_url,
+                    workspace_id,
+                    &["members"],
+                )?)
+                .json(&body),
+        )
+        .await?
+        .json::<WorkspaceMember>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn update_member_role(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        role: WorkspaceRole,
+    ) -> Result<WorkspaceMember, CliError> {
+        let body = serde_json::json!({ "role": role });
+        self.send(
+            self.http
+                .patch(workspace_api_url_with_suffix(
+                    &self.base_url,
+                    workspace_id,
+                    &["members", email],
+                )?)
+                .json(&body),
+        )
+        .await?
+        .json::<WorkspaceMember>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    pub async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<(), CliError> {
+        self.send(self.http.delete(workspace_api_url_with_suffix(
+            &self.base_url,
+            workspace_id,
+            &["members", email],
+        )?))
+        .await?;
+        Ok(())
     }
 
     async fn send(
@@ -376,12 +583,18 @@ pub fn workspace_ws_url(server_url: &str, workspace_id: &str) -> Result<String, 
 }
 
 fn workspace_api_url(server_url: &str, workspace_id: &str) -> Result<reqwest::Url, CliError> {
-    reqwest::Url::parse(&url_with_segments(
-        server_url,
-        None,
-        &["api", "workspaces", workspace_id],
-    )?)
-    .map_err(|error| CliError::invalid_server(format!("invalid workspace API URL: {error}")))
+    workspace_api_url_with_suffix(server_url, workspace_id, &[])
+}
+
+fn workspace_api_url_with_suffix(
+    server_url: &str,
+    workspace_id: &str,
+    suffix: &[&str],
+) -> Result<reqwest::Url, CliError> {
+    let mut segments = vec!["api", "workspaces", workspace_id];
+    segments.extend_from_slice(suffix);
+    reqwest::Url::parse(&url_with_segments(server_url, None, &segments)?)
+        .map_err(|error| CliError::invalid_server(format!("invalid workspace API URL: {error}")))
 }
 
 fn url_with_segments(
@@ -462,6 +675,87 @@ pub fn format_workspace_human(workspace: &WorkspaceRecord, target: &WorkspaceTar
         target.web_url,
         target.ws_url,
     )
+}
+
+pub fn format_workspace_pin_human(output: &WorkspacePinOutput) -> String {
+    let state = if output.pinned { "Pinned" } else { "Unpinned" };
+    format!(
+        "{state}: {}\nID: {}\nPinned at: {}",
+        output.workspace.name,
+        output.workspace.id,
+        output
+            .user_state
+            .pinned_at
+            .as_deref()
+            .unwrap_or("not pinned"),
+    )
+}
+
+pub fn format_workspace_lifecycle_human(output: &WorkspaceLifecycleOutput) -> String {
+    format!(
+        "{}: {}\nID: {}\nArchived: {}\nURL: {}",
+        output.action,
+        output.workspace.name,
+        output.workspace.id,
+        if output.workspace.archived_at.is_some() {
+            "yes"
+        } else {
+            "no"
+        },
+        output.target.web_url,
+    )
+}
+
+pub fn format_workspace_sharing_human(output: &WorkspaceSharingOutput) -> String {
+    let link = match output.sharing.link_access {
+        WorkspaceLinkAccess::Restricted => "off".to_string(),
+        WorkspaceLinkAccess::AnyoneWithLink => {
+            format!("anyone with link ({})", output.sharing.link_role.as_str())
+        }
+    };
+    let members = if output.sharing.members.is_empty() {
+        "Members: none".to_string()
+    } else {
+        let rows = output
+            .sharing
+            .members
+            .iter()
+            .map(|member| {
+                format!(
+                    "{}  {}  {}",
+                    member.email,
+                    member.role.as_str(),
+                    member.display_name,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Members:\n{rows}")
+    };
+    format!(
+        "Workspace: {}\nID: {}\nLink: {}\n{}",
+        output.workspace.name, output.workspace.id, link, members
+    )
+}
+
+pub fn format_workspace_member_human(output: &WorkspaceMemberOutput) -> String {
+    match output.member.as_ref() {
+        Some(member) => format!(
+            "{}: {}\nRole: {}\nWorkspace: {} ({})",
+            output.action,
+            member.email,
+            member.role.as_str(),
+            output.workspace.name,
+            output.workspace.id,
+        ),
+        None => format!(
+            "{}: {}\nWorkspace: {} ({})",
+            output.action,
+            output.email.as_deref().unwrap_or("member"),
+            output.workspace.name,
+            output.workspace.id
+        ),
+    }
 }
 
 fn looks_like_workspace_id(selector: &str) -> bool {
