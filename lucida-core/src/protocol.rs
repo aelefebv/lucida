@@ -56,7 +56,7 @@ pub enum ClientMessage {
     Steer { client: ClientId },
     /// Request the server open a Dataset from a URL.
     /// The server reads metadata via a StorageBackend and broadcasts DatasetOpened.
-    OpenRemoteDataset { url: String },
+    OpenRemoteDataset { request_id: String, url: String },
     /// Advisory, unsequenced scheduling hint for server-generated chunks.
     /// This is session/runtime state only; it is not a document command and
     /// must not be persisted in saved views.
@@ -173,8 +173,19 @@ pub enum ServerMessage {
         dataset_order: Vec<DatasetId>,
         dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     },
-    /// Sent when OpenRemoteDataset cannot be fulfilled.
-    OpenDatasetFailed { url: String, error: String },
+    /// Sent to the requester when OpenRemoteDataset succeeds.
+    OpenDatasetSucceeded {
+        request_id: String,
+        url: String,
+        seq: u64,
+        opened: lucida_protocol::DatasetOpened,
+    },
+    /// Sent to the requester when OpenRemoteDataset cannot be fulfilled.
+    OpenDatasetFailed {
+        request_id: String,
+        url: String,
+        error: String,
+    },
     /// Incremental update to a dataset's asset catalog.
     AssetCatalogUpdate {
         dataset_id: DatasetId,
@@ -566,14 +577,17 @@ mod tests {
     #[test]
     fn open_remote_dataset_round_trips() {
         let msg = ClientMessage::OpenRemoteDataset {
+            request_id: "req-1".into(),
             url: "/mnt/data/experiment.zarr".into(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"open_remote_dataset\""));
+        assert!(json.contains("\"request_id\":\"req-1\""));
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::OpenRemoteDataset { url } => {
-                assert_eq!(url, "/mnt/data/experiment.zarr")
+            ClientMessage::OpenRemoteDataset { request_id, url } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(url, "/mnt/data/experiment.zarr");
             }
             _ => panic!("expected OpenRemoteDataset"),
         }
@@ -582,6 +596,7 @@ mod tests {
     #[test]
     fn open_dataset_failed_round_trips() {
         let msg = ServerMessage::OpenDatasetFailed {
+            request_id: "req-1".into(),
             url: "gs://bucket/missing.zarr".into(),
             error: "not found".into(),
         };
@@ -589,7 +604,12 @@ mod tests {
         assert!(json.contains("\"type\":\"open_dataset_failed\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ServerMessage::OpenDatasetFailed { url, error } => {
+            ServerMessage::OpenDatasetFailed {
+                request_id,
+                url,
+                error,
+            } => {
+                assert_eq!(request_id, "req-1");
                 assert_eq!(url, "gs://bucket/missing.zarr");
                 assert_eq!(error, "not found");
             }

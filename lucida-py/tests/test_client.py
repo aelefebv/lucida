@@ -265,11 +265,16 @@ def test_snapshot_and_dataset_listing_use_workspace_websocket(tmp_path):
     assert connector.calls[0]["headers"]["Authorization"] == "Bearer tok"
 
 
-def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path):
+def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path, monkeypatch):
+    class FakeUuid:
+        hex = "abc123"
+
+    monkeypatch.setattr("lucida.client.uuid.uuid4", lambda: FakeUuid())
     opened = {
-        "type": "command_broadcast",
+        "type": "open_dataset_succeeded",
+        "request_id": "py-abc123",
         "seq": 13,
-        "command": {"type": "dataset_opened", "manifest": manifest("wds-new", "new.zarr")},
+        "opened": {"manifest": manifest("wds-new", "new.zarr")},
     }
     connector = FakeConnector([snapshot(), opened])
     client = LucidaClient(
@@ -281,9 +286,10 @@ def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path):
 
     result = workspace.datasets.open("/data/new.zarr")
 
-    assert connector.websocket.sent == [
-        {"type": "open_remote_dataset", "url": "/data/new.zarr"}
-    ]
+    sent = connector.websocket.sent[0]
+    assert sent["type"] == "open_remote_dataset"
+    assert sent["url"] == "/data/new.zarr"
+    assert sent["request_id"] == "py-abc123"
     assert result["workspace_dataset_id"] == "wds-new"
     assert result["seq"] == 13
 

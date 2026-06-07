@@ -7,6 +7,7 @@ import os
 import platform
 import stat
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -520,7 +521,15 @@ class DatasetsResource:
     async def async_open(self, source: str, *, timeout: float = 300.0) -> dict[str, Any]:
         async with self._workspace._connect_ws() as ws:
             snapshot = await recv_snapshot(ws, timeout)
-            await send_json(ws, {"type": "open_remote_dataset", "url": source})
+            request_id = f"py-{uuid.uuid4().hex}"
+            await send_json(
+                ws,
+                {
+                    "type": "open_remote_dataset",
+                    "request_id": request_id,
+                    "url": source,
+                },
+            )
             deadline = asyncio.get_running_loop().time() + timeout
             while True:
                 remaining = max(0.0, deadline - asyncio.get_running_loop().time())
@@ -532,16 +541,18 @@ class DatasetsResource:
                 message = await recv_json(ws, remaining)
                 message_type = message.get("type")
                 if message_type == "open_dataset_failed":
+                    if message.get("request_id") != request_id:
+                        continue
                     raise LucidaError(
                         "dataset_open_failure",
                         f"dataset open failed for {message.get('url')!r}: {message.get('error')}",
                     )
-                if message_type != "command_broadcast":
+                if message_type != "open_dataset_succeeded":
                     continue
-                command = message.get("command") or {}
-                if command.get("type") != "dataset_opened":
+                if message.get("request_id") != request_id:
                     continue
-                manifest = command.get("manifest") or {}
+                opened = message.get("opened") or {}
+                manifest = opened.get("manifest") or {}
                 return dataset_open_summary(
                     manifest,
                     source=source,

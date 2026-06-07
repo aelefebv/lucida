@@ -212,7 +212,9 @@ impl DatasetOpenClient {
 
         let (socket, _response) = connect_async(request).await.map_err(map_websocket_error)?;
         let (mut write, read) = socket.split();
+        let request_id = dataset_open_request_id();
         let message = ClientMessage::OpenRemoteDataset {
+            request_id: request_id.clone(),
             url: source.to_string(),
         };
         let json = serde_json::to_string(&message)?;
@@ -228,7 +230,7 @@ impl DatasetOpenClient {
             Err(error) => Err(map_websocket_error(error)),
         });
 
-        wait_for_dataset_open_result(incoming, source, workspace_id, wait).await
+        wait_for_dataset_open_result(incoming, &request_id, source, workspace_id, wait).await
     }
 }
 
@@ -721,6 +723,7 @@ fn format_dimensions(shape: [u64; 5]) -> String {
 
 async fn wait_for_dataset_open_result<S>(
     mut messages: S,
+    request_id: &str,
     source: &str,
     workspace_id: &str,
     wait: Duration,
@@ -732,7 +735,9 @@ where
         while let Some(message) = messages.next().await {
             match message? {
                 IncomingDatasetMessage::Text(text) => {
-                    if let Some(result) = observe_dataset_message(&text, source, workspace_id)? {
+                    if let Some(result) =
+                        observe_dataset_message(&text, request_id, source, workspace_id)?
+                    {
                         return Ok(result);
                     }
                 }
@@ -765,6 +770,7 @@ where
 
 fn observe_dataset_message(
     text: &str,
+    request_id: &str,
     source: &str,
     workspace_id: &str,
 ) -> Result<Option<DatasetOpenSummary>, CliError> {
@@ -776,10 +782,15 @@ fn observe_dataset_message(
     })?;
 
     match message {
-        ServerMessage::CommandBroadcast {
+        ServerMessage::OpenDatasetSucceeded {
+            request_id: message_request_id,
             seq,
-            command: DocumentCommand::DatasetOpened(opened),
+            opened,
+            ..
         } => {
+            if message_request_id != request_id {
+                return Ok(None);
+            }
             let image_count = opened.manifest.images().len();
             let entity_count = opened.manifest.entities().len();
             Ok(Some(DatasetOpenSummary {
@@ -792,13 +803,30 @@ fn observe_dataset_message(
                 source: source.to_string(),
             }))
         }
-        ServerMessage::OpenDatasetFailed { url, error } => Err(open_dataset_failure(&url, &error)),
+        ServerMessage::OpenDatasetFailed {
+            request_id: message_request_id,
+            url,
+            error,
+        } => {
+            if message_request_id != request_id {
+                return Ok(None);
+            }
+            Err(open_dataset_failure(&url, &error))
+        }
         ServerMessage::WorkspaceArchived { .. } => Err(CliError::new(
             ErrorKind::ArchivedWorkspace,
             "workspace was archived before the dataset opened",
         )),
         _ => Ok(None),
     }
+}
+
+fn dataset_open_request_id() -> String {
+    format!(
+        "cli-{hi:016x}{lo:016x}",
+        hi = rand::random::<u64>(),
+        lo = rand::random::<u64>()
+    )
 }
 
 fn open_dataset_failure(url: &str, error: &str) -> CliError {
@@ -941,12 +969,13 @@ mod tests {
 
     use super::*;
 
-    fn dataset_opened_message(seq: u64) -> String {
+    fn dataset_open_succeeded_message(request_id: &str, seq: u64) -> String {
         serde_json::json!({
-            "type": "command_broadcast",
+            "type": "open_dataset_succeeded",
+            "request_id": request_id,
+            "url": "/data/demo.zarr",
             "seq": seq,
-            "command": {
-                "type": "dataset_opened",
+            "opened": {
                 "manifest": {
                     "dataset_id": "wds-test",
                     "name": "demo.zarr",
@@ -1068,7 +1097,8 @@ mod tests {
     #[tokio::test]
     async fn returns_dataset_opened_summary() {
         let result = wait_for_dataset_open_result(
-            text_messages(vec![dataset_opened_message(17)]),
+            text_messages(vec![dataset_open_succeeded_message("req-1", 17)]),
+            "req-1",
             "/data/demo.zarr",
             "workspace-1",
             Duration::from_secs(1),
@@ -1093,8 +1123,17 @@ mod tests {
                     "client_id": 42
                 })
                 .to_string(),
-                dataset_opened_message(18),
+                dataset_open_succeeded_message("other-req", 17),
+                serde_json::json!({
+                    "type": "open_dataset_failed",
+                    "request_id": "other-req",
+                    "url": "ftp://example/data.zarr",
+                    "error": "unsupported URL scheme: ftp://example/data.zarr"
+                })
+                .to_string(),
+                dataset_open_succeeded_message("req-1", 18),
             ]),
+            "req-1",
             "/data/demo.zarr",
             "workspace-1",
             Duration::from_secs(1),
@@ -1111,11 +1150,13 @@ mod tests {
             text_messages(vec![
                 serde_json::json!({
                     "type": "open_dataset_failed",
+                    "request_id": "req-1",
                     "url": "ftp://example/data.zarr",
                     "error": "unsupported URL scheme: ftp://example/data.zarr"
                 })
                 .to_string(),
             ]),
+            "req-1",
             "ftp://example/data.zarr",
             "workspace-1",
             Duration::from_secs(1),
@@ -1131,6 +1172,7 @@ mod tests {
     async fn reports_timeout() {
         let error = wait_for_dataset_open_result(
             stream::pending::<Result<IncomingDatasetMessage, CliError>>(),
+            "req-1",
             "/data/demo.zarr",
             "workspace-1",
             Duration::from_millis(1),
@@ -1146,6 +1188,7 @@ mod tests {
     async fn reports_disconnect() {
         let error = wait_for_dataset_open_result(
             stream::empty::<Result<IncomingDatasetMessage, CliError>>(),
+            "req-1",
             "/data/demo.zarr",
             "workspace-1",
             Duration::from_secs(1),
