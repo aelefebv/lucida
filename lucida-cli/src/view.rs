@@ -1319,6 +1319,7 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
         ),
         format!("Client: {}", output.result.own_client_id),
         format!("Seed: {seed}"),
+        format!("Updated: {}", output.result.updated_at),
         format!("Camera: {}", format_camera(&output.result.camera)),
         format!("View: {}", format_view(&output.result.view)),
         format!("Multi-channel: {multi}"),
@@ -2892,6 +2893,8 @@ mod tests {
         GeneratedLevelAvailability, GeneratedLevelSummary,
     };
 
+    use crate::workspace::WorkspaceRole;
+
     use super::*;
 
     fn presence(client_id: ClientId, center: [f64; 2]) -> PresenceState {
@@ -3062,6 +3065,61 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn viewer_profile_human_includes_updated_time() {
+        let output = ViewerProfileOutput {
+            server: EffectiveServer {
+                url: "http://localhost:9876".to_string(),
+                source: crate::config::ServerSource::Default,
+            },
+            workspace: WorkspaceRecord {
+                id: "w".to_string(),
+                name: "Workspace".to_string(),
+                role: WorkspaceRole::Owner,
+                created_by: "dev@local".to_string(),
+                created_at: "2026-06-07T00:00:00Z".to_string(),
+                updated_at: "2026-06-07T00:00:00Z".to_string(),
+                archived_at: None,
+                seq: 1,
+                default_saved_view_id: None,
+                last_opened_at: None,
+                pinned_at: None,
+            },
+            target: WorkspaceTarget {
+                id: "w".to_string(),
+                name: "Workspace".to_string(),
+                role: WorkspaceRole::Owner,
+                archived: false,
+                server_url: "http://localhost:9876".to_string(),
+                web_url: "http://localhost:9876/w/w".to_string(),
+                ws_url: "ws://localhost:9876/ws/workspaces/w".to_string(),
+            },
+            result: ViewerProfileResult {
+                snapshot_seq: 12,
+                own_client_id: 7,
+                profile: "default".to_string(),
+                user_email: "dev@local".to_string(),
+                created_at: "2026-06-07T00:00:00Z".to_string(),
+                updated_at: "2026-06-07T00:01:00Z".to_string(),
+                seed_source: Some("workspace_snapshot".to_string()),
+                command: None,
+                camera: Camera::Slice(Slice {
+                    center: [0.0, 0.0],
+                    zoom: 1.0,
+                    viewport: [800, 600],
+                }),
+                view: ViewState::new(),
+                display: DisplayState::default(),
+                multi_channel: false,
+                layers: Vec::new(),
+            },
+        };
+
+        let human = format_viewer_profile_human(&output);
+
+        assert!(human.contains("Updated: 2026-06-07T00:01:00Z"));
     }
 
     #[test]
