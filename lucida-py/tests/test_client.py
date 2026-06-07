@@ -190,6 +190,7 @@ def test_package_root_import_exposes_server_client():
     import lucida  # noqa: PLC0415
 
     assert lucida.LucidaClient is LucidaClient
+    assert not hasattr(lucida, "Viewer")
 
 
 def test_workspace_list_builds_bearer_request(tmp_path):

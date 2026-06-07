@@ -14,11 +14,6 @@ except ImportError:
     ViewportData = None
 
 try:
-    from lucida.viewer import Viewer
-except ImportError:
-    Viewer = None
-
-try:
     from lucida.lucida import PyScene, PyStore
 except ImportError:
     PyScene = None
@@ -32,7 +27,6 @@ __all__ = [
     "LucidaError",
     "PyScene",
     "PyStore",
-    "Viewer",
     "ViewportData",
     "normalize_server_base_url",
     "resolve_token",
