@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-06-06
+modified: 2026-06-07
 ---
 
 # lucida-cli
@@ -32,6 +32,9 @@ Visible foundation commands:
 - `lucida config set server <base-url>` — persist the default server.
 - `lucida config get server` — print the effective default server.
 - `lucida config path` — print the config file path.
+- `lucida peer list` — list live workspace clients from the WebSocket snapshot, including follow state and compact presence summaries.
+- `lucida peer follow <client-id>` / `lucida peer unfollow` — voluntarily follow or stop following a live client using the same protocol path as the web app.
+- `lucida peer cursor set|clear` — explicit diagnostic/test cursor presence updates.
 
 Global visible flags:
 
@@ -53,8 +56,10 @@ Global visible flags:
 - **Every scriptable command needs `--json`.** Human output can be concise, but automation should not parse tables.
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
 - **One command per invocation.** The CLI remains a one-shot client unless a later slice explicitly introduces a long-lived mode.
+- **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness.
 
 ## Gotchas
 
 - **Keychain is opportunistic.** `lucida auth login` stores the approved token in macOS Keychain when available. If Keychain rejects the write or the platform has no supported keychain integration, the CLI falls back to the `0600` config file.
 - **No retry loop yet.** The foundation status/config commands make single HTTP requests. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
+- **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.

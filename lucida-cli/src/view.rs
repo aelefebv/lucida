@@ -57,6 +57,33 @@ pub struct DatasetPresenceOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PeerListOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    #[serde(flatten)]
+    pub result: PeerListResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PeerFollowOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    #[serde(flatten)]
+    pub result: PeerFollowResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PeerCursorOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    #[serde(flatten)]
+    pub result: PeerCursorResult,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ViewerProfileOutput {
     pub server: EffectiveServer,
     pub workspace: WorkspaceRecord,
@@ -99,6 +126,51 @@ pub struct DatasetPresenceResult {
     pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     #[serde(skip)]
     pub break_follow: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerListResult {
+    pub snapshot_seq: u64,
+    pub own_client_id: ClientId,
+    pub peers: Vec<PeerSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerSummary {
+    pub client_id: ClientId,
+    pub is_self: bool,
+    pub following: Option<ClientId>,
+    pub followers: Vec<ClientId>,
+    pub cursor: Option<[f64; 2]>,
+    pub camera: Camera,
+    pub view: ViewState,
+    pub display: DisplayState,
+    pub dataset_order: Vec<DatasetId>,
+    pub dataset_settings_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerFollowResult {
+    pub snapshot_seq: u64,
+    pub own_client_id: ClientId,
+    pub accepted: bool,
+    pub changed: bool,
+    pub requested_target: Option<ClientId>,
+    pub current_target: Option<ClientId>,
+    pub changes: Vec<PeerFollowChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerFollowChange {
+    pub client_id: ClientId,
+    pub target: Option<ClientId>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerCursorResult {
+    pub snapshot_seq: u64,
+    pub own_client_id: ClientId,
+    pub position: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,6 +383,120 @@ impl ViewWorkspaceClient {
         }
         send_client_message(&mut write, &dataset_presence_message(&result)).await?;
         Ok(result)
+    }
+}
+
+pub struct PeerWorkspaceClient {
+    ws_url: String,
+    token: Option<String>,
+}
+
+impl PeerWorkspaceClient {
+    pub fn new(ws_url: impl Into<String>, token: Option<EffectiveToken>) -> Self {
+        Self {
+            ws_url: ws_url.into(),
+            token: token.map(|effective| effective.token),
+        }
+    }
+
+    pub async fn list(&self, wait: Duration) -> Result<PeerListResult, CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (_write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        Ok(peer_list_result(&snapshot))
+    }
+
+    pub async fn follow(
+        &self,
+        target: ClientId,
+        wait: Duration,
+    ) -> Result<PeerFollowResult, CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        validate_follow_request(&snapshot, target)?;
+
+        let before = own_presence(&snapshot)?.following;
+        send_client_message(&mut write, &follow_message(Some(target))).await?;
+        let changes =
+            wait_for_follow_change(&mut incoming, snapshot.your_id, Some(target), wait).await?;
+        Ok(PeerFollowResult {
+            snapshot_seq: snapshot.seq,
+            own_client_id: snapshot.your_id,
+            accepted: true,
+            changed: before != Some(target),
+            requested_target: Some(target),
+            current_target: Some(target),
+            changes,
+        })
+    }
+
+    pub async fn unfollow(&self, wait: Duration) -> Result<PeerFollowResult, CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let before = own_presence(&snapshot)?.following;
+        if before.is_none() {
+            return Ok(PeerFollowResult {
+                snapshot_seq: snapshot.seq,
+                own_client_id: snapshot.your_id,
+                accepted: true,
+                changed: false,
+                requested_target: None,
+                current_target: None,
+                changes: Vec::new(),
+            });
+        }
+
+        send_client_message(&mut write, &follow_message(None)).await?;
+        let changes = wait_for_follow_change(&mut incoming, snapshot.your_id, None, wait).await?;
+        Ok(PeerFollowResult {
+            snapshot_seq: snapshot.seq,
+            own_client_id: snapshot.your_id,
+            accepted: true,
+            changed: true,
+            requested_target: None,
+            current_target: None,
+            changes,
+        })
+    }
+
+    pub async fn cursor(
+        &self,
+        position: Option<[f64; 2]>,
+        wait: Duration,
+    ) -> Result<PeerCursorResult, CliError> {
+        if let Some([x, y]) = position {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(CliError::config("peer cursor coordinates must be finite"));
+            }
+        }
+
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        send_client_message(&mut write, &cursor_message(position)).await?;
+        Ok(PeerCursorResult {
+            snapshot_seq: snapshot.seq,
+            own_client_id: snapshot.your_id,
+            position,
+        })
     }
 }
 
@@ -683,6 +869,77 @@ pub fn format_dataset_presence_human(output: &DatasetPresenceOutput) -> String {
         output.workspace.id,
         format_source(&output.result.source),
         layers
+    )
+}
+
+pub fn format_peer_list_human(output: &PeerListOutput) -> String {
+    let mut lines = vec![
+        "Peers".to_string(),
+        format!(
+            "Workspace: {} ({})",
+            output.workspace.name, output.workspace.id
+        ),
+        format!("Snapshot: {}", output.result.snapshot_seq),
+        format!("Your client: {}", output.result.own_client_id),
+    ];
+    if output.result.peers.is_empty() {
+        lines.push("No live peers".to_string());
+    } else {
+        lines.extend(output.result.peers.iter().map(format_peer_summary));
+    }
+    lines.join("\n")
+}
+
+pub fn format_peer_follow_human(output: &PeerFollowOutput) -> String {
+    let action = if output.result.requested_target.is_some() {
+        "Follow accepted"
+    } else if output.result.changed {
+        "Unfollow accepted"
+    } else {
+        "Already not following"
+    };
+    let target = output
+        .result
+        .current_target
+        .map(|target| target.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let mut lines = vec![
+        action.to_string(),
+        format!(
+            "Workspace: {} ({})",
+            output.workspace.name, output.workspace.id
+        ),
+        format!("Client: {}", output.result.own_client_id),
+        format!("Current following: {target}"),
+    ];
+    if !output.result.changes.is_empty() {
+        let changes = output
+            .result
+            .changes
+            .iter()
+            .map(|change| {
+                let target = change
+                    .target
+                    .map(|target| target.to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                format!("{}->{target}", change.client_id)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Confirmed changes: {changes}"));
+    }
+    lines.join("\n")
+}
+
+pub fn format_peer_cursor_human(output: &PeerCursorOutput) -> String {
+    let cursor = output
+        .result
+        .position
+        .map(|[x, y]| format!("({x:.3}, {y:.3})"))
+        .unwrap_or_else(|| "cleared".to_string());
+    format!(
+        "Cursor diagnostic sent\nWorkspace: {} ({})\nClient: {}\nCursor: {}",
+        output.workspace.name, output.workspace.id, output.result.own_client_id, cursor
     )
 }
 
@@ -1385,6 +1642,76 @@ fn own_presence(snapshot: &WorkspacePresenceSnapshot) -> Result<&PresenceState, 
     })
 }
 
+fn peer_list_result(snapshot: &WorkspacePresenceSnapshot) -> PeerListResult {
+    let peers = snapshot
+        .peers
+        .iter()
+        .map(|presence| {
+            let followers = snapshot
+                .peers
+                .iter()
+                .filter(|candidate| candidate.following == Some(presence.client_id))
+                .map(|candidate| candidate.client_id)
+                .collect::<Vec<_>>();
+            PeerSummary {
+                client_id: presence.client_id,
+                is_self: presence.client_id == snapshot.your_id,
+                following: presence.following,
+                followers,
+                cursor: presence.cursor,
+                camera: presence.camera.clone(),
+                view: presence.view.clone(),
+                display: presence.display.clone(),
+                dataset_order: presence.dataset_order.clone(),
+                dataset_settings_count: presence.dataset_settings.len(),
+            }
+        })
+        .collect();
+    PeerListResult {
+        snapshot_seq: snapshot.seq,
+        own_client_id: snapshot.your_id,
+        peers,
+    }
+}
+
+fn validate_follow_request(
+    snapshot: &WorkspacePresenceSnapshot,
+    target: ClientId,
+) -> Result<(), CliError> {
+    let own = own_presence(snapshot)?;
+    if target == snapshot.your_id {
+        return Err(CliError::new(
+            ErrorKind::RejectedCommand,
+            format!("cannot follow yourself (client {target})"),
+        ));
+    }
+
+    let target_presence = find_presence(snapshot, target).ok_or_else(|| {
+        CliError::new(
+            ErrorKind::RejectedCommand,
+            format!("cannot follow client {target}: no live peer with that client id"),
+        )
+    })?;
+
+    if let Some(target_following) = target_presence.following {
+        return Err(CliError::new(
+            ErrorKind::RejectedCommand,
+            format!(
+                "cannot follow client {target}: target is already following client {target_following}"
+            ),
+        ));
+    }
+
+    if own.client_id != snapshot.your_id {
+        return Err(CliError::new(
+            ErrorKind::Protocol,
+            "workspace snapshot own presence did not match your client id",
+        ));
+    }
+
+    Ok(())
+}
+
 fn viewer_profile_result(
     snapshot: &WorkspacePresenceSnapshot,
     record: WorkspaceViewerProfileRecord,
@@ -1423,6 +1750,14 @@ fn dataset_presence_message(result: &DatasetPresenceResult) -> ClientMessage {
         dataset_order: result.dataset_order.clone(),
         dataset_settings: result.dataset_settings.clone(),
     }
+}
+
+fn follow_message(target: Option<ClientId>) -> ClientMessage {
+    ClientMessage::Follow { target }
+}
+
+fn cursor_message(position: Option<[f64; 2]>) -> ClientMessage {
+    ClientMessage::Cursor { position }
 }
 
 async fn send_client_message<W>(write: &mut W, message: &ClientMessage) -> Result<(), CliError>
@@ -1516,6 +1851,74 @@ where
             ErrorKind::SessionDisconnect,
             format!(
                 "timed out waiting for workspace snapshot after {}s",
+                wait.as_secs()
+            ),
+        )
+    })?
+}
+
+async fn wait_for_follow_change<S>(
+    messages: &mut S,
+    client_id: ClientId,
+    target: Option<ClientId>,
+    wait: Duration,
+) -> Result<Vec<PeerFollowChange>, CliError>
+where
+    S: Stream<Item = Result<IncomingViewMessage, CliError>> + Unpin,
+{
+    tokio::time::timeout(wait, async {
+        let mut changes = Vec::new();
+        while let Some(message) = messages.next().await {
+            match message? {
+                IncomingViewMessage::Text(text) => {
+                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
+                        CliError::new(
+                            ErrorKind::Protocol,
+                            format!("invalid workspace server message: {error}"),
+                        )
+                    })?;
+                    match message {
+                        ServerMessage::FollowChanged {
+                            client_id: changed_client_id,
+                            target: changed_target,
+                        } => {
+                            changes.push(PeerFollowChange {
+                                client_id: changed_client_id,
+                                target: changed_target,
+                            });
+                            if changed_client_id == client_id && changed_target == target {
+                                return Ok(changes);
+                            }
+                        }
+                        ServerMessage::WorkspaceArchived { .. } => {
+                            return Err(CliError::new(
+                                ErrorKind::ArchivedWorkspace,
+                                "workspace was archived before follow confirmation",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                IncomingViewMessage::Close => {
+                    return Err(CliError::new(
+                        ErrorKind::SessionDisconnect,
+                        "workspace WebSocket closed before follow confirmation",
+                    ));
+                }
+                IncomingViewMessage::Ignore => {}
+            }
+        }
+        Err(CliError::new(
+            ErrorKind::SessionDisconnect,
+            "workspace WebSocket disconnected before follow confirmation",
+        ))
+    })
+    .await
+    .map_err(|_| {
+        CliError::new(
+            ErrorKind::RejectedCommand,
+            format!(
+                "timed out waiting for follow confirmation after {}s",
                 wait.as_secs()
             ),
         )
@@ -1714,6 +2117,47 @@ fn format_view(view: &ViewState) -> String {
     format!(
         "T{} C{} Z{}..{}",
         view.t, view.c, view.z_range.start, view.z_range.end
+    )
+}
+
+fn format_peer_summary(peer: &PeerSummary) -> String {
+    let self_marker = if peer.is_self { " (you)" } else { "" };
+    let following = peer
+        .following
+        .map(|target| target.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let followers = if peer.followers.is_empty() {
+        "none".to_string()
+    } else {
+        peer.followers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let cursor = peer
+        .cursor
+        .map(|[x, y]| format!("({x:.3}, {y:.3})"))
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "{}{} following={} followers={} cursor={} datasets={} settings={} camera={} view={} display={}",
+        peer.client_id,
+        self_marker,
+        following,
+        followers,
+        cursor,
+        peer.dataset_order.len(),
+        peer.dataset_settings_count,
+        format_camera(&peer.camera),
+        format_view(&peer.view),
+        format_display(&peer.display)
+    )
+}
+
+fn format_display(display: &DisplayState) -> String {
+    format!(
+        "contrast={:.3}..{:.3} gamma={:.3}",
+        display.contrast_min, display.contrast_max, display.gamma
     )
 }
 
@@ -1996,6 +2440,84 @@ mod tests {
                 .unwrap();
 
         assert!(result.break_follow);
+    }
+
+    #[test]
+    fn peer_list_result_summarizes_snapshot_presence() {
+        let mut own = presence(7, [1.0, 2.0]);
+        own.cursor = Some([12.5, 13.5]);
+        own.dataset_order = vec![DatasetId("wds-test".to_string())];
+        let mut follower = presence(9, [3.0, 4.0]);
+        follower.following = Some(7);
+        let snapshot = WorkspacePresenceSnapshot {
+            peers: vec![own, follower],
+            ..snapshot()
+        };
+
+        let result = peer_list_result(&snapshot);
+
+        assert_eq!(result.snapshot_seq, 12);
+        assert_eq!(result.own_client_id, 7);
+        let own_summary = result
+            .peers
+            .iter()
+            .find(|peer| peer.client_id == 7)
+            .unwrap();
+        assert!(own_summary.is_self);
+        assert_eq!(own_summary.cursor, Some([12.5, 13.5]));
+        assert_eq!(
+            own_summary.dataset_order,
+            vec![DatasetId("wds-test".to_string())]
+        );
+        assert_eq!(own_summary.followers, vec![9]);
+        let follower_summary = result
+            .peers
+            .iter()
+            .find(|peer| peer.client_id == 9)
+            .unwrap();
+        assert!(!follower_summary.is_self);
+        assert_eq!(follower_summary.following, Some(7));
+    }
+
+    #[test]
+    fn follow_request_rejects_self_missing_and_following_targets() {
+        let self_error = validate_follow_request(&snapshot(), 7).unwrap_err();
+        assert_eq!(self_error.kind, ErrorKind::RejectedCommand);
+
+        let missing_error = validate_follow_request(&snapshot(), 99).unwrap_err();
+        assert_eq!(missing_error.kind, ErrorKind::RejectedCommand);
+
+        let mut target = presence(9, [0.0, 0.0]);
+        target.following = Some(11);
+        let snapshot = WorkspacePresenceSnapshot {
+            peers: vec![presence(7, [0.0, 0.0]), target],
+            ..snapshot()
+        };
+        let following_error = validate_follow_request(&snapshot, 9).unwrap_err();
+        assert_eq!(following_error.kind, ErrorKind::RejectedCommand);
+    }
+
+    #[test]
+    fn follow_and_unfollow_messages_use_protocol_follow_shape() {
+        let follow = serde_json::to_value(follow_message(Some(9))).unwrap();
+        assert_eq!(follow["type"], "follow");
+        assert_eq!(follow["target"], 9);
+
+        let unfollow = serde_json::to_value(follow_message(None)).unwrap();
+        assert_eq!(unfollow["type"], "follow");
+        assert!(unfollow["target"].is_null());
+    }
+
+    #[test]
+    fn cursor_message_uses_protocol_cursor_shape() {
+        let set = serde_json::to_value(cursor_message(Some([1.25, 2.5]))).unwrap();
+        assert_eq!(set["type"], "cursor");
+        assert_eq!(set["position"][0], 1.25);
+        assert_eq!(set["position"][1], 2.5);
+
+        let clear = serde_json::to_value(cursor_message(None)).unwrap();
+        assert_eq!(clear["type"], "cursor");
+        assert!(clear["position"].is_null());
     }
 
     #[test]

@@ -337,6 +337,8 @@ Expose collaboration diagnostics and voluntary follow without making steer/prese
 - [ ] Steer is absent from casual default UX; if retained, it lives under an explicit debug/protocol namespace with role/policy caveats.
 - [ ] Tests cover peer snapshot parsing, follow/unfollow message shape, follow rejection handling, and cursor message shape if implemented.
 
+Current implementation note: `lucida peer list`, `lucida peer follow <client-id>`, `lucida peer unfollow`, and explicit `lucida peer cursor set|clear` diagnostics have landed on `codex/cli-open-dataset`. Follow uses `ClientMessage::Follow`, waits for matching `FollowChanged`, and preflights the server rejection rules so self-follow, missing peers, and targets already following another peer report `rejected_command`. Steer remains absent from the default CLI surface.
+
 ### Wiki context
 
 - `wiki/systems/subsystems/presence-and-follow-mode.md`

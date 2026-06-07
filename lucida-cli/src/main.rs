@@ -53,9 +53,11 @@ use crate::saved_view::{
 };
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{
-    DatasetDisplayCommand, DatasetPresenceOutput, ViewApplyOutput, ViewWorkspaceClient,
-    ViewerProfileClient, ViewerProfileOutput, format_dataset_presence_human,
-    format_view_apply_human, format_viewer_profile_human,
+    DatasetDisplayCommand, DatasetPresenceOutput, PeerCursorOutput, PeerFollowOutput,
+    PeerListOutput, PeerWorkspaceClient, ViewApplyOutput, ViewWorkspaceClient, ViewerProfileClient,
+    ViewerProfileOutput, format_dataset_presence_human, format_peer_cursor_human,
+    format_peer_follow_human, format_peer_list_human, format_view_apply_human,
+    format_viewer_profile_human,
 };
 use crate::workspace::{
     WorkspaceClient, WorkspaceListOutput, WorkspaceLookupMode, WorkspaceOpenOutput,
@@ -176,6 +178,14 @@ enum Command {
         timeout_seconds: u64,
         #[command(subcommand)]
         command: ViewerCommand,
+    },
+    /// Inspect live peers and send explicit presence diagnostics
+    Peer {
+        /// Seconds to wait for workspace state or follow confirmation
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: PeerCommand,
     },
     /// Inspect and change shared dataset layouts in the selected workspace
     Layout {
@@ -774,6 +784,37 @@ enum ViewerCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum PeerCommand {
+    /// List live clients in the selected workspace
+    List,
+    /// Follow another live client
+    Follow {
+        /// Live client id to follow
+        client_id: u64,
+    },
+    /// Stop following any client
+    Unfollow,
+    /// Send cursor presence diagnostics for tests
+    Cursor {
+        #[command(subcommand)]
+        command: PeerCursorCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PeerCursorCommand {
+    /// Set this client's cursor position
+    Set {
+        #[arg(long, allow_hyphen_values = true)]
+        x: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        y: f64,
+    },
+    /// Clear this client's cursor position
+    Clear,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1448,6 +1489,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         } => {
             emit_viewer_command(&cli, &config, output, command, profile, *timeout_seconds).await?;
         }
+        Command::Peer {
+            timeout_seconds,
+            command,
+        } => {
+            emit_peer_command(&cli, &config, output, command, *timeout_seconds).await?;
+        }
         Command::Layout {
             timeout_seconds,
             command,
@@ -1929,6 +1976,83 @@ async fn emit_viewer_command(
             });
             output.print_either(&payload, || {
                 format!("Captured viewer overview: {output_path}\nURL: {url}")
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn emit_peer_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &PeerCommand,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let wait = Duration::from_secs(timeout_seconds);
+    let peer_client = PeerWorkspaceClient::new(target.ws_url.clone(), token);
+
+    match command {
+        PeerCommand::List => {
+            let result = peer_client.list(wait).await?;
+            let output_payload = PeerListOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || format_peer_list_human(&output_payload))?;
+        }
+        PeerCommand::Follow { client_id } => {
+            let result = peer_client.follow(*client_id, wait).await?;
+            let output_payload = PeerFollowOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                format_peer_follow_human(&output_payload)
+            })?;
+        }
+        PeerCommand::Unfollow => {
+            let result = peer_client.unfollow(wait).await?;
+            let output_payload = PeerFollowOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                format_peer_follow_human(&output_payload)
+            })?;
+        }
+        PeerCommand::Cursor { command } => {
+            let position = match command {
+                PeerCursorCommand::Set { x, y } => Some([*x, *y]),
+                PeerCursorCommand::Clear => None,
+            };
+            let result = peer_client.cursor(position, wait).await?;
+            let output_payload = PeerCursorOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                format_peer_cursor_human(&output_payload)
             })?;
         }
     }
@@ -2535,6 +2659,7 @@ mod tests {
         assert!(help.contains("camera"));
         assert!(help.contains("layer"));
         assert!(help.contains("channel"));
+        assert!(help.contains("peer"));
         assert!(help.contains("layout"));
         assert!(help.contains("saved-view"));
         assert!(help.contains("config"));
@@ -3151,6 +3276,62 @@ mod tests {
             }
             _ => panic!("expected viewer screenshot"),
         }
+    }
+
+    #[test]
+    fn peer_commands_parse_product_shape() {
+        let list = parse(&["peer", "--timeout-seconds", "9", "list"]);
+        match list.command {
+            Command::Peer {
+                timeout_seconds,
+                command: PeerCommand::List,
+            } => assert_eq!(timeout_seconds, 9),
+            _ => panic!("expected peer list"),
+        }
+
+        let follow = parse(&["peer", "follow", "42"]);
+        match follow.command {
+            Command::Peer {
+                command: PeerCommand::Follow { client_id },
+                ..
+            } => assert_eq!(client_id, 42),
+            _ => panic!("expected peer follow"),
+        }
+
+        let unfollow = parse(&["peer", "unfollow"]);
+        assert!(matches!(
+            unfollow.command,
+            Command::Peer {
+                command: PeerCommand::Unfollow,
+                ..
+            }
+        ));
+
+        let cursor_set = parse(&["peer", "cursor", "set", "--x", "-1.5", "--y", "2.25"]);
+        match cursor_set.command {
+            Command::Peer {
+                command:
+                    PeerCommand::Cursor {
+                        command: PeerCursorCommand::Set { x, y },
+                    },
+                ..
+            } => {
+                assert_eq!(x, -1.5);
+                assert_eq!(y, 2.25);
+            }
+            _ => panic!("expected peer cursor set"),
+        }
+
+        let cursor_clear = parse(&["peer", "cursor", "clear"]);
+        assert!(matches!(
+            cursor_clear.command,
+            Command::Peer {
+                command: PeerCommand::Cursor {
+                    command: PeerCursorCommand::Clear
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
