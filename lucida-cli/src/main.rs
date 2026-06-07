@@ -53,11 +53,12 @@ use crate::saved_view::{
 };
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{
-    DatasetDisplayCommand, DatasetPresenceOutput, PeerCursorOutput, PeerFollowOutput,
-    PeerListOutput, PeerWorkspaceClient, ViewApplyOutput, ViewWorkspaceClient, ViewerProfileClient,
-    ViewerProfileOutput, format_dataset_presence_human, format_peer_cursor_human,
-    format_peer_follow_human, format_peer_list_human, format_view_apply_human,
-    format_viewer_profile_human,
+    DatasetDisplayCommand, DatasetPresenceOutput, DebugStateOutput, PeerCursorOutput,
+    PeerFollowOutput, PeerListOutput, PeerWorkspaceClient, PlanVisibleChunksOutput,
+    ViewApplyOutput, ViewWorkspaceClient, ViewerProfileClient, ViewerProfileOutput,
+    format_dataset_presence_human, format_debug_state_human, format_peer_cursor_human,
+    format_peer_follow_human, format_peer_list_human, format_plan_visible_chunks_human,
+    format_view_apply_human, format_viewer_profile_human,
 };
 use crate::workspace::{
     WorkspaceClient, WorkspaceListOutput, WorkspaceLookupMode, WorkspaceOpenOutput,
@@ -186,6 +187,34 @@ enum Command {
         timeout_seconds: u64,
         #[command(subcommand)]
         command: PeerCommand,
+    },
+    /// Inspect chunk-planning diagnostics for the selected workspace view
+    Plan {
+        /// Durable headless viewer profile to inspect when --from-peer is omitted
+        #[arg(long, default_value = "default", value_name = "NAME")]
+        viewer_profile: String,
+        /// Inspect an explicit live peer's presence instead of the viewer profile
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+        /// Seconds to wait for workspace state
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: PlanCommand,
+    },
+    /// Inspect read-only workspace and viewer diagnostics
+    Debug {
+        /// Durable headless viewer profile to inspect when --from-peer is omitted
+        #[arg(long, default_value = "default", value_name = "NAME")]
+        viewer_profile: String,
+        /// Inspect an explicit live peer's presence instead of the viewer profile
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+        /// Seconds to wait for workspace state
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+        #[command(subcommand)]
+        command: DebugCommand,
     },
     /// Inspect and change shared dataset layouts in the selected workspace
     Layout {
@@ -815,6 +844,21 @@ enum PeerCursorCommand {
     },
     /// Clear this client's cursor position
     Clear,
+}
+
+#[derive(Subcommand, Debug)]
+enum PlanCommand {
+    /// Show lower-level scene visible/prefetch chunks
+    VisibleChunks {
+        /// Optional workspace-local dataset id or unambiguous dataset name
+        dataset: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugCommand {
+    /// Show read-only workspace snapshot and selected viewer state
+    State,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1495,6 +1539,40 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         } => {
             emit_peer_command(&cli, &config, output, command, *timeout_seconds).await?;
         }
+        Command::Plan {
+            viewer_profile,
+            from_peer,
+            timeout_seconds,
+            command,
+        } => {
+            emit_plan_command(
+                &cli,
+                &config,
+                output,
+                command,
+                viewer_profile,
+                *from_peer,
+                *timeout_seconds,
+            )
+            .await?;
+        }
+        Command::Debug {
+            viewer_profile,
+            from_peer,
+            timeout_seconds,
+            command,
+        } => {
+            emit_debug_command(
+                &cli,
+                &config,
+                output,
+                command,
+                viewer_profile,
+                *from_peer,
+                *timeout_seconds,
+            )
+            .await?;
+        }
         Command::Layout {
             timeout_seconds,
             command,
@@ -2053,6 +2131,98 @@ async fn emit_peer_command(
             };
             output.print_either(&output_payload, || {
                 format_peer_cursor_human(&output_payload)
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn emit_plan_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &PlanCommand,
+    viewer_profile: &str,
+    from_peer: Option<u64>,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let wait = Duration::from_secs(timeout_seconds);
+    let view_client = ViewerProfileClient::new(server.url.clone(), target.ws_url.clone(), token);
+
+    match command {
+        PlanCommand::VisibleChunks { dataset } => {
+            let result = view_client
+                .plan_visible_chunks(
+                    &workspace,
+                    viewer_profile,
+                    from_peer,
+                    dataset.as_deref(),
+                    wait,
+                )
+                .await?;
+            let output_payload = PlanVisibleChunksOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                format_plan_visible_chunks_human(&output_payload)
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn emit_debug_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &DebugCommand,
+    viewer_profile: &str,
+    from_peer: Option<u64>,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+    let workspace = resolve_workspace_record(
+        &workspace_client,
+        cli.workspace.as_deref(),
+        config,
+        WorkspaceLookupMode::ActiveOnly,
+    )
+    .await?;
+    let target = target_for(&server.url, &workspace)?;
+    let wait = Duration::from_secs(timeout_seconds);
+    let view_client = ViewerProfileClient::new(server.url.clone(), target.ws_url.clone(), token);
+
+    match command {
+        DebugCommand::State => {
+            let result = view_client
+                .debug_state(&workspace, viewer_profile, from_peer, wait)
+                .await?;
+            let output_payload = DebugStateOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                format_debug_state_human(&output_payload)
             })?;
         }
     }
@@ -2660,6 +2830,8 @@ mod tests {
         assert!(help.contains("layer"));
         assert!(help.contains("channel"));
         assert!(help.contains("peer"));
+        assert!(help.contains("plan"));
+        assert!(help.contains("debug"));
         assert!(help.contains("layout"));
         assert!(help.contains("saved-view"));
         assert!(help.contains("config"));
@@ -3335,8 +3507,53 @@ mod tests {
     }
 
     #[test]
+    fn plan_and_debug_commands_parse_product_shape() {
+        let plan = parse(&[
+            "plan",
+            "--viewer-profile",
+            "analysis",
+            "--from-peer",
+            "7",
+            "--timeout-seconds",
+            "9",
+            "visible-chunks",
+            "demo.zarr",
+        ]);
+        match plan.command {
+            Command::Plan {
+                viewer_profile,
+                from_peer,
+                timeout_seconds,
+                command: PlanCommand::VisibleChunks { dataset },
+            } => {
+                assert_eq!(viewer_profile, "analysis");
+                assert_eq!(from_peer, Some(7));
+                assert_eq!(timeout_seconds, 9);
+                assert_eq!(dataset.as_deref(), Some("demo.zarr"));
+            }
+            _ => panic!("expected plan visible-chunks"),
+        }
+
+        let debug = parse(&["debug", "--viewer-profile", "analysis", "state"]);
+        match debug.command {
+            Command::Debug {
+                viewer_profile,
+                from_peer,
+                timeout_seconds,
+                command: DebugCommand::State,
+            } => {
+                assert_eq!(viewer_profile, "analysis");
+                assert_eq!(from_peer, None);
+                assert_eq!(timeout_seconds, 30);
+            }
+            _ => panic!("expected debug state"),
+        }
+    }
+
+    #[test]
     fn flat_open_command_is_not_accepted() {
         assert!(try_parse(&["open", "/tmp/data.ome.zarr"]).is_err());
+        assert!(try_parse(&["visible-chunks"]).is_err());
     }
 
     #[test]

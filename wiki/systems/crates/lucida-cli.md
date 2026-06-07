@@ -35,6 +35,8 @@ Visible foundation commands:
 - `lucida peer list` — list live workspace clients from the WebSocket snapshot, including follow state and compact presence summaries.
 - `lucida peer follow <client-id>` / `lucida peer unfollow` — voluntarily follow or stop following a live client using the same protocol path as the web app.
 - `lucida peer cursor set|clear` — explicit diagnostic/test cursor presence updates.
+- `lucida plan visible-chunks [dataset]` — inspect lower-level `lucida-core` scene chunk diagnostics for the selected viewer profile or explicit peer.
+- `lucida debug state` — print read-only workspace snapshot, selected viewer state, peer, dataset, active-member, and generated-availability diagnostics.
 
 Global visible flags:
 
@@ -57,6 +59,7 @@ Global visible flags:
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
 - **One command per invocation.** The CLI remains a one-shot client unless a later slice explicitly introduces a long-lived mode.
 - **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness.
+- **Plan diagnostics are labeled by parity.** `plan visible-chunks` is a lower-level scene diagnostic, not a web-planner-equivalent dump of lanes, carry-forward state, CPU-cache filtering, minimap, or generated-coarse tier selection.
 
 ## Gotchas
 

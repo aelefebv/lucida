@@ -365,6 +365,8 @@ Reframe `visible-chunks` under `lucida plan` or `lucida debug` and add read-only
 - [ ] No command mutates planning config in this slice.
 - [ ] Tests cover snapshot-to-scene reconstruction, generated availability handling, output labeling, and JSON shape.
 
+Current implementation note: `lucida plan visible-chunks [dataset]` and `lucida debug state` have landed on `codex/cli-open-dataset`. They inspect the selected durable viewer profile by default, retain explicit `--from-peer` live-client inspection, carry generated availability from the workspace snapshot, and label visible chunks as `lower_level_scene_diagnostic` with `planner_parity=false` because the CLI uses `lucida-core::Scene::chunk_plan_for` rather than the web planner's lane priorities, carry-forward state, minimap path, CPU-cache filtering, or generated-coarse tier selection. No planning config mutation surface was added.
+
 ### Wiki context
 
 - `wiki/principles/planning.md`

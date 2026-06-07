@@ -1,9 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use lucida_core::DatasetId;
 use lucida_core::camera::Camera;
+use lucida_core::chunk::ChunkCoord;
 use lucida_core::command::{Command as CoreCommand, ViewportCommand};
 use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
@@ -12,6 +13,8 @@ use lucida_core::scene::{
     RenderMode, Scene,
 };
 use lucida_core::view::ViewState;
+use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -81,6 +84,24 @@ pub struct PeerCursorOutput {
     pub target: WorkspaceTarget,
     #[serde(flatten)]
     pub result: PeerCursorResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlanVisibleChunksOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    #[serde(flatten)]
+    pub result: PlanVisibleChunksResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DebugStateOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    #[serde(flatten)]
+    pub result: DebugStateResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,6 +192,147 @@ pub struct PeerCursorResult {
     pub snapshot_seq: u64,
     pub own_client_id: ClientId,
     pub position: Option<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanVisibleChunksResult {
+    pub snapshot_seq: u64,
+    pub own_client_id: ClientId,
+    pub source: DiagnosticViewSource,
+    pub diagnostic_kind: &'static str,
+    pub planner_parity: bool,
+    pub datasets: Vec<PlanDatasetDiagnostic>,
+    pub caveats: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanDatasetDiagnostic {
+    pub dataset_id: String,
+    pub name: String,
+    pub visible: bool,
+    pub multi_channel: bool,
+    pub display: DisplayState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_layout_id: Option<String>,
+    pub active_members: Vec<ActiveMemberDiagnostic>,
+    pub member_plans: Vec<MemberVisibleChunksDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_availability: Option<GeneratedAvailabilityDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveMemberDiagnostic {
+    pub entity_id: String,
+    pub image_id: String,
+    pub position: [f64; 2],
+    pub level_indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberVisibleChunksDiagnostic {
+    pub image_id: String,
+    pub position: [f64; 2],
+    pub needed_count: usize,
+    pub prefetch_count: usize,
+    pub tiers: Vec<ChunkTierDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkTierDiagnostic {
+    pub tier: &'static str,
+    pub level_index: u32,
+    pub count: usize,
+    pub chunks: Vec<ChunkCoord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugStateResult {
+    pub snapshot_seq: u64,
+    pub own_client_id: ClientId,
+    pub source: DiagnosticViewSource,
+    pub diagnostic_kind: &'static str,
+    pub planner_parity: bool,
+    pub viewer: DebugViewerState,
+    pub datasets: Vec<DebugDatasetState>,
+    pub peers: Vec<PeerSummary>,
+    pub generated_availability: Vec<DatasetGeneratedAvailabilityDiagnostic>,
+    pub caveats: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugViewerState {
+    pub camera: Camera,
+    pub view: ViewState,
+    pub display: DisplayState,
+    pub multi_channel: bool,
+    pub dataset_order: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugDatasetState {
+    pub dataset_id: String,
+    pub name: String,
+    pub visible: bool,
+    pub member_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_layout_id: Option<String>,
+    pub generated_level_count: usize,
+    pub generated_chunk_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DatasetGeneratedAvailabilityDiagnostic {
+    pub dataset_id: String,
+    pub name: String,
+    pub availability: GeneratedAvailabilityDiagnostic,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeneratedAvailabilityDiagnostic {
+    pub level_count: usize,
+    pub chunk_count: usize,
+    pub levels: Vec<GeneratedLevelDiagnostic>,
+    pub chunk_status: GeneratedChunkStatusCounts,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeneratedLevelDiagnostic {
+    pub image_id: String,
+    pub level_index: u32,
+    pub role: String,
+    pub generator: String,
+    pub config_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<GeneratedLevelSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GeneratedChunkStatusCounts {
+    pub ready: usize,
+    pub pending: usize,
+    pub unavailable: usize,
+    pub failed_transient: usize,
+    pub failed_permanent: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagnosticViewSource {
+    pub kind: DiagnosticViewSourceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<ClientId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticViewSourceKind {
+    ViewerProfile,
+    Peer,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,6 +473,14 @@ struct WorkspacePresenceSnapshot {
     document: DocumentState,
     peers: Vec<PresenceState>,
     your_id: ClientId,
+    generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticScene {
+    snapshot: WorkspacePresenceSnapshot,
+    source: DiagnosticViewSource,
+    scene: Scene,
 }
 
 pub struct ViewWorkspaceClient {
@@ -671,6 +841,93 @@ impl ViewerProfileClient {
         Ok(viewer_profile_result(&snapshot, record, None))
     }
 
+    pub async fn plan_visible_chunks(
+        &self,
+        workspace: &WorkspaceRecord,
+        profile: &str,
+        from_peer: Option<ClientId>,
+        dataset: Option<&str>,
+        wait: Duration,
+    ) -> Result<PlanVisibleChunksResult, CliError> {
+        let diagnostic = self
+            .diagnostic_scene(workspace, profile, from_peer, wait)
+            .await?;
+        plan_visible_chunks_result(
+            &diagnostic.snapshot,
+            diagnostic.source,
+            &diagnostic.scene,
+            dataset,
+        )
+    }
+
+    pub async fn debug_state(
+        &self,
+        workspace: &WorkspaceRecord,
+        profile: &str,
+        from_peer: Option<ClientId>,
+        wait: Duration,
+    ) -> Result<DebugStateResult, CliError> {
+        let diagnostic = self
+            .diagnostic_scene(workspace, profile, from_peer, wait)
+            .await?;
+        Ok(debug_state_result(
+            &diagnostic.snapshot,
+            diagnostic.source,
+            &diagnostic.scene,
+        ))
+    }
+
+    async fn diagnostic_scene(
+        &self,
+        workspace: &WorkspaceRecord,
+        profile: &str,
+        from_peer: Option<ClientId>,
+        wait: Duration,
+    ) -> Result<DiagnosticScene, CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (_write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+
+        if let Some(client_id) = from_peer {
+            let presence = find_presence(&snapshot, client_id).ok_or_else(|| {
+                CliError::new(
+                    ErrorKind::MissingResource,
+                    format!("no live peer with client id {client_id}"),
+                )
+            })?;
+            let scene = scene_from_presence(&snapshot.document, presence);
+            return Ok(DiagnosticScene {
+                source: DiagnosticViewSource {
+                    kind: DiagnosticViewSourceKind::Peer,
+                    client_id: Some(client_id),
+                    profile: None,
+                    user_email: None,
+                    seed_source: None,
+                },
+                snapshot,
+                scene,
+            });
+        }
+
+        let record = self.ensure_profile(workspace, profile, &snapshot).await?;
+        let scene = scene_from_saved_view(&snapshot.document, &record.view);
+        Ok(DiagnosticScene {
+            source: DiagnosticViewSource {
+                kind: DiagnosticViewSourceKind::ViewerProfile,
+                client_id: None,
+                profile: Some(record.profile),
+                user_email: Some(record.user_email),
+                seed_source: record.seed_source,
+            },
+            snapshot,
+            scene,
+        })
+    }
+
     async fn ensure_profile(
         &self,
         workspace: &WorkspaceRecord,
@@ -723,11 +980,9 @@ impl ViewerProfileClient {
         if response.status() == reqwest::StatusCode::NO_CONTENT {
             return Ok(None);
         }
-        response
-            .json::<WorkspaceViewerProfileRecord>()
+        decode_viewer_profile_json(response, "viewer profile get")
             .await
             .map(Some)
-            .map_err(CliError::from)
     }
 
     async fn upsert_profile(
@@ -738,15 +993,14 @@ impl ViewerProfileClient {
         view: &SavedView,
     ) -> Result<WorkspaceViewerProfileRecord, CliError> {
         let body = UpsertViewerProfileBody { view, seed_source };
-        self.send(
-            self.http
-                .put(viewer_profile_url(&self.base_url, &workspace.id, profile)?)
-                .json(&body),
-        )
-        .await?
-        .json::<WorkspaceViewerProfileRecord>()
-        .await
-        .map_err(CliError::from)
+        let response = self
+            .send(
+                self.http
+                    .put(viewer_profile_url(&self.base_url, &workspace.id, profile)?)
+                    .json(&body),
+            )
+            .await?;
+        decode_viewer_profile_json(response, "viewer profile upsert").await
     }
 
     async fn get_saved_view_seed(
@@ -754,15 +1008,14 @@ impl ViewerProfileClient {
         workspace: &WorkspaceRecord,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedViewSeedRecord, CliError> {
-        self.send(self.http.get(saved_view_item_url(
-            &self.base_url,
-            &workspace.id,
-            saved_view_id,
-        )?))
-        .await?
-        .json::<WorkspaceSavedViewSeedRecord>()
-        .await
-        .map_err(CliError::from)
+        let response = self
+            .send(self.http.get(saved_view_item_url(
+                &self.base_url,
+                &workspace.id,
+                saved_view_id,
+            )?))
+            .await?;
+        decode_viewer_profile_json(response, "saved view seed get").await
     }
 
     async fn send(
@@ -941,6 +1194,101 @@ pub fn format_peer_cursor_human(output: &PeerCursorOutput) -> String {
         "Cursor diagnostic sent\nWorkspace: {} ({})\nClient: {}\nCursor: {}",
         output.workspace.name, output.workspace.id, output.result.own_client_id, cursor
     )
+}
+
+pub fn format_plan_visible_chunks_human(output: &PlanVisibleChunksOutput) -> String {
+    let mut lines = vec![
+        "Visible chunks".to_string(),
+        format!(
+            "Workspace: {} ({})",
+            output.workspace.name, output.workspace.id
+        ),
+        format!(
+            "Source: {}",
+            format_diagnostic_source(&output.result.source)
+        ),
+        format!("Diagnostic: {}", output.result.diagnostic_kind),
+        format!("Web planner equivalent: {}", output.result.planner_parity),
+    ];
+    if output.result.datasets.is_empty() {
+        lines.push("No datasets loaded".to_string());
+    } else {
+        for dataset in &output.result.datasets {
+            let generated = dataset
+                .generated_availability
+                .as_ref()
+                .map(format_generated_availability_summary)
+                .unwrap_or_else(|| "generated=none".to_string());
+            lines.push(format!(
+                "{}  {}  visible={} multichannel={} members={} plans={} {}",
+                dataset.dataset_id,
+                dataset.name,
+                dataset.visible,
+                dataset.multi_channel,
+                dataset.active_members.len(),
+                dataset.member_plans.len(),
+                generated
+            ));
+            for member in &dataset.member_plans {
+                lines.push(format!(
+                    "  member {} pos=({:.3}, {:.3}) visible={} prefetch={}",
+                    member.image_id,
+                    member.position[0],
+                    member.position[1],
+                    member.needed_count,
+                    member.prefetch_count
+                ));
+                for tier in &member.tiers {
+                    lines.push(format!(
+                        "    tier={} level={} chunks={}",
+                        tier.tier, tier.level_index, tier.count
+                    ));
+                }
+            }
+        }
+    }
+    lines.push(format!("Caveats: {}", output.result.caveats.join("; ")));
+    lines.join("\n")
+}
+
+pub fn format_debug_state_human(output: &DebugStateOutput) -> String {
+    let mut lines = vec![
+        "Debug state".to_string(),
+        format!(
+            "Workspace: {} ({})",
+            output.workspace.name, output.workspace.id
+        ),
+        format!("Snapshot: {}", output.result.snapshot_seq),
+        format!(
+            "Source: {}",
+            format_diagnostic_source(&output.result.source)
+        ),
+        format!("Diagnostic: {}", output.result.diagnostic_kind),
+        format!("Camera: {}", format_camera(&output.result.viewer.camera)),
+        format!("View: {}", format_view(&output.result.viewer.view)),
+        format!("Display: {}", format_display(&output.result.viewer.display)),
+        format!(
+            "Datasets: {}  Peers: {}  Generated datasets: {}",
+            output.result.datasets.len(),
+            output.result.peers.len(),
+            output.result.generated_availability.len()
+        ),
+    ];
+    for dataset in &output.result.datasets {
+        let layout = dataset.active_layout_id.as_deref().unwrap_or("default");
+        lines.push(format!(
+            "{}  {}  visible={} members={} layout={} generated_levels={} generated_chunks={}",
+            dataset.dataset_id,
+            dataset.name,
+            dataset.visible,
+            dataset.member_count,
+            layout,
+            dataset.generated_level_count,
+            dataset.generated_chunk_count
+        ));
+    }
+    lines.push(format!("Caveats: {}", output.result.caveats.join("; ")));
+    lines.join("\n")
 }
 
 pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
@@ -1292,6 +1640,7 @@ fn hydrate_scene_document_defaults(scene: &mut Scene) {
     scene
         .dataset_settings
         .retain(|id, _| dataset_ids.contains(id));
+    scene.rebuild_derived();
 }
 
 fn apply_viewport_command(scene: &mut Scene, command: &ViewportCommand) {
@@ -1712,6 +2061,280 @@ fn validate_follow_request(
     Ok(())
 }
 
+fn plan_visible_chunks_result(
+    snapshot: &WorkspacePresenceSnapshot,
+    source: DiagnosticViewSource,
+    scene: &Scene,
+    dataset: Option<&str>,
+) -> Result<PlanVisibleChunksResult, CliError> {
+    let dataset_ids = diagnostic_dataset_ids(&scene.document, &scene.dataset_order, dataset)?;
+    let datasets = dataset_ids
+        .iter()
+        .filter_map(|dataset_id| plan_dataset_diagnostic(snapshot, scene, dataset_id))
+        .collect();
+    Ok(PlanVisibleChunksResult {
+        snapshot_seq: snapshot.seq,
+        own_client_id: snapshot.your_id,
+        source,
+        diagnostic_kind: "lower_level_scene_diagnostic",
+        planner_parity: false,
+        datasets,
+        caveats: plan_diagnostic_caveats(),
+    })
+}
+
+fn plan_dataset_diagnostic(
+    snapshot: &WorkspacePresenceSnapshot,
+    scene: &Scene,
+    dataset_id: &DatasetId,
+) -> Option<PlanDatasetDiagnostic> {
+    let manifest = scene.document.manifests.get(dataset_id)?;
+    let settings = scene
+        .dataset_settings
+        .get(dataset_id)
+        .cloned()
+        .unwrap_or_default();
+    let member_plans = if settings.visible {
+        scene
+            .chunk_plan_for(dataset_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(member_visible_chunks_diagnostic)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(PlanDatasetDiagnostic {
+        dataset_id: dataset_id.0.clone(),
+        name: manifest.name.clone(),
+        visible: settings.visible,
+        multi_channel: scene.view.multi_channel,
+        display: scene.display.clone(),
+        active_layout_id: scene
+            .document
+            .active_layout_ids
+            .get(dataset_id)
+            .map(|layout_id| layout_id.0.clone()),
+        active_members: active_member_diagnostics(scene, dataset_id),
+        member_plans,
+        generated_availability: snapshot
+            .generated_availability
+            .get(dataset_id)
+            .map(generated_availability_diagnostic),
+    })
+}
+
+fn debug_state_result(
+    snapshot: &WorkspacePresenceSnapshot,
+    source: DiagnosticViewSource,
+    scene: &Scene,
+) -> DebugStateResult {
+    DebugStateResult {
+        snapshot_seq: snapshot.seq,
+        own_client_id: snapshot.your_id,
+        source,
+        diagnostic_kind: "workspace_scene_state",
+        planner_parity: false,
+        viewer: DebugViewerState {
+            camera: scene.camera.clone(),
+            view: scene.view.clone(),
+            display: scene.display.clone(),
+            multi_channel: scene.view.multi_channel,
+            dataset_order: scene
+                .dataset_order
+                .iter()
+                .map(|dataset_id| dataset_id.0.clone())
+                .collect(),
+        },
+        datasets: debug_dataset_states(snapshot, scene),
+        peers: peer_list_result(snapshot).peers,
+        generated_availability: dataset_generated_availability(snapshot),
+        caveats: debug_state_caveats(),
+    }
+}
+
+fn diagnostic_dataset_ids(
+    document: &DocumentState,
+    dataset_order: &[DatasetId],
+    dataset: Option<&str>,
+) -> Result<Vec<DatasetId>, CliError> {
+    if let Some(dataset) = dataset {
+        return Ok(vec![resolve_dataset_id(document, dataset)?]);
+    }
+
+    let mut ids = dataset_order.to_vec();
+    for id in document.manifests.keys() {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    Ok(ids)
+}
+
+fn debug_dataset_states(
+    snapshot: &WorkspacePresenceSnapshot,
+    scene: &Scene,
+) -> Vec<DebugDatasetState> {
+    diagnostic_dataset_ids(&scene.document, &scene.dataset_order, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|dataset_id| {
+            let manifest = scene.document.manifests.get(&dataset_id)?;
+            let settings = scene
+                .dataset_settings
+                .get(&dataset_id)
+                .cloned()
+                .unwrap_or_default();
+            let availability = snapshot.generated_availability.get(&dataset_id);
+            Some(DebugDatasetState {
+                dataset_id: dataset_id.0.clone(),
+                name: manifest.name.clone(),
+                visible: settings.visible,
+                member_count: scene
+                    .derived
+                    .get(&dataset_id)
+                    .map(|derived| derived.members.len())
+                    .unwrap_or(0),
+                active_layout_id: scene
+                    .document
+                    .active_layout_ids
+                    .get(&dataset_id)
+                    .map(|layout_id| layout_id.0.clone()),
+                generated_level_count: availability.map(|value| value.levels.len()).unwrap_or(0),
+                generated_chunk_count: availability.map(|value| value.chunks.len()).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+fn active_member_diagnostics(scene: &Scene, dataset_id: &DatasetId) -> Vec<ActiveMemberDiagnostic> {
+    scene
+        .derived
+        .get(dataset_id)
+        .map(|derived| {
+            derived
+                .members
+                .iter()
+                .map(|member| ActiveMemberDiagnostic {
+                    entity_id: member.entity_id.0.clone(),
+                    image_id: member.image_id.0.clone(),
+                    position: member.position,
+                    level_indices: member
+                        .levels
+                        .iter()
+                        .map(|level| level.level_index)
+                        .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn member_visible_chunks_diagnostic(
+    plan: lucida_core::scene::MemberChunkPlan,
+) -> MemberVisibleChunksDiagnostic {
+    let mut tiers = chunk_tier_diagnostics("visible", &plan.needed);
+    tiers.extend(chunk_tier_diagnostics("prefetch", &plan.prefetch));
+    MemberVisibleChunksDiagnostic {
+        image_id: plan.image_id.0,
+        position: plan.position,
+        needed_count: plan.needed.len(),
+        prefetch_count: plan.prefetch.len(),
+        tiers,
+    }
+}
+
+fn chunk_tier_diagnostics(tier: &'static str, chunks: &[ChunkCoord]) -> Vec<ChunkTierDiagnostic> {
+    let mut by_level = BTreeMap::<u32, Vec<ChunkCoord>>::new();
+    for chunk in chunks {
+        by_level.entry(chunk.level).or_default().push(chunk.clone());
+    }
+    by_level
+        .into_iter()
+        .map(|(level_index, chunks)| ChunkTierDiagnostic {
+            tier,
+            level_index,
+            count: chunks.len(),
+            chunks,
+        })
+        .collect()
+}
+
+fn dataset_generated_availability(
+    snapshot: &WorkspacePresenceSnapshot,
+) -> Vec<DatasetGeneratedAvailabilityDiagnostic> {
+    snapshot
+        .generated_availability
+        .iter()
+        .map(|(dataset_id, availability)| {
+            let name = snapshot
+                .document
+                .manifests
+                .get(dataset_id)
+                .map(|manifest| manifest.name.clone())
+                .unwrap_or_else(|| dataset_id.0.clone());
+            DatasetGeneratedAvailabilityDiagnostic {
+                dataset_id: dataset_id.0.clone(),
+                name,
+                availability: generated_availability_diagnostic(availability),
+            }
+        })
+        .collect()
+}
+
+fn generated_availability_diagnostic(
+    availability: &GeneratedAvailabilitySnapshot,
+) -> GeneratedAvailabilityDiagnostic {
+    GeneratedAvailabilityDiagnostic {
+        level_count: availability.levels.len(),
+        chunk_count: availability.chunks.len(),
+        levels: availability
+            .levels
+            .iter()
+            .map(|level| GeneratedLevelDiagnostic {
+                image_id: level.image_id.0.clone(),
+                level_index: level.info.level_index,
+                role: format!("{:?}", level.info.role).to_ascii_lowercase(),
+                generator: level.info.provenance.generator.clone(),
+                config_id: level.info.provenance.config_id.clone(),
+                summary: level.summary.clone(),
+            })
+            .collect(),
+        chunk_status: generated_chunk_status_counts(availability),
+    }
+}
+
+fn generated_chunk_status_counts(
+    availability: &GeneratedAvailabilitySnapshot,
+) -> GeneratedChunkStatusCounts {
+    let mut counts = GeneratedChunkStatusCounts::default();
+    for chunk in &availability.chunks {
+        match chunk.status {
+            GeneratedChunkStatus::Ready => counts.ready += 1,
+            GeneratedChunkStatus::Pending => counts.pending += 1,
+            GeneratedChunkStatus::Unavailable => counts.unavailable += 1,
+            GeneratedChunkStatus::FailedTransient => counts.failed_transient += 1,
+            GeneratedChunkStatus::FailedPermanent => counts.failed_permanent += 1,
+        }
+    }
+    counts
+}
+
+fn plan_diagnostic_caveats() -> Vec<&'static str> {
+    vec![
+        "uses lucida-core Scene::chunk_plan_for for scene-visible source chunks",
+        "does not run the web planner's lane priorities, active-set carry-forward, minimap path, CPU-cache filtering, or generated-coarse tier selection",
+        "dataset visibility is applied before calling the scene chunk diagnostic",
+    ]
+}
+
+fn debug_state_caveats() -> Vec<&'static str> {
+    vec![
+        "reports workspace snapshot and selected viewer scene state",
+        "does not include browser renderer residency, CPU-cache state, or worker wanted-set state",
+    ]
+}
+
 fn viewer_profile_result(
     snapshot: &WorkspacePresenceSnapshot,
     record: WorkspaceViewerProfileRecord,
@@ -1813,13 +2436,14 @@ where
                             document,
                             peers,
                             your_id,
-                            ..
+                            generated_availability,
                         } => {
                             return Ok(WorkspacePresenceSnapshot {
                                 seq,
                                 document,
                                 peers,
                                 your_id,
+                                generated_availability,
                             });
                         }
                         ServerMessage::WorkspaceArchived { .. } => {
@@ -1997,6 +2621,30 @@ fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsRequest<(
     Ok(request)
 }
 
+async fn decode_viewer_profile_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<T, CliError> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    if !content_type.contains("application/json") {
+        return Err(CliError::new(
+            ErrorKind::Protocol,
+            format!("{context} returned {content_type}; expected application/json"),
+        ));
+    }
+    response.json::<T>().await.map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("{context} response was not valid JSON: {error}"),
+        )
+    })
+}
+
 fn map_viewer_profile_http_error(status: reqwest::StatusCode, body: &str) -> CliError {
     let detail = response_detail(body);
     match status {
@@ -2087,6 +2735,34 @@ fn format_source(source: &ViewPresenceSource) -> String {
         ViewPresenceSourceKind::Own => format!("own client {}", source.client_id),
         ViewPresenceSourceKind::Peer => format!("peer client {}", source.client_id),
     }
+}
+
+fn format_diagnostic_source(source: &DiagnosticViewSource) -> String {
+    match source.kind {
+        DiagnosticViewSourceKind::ViewerProfile => {
+            let profile = source.profile.as_deref().unwrap_or("unknown");
+            let seed = source.seed_source.as_deref().unwrap_or("existing_profile");
+            format!("viewer profile {profile} ({seed})")
+        }
+        DiagnosticViewSourceKind::Peer => {
+            let client_id = source
+                .client_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("peer client {client_id}")
+        }
+    }
+}
+
+fn format_generated_availability_summary(availability: &GeneratedAvailabilityDiagnostic) -> String {
+    format!(
+        "generated=levels:{} chunks:{} ready:{} pending:{} failed:{}",
+        availability.level_count,
+        availability.chunk_count,
+        availability.chunk_status.ready,
+        availability.chunk_status.pending,
+        availability.chunk_status.failed_transient + availability.chunk_status.failed_permanent
+    )
 }
 
 fn format_camera(camera: &Camera) -> String {
@@ -2202,10 +2878,18 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
 mod tests {
     use std::collections::HashMap;
 
+    use lucida_content::{
+        GeneratedLevelInfo, GeneratedLevelProvenance, GeneratedLevelRole, LevelGeometry,
+    };
+    use lucida_core::ImageId;
     use lucida_core::camera::{Camera, Slice};
     use lucida_core::protocol::PresenceState;
     use lucida_core::scene::{DisplayState, DocumentState};
     use lucida_core::view::ViewState;
+    use lucida_protocol::{
+        GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
+        GeneratedLevelAvailability, GeneratedLevelSummary,
+    };
 
     use super::*;
 
@@ -2232,6 +2916,7 @@ mod tests {
             document: DocumentState::default(),
             peers: vec![presence(7, [0.0, 0.0]), presence(9, [100.0, 200.0])],
             your_id: 7,
+            generated_availability: HashMap::new(),
         }
     }
 
@@ -2328,6 +3013,53 @@ mod tests {
             document: document_with_two_datasets(),
             peers: vec![presence(7, [0.0, 0.0])],
             your_id: 7,
+            generated_availability: HashMap::new(),
+        }
+    }
+
+    fn generated_availability() -> GeneratedAvailabilitySnapshot {
+        GeneratedAvailabilitySnapshot {
+            levels: vec![GeneratedLevelAvailability {
+                image_id: ImageId("image-1".to_string()),
+                info: GeneratedLevelInfo {
+                    level_index: 3,
+                    role: GeneratedLevelRole::Coarse,
+                    provenance: GeneratedLevelProvenance {
+                        generator: "coarse-v1".to_string(),
+                        config_id: "coarse-64".to_string(),
+                        source_content_id: Some("source-a".to_string()),
+                    },
+                },
+                level: LevelGeometry {
+                    level_index: 3,
+                    shape: [1, 3, 5, 8, 4],
+                    chunk_shape: [1, 1, 1, 8, 4],
+                    grid_shape: [1, 3, 5, 1, 1],
+                    scale: [1.0, 1.0, 1.0, 8.0, 8.0],
+                },
+                summary: Some(GeneratedLevelSummary {
+                    total_chunks: 2,
+                    ready_chunks: 1,
+                    pending_chunks: 1,
+                    failed_chunks: 0,
+                }),
+            }],
+            chunks: vec![
+                GeneratedChunkStatusUpdate {
+                    image_id: ImageId("image-1".to_string()),
+                    level_index: 3,
+                    key: "3/0/0/0/0/0".to_string(),
+                    status: GeneratedChunkStatus::Ready,
+                    message: None,
+                },
+                GeneratedChunkStatusUpdate {
+                    image_id: ImageId("image-1".to_string()),
+                    level_index: 3,
+                    key: "3/0/0/1/0/0".to_string(),
+                    status: GeneratedChunkStatus::Pending,
+                    message: Some("queued".to_string()),
+                },
+            ],
         }
     }
 
@@ -2518,6 +3250,110 @@ mod tests {
         let clear = serde_json::to_value(cursor_message(None)).unwrap();
         assert_eq!(clear["type"], "cursor");
         assert!(clear["position"].is_null());
+    }
+
+    #[test]
+    fn plan_visible_chunks_reconstructs_scene_from_snapshot() {
+        let snapshot = display_snapshot();
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let result = plan_visible_chunks_result(
+            &snapshot,
+            DiagnosticViewSource {
+                kind: DiagnosticViewSourceKind::Peer,
+                client_id: Some(7),
+                profile: None,
+                user_email: None,
+                seed_source: None,
+            },
+            &scene,
+            Some("demo.zarr"),
+        )
+        .unwrap();
+
+        assert_eq!(result.diagnostic_kind, "lower_level_scene_diagnostic");
+        assert!(!result.planner_parity);
+        assert_eq!(result.datasets.len(), 1);
+        let dataset = &result.datasets[0];
+        assert_eq!(dataset.dataset_id, "wds-test");
+        assert!(!dataset.active_members.is_empty());
+        assert!(!dataset.member_plans.is_empty());
+        assert!(
+            dataset.member_plans[0]
+                .tiers
+                .iter()
+                .any(|tier| tier.tier == "visible")
+        );
+    }
+
+    #[test]
+    fn diagnostics_include_generated_availability() {
+        let mut snapshot = display_snapshot();
+        snapshot
+            .generated_availability
+            .insert(DatasetId("wds-test".to_string()), generated_availability());
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+
+        let plan = plan_visible_chunks_result(
+            &snapshot,
+            DiagnosticViewSource {
+                kind: DiagnosticViewSourceKind::Peer,
+                client_id: Some(7),
+                profile: None,
+                user_email: None,
+                seed_source: None,
+            },
+            &scene,
+            Some("wds-test"),
+        )
+        .unwrap();
+        let generated = plan.datasets[0].generated_availability.as_ref().unwrap();
+        assert_eq!(generated.level_count, 1);
+        assert_eq!(generated.chunk_status.ready, 1);
+        assert_eq!(generated.chunk_status.pending, 1);
+
+        let debug = debug_state_result(
+            &snapshot,
+            DiagnosticViewSource {
+                kind: DiagnosticViewSourceKind::Peer,
+                client_id: Some(7),
+                profile: None,
+                user_email: None,
+                seed_source: None,
+            },
+            &scene,
+        );
+        assert_eq!(debug.generated_availability.len(), 1);
+        let debug_dataset = debug
+            .datasets
+            .iter()
+            .find(|dataset| dataset.dataset_id == "wds-test")
+            .unwrap();
+        assert_eq!(debug_dataset.generated_level_count, 1);
+        assert_eq!(debug_dataset.generated_chunk_count, 2);
+    }
+
+    #[test]
+    fn debug_state_json_shape_is_labeled() {
+        let snapshot = display_snapshot();
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let result = debug_state_result(
+            &snapshot,
+            DiagnosticViewSource {
+                kind: DiagnosticViewSourceKind::Peer,
+                client_id: Some(7),
+                profile: None,
+                user_email: None,
+                seed_source: None,
+            },
+            &scene,
+        );
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["diagnostic_kind"], "workspace_scene_state");
+        assert_eq!(value["planner_parity"], false);
+        assert!(value["viewer"]["camera"].is_object());
+        assert!(value["datasets"].as_array().unwrap().len() >= 2);
+        assert!(value["caveats"].as_array().unwrap().len() >= 1);
     }
 
     #[test]
