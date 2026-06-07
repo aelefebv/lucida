@@ -76,6 +76,8 @@ use crate::workspace::{
     resolve_workspace_record, target_for,
 };
 
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
 #[derive(Parser, Debug)]
 #[command(name = "lucida", about = "Command line client for Lucida", version)]
 struct Cli {
@@ -3079,6 +3081,7 @@ async fn capture_cdp_png(
     )
     .await?;
     wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
+    wait_for_canvas_visible(&mut write, &mut read, &mut id, &session_id, wait).await?;
     let captured = cdp_call(
         &mut write,
         &mut read,
@@ -3093,9 +3096,13 @@ async fn capture_cdp_png(
         .get("data")
         .and_then(|value| value.as_str())
         .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP screenshot data was missing"))?;
-    base64::engine::general_purpose::STANDARD
+    let png = base64::engine::general_purpose::STANDARD
         .decode(data)
-        .map_err(|error| CliError::new(ErrorKind::Protocol, format!("invalid PNG data: {error}")))
+        .map_err(|error| {
+            CliError::new(ErrorKind::Protocol, format!("invalid PNG data: {error}"))
+        })?;
+    ensure_png_signature(&png)?;
+    Ok(png)
 }
 
 async fn wait_for_page_ready<W, S>(
@@ -3144,6 +3151,167 @@ where
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+const CANVAS_VISIBILITY_PROBE: &str = r#"(() => {
+  const canvas = document.querySelector('canvas');
+  if (!canvas) {
+    return { ready: false, visible: false, reason: 'missing_canvas' };
+  }
+  const sourceWidth = canvas.width || Math.floor(canvas.clientWidth);
+  const sourceHeight = canvas.height || Math.floor(canvas.clientHeight);
+  if (!sourceWidth || !sourceHeight) {
+    return { ready: true, visible: false, reason: 'zero_size_canvas' };
+  }
+  const sampleWidth = Math.max(1, Math.min(64, sourceWidth));
+  const sampleHeight = Math.max(1, Math.min(64, sourceHeight));
+  const probe = document.createElement('canvas');
+  probe.width = sampleWidth;
+  probe.height = sampleHeight;
+  const ctx = probe.getContext('2d', { willReadFrequently: true });
+  if (!ctx) {
+    return { ready: true, visible: false, reason: 'missing_2d_context' };
+  }
+  try {
+    ctx.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
+    const data = ctx.getImageData(0, 0, sampleWidth, sampleHeight).data;
+    let opaquePixels = 0;
+    let minChannel = 255;
+    let maxChannel = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3];
+      if (alpha === 0) {
+        continue;
+      }
+      opaquePixels += 1;
+      const red = data[i];
+      const green = data[i + 1];
+      const blue = data[i + 2];
+      minChannel = Math.min(minChannel, red, green, blue);
+      maxChannel = Math.max(maxChannel, red, green, blue);
+    }
+    const colorSpan = opaquePixels > 0 ? maxChannel - minChannel : 0;
+    const visible = opaquePixels > 0 && colorSpan >= 4;
+    return {
+      ready: true,
+      visible,
+      reason: visible ? 'visible' : 'blank_canvas',
+      sample_pixels: sampleWidth * sampleHeight,
+      opaque_pixels: opaquePixels,
+      color_span: colorSpan
+    };
+  } catch (error) {
+    return {
+      ready: true,
+      visible: false,
+      reason: 'readback_failed: ' + String(error && error.message ? error.message : error)
+    };
+  }
+})()"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanvasProbe {
+    ready: bool,
+    visible: bool,
+    reason: String,
+    sample_pixels: u64,
+    opaque_pixels: u64,
+    color_span: u64,
+}
+
+async fn wait_for_canvas_visible<W, S>(
+    write: &mut W,
+    read: &mut S,
+    id: &mut u64,
+    session_id: &str,
+    wait: Duration,
+) -> Result<(), CliError>
+where
+    W: Sink<Message, Error = WebSocketError> + Unpin,
+    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let result = cdp_call(
+            write,
+            read,
+            id,
+            Some(session_id),
+            "Runtime.evaluate",
+            json!({
+                "expression": CANVAS_VISIBILITY_PROBE,
+                "returnByValue": true
+            }),
+            wait,
+        )
+        .await?;
+        let probe = canvas_probe_from_cdp_result(&result)?;
+        if probe.ready && probe.visible {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let reason = canvas_probe_summary(&probe);
+            return Err(CliError::new(
+                ErrorKind::SessionDisconnect,
+                format!(
+                    "timed out waiting for nonblank viewer canvas after {}s ({reason})",
+                    wait.as_secs()
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn canvas_probe_from_cdp_result(value: &Value) -> Result<CanvasProbe, CliError> {
+    let probe = value
+        .get("result")
+        .and_then(|value| value.get("value"))
+        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "canvas probe result was missing"))?;
+    Ok(CanvasProbe {
+        ready: probe
+            .get("ready")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        visible: probe
+            .get("visible")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        reason: probe
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        sample_pixels: probe
+            .get("sample_pixels")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        opaque_pixels: probe
+            .get("opaque_pixels")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        color_span: probe
+            .get("color_span")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+fn canvas_probe_summary(probe: &CanvasProbe) -> String {
+    format!(
+        "last probe: reason={}, sample_pixels={}, opaque_pixels={}, color_span={}",
+        probe.reason, probe.sample_pixels, probe.opaque_pixels, probe.color_span,
+    )
+}
+
+fn ensure_png_signature(bytes: &[u8]) -> Result<(), CliError> {
+    if bytes.starts_with(PNG_SIGNATURE) {
+        return Ok(());
+    }
+    Err(CliError::new(
+        ErrorKind::Protocol,
+        "CDP screenshot did not return a PNG",
+    ))
 }
 
 async fn cdp_call<W, S>(
@@ -4337,6 +4505,55 @@ mod tests {
             }
             _ => panic!("expected viewer screenshot"),
         }
+    }
+
+    #[test]
+    fn canvas_probe_parser_distinguishes_visible_and_blank_results() {
+        let visible = canvas_probe_from_cdp_result(&json!({
+            "result": {
+                "value": {
+                    "ready": true,
+                    "visible": true,
+                    "reason": "visible",
+                    "sample_pixels": 4096,
+                    "opaque_pixels": 4096,
+                    "color_span": 127
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(visible.ready);
+        assert!(visible.visible);
+        assert_eq!(visible.color_span, 127);
+
+        let blank = canvas_probe_from_cdp_result(&json!({
+            "result": {
+                "value": {
+                    "ready": true,
+                    "visible": false,
+                    "reason": "blank_canvas",
+                    "sample_pixels": 4096,
+                    "opaque_pixels": 4096,
+                    "color_span": 0
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(blank.ready);
+        assert!(!blank.visible);
+        assert!(canvas_probe_summary(&blank).contains("blank_canvas"));
+    }
+
+    #[test]
+    fn screenshot_png_signature_is_validated() {
+        let mut png = Vec::from(PNG_SIGNATURE.as_slice());
+        png.extend_from_slice(b"rest of fake png");
+        ensure_png_signature(&png).unwrap();
+
+        let error = ensure_png_signature(b"not a png").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
     }
 
     #[test]
