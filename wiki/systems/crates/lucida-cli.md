@@ -37,6 +37,10 @@ Visible foundation commands:
 - `lucida peer cursor set|clear` — explicit diagnostic/test cursor presence updates.
 - `lucida plan visible-chunks [dataset]` — inspect lower-level `lucida-core` scene chunk diagnostics for the selected viewer profile or explicit peer.
 - `lucida debug state` — print read-only workspace snapshot, selected viewer state, peer, dataset, active-member, and generated-availability diagnostics.
+- `lucida admin workspace search [query]` — search remote admin workspace metadata by id, name, creator, or member email.
+- `lucida admin workspace info|archive|restore <workspace-id>` — inspect or mutate one workspace through the authenticated remote admin API.
+- `lucida admin workspace owner add|promote <workspace-id> <email>` — add or promote a workspace owner through the remote admin API.
+- `lucida admin clear-proxy-cache [--dataset <url>]` — clear the remote server proxy cache via `/admin/clear-proxy-cache`.
 
 Global visible flags:
 
@@ -49,6 +53,7 @@ Global visible flags:
 - Config is local JSON under `$LUCIDA_CONFIG_PATH`, `$XDG_CONFIG_HOME/lucida/config.json`, or `~/.config/lucida/config.json`.
 - Bearer credentials are sourced from `LUCIDA_TOKEN` first, then macOS Keychain when available, then the local config file. The file fallback is written with `0600` permissions on Unix.
 - HTTP status checks call the same public/protected server endpoints the web app uses: `/healthz`, `/readyz`, `/version`, and `/auth/whoami`.
+- Remote admin commands call `/admin/*` APIs with bearer auth and label JSON/human output as `remote_admin`, keeping them distinct from local `lucida-server` process operations.
 - Future noun commands should reuse the same config, output, error, target-resolution, HTTP, and WebSocket modules instead of adding one-off flag parsing.
 
 ## Invariants
@@ -66,3 +71,4 @@ Global visible flags:
 - **Keychain is opportunistic.** `lucida auth login` stores the approved token in macOS Keychain when available. If Keychain rejects the write or the platform has no supported keychain integration, the CLI falls back to the `0600` config file.
 - **No retry loop yet.** The foundation status/config commands make single HTTP requests. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
 - **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.
+- **Admin workspace commands are id-based.** Search can discover ids, but `admin workspace info/archive/restore/owner` intentionally do not reuse member-scoped workspace name resolution.

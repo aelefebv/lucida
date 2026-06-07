@@ -392,6 +392,8 @@ Expose authenticated remote support APIs under `lucida admin` while keeping loca
 - [ ] Output distinguishes remote admin APIs from local `lucida-server` process operations.
 - [ ] Tests cover request construction, admin success, non-admin failure, and JSON/human output.
 
+Current implementation note: `lucida admin workspace search [query]`, `lucida admin workspace info|archive|restore <workspace-id>`, `lucida admin workspace owner add|promote <workspace-id> <email>`, and `lucida admin clear-proxy-cache [--dataset <url>]` have landed on `codex/cli-open-dataset`. The CLI calls the existing `/admin/workspaces` and `/admin/clear-proxy-cache` routes with bearer auth, emits structured `unauthenticated`/`unauthorized` errors for missing or non-admin credentials, and labels outputs as `remote_admin` so they do not blur into local `lucida-server` process operations. Tests cover parser shape, request construction, success JSON decoding, non-admin error mapping, and human output without binding local sockets.
+
 ### Wiki context
 
 - `wiki/systems/crates/lucida-server.md`

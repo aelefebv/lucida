@@ -1,3 +1,4 @@
+mod admin;
 mod auth;
 mod config;
 mod credentials;
@@ -26,6 +27,12 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
+use crate::admin::{
+    AdminClearProxyCacheOutput, AdminClient, AdminWorkspaceDetailsOutput,
+    AdminWorkspaceOwnerOutput, AdminWorkspaceSearchOutput, REMOTE_ADMIN_SCOPE,
+    format_admin_clear_proxy_cache_human, format_admin_workspace_details_human,
+    format_admin_workspace_owner_human, format_admin_workspace_search_human,
+};
 use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
 };
@@ -232,6 +239,11 @@ enum Command {
         #[command(subcommand)]
         command: SavedViewCommand,
     },
+    /// Run authenticated remote admin/support commands
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
     /// Read or write local Lucida CLI configuration
     Config {
         #[command(subcommand)]
@@ -307,6 +319,80 @@ enum WorkspaceCommand {
         /// Do not attempt to open a browser automatically
         #[arg(long)]
         no_browser: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminCommand {
+    /// Search and mutate workspaces through the remote admin API
+    Workspace {
+        #[command(subcommand)]
+        command: AdminWorkspaceCommand,
+    },
+    /// Clear the remote server proxy cache
+    ClearProxyCache {
+        /// Dataset URL to clear. Omit to clear every cached dataset.
+        #[arg(long)]
+        dataset: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminWorkspaceCommand {
+    /// Search workspace admin metadata by id, name, creator, or member email
+    Search {
+        /// Optional search text
+        query: Option<String>,
+        /// Include archived workspaces
+        #[arg(long)]
+        include_archived: bool,
+        /// Maximum rows to return
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+    },
+    /// Show admin metadata and members for one workspace id
+    Info {
+        /// Workspace id
+        workspace_id: String,
+    },
+    /// Archive one workspace id through the remote admin API
+    Archive {
+        /// Workspace id
+        workspace_id: String,
+    },
+    /// Restore one archived workspace id through the remote admin API
+    Restore {
+        /// Workspace id
+        workspace_id: String,
+    },
+    /// Add or promote workspace owners through the remote admin API
+    Owner {
+        #[command(subcommand)]
+        command: AdminWorkspaceOwnerCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminWorkspaceOwnerCommand {
+    /// Add a new owner or leave an existing owner as owner
+    Add {
+        /// Workspace id
+        workspace_id: String,
+        /// Owner email
+        email: String,
+        /// Display name to store if adding the member
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    /// Promote an existing member to owner, or add them if missing
+    Promote {
+        /// Workspace id
+        workspace_id: String,
+        /// Owner email
+        email: String,
+        /// Display name to store if adding the member
+        #[arg(long)]
+        display_name: Option<String>,
     },
 }
 
@@ -1585,6 +1671,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         } => {
             emit_saved_view_command(&cli, &config, output, command, *timeout_seconds).await?;
         }
+        Command::Admin { command } => {
+            emit_admin_command(&cli, &config, output, command).await?;
+        }
         Command::Config { command } => match command {
             ConfigCommand::Set { command } => match command {
                 ConfigSetCommand::Server { base_url } => {
@@ -1629,6 +1718,120 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 output.print_either(&payload, || store.path().display().to_string())?;
             }
         },
+    }
+
+    Ok(())
+}
+
+async fn emit_admin_command(
+    cli: &Cli,
+    config: &CliConfig,
+    output: Output,
+    command: &AdminCommand,
+) -> Result<(), CliError> {
+    let server = resolve_server(cli.server.as_deref(), config)?;
+    let token = resolve_token(&server.url, config);
+    let client = AdminClient::new(server.url.clone(), token);
+
+    match command {
+        AdminCommand::Workspace { command } => match command {
+            AdminWorkspaceCommand::Search {
+                query,
+                include_archived,
+                limit,
+            } => {
+                let workspaces = client
+                    .search_workspaces(query.as_deref(), *include_archived, *limit)
+                    .await?;
+                let output_payload = AdminWorkspaceSearchOutput {
+                    scope: REMOTE_ADMIN_SCOPE,
+                    server,
+                    query: query.clone(),
+                    include_archived: *include_archived,
+                    limit: *limit,
+                    workspaces,
+                };
+                output.print_either(&output_payload, || {
+                    format_admin_workspace_search_human(&output_payload)
+                })?;
+            }
+            AdminWorkspaceCommand::Info { workspace_id } => {
+                let details = client.workspace_info(workspace_id).await?;
+                let output_payload = AdminWorkspaceDetailsOutput {
+                    scope: REMOTE_ADMIN_SCOPE,
+                    server,
+                    workspace: details.workspace,
+                    members: details.members,
+                };
+                output.print_either(&output_payload, || {
+                    format_admin_workspace_details_human(&output_payload, "info")
+                })?;
+            }
+            AdminWorkspaceCommand::Archive { workspace_id } => {
+                let details = client.archive_workspace(workspace_id).await?;
+                let output_payload = AdminWorkspaceDetailsOutput {
+                    scope: REMOTE_ADMIN_SCOPE,
+                    server,
+                    workspace: details.workspace,
+                    members: details.members,
+                };
+                output.print_either(&output_payload, || {
+                    format_admin_workspace_details_human(&output_payload, "archive")
+                })?;
+            }
+            AdminWorkspaceCommand::Restore { workspace_id } => {
+                let details = client.restore_workspace(workspace_id).await?;
+                let output_payload = AdminWorkspaceDetailsOutput {
+                    scope: REMOTE_ADMIN_SCOPE,
+                    server,
+                    workspace: details.workspace,
+                    members: details.members,
+                };
+                output.print_either(&output_payload, || {
+                    format_admin_workspace_details_human(&output_payload, "restore")
+                })?;
+            }
+            AdminWorkspaceCommand::Owner { command } => {
+                let (workspace_id, email, display_name) = match command {
+                    AdminWorkspaceOwnerCommand::Add {
+                        workspace_id,
+                        email,
+                        display_name,
+                    }
+                    | AdminWorkspaceOwnerCommand::Promote {
+                        workspace_id,
+                        email,
+                        display_name,
+                    } => (workspace_id, email, display_name),
+                };
+                let member = client
+                    .add_or_promote_owner(workspace_id, email, display_name.as_deref())
+                    .await?;
+                let output_payload = AdminWorkspaceOwnerOutput {
+                    scope: REMOTE_ADMIN_SCOPE,
+                    server,
+                    workspace_id: workspace_id.clone(),
+                    member,
+                };
+                output.print_either(&output_payload, || {
+                    format_admin_workspace_owner_human(&output_payload)
+                })?;
+            }
+        },
+        AdminCommand::ClearProxyCache { dataset } => {
+            let result = client.clear_proxy_cache(dataset.as_deref()).await?;
+            let output_payload = AdminClearProxyCacheOutput {
+                scope: REMOTE_ADMIN_SCOPE,
+                server,
+                dataset: dataset.clone(),
+                cleared: result.cleared,
+                datasets: result.datasets,
+                files: result.files,
+            };
+            output.print_either(&output_payload, || {
+                format_admin_clear_proxy_cache_human(&output_payload)
+            })?;
+        }
     }
 
     Ok(())
@@ -2834,6 +3037,7 @@ mod tests {
         assert!(help.contains("debug"));
         assert!(help.contains("layout"));
         assert!(help.contains("saved-view"));
+        assert!(help.contains("admin"));
         assert!(help.contains("config"));
         assert!(!help.contains("visible-chunks"));
         assert!(!help.contains("set-mode-2d"));
@@ -2950,6 +3154,141 @@ mod tests {
                 assert!(no_browser);
             }
             _ => panic!("expected workspace open"),
+        }
+    }
+
+    #[test]
+    fn admin_workspace_search_parses_remote_admin_shape() {
+        let cli = parse(&[
+            "admin",
+            "workspace",
+            "search",
+            "owner@example.com",
+            "--include-archived",
+            "--limit",
+            "12",
+        ]);
+
+        match cli.command {
+            Command::Admin {
+                command:
+                    AdminCommand::Workspace {
+                        command:
+                            AdminWorkspaceCommand::Search {
+                                query,
+                                include_archived,
+                                limit,
+                            },
+                    },
+            } => {
+                assert_eq!(query.as_deref(), Some("owner@example.com"));
+                assert!(include_archived);
+                assert_eq!(limit, 12);
+            }
+            _ => panic!("expected admin workspace search"),
+        }
+    }
+
+    #[test]
+    fn admin_workspace_mutations_parse_id_based_shape() {
+        let info = parse(&["admin", "workspace", "info", "w1"]);
+        match info.command {
+            Command::Admin {
+                command:
+                    AdminCommand::Workspace {
+                        command: AdminWorkspaceCommand::Info { workspace_id },
+                    },
+            } => assert_eq!(workspace_id, "w1"),
+            _ => panic!("expected admin workspace info"),
+        }
+
+        let archive = parse(&["admin", "workspace", "archive", "w1"]);
+        match archive.command {
+            Command::Admin {
+                command:
+                    AdminCommand::Workspace {
+                        command: AdminWorkspaceCommand::Archive { workspace_id },
+                    },
+            } => assert_eq!(workspace_id, "w1"),
+            _ => panic!("expected admin workspace archive"),
+        }
+
+        let restore = parse(&["admin", "workspace", "restore", "w1"]);
+        match restore.command {
+            Command::Admin {
+                command:
+                    AdminCommand::Workspace {
+                        command: AdminWorkspaceCommand::Restore { workspace_id },
+                    },
+            } => assert_eq!(workspace_id, "w1"),
+            _ => panic!("expected admin workspace restore"),
+        }
+    }
+
+    #[test]
+    fn admin_workspace_owner_and_cache_commands_parse() {
+        let owner = parse(&[
+            "admin",
+            "workspace",
+            "owner",
+            "add",
+            "w1",
+            "owner@example.com",
+            "--display-name",
+            "Owner",
+        ]);
+        match owner.command {
+            Command::Admin {
+                command:
+                    AdminCommand::Workspace {
+                        command:
+                            AdminWorkspaceCommand::Owner {
+                                command:
+                                    AdminWorkspaceOwnerCommand::Add {
+                                        workspace_id,
+                                        email,
+                                        display_name,
+                                    },
+                            },
+                    },
+            } => {
+                assert_eq!(workspace_id, "w1");
+                assert_eq!(email, "owner@example.com");
+                assert_eq!(display_name.as_deref(), Some("Owner"));
+            }
+            _ => panic!("expected admin workspace owner add"),
+        }
+
+        let promote = parse(&[
+            "admin",
+            "workspace",
+            "owner",
+            "promote",
+            "w1",
+            "owner@example.com",
+        ]);
+        assert!(matches!(
+            promote.command,
+            Command::Admin {
+                command: AdminCommand::Workspace {
+                    command: AdminWorkspaceCommand::Owner {
+                        command: AdminWorkspaceOwnerCommand::Promote { .. },
+                    },
+                },
+            }
+        ));
+
+        let clear = parse(&[
+            "admin",
+            "clear-proxy-cache",
+            "--dataset",
+            "file:///data/demo.ome.zarr",
+        ]);
+        match clear.command {
+            Command::Admin {
+                command: AdminCommand::ClearProxyCache { dataset },
+            } => assert_eq!(dataset.as_deref(), Some("file:///data/demo.ome.zarr")),
+            _ => panic!("expected admin clear-proxy-cache"),
         }
     }
 
