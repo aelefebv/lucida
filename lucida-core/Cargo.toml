@@ -17,6 +17,11 @@ indexmap = { version = "2", features = ["serde"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 
+[package.metadata.wasm-pack.profile.release]
+# wasm-pack's bundled wasm-opt can lag current Rust WASM output; CI and
+# Docker should build the package without invoking that optimizer.
+wasm-opt = false
+
 [profile.release]
 opt-level = "s"
 lto = true
