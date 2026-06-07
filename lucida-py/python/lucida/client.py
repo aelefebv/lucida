@@ -188,10 +188,30 @@ def resolve_token(
     keychain_token = read_keychain_token(server_url)
     if keychain_token:
         return EffectiveToken(keychain_token, "keychain")
-    config_token = (config or {}).get("token")
+    config_token = server_config(config, server_url).get("token")
     if isinstance(config_token, str) and config_token.strip():
         return EffectiveToken(config_token, "config")
     return None
+
+
+def server_config(config: dict[str, Any] | None, server_url: str) -> dict[str, Any]:
+    servers = (config or {}).get("servers")
+    if not isinstance(servers, dict):
+        return {}
+    entry = servers.get(server_url)
+    return entry if isinstance(entry, dict) else {}
+
+
+def server_config_mut(config: dict[str, Any], server_url: str) -> dict[str, Any]:
+    servers = config.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+        config["servers"] = servers
+    entry = servers.setdefault(server_url, {})
+    if not isinstance(entry, dict):
+        entry = {}
+        servers[server_url] = entry
+    return entry
 
 
 def read_keychain_token(server_url: str) -> str | None:
@@ -402,7 +422,10 @@ class WorkspacesResource:
         *,
         include_archived: bool = False,
     ) -> "WorkspaceResource":
-        selector = selector or self._client.config.get("workspace")
+        selector = selector or server_config(
+            self._client.config,
+            self._client.server.url,
+        ).get("workspace")
         if not selector:
             raise LucidaError(
                 "config",
@@ -420,7 +443,8 @@ class WorkspacesResource:
 
     def use(self, selector: str) -> "WorkspaceResource":
         workspace = self.resolve(selector)
-        self._client.config["workspace"] = workspace.id
+        entry = server_config_mut(self._client.config, self._client.server.url)
+        entry["workspace"] = workspace.id
         self._client.config_store.save(self._client.config)
         return workspace
 

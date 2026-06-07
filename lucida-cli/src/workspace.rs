@@ -212,9 +212,10 @@ pub async fn resolve_workspace_record(
     client: &WorkspaceClient,
     selector: Option<&str>,
     config: &CliConfig,
+    server_url: &str,
     mode: WorkspaceLookupMode,
 ) -> Result<WorkspaceRecord, CliError> {
-    let selector = workspace_selector(selector, config)?;
+    let selector = workspace_selector(selector, config, server_url)?;
     if mode == WorkspaceLookupMode::ActiveOnly && looks_like_workspace_id(selector) {
         return client.get(selector).await;
     }
@@ -225,8 +226,14 @@ pub async fn resolve_workspace_record(
     } else {
         Vec::new()
     };
-    let summary =
-        resolve_workspace_summary_from_summaries(Some(selector), config, &active, &archived, mode)?;
+    let summary = resolve_workspace_summary_from_summaries(
+        Some(selector),
+        config,
+        server_url,
+        &active,
+        &archived,
+        mode,
+    )?;
     if summary.archived_at.is_some() {
         return Ok(WorkspaceRecord::from(summary));
     }
@@ -237,21 +244,26 @@ pub async fn resolve_workspace_record(
 fn resolve_workspace_id_from_summaries(
     selector: Option<&str>,
     config: &CliConfig,
+    server_url: &str,
     active: &[WorkspaceSummary],
     archived: &[WorkspaceSummary],
     mode: WorkspaceLookupMode,
 ) -> Result<String, CliError> {
-    Ok(resolve_workspace_summary_from_summaries(selector, config, active, archived, mode)?.id)
+    Ok(resolve_workspace_summary_from_summaries(
+        selector, config, server_url, active, archived, mode,
+    )?
+    .id)
 }
 
 fn resolve_workspace_summary_from_summaries(
     selector: Option<&str>,
     config: &CliConfig,
+    server_url: &str,
     active: &[WorkspaceSummary],
     archived: &[WorkspaceSummary],
     mode: WorkspaceLookupMode,
 ) -> Result<WorkspaceSummary, CliError> {
-    let selector = workspace_selector(selector, config)?;
+    let selector = workspace_selector(selector, config, server_url)?;
     let mut candidates: Vec<WorkspaceSummary> = active.to_vec();
     if mode == WorkspaceLookupMode::IncludeArchived {
         candidates.extend(archived.iter().cloned());
@@ -293,13 +305,16 @@ fn resolve_workspace_summary_from_summaries(
 fn workspace_selector<'a>(
     selector: Option<&'a str>,
     config: &'a CliConfig,
+    server_url: &str,
 ) -> Result<&'a str, CliError> {
-    selector.or(config.workspace.as_deref()).ok_or_else(|| {
-        CliError::new(
-            ErrorKind::MissingResource,
-            "no workspace specified; pass one or run `lucida workspace use <id-or-name>`",
-        )
-    })
+    selector
+        .or_else(|| config.workspace_for_server(server_url))
+        .ok_or_else(|| {
+            CliError::new(
+                ErrorKind::MissingResource,
+                "no workspace specified; pass one or run `lucida workspace use <id-or-name>`",
+            )
+        })
 }
 
 impl From<WorkspaceSummary> for WorkspaceRecord {
@@ -533,14 +548,16 @@ mod tests {
     #[test]
     fn resolves_configured_default_workspace() {
         let config = CliConfig {
-            workspace: Some("Team".into()),
             ..CliConfig::default()
         };
+        let mut config = config;
+        config.set_workspace_for_server("http://server", "Team");
         let active = vec![summary("w1", "Team")];
 
         let id = resolve_workspace_id_from_summaries(
             None,
             &config,
+            "http://server",
             &active,
             &[],
             WorkspaceLookupMode::ActiveOnly,
@@ -553,14 +570,16 @@ mod tests {
     #[test]
     fn explicit_selector_overrides_configured_default() {
         let config = CliConfig {
-            workspace: Some("Default".into()),
             ..CliConfig::default()
         };
+        let mut config = config;
+        config.set_workspace_for_server("http://server", "Default");
         let active = vec![summary("w1", "Default"), summary("w2", "Override")];
 
         let id = resolve_workspace_id_from_summaries(
             Some("Override"),
             &config,
+            "http://server",
             &active,
             &[],
             WorkspaceLookupMode::ActiveOnly,
@@ -581,6 +600,7 @@ mod tests {
         let id = resolve_workspace_id_from_summaries(
             Some("ca7ba7c7-37f8-4f97-988e-a98f8e5d1e62"),
             &config,
+            "http://server",
             &active,
             &[],
             WorkspaceLookupMode::ActiveOnly,
@@ -596,6 +616,7 @@ mod tests {
         let error = resolve_workspace_id_from_summaries(
             None,
             &config,
+            "http://server",
             &[],
             &[],
             WorkspaceLookupMode::ActiveOnly,
@@ -613,6 +634,7 @@ mod tests {
         let error = resolve_workspace_id_from_summaries(
             Some("Shared"),
             &config,
+            "http://server",
             &active,
             &[],
             WorkspaceLookupMode::ActiveOnly,
@@ -630,6 +652,7 @@ mod tests {
         let missing = resolve_workspace_id_from_summaries(
             Some("Old"),
             &config,
+            "http://server",
             &[],
             &archived,
             WorkspaceLookupMode::ActiveOnly,
@@ -640,6 +663,7 @@ mod tests {
         let id = resolve_workspace_id_from_summaries(
             Some("Old"),
             &config,
+            "http://server",
             &[],
             &archived,
             WorkspaceLookupMode::IncludeArchived,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,10 +16,46 @@ pub const DEFAULT_SERVER: &str = "http://localhost:9876";
 pub struct CliConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub servers: BTreeMap<String, ServerConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+impl CliConfig {
+    pub fn server_config(&self, server_url: &str) -> Option<&ServerConfig> {
+        self.servers.get(server_url)
+    }
+
+    pub fn server_config_mut(&mut self, server_url: &str) -> &mut ServerConfig {
+        self.servers.entry(server_url.to_string()).or_default()
+    }
+
+    pub fn workspace_for_server(&self, server_url: &str) -> Option<&str> {
+        self.server_config(server_url)?.workspace.as_deref()
+    }
+
+    pub fn set_workspace_for_server(&mut self, server_url: &str, workspace: impl Into<String>) {
+        self.server_config_mut(server_url).workspace = Some(workspace.into());
+    }
+
+    pub fn token_for_server(&self, server_url: &str) -> Option<&str> {
+        self.server_config(server_url)?.token.as_deref()
+    }
+
+    pub fn set_token_for_server(&mut self, server_url: &str, token: impl Into<String>) {
+        self.server_config_mut(server_url).token = Some(token.into());
+    }
+
+    pub fn clear_token_for_server(&mut self, server_url: &str) -> bool {
+        self.server_config_mut(server_url).token.take().is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -234,8 +271,13 @@ mod tests {
         let store = ConfigStore::with_path(path.clone());
         let config = CliConfig {
             server: Some("http://127.0.0.1:9988".to_string()),
-            workspace: None,
-            token: Some("lucida_pat_test".to_string()),
+            servers: BTreeMap::from([(
+                "http://127.0.0.1:9988".to_string(),
+                ServerConfig {
+                    workspace: Some("workspace-1".to_string()),
+                    token: Some("lucida_pat_test".to_string()),
+                },
+            )]),
         };
 
         store.save(&config).unwrap();

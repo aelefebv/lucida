@@ -58,8 +58,7 @@ pub fn resolve_token(server_url: &str, config: &CliConfig) -> Option<EffectiveTo
     }
 
     config
-        .token
-        .as_deref()
+        .token_for_server(server_url)
         .filter(|value| !value.trim().is_empty())
         .map(|token| EffectiveToken {
             token: token.to_string(),
@@ -73,16 +72,16 @@ pub fn store_local_token(
     config: &mut CliConfig,
 ) -> CredentialStorage {
     if store_keychain_token(server_url, raw_token).is_ok() {
-        config.token = None;
+        config.clear_token_for_server(server_url);
         CredentialStorage::Keychain
     } else {
-        config.token = Some(raw_token.to_string());
+        config.set_token_for_server(server_url, raw_token);
         CredentialStorage::Config
     }
 }
 
 pub fn clear_local_token(server_url: &str, config: &mut CliConfig) -> bool {
-    let had_config = config.token.take().is_some();
+    let had_config = config.clear_token_for_server(server_url);
     let removed_keychain = delete_keychain_token(server_url).unwrap_or(false);
     had_config || removed_keychain
 }
@@ -174,7 +173,11 @@ mod tests {
         let mut config = CliConfig::default();
         let storage = store_local_token("http://localhost:9876", "lucida_pat_test", &mut config);
         assert_eq!(storage, CredentialStorage::Config);
-        assert_eq!(config.token.as_deref(), Some("lucida_pat_test"));
+        assert_eq!(
+            config.token_for_server("http://localhost:9876"),
+            Some("lucida_pat_test")
+        );
+        assert_eq!(config.token_for_server("http://elsewhere"), None);
     }
 
     #[test]

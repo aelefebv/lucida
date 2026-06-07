@@ -1314,6 +1314,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &client,
                     first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
                     &config,
+                    &server.url,
                     if *archived {
                         WorkspaceLookupMode::IncludeArchived
                     } else {
@@ -1339,10 +1340,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &client,
                     Some(selector.as_str()),
                     &config,
+                    &server.url,
                     WorkspaceLookupMode::ActiveOnly,
                 )
                 .await?;
-                config.workspace = Some(workspace.id.clone());
+                config.set_workspace_for_server(&server.url, workspace.id.clone());
                 store.save(&config)?;
                 let target = target_for(&server.url, &workspace)?;
                 let output_payload = WorkspaceUseOutput {
@@ -1371,6 +1373,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &client,
                     first_workspace_selector(selector.as_deref(), cli.workspace.as_deref()),
                     &config,
+                    &server.url,
                     WorkspaceLookupMode::ActiveOnly,
                 )
                 .await?;
@@ -1421,6 +1424,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &workspace_client,
                     cli.workspace.as_deref(),
                     &config,
+                    &server.url,
                     WorkspaceLookupMode::ActiveOnly,
                 )
                 .await?;
@@ -1447,6 +1451,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &workspace_client,
                     cli.workspace.as_deref(),
                     &config,
+                    &server.url,
                     WorkspaceLookupMode::ActiveOnly,
                 )
                 .await?;
@@ -1477,6 +1482,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &workspace_client,
                     cli.workspace.as_deref(),
                     &config,
+                    &server.url,
                     WorkspaceLookupMode::ActiveOnly,
                 )
                 .await?;
@@ -1507,6 +1513,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     &workspace_client,
                     cli.workspace.as_deref(),
                     &config,
+                    &server.url,
                     WorkspaceLookupMode::ActiveOnly,
                 )
                 .await?;
@@ -1698,14 +1705,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     })?;
                 }
                 ConfigGetCommand::Workspace => {
+                    let server = resolve_server(cli.server.as_deref(), &config)?;
+                    let workspace = config.workspace_for_server(&server.url);
                     let payload = serde_json::json!({
-                        "workspace": config.workspace,
-                        "source": if config.workspace.is_some() { "config" } else { "unset" },
+                        "server": server,
+                        "workspace": workspace,
+                        "source": if workspace.is_some() { "config" } else { "unset" },
                     });
                     output.print_either(&payload, || {
-                        config
-                            .workspace
-                            .clone()
+                        workspace
+                            .map(ToString::to_string)
                             .unwrap_or_else(|| "unset".to_string())
                     })?;
                 }
@@ -1848,6 +1857,7 @@ async fn emit_saved_view_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2038,6 +2048,7 @@ async fn emit_viewport_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2098,6 +2109,7 @@ async fn emit_dataset_presence_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2171,6 +2183,7 @@ async fn emit_viewer_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2275,6 +2288,7 @@ async fn emit_peer_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2354,6 +2368,7 @@ async fn emit_plan_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2403,6 +2418,7 @@ async fn emit_debug_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;
@@ -2837,6 +2853,7 @@ async fn emit_layout_command(
         &workspace_client,
         cli.workspace.as_deref(),
         config,
+        &server.url,
         WorkspaceLookupMode::ActiveOnly,
     )
     .await?;

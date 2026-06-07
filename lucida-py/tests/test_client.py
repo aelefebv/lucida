@@ -167,9 +167,19 @@ def test_token_sourcing_prefers_env_then_config(monkeypatch):
     assert resolve_token("http://server", config={"token": "config-token"}).token == "env-token"
 
     monkeypatch.delenv("LUCIDA_TOKEN")
-    token = resolve_token("http://server", config={"token": "config-token"})
+    token = resolve_token(
+        "http://server",
+        config={"servers": {"http://server": {"token": "config-token"}}},
+    )
     assert token.token == "config-token"
     assert token.source == "config"
+    assert (
+        resolve_token(
+            "http://elsewhere",
+            config={"servers": {"http://server": {"token": "config-token"}}},
+        )
+        is None
+    )
 
 
 def test_normalize_server_accepts_bare_host():
@@ -217,7 +227,9 @@ def test_workspace_use_persists_default_workspace(tmp_path):
     workspace = client.workspaces.use("Demo")
 
     assert workspace.id == "w1"
-    assert json.loads(config_path.read_text())["workspace"] == "w1"
+    assert json.loads(config_path.read_text())["servers"]["http://127.0.0.1:9988"][
+        "workspace"
+    ] == "w1"
 
 
 def test_http_error_normalizes_forbidden(tmp_path):
