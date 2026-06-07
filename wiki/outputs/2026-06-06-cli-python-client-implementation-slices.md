@@ -412,12 +412,14 @@ Add a pure-Python server-client layer in `lucida-py` that mirrors the CLI noun m
 
 ### Acceptance criteria
 
-- [ ] Python exposes a server client with resource objects/methods matching CLI nouns where practical.
-- [ ] Python reads `LUCIDA_TOKEN` and can reuse stored CLI credentials where feasible.
-- [ ] Python can list/use workspaces, open a dataset into a workspace, inspect snapshot state, and send basic view/layer/channel commands.
-- [ ] Server-client code is pure Python unless a measured need requires pyo3 involvement.
-- [ ] Existing `PyScene` and `PyStore` local analysis APIs remain available.
-- [ ] Pytest coverage exercises auth token sourcing, workspace/dataset basics, WebSocket snapshot handling, command sending, and error normalization.
+- [x] Python exposes a server client with resource objects/methods matching CLI nouns where practical.
+- [x] Python reads `LUCIDA_TOKEN` and can reuse stored CLI credentials where feasible.
+- [x] Python can list/use workspaces, open a dataset into a workspace, inspect snapshot state, and send basic view/layer/channel commands.
+- [x] Server-client code is pure Python unless a measured need requires pyo3 involvement.
+- [x] Existing `PyScene` and `PyStore` local analysis APIs remain available.
+- [x] Pytest coverage exercises auth token sourcing, workspace/dataset basics, WebSocket snapshot handling, command sending, and error normalization.
+
+Current implementation note: `lucida-py` now exposes `LucidaClient` from the package root and `lucida.client`. It resolves server/token config through constructor args, `LUCIDA_TOKEN`, macOS Keychain, and CLI-compatible config, then exposes `workspaces`, `datasets`, `view`, `layer`, `channel`, and `debug` resources. HTTP operations use a small stdlib transport; workspace session operations use WebSocket snapshot/command messages shared with browser and CLI clients. Existing local-analysis exports remain available but are optional at import time so `from lucida import LucidaClient` does not require a built Rust extension. Tests cover token sourcing, workspace resolution/use, HTTP error normalization, WebSocket snapshot reading, dataset open, presence commands, dataset presence commands, and package-root import behavior.
 
 ### Wiki context
 
