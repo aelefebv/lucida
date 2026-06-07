@@ -97,7 +97,7 @@ Related prior issues: #739
 
 ### What to build
 
-Make workspaces the CLI discovery spine. Add workspace list/create/info/open/use, persistent default workspace selection, ID/name resolution, and the target resolver that later dataset/view/layer commands reuse to derive HTTP and WebSocket targets.
+Make workspaces the CLI discovery spine. Add workspace list/create/info/open/use, personal pinning, owner archive/restore, link sharing, member management, persistent default workspace selection, ID/name resolution, and the target resolver that later dataset/view/layer commands reuse to derive HTTP and WebSocket targets.
 
 ### Acceptance criteria
 
@@ -108,6 +108,10 @@ Make workspaces the CLI discovery spine. Add workspace list/create/info/open/use
 - [ ] Ambiguous names fail clearly and never choose implicitly.
 - [ ] `lucida workspace use <id-or-name>` persists the default workspace.
 - [ ] `lucida workspace open <id-or-name>` prints or opens the `/w/:workspace_id` browser route.
+- [ ] `lucida workspace pin|unpin <id-or-name>` update personal pin state without granting access.
+- [ ] `lucida workspace archive|restore <id-or-name>` use owner-gated lifecycle APIs.
+- [ ] `lucida workspace share show|link` expose link sharing without allowing owner links.
+- [ ] `lucida workspace member list|add|set-role|remove` expose explicit membership management.
 - [ ] Target resolution produces base HTTP URLs and `/ws/workspaces/:id` URLs without requiring users to hand-construct WebSocket URLs.
 - [ ] Mutating commands print the resolved target unless `--quiet` is set.
 - [ ] Tests cover defaults, overrides, ID/name resolution, missing defaults, ambiguous names, archived workspaces, and URL derivation.
@@ -117,6 +121,8 @@ Make workspaces the CLI discovery spine. Add workspace list/create/info/open/use
 - `wiki/systems/crates/lucida-server.md`
 - `wiki/systems/crates/lucida-cli.md`
 - `wiki/systems/subsystems/auth.md`
+
+Current implementation note: `lucida workspace pin/unpin`, `archive/restore`, `share show`, `share link <off|viewer|editor>`, and `member list/add/set-role/remove` now call the member-facing workspace APIs. Workspace defaults are stored per normalized server URL so switching servers does not reuse another server's selected workspace.
 
 ## Slice 4: Workspace-Targeted Dataset Open
 
@@ -308,6 +314,8 @@ The preferred v1 rendering path is to reuse the web renderer through a headless 
 - [ ] Render capture reports renderer startup failures, auth failures, render-ready timeout, and missing dataset references as structured errors.
 - [ ] Tests cover profile initialization, repeated command persistence, saved-view-shaped serialization, absence of durable presence fields, screenshot request/auth construction, timeout/error handling, and a smoke-level nonblank image assertion.
 
+Current implementation note: screenshot/overview capture drives the web renderer through Chrome/Chromium, waits for a readable nonblank canvas probe before `Page.captureScreenshot`, and validates the returned bytes have a PNG signature.
+
 ### Wiki context
 
 - `wiki/systems/subsystems/presence-and-follow-mode.md`
@@ -419,7 +427,7 @@ Add a pure-Python server-client layer in `lucida-py` that mirrors the CLI noun m
 - [x] Existing `PyScene` and `PyStore` local analysis APIs remain available.
 - [x] Pytest coverage exercises auth token sourcing, workspace/dataset basics, WebSocket snapshot handling, command sending, and error normalization.
 
-Current implementation note: `lucida-py` now exposes `LucidaClient` from the package root and `lucida.client`. It resolves server/token config through constructor args, `LUCIDA_TOKEN`, macOS Keychain, and CLI-compatible config, then exposes `workspaces`, `datasets`, `view`, `layer`, `channel`, and `debug` resources. HTTP operations use a small stdlib transport; workspace session operations use WebSocket snapshot/command messages shared with browser and CLI clients. Existing local-analysis exports remain available but are optional at import time so `from lucida import LucidaClient` does not require a built Rust extension. Tests cover token sourcing, workspace resolution/use, HTTP error normalization, WebSocket snapshot reading, dataset open, presence commands, dataset presence commands, and package-root import behavior.
+Current implementation note: `lucida-py` now exposes `LucidaClient` from the package root and `lucida.client`. It resolves server/token config through constructor args, `LUCIDA_TOKEN`, macOS Keychain, and CLI-compatible server-scoped config, then exposes `workspaces`, `datasets`, `view`, `layer`, `channel`, and `debug` resources. HTTP operations use a small stdlib transport; workspace session operations use WebSocket snapshot/command messages shared with browser and CLI clients. `PyScene`, `PyStore`, and `ViewportData` remain optional local-analysis exports, so `from lucida import LucidaClient` does not require a built Rust extension. The old high-level `Viewer` wrapper has been removed rather than kept as a compatibility surface. Tests cover token sourcing, workspace resolution/use, HTTP error normalization, WebSocket snapshot reading, dataset open, presence commands, dataset presence commands, and package-root import behavior.
 
 ### Wiki context
 
@@ -448,7 +456,7 @@ Finish the clean cut: update user-facing docs, examples, package metadata, and w
 - [x] #737-#743 are either closed by child slice PRs or explicitly linked as superseded by #745 and its child issues.
 - [x] Wiki updates capture any new auth/token, target-resolution, or Python-client boundaries discovered during implementation.
 
-Current implementation note: README now documents the workspace-first `lucida` CLI flow, source-checkout invocation via `cargo run -p lucida-cli -- ...`, protected-deployment `auth login`, browser verification for `lucida dataset open`, durable viewer screenshots, and the matching `LucidaClient` Python flow. `wiki/systems/crates/lucida-cli.md` now lists the current noun command tree, documents browser verification, and explicitly marks the old flat command taxonomy as non-contractual; parser tests already reject flat `open`, root `visible-chunks`, `--steer`, `--peer`, and `config set workspace`. `lucida-cli/Cargo.toml` now describes the package as installing the `lucida` product binary. GitHub issues #737-#743 were closed as superseded by #745 and its child implementation slices.
+Current implementation note: README now documents the workspace-first `lucida` CLI flow, source-checkout invocation via `cargo run -p lucida-cli -- ...`, protected-deployment `auth login`, browser verification for `lucida dataset open`, workspace pin/share examples, durable viewer screenshots, nonblank screenshot capture, server-scoped config defaults, and the matching `LucidaClient` Python flow. `wiki/systems/crates/lucida-cli.md` now lists the current noun command tree including workspace lifecycle/sharing/member commands, documents browser verification, and explicitly marks the old flat command taxonomy as non-contractual; parser tests already reject flat `open`, root `visible-chunks`, `--steer`, `--peer`, and `config set workspace`. `lucida-py` docs now document `LucidaClient` plus optional local bindings and no longer document a `Viewer` wrapper. `lucida-cli/Cargo.toml` describes the package as installing the `lucida` product binary. GitHub issues #737-#743 were closed as superseded by #745 and its child implementation slices.
 
 ### Wiki context
 

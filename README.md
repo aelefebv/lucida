@@ -58,7 +58,7 @@ Visit <http://localhost:5173>.
 
 ### Use the CLI and Python client
 
-The product CLI command is `lucida`. From a source checkout, run the same binary with `cargo run -p lucida-cli -- ...`.
+The product CLI command is `lucida`. From a source checkout, run the same binary by replacing `lucida` with `cargo run -p lucida-cli --`, for example `cargo run -p lucida-cli -- --server http://127.0.0.1:9876 status`.
 
 For an auth-disabled local server:
 
@@ -68,6 +68,8 @@ lucida --server http://127.0.0.1:9876 workspace list
 lucida --server http://127.0.0.1:9876 workspace create "local analysis"
 lucida --server http://127.0.0.1:9876 workspace use "local analysis"
 lucida --server http://127.0.0.1:9876 workspace open --no-browser
+lucida --server http://127.0.0.1:9876 workspace pin
+lucida --server http://127.0.0.1:9876 workspace share show
 ```
 
 For protected deployments, authenticate first:
@@ -87,7 +89,7 @@ lucida viewer state
 lucida viewer screenshot current-view.png
 ```
 
-The already-open browser workspace should update when `dataset open`, layout, saved-view, or other shared workspace commands land. View, camera, layer, and channel commands update the selected durable headless viewer profile by default, and can also broadcast ephemeral presence while connected.
+The already-open browser workspace should update when `dataset open`, layout, saved-view, or other shared workspace commands land. View, camera, layer, and channel commands update the selected durable headless viewer profile by default, and can also broadcast ephemeral presence while connected. `viewer screenshot`/`viewer overview` use the web renderer through Chrome/Chromium and wait for a nonblank canvas before writing the PNG.
 
 Python scripts use the same server/client model:
 
@@ -100,7 +102,7 @@ workspace.datasets.open("/var/lib/lucida/data/sample.ome.zarr")
 print(workspace.datasets.list())
 ```
 
-`LucidaClient` reads explicit constructor tokens, `LUCIDA_TOKEN`, macOS Keychain credentials created by `lucida auth login`, and the CLI-compatible config file.
+`LucidaClient` reads explicit constructor tokens, `LUCIDA_TOKEN`, macOS Keychain credentials created by `lucida auth login`, and the CLI-compatible config file. Default workspaces and config-file token fallback are scoped to the normalized server URL.
 
 ### Useful options
 

@@ -34,6 +34,14 @@ Current product commands:
 - `lucida workspace info [id-or-name] [--archived]` — show workspace details and derived target URLs.
 - `lucida workspace use <id-or-name>` — persist the default workspace.
 - `lucida workspace open [id-or-name] [--no-browser]` — mark the workspace as opened and print/open `/w/:workspace_id`.
+- `lucida workspace pin|unpin [id-or-name]` — update the current user's personal workspace pin state.
+- `lucida workspace archive|restore [id-or-name]` — archive or restore an owned workspace.
+- `lucida workspace share show [id-or-name]` — show link sharing and explicit members.
+- `lucida workspace share link <off|viewer|editor> [id-or-name]` — disable link sharing or grant viewer/editor link access.
+- `lucida workspace member list [id-or-name]` — list explicit workspace members.
+- `lucida workspace member add <email> <viewer|editor|owner> [id-or-name] [--display-name <name>]` — add or update a member.
+- `lucida workspace member set-role <email> <viewer|editor|owner> [id-or-name]` — update a member role.
+- `lucida workspace member remove <email> [id-or-name]` — remove an explicit member.
 - `lucida dataset browse [path]` — browse server-visible filesystem roots and directories.
 - `lucida dataset open <path-or-url>` — open a dataset in the selected workspace and wait for completion.
 - `lucida dataset list` — list loaded datasets in the selected workspace.
@@ -69,12 +77,15 @@ Global visible flags:
 
 ## Browser verification flow
 
-Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for `DatasetOpened`, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
+Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for the request-correlated dataset-open result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
+
+For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for a nonblank canvas probe and validates that CDP returned PNG bytes before writing the file.
 
 ## Interactions
 
 - Config is local JSON under `$LUCIDA_CONFIG_PATH`, `$XDG_CONFIG_HOME/lucida/config.json`, or `~/.config/lucida/config.json`.
-- Bearer credentials are sourced from `LUCIDA_TOKEN` first, then macOS Keychain when available, then the local config file. The file fallback is written with `0600` permissions on Unix.
+- The default server is global, while default workspace and config-file bearer-token fallback are scoped under `servers[normalized_server_url]`.
+- Bearer credentials are sourced from `LUCIDA_TOKEN` first, then macOS Keychain when available, then the server-scoped local config fallback. The file fallback is written with `0600` permissions on Unix.
 - HTTP status checks call the same public/protected server endpoints the web app uses: `/healthz`, `/readyz`, `/version`, and `/auth/whoami`.
 - Remote admin commands call `/admin/*` APIs with bearer auth and label JSON/human output as `remote_admin`, keeping them distinct from local `lucida-server` process operations.
 - Future noun commands should reuse the same config, output, error, target-resolution, HTTP, and WebSocket modules instead of adding one-off flag parsing.
@@ -84,6 +95,7 @@ Use `lucida workspace open [workspace]` to print/open the browser route for the 
 - **The product command is `lucida`.** `lucida-cli` is the crate/package implementation detail.
 - **The old flat command taxonomy is not a compatibility contract.** Flat `open`, root `visible-chunks`, `--steer`, `--peer`, and `config set workspace` are intentionally rejected in parser tests.
 - **Server input is a base HTTP URL.** Commands that need a session derive WebSocket URLs internally from the base server target.
+- **Workspace defaults are server-scoped.** Switching `--server` must not silently reuse another server's selected workspace or config-file token.
 - **Every scriptable command needs `--json`.** Human output can be concise, but automation should not parse tables.
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
 - **One command per invocation.** The CLI remains a one-shot client unless a later slice explicitly introduces a long-lived mode.
@@ -97,3 +109,4 @@ Use `lucida workspace open [workspace]` to print/open the browser route for the 
 - **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.
 - **Admin workspace commands are id-based.** Search can discover ids, but `admin workspace info/archive/restore/owner` intentionally do not reuse member-scoped workspace name resolution.
 - **Negative numeric flags use clap's accepted forms.** The parser accepts `--flag=-2` and the relevant commands enable hyphen values where practical; scripts should prefer equals-style values for clarity.
+- **Viewer screenshots require Chrome/Chromium.** Set `LUCIDA_BROWSER` when auto-discovery cannot find a browser binary; a render-ready timeout usually means the page never produced a readable, nonblank canvas.

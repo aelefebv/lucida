@@ -29,19 +29,20 @@ Three concrete uses:
 2. **Test fixtures** — building scenes and chunk plans in pytest is much faster than spinning up a browser.
 3. **Reference for command serialization** — `PyScene.pan(...)` returns the JSON of the command it just applied, which makes it the easiest way to learn the wire format.
 
-## Module map
+## Module Map
 
 - `src/lib.rs` — `PyScene`, `PyStore`, the `lucida` Python module declaration
 - `python/lucida/client.py` — pure-Python server client
-- `python/lucida/` — Python-side glue (high-level wrapper around `PyScene`, package exports)
+- `python/lucida/__init__.py` — package-root exports; `LucidaClient` is available without building the Rust extension
+- `python/lucida/zarr_reader.py` — local OME-Zarr helper types used by local analysis scripts
+- `tests/test_client.py` — pytest coverage for token sourcing, workspace/dataset calls, WebSocket command messages, and package-root import behavior
 - `pyproject.toml` — maturin build config; declares the `lucida` package
-- `test.py` — usage examples
 
 ## Interactions
 
 - **`LucidaClient` connects to [[lucida-server]]** over HTTP for status/auth/workspace APIs and WebSocket for workspace session state and commands.
 - **Token sourcing mirrors [[lucida-cli]] where practical.** Explicit constructor token wins, then `LUCIDA_TOKEN`, then macOS Keychain under the `lucida-cli` service, then the CLI-compatible config token.
-- **Server config mirrors [[lucida-cli]] where practical.** `LUCIDA_CONFIG_PATH` wins, then `$XDG_CONFIG_HOME/lucida/config.json`, then `~/.config/lucida/config.json`; `LucidaClient(...).workspaces.use(...)` persists the default workspace id.
+- **Server config mirrors [[lucida-cli]] where practical.** `LUCIDA_CONFIG_PATH` wins, then `$XDG_CONFIG_HOME/lucida/config.json`, then `~/.config/lucida/config.json`; `LucidaClient(...).workspaces.use(...)` persists the default workspace id under the normalized server URL.
 - **Local bindings import** [[lucida-core]] and [[lucida-store]] directly. No FFI tricks — pyo3 handles the conversion.
 - **JSON is the lingua franca**: `apply_command(json)`, `presence_json()`, `chunk_plan()` all use serde JSON to cross the boundary. This avoids defining a parallel pyo3 type for every Rust struct.
 - **Workspace commands use the same protocol messages as browser/CLI sessions.** Dataset open sends `open_remote_dataset`; view commands send `presence`; layer/channel commands send `dataset_presence`.
@@ -49,7 +50,8 @@ Three concrete uses:
 ## Invariants
 
 - **The server client is pure Python.** It uses stdlib `urllib` for HTTP and the existing `websockets` package for workspace sessions; no `pyo3` bridge is required for server operations.
-- **Package-root imports must not require the Rust extension.** `from lucida import LucidaClient` should work in an editable/source checkout even before `maturin develop`; missing local-analysis dependencies leave `PyScene`, `PyStore`, `Viewer`, or `ViewportData` as `None`.
+- **Package-root imports must not require the Rust extension.** `from lucida import LucidaClient` should work in an editable/source checkout even before `maturin develop`; missing local-analysis dependencies leave `PyScene`, `PyStore`, or `ViewportData` as `None`.
+- **There is no compatibility `Viewer` wrapper.** Server-facing Python automation goes through `LucidaClient`; `PyScene`/`PyStore` remain local-analysis bindings only.
 - **Synchronous workspace methods are wrappers around async WebSocket operations.** Use the `async_*` variants inside a running event loop.
 - **`runtime` is a per-`PyStore` tokio runtime.** The crate uses `block_on` to bridge async I/O into Python's sync calls. One runtime per store; multiple stores get multiple runtimes. Acceptable because `PyStore` is a long-lived object.
 - **`PyScene::import_presence` preserves the local viewport size.** The incoming presence's camera viewport is overwritten with the local one before assignment, because the client's window dimensions are local and shouldn't be clobbered by a remote peer.
