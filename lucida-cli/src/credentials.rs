@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::config::CliConfig;
 use crate::error::CliError;
 
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "lucida-cli";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
