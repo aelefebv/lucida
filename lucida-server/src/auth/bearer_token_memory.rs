@@ -21,6 +21,13 @@ impl MemoryBearerTokenStore {
     pub fn len(&self) -> usize {
         self.rows.lock().expect("memory store mutex poisoned").len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows
+            .lock()
+            .expect("memory store mutex poisoned")
+            .is_empty()
+    }
 }
 
 #[async_trait]

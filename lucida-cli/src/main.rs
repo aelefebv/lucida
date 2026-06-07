@@ -1204,17 +1204,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 no_browser,
                 timeout_seconds,
             } => {
-                let result = login(
-                    cli.server.as_deref(),
-                    &mut config,
-                    &store,
+                let options = LoginOptions {
                     name,
-                    *ttl_days,
-                    *no_browser,
-                    Duration::from_secs(*timeout_seconds),
-                    &output,
-                )
-                .await?;
+                    ttl_days: *ttl_days,
+                    no_browser: *no_browser,
+                    timeout: Duration::from_secs(*timeout_seconds),
+                };
+                let result =
+                    login(cli.server.as_deref(), &mut config, &store, options, &output).await?;
                 output.print_either(&result, || {
                     format!(
                         "Logged in as {}\nToken: {}\nStorage: {}\nConfig: {}",
@@ -2910,22 +2907,26 @@ async fn load_status(
     Ok(client.status_report(server).await)
 }
 
+struct LoginOptions<'a> {
+    name: &'a str,
+    ttl_days: u64,
+    no_browser: bool,
+    timeout: Duration,
+}
+
 async fn login(
     server_override: Option<&str>,
     config: &mut CliConfig,
     store: &ConfigStore,
-    name: &str,
-    ttl_days: u64,
-    no_browser: bool,
-    timeout: Duration,
+    options: LoginOptions<'_>,
     output: &Output,
 ) -> Result<LoginResult, CliError> {
     let server = resolve_server(server_override, config)?;
     let client = AuthClient::new(server.url.clone());
     let raw_token = generate_raw_token();
-    let ttl_seconds = ttl_days.saturating_mul(24 * 60 * 60);
+    let ttl_seconds = options.ttl_days.saturating_mul(24 * 60 * 60);
     let start = client
-        .start_login(name, &raw_token, Some(ttl_seconds))
+        .start_login(options.name, &raw_token, Some(ttl_seconds))
         .await?;
     let approval_url = format!("{}{}", server.url, start.approval_path);
 
@@ -2938,11 +2939,11 @@ async fn login(
         println!("{approval_url}");
         println!("Code: {}", start.user_code);
     }
-    if !no_browser {
+    if !options.no_browser {
         let _ = open_browser(&approval_url);
     }
 
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + options.timeout;
     loop {
         match client
             .poll_login(&start.poll_path, &start.poll_token)
@@ -3608,22 +3609,22 @@ mod tests {
 
         let active = parse(&["layout", "active"]);
         match active.command {
-            Command::Layout { command, .. } => match command {
-                LayoutCommand::Active { dataset } => assert!(dataset.is_none()),
-                _ => panic!("expected layout active"),
-            },
+            Command::Layout {
+                command: LayoutCommand::Active { dataset },
+                ..
+            } => assert!(dataset.is_none()),
             _ => panic!("expected layout active"),
         }
 
         let set = parse(&["layout", "set", "wds-test", "layout-source"]);
         match set.command {
-            Command::Layout { command, .. } => match command {
-                LayoutCommand::Set { dataset, layout } => {
-                    assert_eq!(dataset, "wds-test");
-                    assert_eq!(layout, "layout-source");
-                }
-                _ => panic!("expected layout set"),
-            },
+            Command::Layout {
+                command: LayoutCommand::Set { dataset, layout },
+                ..
+            } => {
+                assert_eq!(dataset, "wds-test");
+                assert_eq!(layout, "layout-source");
+            }
             _ => panic!("expected layout set"),
         }
     }

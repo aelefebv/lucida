@@ -364,6 +364,7 @@ pub struct ChannelState {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum DatasetDisplayCommand {
     SetOrder {
         selectors: Vec<String>,
@@ -648,10 +649,10 @@ impl PeerWorkspaceClient {
         position: Option<[f64; 2]>,
         wait: Duration,
     ) -> Result<PeerCursorResult, CliError> {
-        if let Some([x, y]) = position {
-            if !x.is_finite() || !y.is_finite() {
-                return Err(CliError::config("peer cursor coordinates must be finite"));
-            }
+        if let Some([x, y]) = position
+            && (!x.is_finite() || !y.is_finite())
+        {
+            return Err(CliError::config("peer cursor coordinates must be finite"));
         }
 
         let (socket, _response) =
@@ -3353,7 +3354,7 @@ mod tests {
         assert_eq!(value["planner_parity"], false);
         assert!(value["viewer"]["camera"].is_object());
         assert!(value["datasets"].as_array().unwrap().len() >= 2);
-        assert!(value["caveats"].as_array().unwrap().len() >= 1);
+        assert!(!value["caveats"].as_array().unwrap().is_empty());
     }
 
     #[test]
