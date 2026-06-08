@@ -1532,12 +1532,14 @@ fn apply_overview_to_scene(scene: &mut Scene, viewport: [u32; 2]) -> Result<(), 
     if viewport[0] == 0 || viewport[1] == 0 {
         return Err(CliError::config("overview viewport must be positive"));
     }
-    let (width, height, depth) = first_visible_image_shape(scene).ok_or_else(|| {
+    let bounds = scene.visible_content_bounds_2d().ok_or_else(|| {
         CliError::new(
             ErrorKind::MissingResource,
             "no visible image dataset is available for overview",
         )
     })?;
+    let width = bounds.width();
+    let height = bounds.height();
     if width <= 0.0 || height <= 0.0 {
         return Err(CliError::new(
             ErrorKind::MissingResource,
@@ -1559,39 +1561,14 @@ fn apply_overview_to_scene(scene: &mut Scene, viewport: [u32; 2]) -> Result<(), 
     apply_viewport_command(
         scene,
         &ViewportCommand::SetCenter {
-            x: width / 2.0,
-            y: height / 2.0,
+            x: bounds.center_x(),
+            y: bounds.center_y(),
         },
     );
     apply_viewport_command(scene, &ViewportCommand::SetZoom { value: zoom });
-    let z = depth.saturating_sub(1) / 2;
+    let z = bounds.max_depth.saturating_sub(1) / 2;
     apply_viewport_command(scene, &ViewportCommand::SetZ { z });
     Ok(())
-}
-
-fn first_visible_image_shape(scene: &Scene) -> Option<(f64, f64, u32)> {
-    for id in &scene.dataset_order {
-        let settings = scene.dataset_settings.get(id).cloned().unwrap_or_default();
-        if !settings.visible {
-            continue;
-        }
-        let Some(manifest) = scene.document.manifests.get(id) else {
-            continue;
-        };
-        let images = manifest.images();
-        let Some(image) = images.first() else {
-            continue;
-        };
-        let Some(level) = image.multiscale.levels.first() else {
-            continue;
-        };
-        return Some((
-            level.shape[4] as f64,
-            level.shape[3] as f64,
-            level.shape[2].min(u32::MAX as u64) as u32,
-        ));
-    }
-    None
 }
 
 fn active_layouts_from_document(

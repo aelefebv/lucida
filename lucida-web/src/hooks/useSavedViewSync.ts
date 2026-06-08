@@ -19,6 +19,7 @@ import { buildCapture } from "../savedView/captureBuilder.ts";
 import type { DatasetReferenceMode, SavedView } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { syncSceneViewState } from "./sceneViewState.ts";
 
 interface Params {
   /** Returns the live `WasmScene`, or null if not yet loaded. */
@@ -49,6 +50,7 @@ interface Params {
   setT: React.Dispatch<React.SetStateAction<number>>;
   setZ: React.Dispatch<React.SetStateAction<number>>;
   setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
+  setMultiChannel: React.Dispatch<React.SetStateAction<boolean>>;
   /** Per-dataset auto-contrast preference (read for capture, restored on
    *  apply). Lives in `useDatasetSettings.autoContrastMap`. Without this
    *  round-trip, recipient's auto-contrast immediately overwrites the
@@ -80,6 +82,7 @@ export function useSavedViewSync({
   setT,
   setZ,
   setViewMode,
+  setMultiChannel,
   autoContrastMapRef,
   setAutoContrastMap,
   datasetReferenceMode = "source-url",
@@ -218,7 +221,7 @@ export function useSavedViewSync({
   }, [bundle.applier, onApplyResult]);
 
   // Apply-complete: refresh the render loop (Bug #2) and push post-apply
-  // C/T/Z/viewMode back to React state (Bug #3). The applier writes to
+  // C/T/Z/viewMode/multiChannel back to React state (Bug #3). The applier writes to
   // WASM only; without this the RAF loop sits idle until the next user
   // input and the slider mirrors stay stale. Mirrors the bridge's
   // follow/presence-update flow (useBridge.ts onPresenceUpdate / onFollowChanged).
@@ -227,10 +230,7 @@ export function useSavedViewSync({
       const scene = getScene();
       if (!scene) return;
       try {
-        setZ(scene.z());
-        setT(scene.t());
-        setC(scene.c());
-        setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
+        syncSceneViewState(scene, { setZ, setT, setC, setViewMode, setMultiChannel });
       } catch (e) {
         console.warn("[SavedView] post-apply state read failed:", e);
       }
@@ -256,7 +256,7 @@ export function useSavedViewSync({
       loopRef.current?.markInteractiveDirty("savedview_apply");
       loopRef.current?.markResidencyDirty("savedview_apply");
     });
-  }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setAutoContrastMap]);
+  }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setMultiChannel, setAutoContrastMap]);
 
   // Stable notifyChange: App.tsx wraps emitPresence/emitDatasetPresence
   // so every viewport mutation co-taps the URL (Bug #1 fix). Forwards

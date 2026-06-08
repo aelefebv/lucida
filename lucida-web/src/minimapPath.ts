@@ -44,6 +44,47 @@ export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels
   return null;
 }
 
+export interface SliceViewBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+export interface SliceViewportMemberInput {
+  datasetId: string;
+  memberId: string;
+  modelMatrix: Float32Array;
+  position: [number, number];
+  width: number;
+  height: number;
+  depth: number;
+}
+
+export function intersectSliceViewWithMember(
+  sceneBounds: SliceViewBounds,
+  member: SliceViewportMemberInput,
+): MinimapOverlayData["sliceViewports"][number] | null {
+  const localMinX = Math.max(0, sceneBounds.minX - member.position[0]);
+  const localMinY = Math.max(0, sceneBounds.minY - member.position[1]);
+  const localMaxX = Math.min(member.width, sceneBounds.maxX - member.position[0]);
+  const localMaxY = Math.min(member.height, sceneBounds.maxY - member.position[1]);
+
+  if (localMaxX <= localMinX || localMaxY <= localMinY) {
+    return null;
+  }
+
+  return {
+    datasetId: member.datasetId,
+    memberId: member.memberId,
+    modelMatrix: member.modelMatrix,
+    bounds: { minX: localMinX, minY: localMinY, maxX: localMaxX, maxY: localMaxY },
+    width: member.width,
+    height: member.height,
+    depth: member.depth,
+  };
+}
+
 /**
  * Mark a dataset's explicit coarse level as fully seeded (all chunks already uploaded).
  * Called when overview data was bulk-uploaded externally.
@@ -226,6 +267,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const layers: MinimapLayerParams[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
   const datasetOverlayLayers: MinimapOverlayData["datasetLayers"] = [];
+  const sliceViewportMembers: SliceViewportMemberInput[] = [];
 
   for (const dsId of layerOrder) {
     const ds = datasets.get(dsId);
@@ -233,10 +275,18 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     const settings = allSettings[dsId];
     if (!settings || !settings.visible) continue;
 
+    let memberPositions: Record<string, [number, number]> = {};
+    try {
+      memberPositions = JSON.parse(scene.member_positions(dsId));
+    } catch {
+      memberPositions = {};
+    }
+
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
       const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
       const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
+      const level0 = img.multiscale.levels[0];
 
       layers.push({
         datasetId: memberId,
@@ -248,9 +298,20 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       });
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
+      if (level0) {
+        sliceViewportMembers.push({
+          datasetId: dsId,
+          memberId,
+          modelMatrix: model,
+          position: memberPositions[img.owner] ?? memberPositions[memberId] ?? [0, 0],
+          width: level0.shape[Axis.X],
+          height: level0.shape[Axis.Y],
+          depth: level0.shape[Axis.Z],
+        });
+      }
     }
 
-    // Dataset-level overlay layer for view rectangle and frustum
+    // Dataset-level overlay layer for volume frustum
     const dsModel = new Float32Array(scene.scene_model_matrix_for(dsId));
     const dsInvModel = new Float32Array(scene.inv_scene_model_matrix_for(dsId));
     const volShape = scene.dataset_volume_shape(dsId);
@@ -285,8 +346,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       }
     }
 
-    // Slice view bounds (2D only)
-    let sliceViewBounds: MinimapOverlayData["sliceViewBounds"] = null;
+    // Slice view bounds (2D only), expressed in scene XY coordinates.
+    let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
     if (mode === "slice") {
       const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
       const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
@@ -294,7 +355,10 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       const c = scene.center();
       const halfW = mainW / (2 * z);
       const halfH = mainH / (2 * z);
-      sliceViewBounds = { minX: c[0] - halfW, minY: c[1] - halfH, maxX: c[0] + halfW, maxY: c[1] + halfH };
+      const sceneBounds = { minX: c[0] - halfW, minY: c[1] - halfH, maxX: c[0] + halfW, maxY: c[1] + halfH };
+      sliceViewports = sliceViewportMembers
+        .map((member) => intersectSliceViewWithMember(sceneBounds, member))
+        .filter((viewport): viewport is MinimapOverlayData["sliceViewports"][number] => viewport !== null);
     }
 
     // Main camera inv view-proj (3D only)
@@ -305,6 +369,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       viewProj,
       layers: overlayLayers,
       datasetLayers: datasetOverlayLayers,
+      sliceViewports,
       mode,
       theta,
       phi,
@@ -312,7 +377,6 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       canvasH: backingSize,
       currentZ,
       datasetDims,
-      sliceViewBounds,
       mainInvViewProj,
     });
   }

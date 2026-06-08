@@ -4,7 +4,7 @@
 //   - Bug 1: notifyChange is exposed and forwards to UrlSync.
 //   - Bug 2: applier's apply-complete fires markInteractiveDirty/Residency.
 //   - Bug 3: applier's apply-complete pushes post-apply C/T/Z/viewMode
-//     back to the React-side dim mirrors.
+//     and multiChannel back to the React-side dim mirrors.
 //
 // Mocks `lucida-core`'s `dataset_id_for_url` so the hook can construct
 // without a wasm init (mirrors applier.test.ts's injected fakeIdForUrl).
@@ -29,10 +29,12 @@ interface MockScene {
   cVal: number;
   tVal: number;
   cameraModeVal: string;
+  multiChannelVal: boolean;
   z: () => number;
   c: () => number;
   t: () => number;
   camera_mode: () => string;
+  multi_channel: () => boolean;
   apply_command: (json: string) => void;
   dataset_ids: () => string;
   available_layouts: (id: string) => string;
@@ -53,10 +55,12 @@ function makeMockScene(): MockScene {
     cVal: 0,
     tVal: 0,
     cameraModeVal: "slice",
+    multiChannelVal: false,
     z: () => m.zVal,
     c: () => m.cVal,
     t: () => m.tVal,
     camera_mode: () => m.cameraModeVal,
+    multi_channel: () => m.multiChannelVal,
     apply_command(json: string) {
       try {
         const cmd = JSON.parse(json);
@@ -64,6 +68,7 @@ function makeMockScene(): MockScene {
         if (cmd.type === "set_t") m.tVal = cmd.t;
         if (cmd.type === "set_z") m.zVal = cmd.z;
         if (cmd.type === "set_z_range") m.zVal = cmd.start;
+        if (cmd.type === "set_multi_channel") m.multiChannelVal = cmd.enabled;
       } catch { /* ignore */ }
     },
     dataset_ids: () => "[]",
@@ -99,6 +104,7 @@ interface Captured {
     c: number;
     t: number;
     viewMode: "2d" | "3d";
+    multiChannel: boolean;
   } | null;
 }
 
@@ -114,6 +120,7 @@ function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
   const [c, setC] = useState(initial?.c ?? 0);
   const [t, setT] = useState(initial?.t ?? 0);
   const [viewMode, setViewMode] = useState<"2d" | "3d">(initial?.viewMode ?? "2d");
+  const [multiChannel, setMultiChannel] = useState(false);
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   // Mirror the latest map into a ref via useLayoutEffect — the hook reads
   // .current from event handlers and follow-on effects, all of which fire
@@ -133,11 +140,12 @@ function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
     setT,
     setZ,
     setViewMode,
+    setMultiChannel,
     autoContrastMapRef,
     setAutoContrastMap,
   });
   useEffect(() => {
-    outRef.current = { handle, z, c, t, viewMode };
+    outRef.current = { handle, z, c, t, viewMode, multiChannel };
   });
   return null;
 }
@@ -277,5 +285,23 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     });
     await act(async () => { /* flush pending effects */ });
     expect(outRef.current?.viewMode).toBe("3d");
+  });
+
+  it("syncs multiChannel from post-apply scene state", async () => {
+    const loop = makeMockLoop();
+    await act(async () => {
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+    });
+    expect(outRef.current?.multiChannel).toBe(false);
+
+    const v = emptyView();
+    v.view.multi_channel = true;
+    await act(async () => {
+      await outRef.current!.handle.applier.apply(v);
+    });
+    await act(async () => { /* flush pending effects */ });
+
+    expect(scene.multiChannelVal).toBe(true);
+    expect(outRef.current?.multiChannel).toBe(true);
   });
 });
