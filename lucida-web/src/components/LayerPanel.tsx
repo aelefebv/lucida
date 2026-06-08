@@ -100,13 +100,25 @@ export function LayerPanel({
         <h3>Layers</h3>
         <div className="layer-panel-header-buttons">
           {viewModeToggle && (
-            <button onClick={viewModeToggle.onClick}>{viewModeToggle.label}</button>
+            <button
+              aria-label={`Switch view mode to ${viewModeToggle.label}`}
+              onClick={viewModeToggle.onClick}
+            >
+              {viewModeToggle.label}
+            </button>
           )}
           {cameraModeToggle && (
-            <button onClick={cameraModeToggle.onClick} title="Toggle camera mode (F)">{cameraModeToggle.label}</button>
+            <button
+              aria-label={`Switch camera mode to ${cameraModeToggle.label}`}
+              onClick={cameraModeToggle.onClick}
+              title="Toggle camera mode (F)"
+            >
+              {cameraModeToggle.label}
+            </button>
           )}
           {debugToggle && (
             <button
+              aria-label={debugToggle.label}
               onClick={debugToggle.onClick}
               title="Toggle debug overlay"
               style={debugToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
@@ -114,7 +126,7 @@ export function LayerPanel({
               {debugToggle.label}
             </button>
           )}
-          <button onClick={onAddLayer}>+ Add</button>
+          <button aria-label="Add layer" onClick={onAddLayer}>+ Add</button>
         </div>
       </div>
       <div className="layer-list">
@@ -135,6 +147,8 @@ export function LayerPanel({
                 <button
                   className="layer-eye-btn"
                   title={layer.visible ? "Hide" : "Show"}
+                  aria-label={`${layer.visible ? "Hide" : "Show"} layer ${layer.name}`}
+                  aria-pressed={layer.visible}
                   onClick={(e) => { e.stopPropagation(); onSetVisible(layer.id, !layer.visible); }}
                 >
                   {layer.visible ? "\u25C9" : "\u25CB"}
@@ -143,6 +157,7 @@ export function LayerPanel({
                 <input
                   type="range"
                   className="layer-opacity-slider"
+                  aria-label={`${layer.name} opacity`}
                   min={0}
                   max={100}
                   value={Math.round(layer.opacity * 100)}
@@ -153,6 +168,8 @@ export function LayerPanel({
                 <button
                   className="layer-expand-btn"
                   title={isExpanded ? "Collapse" : "Expand"}
+                  aria-label={`${isExpanded ? "Collapse" : "Expand"} layer ${layer.name}`}
+                  aria-expanded={isExpanded}
                   onClick={(e) => { e.stopPropagation(); onToggleExpand(layer.id); }}
                 >
                   {isExpanded ? "\u25B2" : "\u25BC"}
@@ -174,6 +191,8 @@ export function LayerPanel({
                             <button
                               className="layer-eye-btn"
                               title={ch.visible ? "Hide channel" : "Show channel"}
+                              aria-label={`${ch.visible ? "Hide" : "Show"} ${layer.name} channel ${chIdx}`}
+                              aria-pressed={ch.visible}
                               onClick={() => onChannelSetVisible?.(layer.id, chIdx, !ch.visible)}
                             >
                               {ch.visible ? "\u25C9" : "\u25CB"}
@@ -181,6 +200,7 @@ export function LayerPanel({
                             <span className="channel-label">Ch {chIdx}</span>
                             <ColormapSelector
                               value={ch.colormap}
+                              label={`${layer.name} channel ${chIdx} colormap`}
                               onChange={(cmap) => onChannelSetColormap?.(layer.id, chIdx, cmap)}
                             />
                           </div>
@@ -200,6 +220,7 @@ export function LayerPanel({
                                 fullRange={false}
                                 onFullRangeToggle={() => {}}
                                 fullRangeMax={layer.fullRangeMax}
+                                labelPrefix={`${layer.name} channel ${chIdx}`}
                               />
                             </div>
                           )}
@@ -208,6 +229,7 @@ export function LayerPanel({
                       <div className="layer-detail-row">
                         <label>Ch Blend</label>
                         <select
+                          aria-label={`${layer.name} channel blend mode`}
                           value={layer.channelBlendMode}
                           onChange={(e) => onChannelSetBlendMode?.(layer.id, e.target.value)}
                         >
@@ -233,11 +255,13 @@ export function LayerPanel({
                         fullRange={layer.fullRange}
                         onFullRangeToggle={() => onFullRangeToggle(layer.id)}
                         fullRangeMax={layer.fullRangeMax}
+                        labelPrefix={layer.name}
                       />
                       <div className="layer-detail-row">
                         <label>Colormap</label>
                         <ColormapSelector
                           value={layer.colormap}
+                          label={`${layer.name} colormap`}
                           onChange={(cmap) => onSetColormap(layer.id, cmap)}
                         />
                       </div>
@@ -246,6 +270,7 @@ export function LayerPanel({
                   <div className="layer-detail-row">
                     <label>Blend</label>
                     <select
+                      aria-label={`${layer.name} blend mode`}
                       value={layer.blendMode}
                       onChange={(e) => onSetBlendMode(layer.id, e.target.value)}
                     >
@@ -257,6 +282,7 @@ export function LayerPanel({
                   <div className="layer-detail-row">
                     <label>Rendering</label>
                     <select
+                      aria-label={`${layer.name} rendering mode`}
                       value={layer.renderMode}
                       onChange={(e) => onSetRenderMode(layer.id, e.target.value)}
                     >
@@ -268,6 +294,7 @@ export function LayerPanel({
                     <div className="layer-detail-row">
                       <label>Detail</label>
                       <select
+                        aria-label={`${layer.name} detail level`}
                         value={layer.detailLevelOverride ?? ""}
                         onChange={(e) => {
                           const value = e.target.value;
@@ -288,6 +315,7 @@ export function LayerPanel({
                       onClick={() => onMoveLayer(layer.id, "up")}
                       disabled={index === 0}
                       title="Move up (render later / on top)"
+                      aria-label={`Move layer ${layer.name} up`}
                     >
                       Up
                     </button>
@@ -295,12 +323,14 @@ export function LayerPanel({
                       onClick={() => onMoveLayer(layer.id, "down")}
                       disabled={index === layers.length - 1}
                       title="Move down (render first / behind)"
+                      aria-label={`Move layer ${layer.name} down`}
                     >
                       Down
                     </button>
                     <button
                       onClick={() => onRemoveLayer(layer.id)}
                       style={{ marginLeft: "auto", color: "#f44" }}
+                      aria-label={`Remove layer ${layer.name}`}
                     >
                       Remove
                     </button>

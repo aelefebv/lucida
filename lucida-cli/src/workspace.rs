@@ -64,7 +64,6 @@ pub struct WorkspaceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceUserState {
     pub workspace_id: String,
-    pub user_email: String,
     pub last_opened_at: Option<String>,
     pub pinned_at: Option<String>,
 }
@@ -91,7 +90,7 @@ pub struct WorkspaceListOutput {
     pub workspaces: Vec<WorkspaceSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceTarget {
     pub id: String,
     pub name: String,
@@ -813,6 +812,19 @@ mod tests {
             archived_at: Some("2026-06-06T00:00:00Z".into()),
             ..summary(id, name)
         }
+    }
+
+    #[test]
+    fn workspace_user_state_decodes_server_pin_response() {
+        let state: WorkspaceUserState = serde_json::from_value(serde_json::json!({
+            "workspace_id": "ws-1",
+            "last_opened_at": "2026-06-07T12:00:00Z",
+            "pinned_at": "2026-06-07T12:01:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(state.workspace_id, "ws-1");
+        assert_eq!(state.pinned_at.as_deref(), Some("2026-06-07T12:01:00Z"));
     }
 
     #[test]

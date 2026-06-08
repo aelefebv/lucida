@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import builtins
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from lucida.client import (  # noqa: E402
     LucidaClient,
     LucidaError,
     WorkspaceResource,
+    default_ws_connect,
     normalize_server_base_url,
     resolve_token,
 )
@@ -191,6 +193,23 @@ def test_package_root_import_exposes_server_client():
 
     assert lucida.LucidaClient is LucidaClient
     assert not hasattr(lucida, "Viewer")
+
+
+def test_missing_websockets_error_points_to_project_environment(monkeypatch):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "websockets":
+            raise ImportError("missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(LucidaError) as exc_info:
+        default_ws_connect("ws://127.0.0.1:9876/ws/workspaces/w1", {})
+
+    assert exc_info.value.kind == "config"
+    assert "uv run python" in exc_info.value.message
 
 
 def test_workspace_list_builds_bearer_request(tmp_path):

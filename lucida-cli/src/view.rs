@@ -581,11 +581,15 @@ impl PeerWorkspaceClient {
         Ok(peer_list_result(&snapshot))
     }
 
-    pub async fn follow(
+    pub async fn follow_live<F>(
         &self,
         target: ClientId,
         wait: Duration,
-    ) -> Result<PeerFollowResult, CliError> {
+        on_followed: F,
+    ) -> Result<PeerFollowResult, CliError>
+    where
+        F: FnOnce(PeerFollowResult) -> Result<(), CliError>,
+    {
         let (socket, _response) =
             connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
                 .await
@@ -599,7 +603,7 @@ impl PeerWorkspaceClient {
         send_client_message(&mut write, &follow_message(Some(target))).await?;
         let changes =
             wait_for_follow_change(&mut incoming, snapshot.your_id, Some(target), wait).await?;
-        Ok(PeerFollowResult {
+        let followed = PeerFollowResult {
             snapshot_seq: snapshot.seq,
             own_client_id: snapshot.your_id,
             accepted: true,
@@ -607,30 +611,10 @@ impl PeerWorkspaceClient {
             requested_target: Some(target),
             current_target: Some(target),
             changes,
-        })
-    }
+        };
+        on_followed(followed)?;
 
-    pub async fn unfollow(&self, wait: Duration) -> Result<PeerFollowResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
-        let (mut write, read) = socket.split();
-        let mut incoming = incoming_messages(read);
-        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
-        let before = own_presence(&snapshot)?.following;
-        if before.is_none() {
-            return Ok(PeerFollowResult {
-                snapshot_seq: snapshot.seq,
-                own_client_id: snapshot.your_id,
-                accepted: true,
-                changed: false,
-                requested_target: None,
-                current_target: None,
-                changes: Vec::new(),
-            });
-        }
-
+        tokio::signal::ctrl_c().await.map_err(CliError::from)?;
         send_client_message(&mut write, &follow_message(None)).await?;
         let changes = wait_for_follow_change(&mut incoming, snapshot.your_id, None, wait).await?;
         Ok(PeerFollowResult {
@@ -727,6 +711,7 @@ impl ViewerProfileClient {
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
         let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
+        validate_viewport_indices(&scene, &command)?;
         apply_viewport_command(&mut scene, &command);
         let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
         let record = self
@@ -1396,6 +1381,7 @@ fn apply_presence_command(
     })?;
 
     let mut scene = scene_from_presence(&snapshot.document, source_presence);
+    validate_viewport_indices(&scene, &command)?;
     apply_viewport_command(&mut scene, &command);
 
     Ok(ViewApplyResult {
@@ -1658,6 +1644,80 @@ fn apply_viewport_command(scene: &mut Scene, command: &ViewportCommand) {
         _ => {}
     }
     scene.apply(CoreCommand::Viewport(command.clone()));
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewIndexBounds {
+    t: u32,
+    c: u32,
+    z: u32,
+}
+
+fn validate_viewport_indices(scene: &Scene, command: &ViewportCommand) -> Result<(), CliError> {
+    let Some(bounds) = visible_view_index_bounds(scene) else {
+        return Ok(());
+    };
+
+    match command {
+        ViewportCommand::SetZ { z } if *z >= bounds.z => Err(view_index_error("Z", *z, bounds.z)),
+        ViewportCommand::SetZRange { start, end } => {
+            if *start >= bounds.z || *end > bounds.z {
+                return Err(CliError::config(format!(
+                    "visible datasets have {count} Z plane(s); requested Z range {start}..{end}",
+                    count = bounds.z,
+                )));
+            }
+            Ok(())
+        }
+        ViewportCommand::SetT { t } if *t >= bounds.t => Err(view_index_error("T", *t, bounds.t)),
+        ViewportCommand::SetC { c } if *c >= bounds.c => Err(view_index_error("C", *c, bounds.c)),
+        _ => Ok(()),
+    }
+}
+
+fn view_index_error(axis: &str, requested: u32, count: u32) -> CliError {
+    CliError::config(format!(
+        "visible datasets have {count} {axis} value(s); requested {axis} index {requested}"
+    ))
+}
+
+fn visible_view_index_bounds(scene: &Scene) -> Option<ViewIndexBounds> {
+    let mut bounds: Option<ViewIndexBounds> = None;
+    for id in &scene.dataset_order {
+        let settings = scene.dataset_settings.get(id).cloned().unwrap_or_default();
+        if !settings.visible {
+            continue;
+        }
+        let Some(manifest) = scene.document.manifests.get(id) else {
+            continue;
+        };
+        let Some(level) = manifest
+            .images()
+            .first()
+            .and_then(|image| image.multiscale.levels.first())
+        else {
+            continue;
+        };
+        let current = ViewIndexBounds {
+            t: shape_count_to_u32(level.shape[0]),
+            c: shape_count_to_u32(level.shape[1]),
+            z: shape_count_to_u32(level.shape[2]),
+        };
+        bounds = Some(if let Some(existing) = bounds {
+            ViewIndexBounds {
+                t: existing.t.min(current.t),
+                c: existing.c.min(current.c),
+                z: existing.z.min(current.z),
+            }
+        } else {
+            current
+        });
+    }
+    bounds
+}
+
+fn shape_count_to_u32(value: u64) -> u32 {
+    value.min(u32::MAX as u64) as u32
 }
 
 fn display_viewport_command(
@@ -3167,13 +3227,36 @@ mod tests {
     #[test]
     fn viewport_command_emits_presence_message_not_document_command() {
         let result =
-            apply_presence_command(&snapshot(), ViewportCommand::SetZ { z: 5 }, None).unwrap();
+            apply_presence_command(&snapshot(), ViewportCommand::SetZ { z: 4 }, None).unwrap();
         let value = serde_json::to_value(presence_message(&result)).unwrap();
 
         assert_eq!(value["type"], "presence");
         assert!(value.get("command").is_none());
-        assert_eq!(value["view"]["z_range"]["start"], 5);
-        assert_eq!(value["view"]["z_range"]["end"], 6);
+        assert_eq!(value["view"]["z_range"]["start"], 4);
+        assert_eq!(value["view"]["z_range"]["end"], 5);
+    }
+
+    #[test]
+    fn viewport_slice_rejects_indices_outside_visible_dataset_bounds() {
+        let error =
+            apply_presence_command(&display_snapshot(), ViewportCommand::SetZ { z: 5 }, None)
+                .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert!(error.message.contains("requested Z index 5"));
+    }
+
+    #[test]
+    fn viewport_z_range_rejects_ranges_outside_visible_dataset_bounds() {
+        let error = apply_presence_command(
+            &display_snapshot(),
+            ViewportCommand::SetZRange { start: 3, end: 9 },
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert!(error.message.contains("requested Z range 3..9"));
     }
 
     #[test]

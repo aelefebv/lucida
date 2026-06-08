@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { LayerInfo } from "../components/LayerPanel.tsx";
@@ -67,6 +67,7 @@ export function useDatasetSettings({
   const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
   const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
   const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
+  const lastAutoExpandedLayerRef = useRef<string | null>(null);
   // Mirror the autoContrast map into a ref so the buildLayerInfos closure
   // (called during render and from event handlers) reads the latest map
   // without depending on it identity-wise.
@@ -97,6 +98,13 @@ export function useDatasetSettings({
     setExpandedLayerId(prev => prev === id ? null : id);
     setSelectedDatasetId(id);
   }, [setSelectedDatasetId]);
+
+  useEffect(() => {
+    if (!selectedDatasetId || expandedLayerId !== null) return;
+    if (lastAutoExpandedLayerRef.current === selectedDatasetId) return;
+    lastAutoExpandedLayerRef.current = selectedDatasetId;
+    setExpandedLayerId(selectedDatasetId);
+  }, [selectedDatasetId, expandedLayerId]);
 
   const handleLayerSetVisible = useCallback((id: string, visible: boolean) => {
     const scene = wasmSceneRef.current;

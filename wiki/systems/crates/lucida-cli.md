@@ -55,7 +55,7 @@ Current product commands:
 - `lucida layout list|active|set` — inspect or change shared dataset layouts.
 - `lucida saved-view list|show|apply|capture|rename|update|delete|set-default|clear-default|link` — manage workspace saved views.
 - `lucida peer list` — list live workspace clients from the WebSocket snapshot, including follow state and compact presence summaries.
-- `lucida peer follow <client-id>` / `lucida peer unfollow` — voluntarily follow or stop following a live client using the same protocol path as the web app.
+- `lucida peer follow <client-id>` — start a long-lived CLI follow session against a live client. The command stays connected until Ctrl-C, then clears follow state before exiting.
 - `lucida peer cursor set|clear` — explicit diagnostic/test cursor presence updates.
 - `lucida plan visible-chunks [dataset]` — inspect lower-level `lucida-core` scene chunk diagnostics for the selected viewer profile or explicit peer.
 - `lucida debug state` — print read-only workspace snapshot, selected viewer state, peer, dataset, active-member, and generated-availability diagnostics.
@@ -79,7 +79,7 @@ Global visible flags:
 
 Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for the request-correlated dataset-open result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
 
-For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for a nonblank canvas probe and validates that CDP returned PNG bytes before writing the file.
+For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file.
 
 ## Interactions
 
@@ -98,8 +98,8 @@ For headless profile verification, `lucida viewer screenshot <path>` and `lucida
 - **Workspace defaults are server-scoped.** Switching `--server` must not silently reuse another server's selected workspace or config-file token.
 - **Every scriptable command needs `--json`.** Human output can be concise, but automation should not parse tables.
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
-- **One command per invocation.** The CLI remains a one-shot client unless a later slice explicitly introduces a long-lived mode.
-- **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness.
+- **Most commands are one-shot.** `peer follow` is intentionally long-lived because follow state is tied to a live WebSocket client. Other commands should remain one-shot unless a later slice explicitly designs another long-lived mode.
+- **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness. `peer follow` stays connected precisely because a disconnected CLI client cannot keep following anyone.
 - **Plan diagnostics are labeled by parity.** `plan visible-chunks` is a lower-level scene diagnostic, not a web-planner-equivalent dump of lanes, carry-forward state, CPU-cache filtering, minimap, or generated-coarse tier selection.
 
 ## Gotchas
@@ -109,4 +109,4 @@ For headless profile verification, `lucida viewer screenshot <path>` and `lucida
 - **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.
 - **Admin workspace commands are id-based.** Search can discover ids, but `admin workspace info/archive/restore/owner` intentionally do not reuse member-scoped workspace name resolution.
 - **Negative numeric flags use clap's accepted forms.** The parser accepts `--flag=-2` and the relevant commands enable hyphen values where practical; scripts should prefer equals-style values for clarity.
-- **Viewer screenshots require Chrome/Chromium.** Set `LUCIDA_BROWSER` when auto-discovery cannot find a browser binary; a render-ready timeout usually means the page never produced a readable, nonblank canvas.
+- **Viewer screenshots require Chrome/Chromium.** Set `LUCIDA_BROWSER` when auto-discovery cannot find a browser binary; a render-ready timeout means the page never reported a rendered Lucida frame for a loaded dataset.

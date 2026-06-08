@@ -1014,9 +1014,10 @@ enum PeerCommand {
     Follow {
         /// Live client id to follow
         client_id: u64,
+        /// Seconds to wait for follow and cleanup confirmations
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
     },
-    /// Stop following any client
-    Unfollow,
     /// Send cursor presence diagnostics for tests
     Cursor {
         #[command(subcommand)]
@@ -2682,29 +2683,39 @@ async fn emit_peer_command(
             };
             output.print_either(&output_payload, || format_peer_list_human(&output_payload))?;
         }
-        PeerCommand::Follow { client_id } => {
-            let result = peer_client.follow(*client_id, wait).await?;
-            let output_payload = PeerFollowOutput {
-                server,
-                workspace,
-                target,
-                result,
-            };
-            output.print_either(&output_payload, || {
-                format_peer_follow_human(&output_payload)
-            })?;
-        }
-        PeerCommand::Unfollow => {
-            let result = peer_client.unfollow(wait).await?;
-            let output_payload = PeerFollowOutput {
-                server,
-                workspace,
-                target,
-                result,
-            };
-            output.print_either(&output_payload, || {
-                format_peer_follow_human(&output_payload)
-            })?;
+        PeerCommand::Follow {
+            client_id,
+            timeout_seconds: follow_timeout_seconds,
+        } => {
+            let follow_wait =
+                Duration::from_secs(follow_timeout_seconds.unwrap_or(timeout_seconds));
+            let initial_server = server.clone();
+            let initial_workspace = workspace.clone();
+            let initial_target = target.clone();
+            let final_result = peer_client
+                .follow_live(*client_id, follow_wait, |result| {
+                    let output_payload = PeerFollowOutput {
+                        server: initial_server,
+                        workspace: initial_workspace,
+                        target: initial_target,
+                        result,
+                    };
+                    output.print_either(&output_payload, || {
+                        let mut human = format_peer_follow_human(&output_payload);
+                        human.push_str("\nFollowing live. Press Ctrl-C to stop following.");
+                        human
+                    })
+                })
+                .await?;
+            if !output.json() && !output.quiet() {
+                let output_payload = PeerFollowOutput {
+                    server,
+                    workspace,
+                    target,
+                    result: final_result,
+                };
+                output.print_human(format_peer_follow_human(&output_payload));
+            }
         }
         PeerCommand::Cursor { command } => {
             let position = match command {
@@ -2847,7 +2858,8 @@ async fn capture_viewer_screenshot(
     tokio::fs::create_dir_all(&user_data_dir).await?;
     let mut child = TokioCommand::new(&browser)
         .arg("--headless=new")
-        .arg("--disable-gpu")
+        .arg("--enable-unsafe-webgpu")
+        .arg("--ignore-gpu-blocklist")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--remote-debugging-port=0")
@@ -3081,7 +3093,7 @@ async fn capture_cdp_png(
     )
     .await?;
     wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
-    wait_for_canvas_visible(&mut write, &mut read, &mut id, &session_id, wait).await?;
+    wait_for_lucida_capture_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
     let captured = cdp_call(
         &mut write,
         &mut read,
@@ -3153,73 +3165,70 @@ where
     }
 }
 
-const CANVAS_VISIBILITY_PROBE: &str = r#"(() => {
+const LUCIDA_CAPTURE_READY_PROBE: &str = r#"(() => {
   const canvas = document.querySelector('canvas');
   if (!canvas) {
-    return { ready: false, visible: false, reason: 'missing_canvas' };
-  }
-  const sourceWidth = canvas.width || Math.floor(canvas.clientWidth);
-  const sourceHeight = canvas.height || Math.floor(canvas.clientHeight);
-  if (!sourceWidth || !sourceHeight) {
-    return { ready: true, visible: false, reason: 'zero_size_canvas' };
-  }
-  const sampleWidth = Math.max(1, Math.min(64, sourceWidth));
-  const sampleHeight = Math.max(1, Math.min(64, sourceHeight));
-  const probe = document.createElement('canvas');
-  probe.width = sampleWidth;
-  probe.height = sampleHeight;
-  const ctx = probe.getContext('2d', { willReadFrequently: true });
-  if (!ctx) {
-    return { ready: true, visible: false, reason: 'missing_2d_context' };
-  }
-  try {
-    ctx.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
-    const data = ctx.getImageData(0, 0, sampleWidth, sampleHeight).data;
-    let opaquePixels = 0;
-    let minChannel = 255;
-    let maxChannel = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      const alpha = data[i + 3];
-      if (alpha === 0) {
-        continue;
-      }
-      opaquePixels += 1;
-      const red = data[i];
-      const green = data[i + 1];
-      const blue = data[i + 2];
-      minChannel = Math.min(minChannel, red, green, blue);
-      maxChannel = Math.max(maxChannel, red, green, blue);
-    }
-    const colorSpan = opaquePixels > 0 ? maxChannel - minChannel : 0;
-    const visible = opaquePixels > 0 && colorSpan >= 4;
     return {
-      ready: true,
-      visible,
-      reason: visible ? 'visible' : 'blank_canvas',
-      sample_pixels: sampleWidth * sampleHeight,
-      opaque_pixels: opaquePixels,
-      color_span: colorSpan
-    };
-  } catch (error) {
-    return {
-      ready: true,
-      visible: false,
-      reason: 'readback_failed: ' + String(error && error.message ? error.message : error)
+      ready: false,
+      reason: 'missing_canvas',
+      frame_count: 0,
+      dataset_count: 0,
+      canvas_width: 0,
+      canvas_height: 0,
+      mode: null
     };
   }
+  const canvasWidth = canvas.width || Math.floor(canvas.clientWidth);
+  const canvasHeight = canvas.height || Math.floor(canvas.clientHeight);
+  if (!canvasWidth || !canvasHeight) {
+    return {
+      ready: false,
+      reason: 'zero_size_canvas',
+      frame_count: 0,
+      dataset_count: 0,
+      canvas_width: canvasWidth || 0,
+      canvas_height: canvasHeight || 0,
+      mode: null
+    };
+  }
+  const state = window.__lucidaCaptureReady;
+  if (!state) {
+    return {
+      ready: false,
+      reason: 'missing_lucida_capture_ready',
+      frame_count: 0,
+      dataset_count: 0,
+      canvas_width: canvasWidth,
+      canvas_height: canvasHeight,
+      mode: null
+    };
+  }
+  const frameCount = Number(state.frameCount || 0);
+  const datasetCount = Number(state.datasetCount || 0);
+  const ready = Boolean(state.ready) && frameCount > 0 && datasetCount > 0;
+  return {
+    ready,
+    reason: ready ? 'rendered' : String(state.reason || 'not_ready'),
+    frame_count: frameCount,
+    dataset_count: datasetCount,
+    canvas_width: canvasWidth,
+    canvas_height: canvasHeight,
+    mode: state.mode || null
+  };
 })()"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CanvasProbe {
+struct CaptureReadyProbe {
     ready: bool,
-    visible: bool,
     reason: String,
-    sample_pixels: u64,
-    opaque_pixels: u64,
-    color_span: u64,
+    frame_count: u64,
+    dataset_count: u64,
+    canvas_width: u64,
+    canvas_height: u64,
+    mode: Option<String>,
 }
 
-async fn wait_for_canvas_visible<W, S>(
+async fn wait_for_lucida_capture_ready<W, S>(
     write: &mut W,
     read: &mut S,
     id: &mut u64,
@@ -3239,22 +3248,22 @@ where
             Some(session_id),
             "Runtime.evaluate",
             json!({
-                "expression": CANVAS_VISIBILITY_PROBE,
+                "expression": LUCIDA_CAPTURE_READY_PROBE,
                 "returnByValue": true
             }),
             wait,
         )
         .await?;
-        let probe = canvas_probe_from_cdp_result(&result)?;
-        if probe.ready && probe.visible {
+        let probe = capture_ready_probe_from_cdp_result(&result)?;
+        if probe.ready {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            let reason = canvas_probe_summary(&probe);
+            let reason = capture_ready_probe_summary(&probe);
             return Err(CliError::new(
                 ErrorKind::SessionDisconnect,
                 format!(
-                    "timed out waiting for nonblank viewer canvas after {}s ({reason})",
+                    "timed out waiting for Lucida viewer render after {}s ({reason})",
                     wait.as_secs()
                 ),
             ));
@@ -3263,18 +3272,19 @@ where
     }
 }
 
-fn canvas_probe_from_cdp_result(value: &Value) -> Result<CanvasProbe, CliError> {
+fn capture_ready_probe_from_cdp_result(value: &Value) -> Result<CaptureReadyProbe, CliError> {
     let probe = value
         .get("result")
         .and_then(|value| value.get("value"))
-        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "canvas probe result was missing"))?;
-    Ok(CanvasProbe {
+        .ok_or_else(|| {
+            CliError::new(
+                ErrorKind::Protocol,
+                "capture-ready probe result was missing",
+            )
+        })?;
+    Ok(CaptureReadyProbe {
         ready: probe
             .get("ready")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        visible: probe
-            .get("visible")
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
         reason: probe
@@ -3282,25 +3292,38 @@ fn canvas_probe_from_cdp_result(value: &Value) -> Result<CanvasProbe, CliError> 
             .and_then(|value| value.as_str())
             .unwrap_or("unknown")
             .to_string(),
-        sample_pixels: probe
-            .get("sample_pixels")
+        frame_count: probe
+            .get("frame_count")
             .and_then(|value| value.as_u64())
             .unwrap_or(0),
-        opaque_pixels: probe
-            .get("opaque_pixels")
+        dataset_count: probe
+            .get("dataset_count")
             .and_then(|value| value.as_u64())
             .unwrap_or(0),
-        color_span: probe
-            .get("color_span")
+        canvas_width: probe
+            .get("canvas_width")
             .and_then(|value| value.as_u64())
             .unwrap_or(0),
+        canvas_height: probe
+            .get("canvas_height")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        mode: probe
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     })
 }
 
-fn canvas_probe_summary(probe: &CanvasProbe) -> String {
+fn capture_ready_probe_summary(probe: &CaptureReadyProbe) -> String {
     format!(
-        "last probe: reason={}, sample_pixels={}, opaque_pixels={}, color_span={}",
-        probe.reason, probe.sample_pixels, probe.opaque_pixels, probe.color_span,
+        "last probe: reason={}, frame_count={}, dataset_count={}, canvas={}x{}, mode={}",
+        probe.reason,
+        probe.frame_count,
+        probe.dataset_count,
+        probe.canvas_width,
+        probe.canvas_height,
+        probe.mode.as_deref().unwrap_or("unknown"),
     )
 }
 
@@ -4508,42 +4531,43 @@ mod tests {
     }
 
     #[test]
-    fn canvas_probe_parser_distinguishes_visible_and_blank_results() {
-        let visible = canvas_probe_from_cdp_result(&json!({
+    fn capture_ready_probe_parser_distinguishes_ready_and_waiting_results() {
+        let ready = capture_ready_probe_from_cdp_result(&json!({
             "result": {
                 "value": {
                     "ready": true,
-                    "visible": true,
-                    "reason": "visible",
-                    "sample_pixels": 4096,
-                    "opaque_pixels": 4096,
-                    "color_span": 127
+                    "reason": "rendered",
+                    "frame_count": 2,
+                    "dataset_count": 1,
+                    "canvas_width": 900,
+                    "canvas_height": 700,
+                    "mode": "slice"
                 }
             }
         }))
         .unwrap();
 
-        assert!(visible.ready);
-        assert!(visible.visible);
-        assert_eq!(visible.color_span, 127);
+        assert!(ready.ready);
+        assert_eq!(ready.frame_count, 2);
+        assert_eq!(ready.mode.as_deref(), Some("slice"));
 
-        let blank = canvas_probe_from_cdp_result(&json!({
+        let waiting = capture_ready_probe_from_cdp_result(&json!({
             "result": {
                 "value": {
-                    "ready": true,
-                    "visible": false,
-                    "reason": "blank_canvas",
-                    "sample_pixels": 4096,
-                    "opaque_pixels": 4096,
-                    "color_span": 0
+                    "ready": false,
+                    "reason": "dataset_added_waiting_for_render",
+                    "frame_count": 0,
+                    "dataset_count": 1,
+                    "canvas_width": 900,
+                    "canvas_height": 700,
+                    "mode": "slice"
                 }
             }
         }))
         .unwrap();
 
-        assert!(blank.ready);
-        assert!(!blank.visible);
-        assert!(canvas_probe_summary(&blank).contains("blank_canvas"));
+        assert!(!waiting.ready);
+        assert!(capture_ready_probe_summary(&waiting).contains("dataset_added_waiting_for_render"));
     }
 
     #[test]
@@ -4570,20 +4594,34 @@ mod tests {
         let follow = parse(&["peer", "follow", "42"]);
         match follow.command {
             Command::Peer {
-                command: PeerCommand::Follow { client_id },
+                command:
+                    PeerCommand::Follow {
+                        client_id,
+                        timeout_seconds,
+                    },
                 ..
-            } => assert_eq!(client_id, 42),
+            } => {
+                assert_eq!(client_id, 42);
+                assert_eq!(timeout_seconds, None);
+            }
             _ => panic!("expected peer follow"),
         }
 
-        let unfollow = parse(&["peer", "unfollow"]);
-        assert!(matches!(
-            unfollow.command,
+        let follow_with_leaf_timeout = parse(&["peer", "follow", "42", "--timeout-seconds", "11"]);
+        match follow_with_leaf_timeout.command {
             Command::Peer {
-                command: PeerCommand::Unfollow,
+                command:
+                    PeerCommand::Follow {
+                        client_id,
+                        timeout_seconds,
+                    },
                 ..
+            } => {
+                assert_eq!(client_id, 42);
+                assert_eq!(timeout_seconds, Some(11));
             }
-        ));
+            _ => panic!("expected peer follow"),
+        }
 
         let cursor_set = parse(&["peer", "cursor", "set", "--x", "-1.5", "--y", "2.25"]);
         match cursor_set.command {

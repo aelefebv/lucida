@@ -1191,7 +1191,7 @@ def default_ws_connect(url: str, headers: dict[str, str]) -> Any:
     except ImportError as error:
         raise LucidaError(
             "config",
-            "websockets is required for workspace session operations",
+            "websockets is required for workspace session operations; in a source checkout run from lucida-py with `uv run python ...` or install dependencies with `uv sync`",
         ) from error
 
     kwargs: dict[str, Any] = {"max_size": None}
