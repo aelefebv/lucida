@@ -4,6 +4,7 @@ import {
   createWorkspaceSavedView,
   deleteWorkspaceSavedView,
   getWorkspaceSavedView,
+  getWorkspaceViewerProfile,
   listArchivedWorkspaces,
   listWorkspaceSavedViews,
   openWorkspace,
@@ -79,6 +80,29 @@ describe("workspace saved view API", () => {
 
     await getWorkspaceSavedView("workspace/a b", "view/1");
     expect(calls[0].url).toBe("/api/workspaces/workspace%2Fa%20b/saved-views/view%2F1");
+  });
+
+  it("gets a private viewer profile with encoded names", async () => {
+    responder = () => jsonResponse(200, {
+      workspace_id: "workspace/a b",
+      user_email: "alice@example.com",
+      profile: "cli.default",
+      created_at: "2026-06-06T00:00:00Z",
+      updated_at: "2026-06-06T00:00:00Z",
+      seed_source: "workspace_snapshot",
+      view: emptyView(),
+    });
+
+    const profile = await getWorkspaceViewerProfile("workspace/a b", "cli.default");
+    expect(profile?.profile).toBe("cli.default");
+    expect(calls[0].url).toBe(
+      "/api/workspaces/workspace%2Fa%20b/viewer-profiles/cli.default",
+    );
+  });
+
+  it("returns null when a private viewer profile is not initialized", async () => {
+    responder = () => new Response(null, { status: 204 });
+    await expect(getWorkspaceViewerProfile("workspace-1", "default")).resolves.toBeNull();
   });
 
   it("POSTs name and view when creating", async () => {

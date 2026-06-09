@@ -316,8 +316,13 @@ export class Bridge {
   }
 
   sendOpenRemoteDataset(url: string) {
-    bridgeLog("open_remote_dataset.send", { url }, this.ws?.readyState);
-    this.send(JSON.stringify({ type: "open_remote_dataset", url }));
+    const requestId = makeOpenDatasetRequestId();
+    bridgeLog("open_remote_dataset.send", { url, requestId }, this.ws?.readyState);
+    this.send(JSON.stringify({
+      type: "open_remote_dataset",
+      request_id: requestId,
+      url,
+    }));
   }
 
   sendViewerInterest(interest: unknown) {
@@ -386,4 +391,11 @@ export class Bridge {
     this.ws?.close();
     this.ws = null;
   }
+}
+
+function makeOpenDatasetRequestId(): string {
+  if (globalThis.crypto?.randomUUID) {
+    return `web-${globalThis.crypto.randomUUID()}`;
+  }
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

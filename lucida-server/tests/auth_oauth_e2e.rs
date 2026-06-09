@@ -49,8 +49,8 @@ use tower::ServiceExt;
 use lucida_server::auth::handlers::{OAuthState, auth_callback, auth_start, whoami};
 use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
 use lucida_server::auth::{
-    AuthConfig, GoogleOAuthClient, LoginSessionStore, MemoryPendingAuthStore, MemorySessionStore,
-    PendingAuthStore,
+    AuthConfig, BearerTokenStore, GoogleOAuthClient, LoginSessionStore, MemoryBearerTokenStore,
+    MemoryPendingAuthStore, MemorySessionStore, PendingAuthStore,
 };
 
 const TEST_CLIENT_ID: &str = "test-client-id";
@@ -277,6 +277,7 @@ async fn build_lucida_app_with_allowed_domains(mock_base: &str, allowed: &[&str]
 
     let arc_config = Arc::new(config);
     let session_store = Arc::new(MemorySessionStore::new());
+    let token_store = Arc::new(MemoryBearerTokenStore::new());
     let pending_store = Arc::new(MemoryPendingAuthStore::new());
 
     let google = Arc::new(
@@ -295,6 +296,7 @@ async fn build_lucida_app_with_allowed_domains(mock_base: &str, allowed: &[&str]
     let extractor: SharedExtractor = build_extractor(
         Arc::clone(&arc_config),
         Arc::clone(&session_store) as Arc<dyn LoginSessionStore>,
+        Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
     );
 
     // Authed half: only `/auth/whoami` here so tests can probe it.

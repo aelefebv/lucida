@@ -337,7 +337,7 @@ describe("SavedViewApplier", () => {
       bridge,
       () => scene as never,
       fakeIdForUrl,
-      30_000,
+      10,
       "workspace-dataset-id",
     );
     const v = emptyView();

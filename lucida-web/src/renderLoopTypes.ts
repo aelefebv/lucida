@@ -22,8 +22,18 @@ export interface MinimapOverlayData {
   viewProj: Float32Array;
   /** Per-member layers (for bounding boxes, slice planes). */
   layers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[];
-  /** Per-dataset layers (for view rectangle, frustum). Uses dataset-level model matrix and full volume extent. */
+  /** Per-dataset layers (for volume frustum overlays). Uses dataset-level model matrix and full volume extent. */
   datasetLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array; width: number; height: number; depth: number }[];
+  /** Per-member slice viewport intersections in member-local voxel coordinates. */
+  sliceViewports: {
+    datasetId: string;
+    memberId: string;
+    modelMatrix: Float32Array;
+    bounds: { minX: number; minY: number; maxX: number; maxY: number };
+    width: number;
+    height: number;
+    depth: number;
+  }[];
   mode: "slice" | "volume";
   theta: number;
   phi: number;
@@ -31,7 +41,6 @@ export interface MinimapOverlayData {
   canvasH: number;
   currentZ: number;
   datasetDims: Map<string, { width: number; height: number; depth: number }>;
-  sliceViewBounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
   mainInvViewProj: Float32Array | null;
 }
 

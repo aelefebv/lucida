@@ -277,6 +277,7 @@ export class SavedViewApplier {
       const loadedIds = new Set<string>(
         JSON.parse(scene.dataset_ids()) as string[],
       );
+      const requestedSet = new Set(requestedIds.map((r) => r.id));
 
       // Step 2-4: open missing.
       const toOpen = this.datasetReferenceMode === "source-url"
@@ -289,6 +290,10 @@ export class SavedViewApplier {
       });
       await this.openMissing(toOpen);
 
+      if (this.datasetReferenceMode === "workspace-dataset-id" && requestedSet.size > 0) {
+        await this.waitForWorkspaceDatasets(requestedSet);
+      }
+
       // Re-read scene after opens (best-effort: if opens raced or some
       // failed, we proceed with whatever's loaded).
       const sceneAfter = this.getScene();
@@ -296,7 +301,6 @@ export class SavedViewApplier {
       const loadedAfter = new Set<string>(
         JSON.parse(sceneAfter.dataset_ids()) as string[],
       );
-      const requestedSet = new Set(requestedIds.map((r) => r.id));
       if (this.datasetReferenceMode === "workspace-dataset-id") {
         for (const warning of workspaceMissingDatasetWarnings(loadedAfter, requestedSet)) {
           this.addWarning(warning);
@@ -488,6 +492,24 @@ export class SavedViewApplier {
     });
 
     await Promise.race([Promise.all(promises), watchdog]);
+  }
+
+  private async waitForWorkspaceDatasets(requestedSet: Set<string>): Promise<void> {
+    const deadline = performance.now() + Math.min(this.openTimeoutMs, 5_000);
+    while (performance.now() < deadline) {
+      const scene = this.getScene();
+      if (!scene) return;
+      const loaded = new Set<string>(JSON.parse(scene.dataset_ids()) as string[]);
+      let missing = false;
+      for (const id of requestedSet) {
+        if (!loaded.has(id)) {
+          missing = true;
+          break;
+        }
+      }
+      if (!missing) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   private applyDocument(cmd: Record<string, unknown>): void {

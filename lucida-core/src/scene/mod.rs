@@ -38,6 +38,34 @@ pub struct MemberState {
     pub data_type: DataType,
 }
 
+/// Aggregate XY extent for visible image content in scene coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisibleContentBounds2D {
+    pub min_x: f64,
+    pub min_y: f64,
+    pub max_x: f64,
+    pub max_y: f64,
+    pub max_depth: u32,
+}
+
+impl VisibleContentBounds2D {
+    pub fn width(&self) -> f64 {
+        self.max_x - self.min_x
+    }
+
+    pub fn height(&self) -> f64 {
+        self.max_y - self.min_y
+    }
+
+    pub fn center_x(&self) -> f64 {
+        (self.min_x + self.max_x) / 2.0
+    }
+
+    pub fn center_y(&self) -> f64 {
+        (self.min_y + self.max_y) / 2.0
+    }
+}
+
 /// The complete viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
@@ -179,6 +207,67 @@ impl Scene {
             })
             .fold(0.0_f64, f64::max);
         if max > 0.0 { max } else { 1.0 }
+    }
+
+    /// Return aggregate bounds for all visible image members in scene XY space.
+    pub fn visible_content_bounds_2d(&self) -> Option<VisibleContentBounds2D> {
+        let mut bounds: Option<VisibleContentBounds2D> = None;
+
+        for id in &self.dataset_order {
+            self.accumulate_visible_dataset_bounds_2d(id, &mut bounds);
+        }
+
+        // Be tolerant of partially hydrated scenes where derived state exists
+        // before dataset_order is fully populated.
+        for id in self.derived.keys() {
+            if !self.dataset_order.contains(id) {
+                self.accumulate_visible_dataset_bounds_2d(id, &mut bounds);
+            }
+        }
+
+        bounds
+    }
+
+    fn accumulate_visible_dataset_bounds_2d(
+        &self,
+        id: &DatasetId,
+        bounds: &mut Option<VisibleContentBounds2D>,
+    ) {
+        let settings = self.dataset_settings.get(id).cloned().unwrap_or_default();
+        if !settings.visible {
+            return;
+        }
+        let Some(derived) = self.derived.get(id) else {
+            return;
+        };
+
+        for member in &derived.members {
+            let Some(level) = member.levels.first() else {
+                continue;
+            };
+            let width = level.shape[4] as f64;
+            let height = level.shape[3] as f64;
+            if width <= 0.0 || height <= 0.0 {
+                continue;
+            }
+            let candidate = VisibleContentBounds2D {
+                min_x: member.position[0],
+                min_y: member.position[1],
+                max_x: member.position[0] + width,
+                max_y: member.position[1] + height,
+                max_depth: level.shape[2].min(u32::MAX as u64) as u32,
+            };
+            *bounds = Some(match *bounds {
+                Some(existing) => VisibleContentBounds2D {
+                    min_x: existing.min_x.min(candidate.min_x),
+                    min_y: existing.min_y.min(candidate.min_y),
+                    max_x: existing.max_x.max(candidate.max_x),
+                    max_y: existing.max_y.max(candidate.max_y),
+                    max_depth: existing.max_depth.max(candidate.max_depth),
+                },
+                None => candidate,
+            });
+        }
     }
 
     /// Compute the chunk request plan for all visible layers across all datasets.
@@ -1335,6 +1424,38 @@ mod tests {
         let scene = Scene::new([512, 512]);
         let ds_id = DatasetId("nonexistent".into());
         assert!(scene.chunk_plan_for(&ds_id).is_none());
+    }
+
+    #[test]
+    fn visible_content_bounds_include_all_visible_plate_members() {
+        let mut scene = Scene::new([512, 512]);
+        let reg = test_helpers::make_plate_dataset_opened(
+            "plate",
+            "plate",
+            vec![("m1", [0.0, 0.0]), ("m2", [300.0, 100.0])],
+            [1, 1, 5, 64, 32],
+            [1, 1, 1, 32, 32],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let bounds = scene.visible_content_bounds_2d().unwrap();
+        assert_eq!(
+            bounds,
+            VisibleContentBounds2D {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 332.0,
+                max_y: 164.0,
+                max_depth: 5,
+            },
+        );
+
+        scene
+            .dataset_settings
+            .get_mut(&DatasetId("plate".into()))
+            .unwrap()
+            .visible = false;
+        assert_eq!(scene.visible_content_bounds_2d(), None);
     }
 
     #[test]

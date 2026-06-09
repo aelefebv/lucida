@@ -30,10 +30,11 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::auth::bearer_token::BearerTokenStore;
 use crate::auth::config::{AuthConfig, AuthMode};
 use crate::auth::cookie::read_signed_out_marker;
 use crate::auth::principal::{
-    AuthError, PrincipalExtractor, SessionCookieExtractor, StubPrincipalExtractor,
+    AuthError, DualCredentialExtractor, PrincipalExtractor, StubPrincipalExtractor,
 };
 use crate::auth::session_store::LoginSessionStore;
 use crate::auth::unauth_landing::{SIGNED_OUT_LANDING_HTML, UNAUTH_LANDING_HTML};
@@ -157,10 +158,11 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
 pub fn build_extractor(
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
+    token_store: Arc<dyn BearerTokenStore>,
 ) -> SharedExtractor {
     match config.mode {
         AuthMode::Disabled => Arc::new(StubPrincipalExtractor),
-        AuthMode::Google => Arc::new(SessionCookieExtractor::new(config, store)),
+        AuthMode::Google => Arc::new(DualCredentialExtractor::new(config, store, token_store)),
     }
 }
 
@@ -176,7 +178,8 @@ mod tests {
     use lucida_core::auth_principal::AuthPrincipal;
     use tower::ServiceExt;
 
-    use crate::auth::principal::{AuthError, PrincipalExtractor};
+    use crate::auth::bearer_token_memory::MemoryBearerTokenStore;
+    use crate::auth::principal::{AuthError, PrincipalExtractor, SessionCookieExtractor};
     use crate::auth::session_store::LoginSession;
     use crate::auth::session_store_memory::MemorySessionStore;
     use async_trait::async_trait;
@@ -316,9 +319,14 @@ mod tests {
     #[tokio::test]
     async fn build_extractor_disabled_mode_attaches_dev_principal_with_no_cookie() {
         let store = Arc::new(MemorySessionStore::new());
+        let token_store = Arc::new(MemoryBearerTokenStore::new());
         // for_tests() = AuthMode::Disabled.
         let config = Arc::new(AuthConfig::for_tests());
-        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let extractor = build_extractor(
+            config,
+            store as Arc<dyn LoginSessionStore>,
+            token_store as Arc<dyn BearerTokenStore>,
+        );
         let app = router_with_extractor(extractor);
 
         let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();

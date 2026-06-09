@@ -16,6 +16,7 @@ export function DimensionControls({ label, value, max, onChange, disabled }: Pro
       <span className="dim-label">{label}</span>
       <button
         className="dim-btn"
+        aria-label={`Previous ${label}`}
         disabled={disabled || value <= 0}
         onClick={() => onChange(value - 1)}
       >
@@ -24,6 +25,7 @@ export function DimensionControls({ label, value, max, onChange, disabled }: Pro
       <input
         type="range"
         className="dim-slider"
+        aria-label={`${label} index`}
         min={0}
         max={max - 1}
         value={value}
@@ -32,6 +34,7 @@ export function DimensionControls({ label, value, max, onChange, disabled }: Pro
       />
       <button
         className="dim-btn"
+        aria-label={`Next ${label}`}
         disabled={disabled || value >= max - 1}
         onClick={() => onChange(value + 1)}
       >

@@ -195,7 +195,7 @@ function drawSliceViewportRect(
 // Entry point
 
 export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, currentZ, datasetDims, sliceViewBounds, mainInvViewProj, theta, phi } = data;
+  const { viewProj, layers, datasetLayers, sliceViewports, mode, canvasW, canvasH, currentZ, datasetDims, mainInvViewProj, theta, phi } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
@@ -215,15 +215,13 @@ export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: Minimap
       drawSlicePlane(ctx, viewProj, layer.modelMatrix, currentZ, dims.depth, canvasW, canvasH, "rgba(255,200,50,0.25)");
     }
 
-    // View rectangle (per-dataset — one rectangle for the camera's view)
-    if (sliceViewBounds) {
-      for (const dl of datasetLayers) {
-        drawSliceViewportRect(
-          ctx, viewProj, dl.modelMatrix, sliceViewBounds,
-          currentZ, dl.width, dl.height, dl.depth,
-          canvasW, canvasH, "rgba(100,180,255,0.3)",
-        );
-      }
+    // View rectangle intersections (per-member, in member-local voxel coordinates)
+    for (const viewport of sliceViewports) {
+      drawSliceViewportRect(
+        ctx, viewProj, viewport.modelMatrix, viewport.bounds,
+        currentZ, viewport.width, viewport.height, viewport.depth,
+        canvasW, canvasH, "rgba(100,180,255,0.3)",
+      );
     }
   }
 

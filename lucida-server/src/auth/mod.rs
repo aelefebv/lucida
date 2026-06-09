@@ -13,6 +13,12 @@
 //! - `session_store_sqlite` — production `SqliteSessionStore` backed by
 //!   `sqlx`. Runs migrations from `migrations/` on open.
 //! - `session_store_memory` — `MemorySessionStore` for tests.
+//! - `bearer_token` / `bearer_token_sqlite` / `bearer_token_memory` —
+//!   opaque CLI/Python credentials stored as hashes and resolved to
+//!   the same `AuthPrincipal` boundary as cookie sessions.
+//! - `cli_authorization` / `cli_authorization_sqlite` /
+//!   `cli_authorization_memory` — short-lived browser approval rows
+//!   for `lucida auth login`.
 //! - `pending_auth` / `pending_auth_sqlite` / `pending_auth_memory` —
 //!   one-shot OAuth-intent rows: state token → intended path/hash.
 //! - `google_oauth` — Google integration: authorization URL, code
@@ -43,7 +49,13 @@
 
 #[cfg(test)]
 mod audit_event_tests;
+pub mod bearer_token;
+pub mod bearer_token_memory;
+pub mod bearer_token_sqlite;
 pub mod cleanup;
+pub mod cli_authorization;
+pub mod cli_authorization_memory;
+pub mod cli_authorization_sqlite;
 pub mod config;
 pub mod cookie;
 pub mod dev;
@@ -61,7 +73,15 @@ pub mod session_store_memory;
 pub mod session_store_sqlite;
 pub mod unauth_landing;
 
+pub use bearer_token::{BearerToken, BearerTokenStore, BearerTokenStoreError, hash_bearer_token};
+pub use bearer_token_memory::MemoryBearerTokenStore;
+pub use bearer_token_sqlite::SqliteBearerTokenStore;
 pub use cleanup::{CleanupState, spawn as spawn_cleanup};
+pub use cli_authorization::{
+    CliTokenAuthorization, CliTokenAuthorizationStore, CliTokenAuthorizationStoreError,
+};
+pub use cli_authorization_memory::MemoryCliTokenAuthorizationStore;
+pub use cli_authorization_sqlite::SqliteCliTokenAuthorizationStore;
 pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig};
 pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
@@ -69,9 +89,9 @@ pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 pub use pending_auth_memory::MemoryPendingAuthStore;
 pub use pending_auth_sqlite::SqlitePendingAuthStore;
 pub use principal::{
-    AuthError, GoogleJwtPrincipalExtractor, PrincipalExtractor, RejectionReason,
-    SessionCookieExtractor, StubPrincipalExtractor, principal_from_claims,
-    principal_or_rejection_from_claims,
+    AuthError, BearerTokenExtractor, DualCredentialExtractor, GoogleJwtPrincipalExtractor,
+    PrincipalExtractor, RejectionReason, SessionCookieExtractor, StubPrincipalExtractor,
+    principal_from_claims, principal_or_rejection_from_claims,
 };
 pub use session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 pub use session_store_memory::MemorySessionStore;

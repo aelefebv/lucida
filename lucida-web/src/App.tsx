@@ -29,7 +29,7 @@ import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import type { SavedView } from "./savedView/types.ts";
-import { getWorkspaceSavedView } from "./workspaceApi.ts";
+import { getWorkspaceSavedView, getWorkspaceViewerProfile } from "./workspaceApi.ts";
 import type { WorkspaceRole } from "./workspaceApi.ts";
 import "./App.css";
 
@@ -140,6 +140,7 @@ function App({
     setC: dims.setC,
     setT: dims.setT,
     setViewMode: dims.setViewMode,
+    setMultiChannel: dims.setMultiChannel,
     setSelectedDatasetId,
     bumpDatasetsVersion,
     bumpRemoteDocumentVersion,
@@ -167,6 +168,12 @@ function App({
     return { id: savedView.id, view: savedView.view };
   }, [workspaceId, defaultSavedViewId]);
 
+  const fetchWorkspaceViewerProfile = useCallback(async (profile: string) => {
+    const record = await getWorkspaceViewerProfile(workspaceId, profile);
+    if (!record) return null;
+    return { id: `viewer_profile:${record.profile}`, view: record.view };
+  }, [workspaceId]);
+
   // SavedView wiring. Mounts the URL→scene sync, exposes the
   // share-button capture, gives the loading banner a handle on apply
   // progress, and forwards apply summaries for the selectedDatasetId
@@ -188,11 +195,13 @@ function App({
     setT: dims.setT,
     setZ: dims.setZ,
     setViewMode: dims.setViewMode,
+    setMultiChannel: dims.setMultiChannel,
     autoContrastMapRef: layers.autoContrastMapRef,
     setAutoContrastMap: layers.setAutoContrastMap,
     datasetReferenceMode: "workspace-dataset-id",
     fetchSavedViewById: fetchWorkspaceSavedViewById,
     fetchDefaultSavedView: fetchDefaultWorkspaceSavedView,
+    fetchViewerProfile: fetchWorkspaceViewerProfile,
     allowDocumentLayoutMutation: canEditWorkspace,
   });
 

@@ -18,6 +18,23 @@ import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 
+export interface LucidaCaptureReadyState {
+  ready: boolean;
+  reason: string;
+  frameCount: number;
+  at: number;
+  mode: "slice" | "volume";
+  datasetCount: number;
+  canvasWidth: number;
+  canvasHeight: number;
+}
+
+declare global {
+  interface Window {
+    __lucidaCaptureReady?: LucidaCaptureReadyState;
+  }
+}
+
 export class RenderLoop {
   private session: Session;
   private datasets: Map<string, { manifest: DatasetManifest }>;
@@ -47,6 +64,7 @@ export class RenderLoop {
   // SAMPLE_BUFFER_LIMIT entries; oldest evicted on push.
   private frameSamples: Array<{ t: number; frame: number; plan: number; upload: number; passes: number; rendered: boolean }> = [];
   private static readonly SAMPLE_BUFFER_LIMIT = 120;
+  private renderedFrameCount = 0;
   // Last-set timestamps for each dirty flag. Lets the panel show a brief
   // "afterglow" so transient flips (e.g. an interactive flag that gets
   // cleared within one RAF) are visible at the 200ms polling rate.
@@ -96,6 +114,7 @@ export class RenderLoop {
     this.configStoreUnsub = configStore.subscribe(() => {
       this.setDirty("interactive", "planning_config_changed");
     });
+    this.publishCaptureReady(false, "initializing");
   }
 
   start(): void {
@@ -160,6 +179,7 @@ export class RenderLoop {
 
   addDataset(id: string, manifest: DatasetManifest): void {
     this.datasets.set(id, { manifest });
+    this.publishCaptureReady(false, "dataset_added_waiting_for_render");
     this.setDirty("interactive", "dataset_added");
   }
 
@@ -222,9 +242,33 @@ export class RenderLoop {
         const identity = identityMatrix();
         this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, identity, new Float32Array([0, 0, -1]), 0, 0);
       }
+      this.publishCaptureReady(false, "no_datasets");
     }
 
     this.setDirty("interactive", "dataset_removed");
+  }
+
+  private publishCaptureReady(ready: boolean, reason: string): void {
+    if (typeof window === "undefined") return;
+    window.__lucidaCaptureReady = {
+      ready,
+      reason,
+      frameCount: this.renderedFrameCount,
+      at: performance.now(),
+      mode: this.mode,
+      datasetCount: this.datasets.size,
+      canvasWidth: this.canvas.width || Math.round(this.canvas.clientWidth),
+      canvasHeight: this.canvas.height || Math.round(this.canvas.clientHeight),
+    };
+  }
+
+  private publishRenderedCaptureReady(): void {
+    if (this.datasets.size === 0) {
+      this.publishCaptureReady(false, "no_datasets");
+      return;
+    }
+    this.renderedFrameCount += 1;
+    this.publishCaptureReady(true, "rendered");
   }
 
   /**
@@ -522,6 +566,10 @@ export class RenderLoop {
     if (debugStats.enabled) {
       debugStats.frameTimeMs = performance.now() - now;
       this.recordFrameSample(now, debugStats.frameTimeMs, debugStats.planTimeMs, debugStats.uploadTimeMs, debugStats.renderPasses.total, shouldRender);
+    }
+
+    if (shouldRender) {
+      this.publishRenderedCaptureReady();
     }
 
     if (tickMinimapOverview(ctx, this.minimapState)) this.setDirty("residency", "minimap_overview_continuation");

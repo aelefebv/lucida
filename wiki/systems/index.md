@@ -19,9 +19,9 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[lucida-store]] — storage abstraction over `object_store`; OME-Zarr import producing the three-output `ImportResult`
 - [[lucida-protocol]] — wire types: `DatasetOpened`, `FetchSource`, `AssetCatalog`, `AssetMessage`
 - [[lucida-content]] — pure data model for `DatasetManifest` (entities, transforms, images, layouts)
-- [[lucida-cli]] — terminal WebSocket client for [[lucida-server]]; viewport commands, snapshots, steer
+- [[lucida-cli]] — workspace-first product CLI for [[lucida-server]]; server/auth/workspace discovery, dataset operations, view/headless viewer commands, collaboration diagnostics, and admin support
 - [[lucida-proxy]] — historical/legacy pure-compute proxy generation algorithm; no I/O, no async
-- [[lucida-py]] — Python bindings via `pyo3` + `maturin`; `PyScene` and `PyStore`
+- [[lucida-py]] — pure-Python `LucidaClient` plus optional `pyo3` + `maturin` local bindings (`PyScene`, `PyStore`)
 - [[lucida-web]] — React 19 + Vite 7 + WebGPU frontend; thin orchestration over the WASM Scene
 
 ## Subsystems (`subsystems/`)

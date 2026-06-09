@@ -14,6 +14,7 @@ interface Props {
   fullRange: boolean;
   onFullRangeToggle: () => void;
   fullRangeMax: number;
+  labelPrefix?: string;
 }
 
 export function ContrastControls({
@@ -30,6 +31,7 @@ export function ContrastControls({
   fullRange,
   onFullRangeToggle,
   fullRangeMax,
+  labelPrefix = "",
 }: Props) {
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wasLongPress = useRef(false);
@@ -64,6 +66,7 @@ export function ContrastControls({
   const range = effectiveMax - effectiveMin;
   const fillLeft = range > 0 ? ((contrastMin - effectiveMin) / range) * 100 : 0;
   const fillRight = range > 0 ? ((contrastMax - effectiveMin) / range) * 100 : 100;
+  const prefix = labelPrefix ? `${labelPrefix} ` : "";
 
   return (
     <div className="contrast-controls">
@@ -78,6 +81,7 @@ export function ContrastControls({
           <input
             type="range"
             className="range-slider-input"
+            aria-label={`${prefix}contrast minimum`}
             min={effectiveMin}
             max={effectiveMax}
             value={contrastMin}
@@ -89,6 +93,7 @@ export function ContrastControls({
           <input
             type="range"
             className="range-slider-input"
+            aria-label={`${prefix}contrast maximum`}
             min={effectiveMin}
             max={effectiveMax}
             value={contrastMax}
@@ -106,6 +111,7 @@ export function ContrastControls({
         <input
           type="range"
           className="dim-slider"
+          aria-label={`${prefix}gamma`}
           min={10}
           max={500}
           value={Math.round(gamma * 100)}
@@ -117,6 +123,8 @@ export function ContrastControls({
       <div className="dim-control">
         <button
           className={`auto-btn${autoContrast ? " auto-btn-active" : ""}`}
+          aria-label={`${prefix}auto contrast`}
+          aria-pressed={autoContrast}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
           onPointerLeave={handlePointerLeave}
@@ -125,6 +133,8 @@ export function ContrastControls({
         </button>
         <button
           className={`auto-btn${fullRange ? " auto-btn-active" : ""}`}
+          aria-label={`${prefix}full range`}
+          aria-pressed={fullRange}
           onClick={onFullRangeToggle}
         >
           Full

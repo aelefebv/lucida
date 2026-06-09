@@ -1,0 +1,1360 @@
+use std::time::Duration;
+
+use futures_util::{SinkExt, Stream, StreamExt};
+use lucida_core::DatasetId;
+use lucida_core::command::DocumentCommand;
+use lucida_core::protocol::{ClientMessage, ServerMessage};
+use lucida_core::scene::DocumentState;
+use serde::{Deserialize, Serialize};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::{Request as WsRequest, StatusCode as WsStatusCode};
+use tokio_tungstenite::tungstenite::protocol::Message;
+
+use crate::config::EffectiveServer;
+use crate::credentials::EffectiveToken;
+use crate::error::{CliError, ErrorKind};
+use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
+
+#[derive(Debug, Serialize)]
+pub struct DatasetBrowseOutput {
+    pub server: EffectiveServer,
+    pub path: String,
+    pub entries: Vec<BrowseEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DatasetBrowseResult {
+    pub path: String,
+    pub entries: Vec<BrowseEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub entry_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowseResponse {
+    path: String,
+    entries: Vec<BrowseEntry>,
+}
+
+pub struct DatasetHttpClient {
+    base_url: String,
+    token: Option<String>,
+    http: reqwest::Client,
+}
+
+impl DatasetHttpClient {
+    pub fn new(base_url: impl Into<String>, token: Option<EffectiveToken>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token: token.map(|effective| effective.token),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    pub async fn browse(&self, path: Option<&str>) -> Result<DatasetBrowseResult, CliError> {
+        let mut request = self
+            .http
+            .get(dataset_api_url(&self.base_url, &["api", "browse"])?)
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(path) = path {
+            request = request.query(&[("path", path)]);
+        }
+        if let Some(token) = self.token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(map_browse_error(status, &body));
+        }
+        let body = response.json::<BrowseResponse>().await?;
+        Ok(DatasetBrowseResult {
+            path: body.path,
+            entries: body.entries,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatasetOpenOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub dataset: DatasetOpenSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatasetListOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub seq: u64,
+    pub datasets: Vec<DatasetSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatasetInfoOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub seq: u64,
+    pub dataset: DatasetInfo,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatasetRemoveOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub seq: u64,
+    pub removed: DatasetSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DatasetOpenSummary {
+    pub workspace_id: String,
+    pub workspace_dataset_id: String,
+    pub name: String,
+    pub image_count: usize,
+    pub entity_count: usize,
+    pub seq: u64,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DatasetSummary {
+    pub workspace_dataset_id: String,
+    pub name: String,
+    pub kind: String,
+    pub image_count: usize,
+    pub entity_count: usize,
+    pub channel_count: Option<u64>,
+    pub dimensions: Option<[u64; 5]>,
+    pub active_layout_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DatasetInfo {
+    #[serde(flatten)]
+    pub summary: DatasetSummary,
+    pub default_layout_id: Option<String>,
+    pub source_layout_count: usize,
+    pub registered_layout_count: usize,
+    pub images: Vec<DatasetImageSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DatasetImageSummary {
+    pub image_id: String,
+    pub owner: String,
+    pub data_type: String,
+    pub level_count: usize,
+    pub level_indices: Vec<u32>,
+    pub dimensions: Option<[u64; 5]>,
+    pub channel_count: Option<u64>,
+}
+
+struct WorkspaceDatasetSnapshot {
+    seq: u64,
+    document: DocumentState,
+}
+
+pub struct DatasetOpenClient {
+    ws_url: String,
+    token: Option<String>,
+}
+
+impl DatasetOpenClient {
+    pub fn new(ws_url: impl Into<String>, token: Option<EffectiveToken>) -> Self {
+        Self {
+            ws_url: ws_url.into(),
+            token: token.map(|effective| effective.token),
+        }
+    }
+
+    pub async fn open(
+        &self,
+        source: &str,
+        workspace_id: &str,
+        wait: Duration,
+    ) -> Result<DatasetOpenSummary, CliError> {
+        let mut request = self
+            .ws_url
+            .as_str()
+            .into_client_request()
+            .map_err(|error| {
+                CliError::new(
+                    ErrorKind::InvalidServer,
+                    format!("invalid workspace WebSocket URL: {error}"),
+                )
+            })?;
+        if let Some(token) = self.token.as_deref() {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {token}").parse().map_err(|error| {
+                    CliError::new(
+                        ErrorKind::Config,
+                        format!("failed to build bearer authorization header: {error}"),
+                    )
+                })?,
+            );
+        }
+
+        let (socket, _response) = connect_async(request).await.map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let request_id = dataset_open_request_id();
+        let message = ClientMessage::OpenRemoteDataset {
+            request_id: request_id.clone(),
+            url: source.to_string(),
+        };
+        let json = serde_json::to_string(&message)?;
+        write
+            .send(Message::Text(json.into()))
+            .await
+            .map_err(map_websocket_error)?;
+
+        let incoming = read.map(|message| match message {
+            Ok(Message::Text(text)) => Ok(IncomingDatasetMessage::Text(text.to_string())),
+            Ok(Message::Close(_)) => Ok(IncomingDatasetMessage::Close),
+            Ok(_) => Ok(IncomingDatasetMessage::Ignore),
+            Err(error) => Err(map_websocket_error(error)),
+        });
+
+        wait_for_dataset_open_result(incoming, &request_id, source, workspace_id, wait).await
+    }
+}
+
+pub struct DatasetWorkspaceClient {
+    ws_url: String,
+    token: Option<String>,
+}
+
+impl DatasetWorkspaceClient {
+    pub fn new(ws_url: impl Into<String>, token: Option<EffectiveToken>) -> Self {
+        Self {
+            ws_url: ws_url.into(),
+            token: token.map(|effective| effective.token),
+        }
+    }
+
+    pub async fn list(&self, wait: Duration) -> Result<(u64, Vec<DatasetSummary>), CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (_write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        Ok((
+            snapshot.seq,
+            dataset_summaries_from_document(&snapshot.document),
+        ))
+    }
+
+    pub async fn info(
+        &self,
+        selector: &str,
+        wait: Duration,
+    ) -> Result<(u64, DatasetInfo), CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (_write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let dataset = dataset_info_from_document(&snapshot.document, selector)?;
+        Ok((snapshot.seq, dataset))
+    }
+
+    pub async fn remove(
+        &self,
+        selector: &str,
+        workspace: &WorkspaceRecord,
+        wait: Duration,
+    ) -> Result<(u64, DatasetSummary), CliError> {
+        if workspace.role == WorkspaceRole::Viewer {
+            return Err(CliError::new(
+                ErrorKind::Unauthorized,
+                "workspace role cannot remove datasets",
+            ));
+        }
+
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let datasets = dataset_summaries_from_document(&snapshot.document);
+        let removed = resolve_dataset_summary(selector, &datasets)?;
+        let message = remove_dataset_message(&removed.workspace_dataset_id);
+        let json = serde_json::to_string(&message)?;
+        write
+            .send(Message::Text(json.into()))
+            .await
+            .map_err(map_websocket_error)?;
+        let seq = wait_for_remove_ack(&mut incoming, &removed.workspace_dataset_id, wait).await?;
+        Ok((seq, removed))
+    }
+}
+
+pub fn format_dataset_open_human(output: &DatasetOpenOutput) -> String {
+    format!(
+        "Opened dataset: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nURL: {}",
+        output.dataset.name,
+        output.workspace.name,
+        output.dataset.workspace_id,
+        output.dataset.workspace_dataset_id,
+        output.dataset.image_count,
+        output.dataset.entity_count,
+        output.dataset.seq,
+        output.target.web_url,
+    )
+}
+
+pub fn format_dataset_browse_human(output: &DatasetBrowseOutput) -> String {
+    if output.entries.is_empty() {
+        return format!("{}\nNo entries", output.path);
+    }
+    let entries = output
+        .entries
+        .iter()
+        .map(|entry| {
+            let suffix = if entry.entry_type == "directory" {
+                "/"
+            } else {
+                ""
+            };
+            format!("{:<9} {}{}", entry.entry_type, entry.name, suffix)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\n{}", output.path, entries)
+}
+
+pub fn format_dataset_list_human(output: &DatasetListOutput) -> String {
+    if output.datasets.is_empty() {
+        return "No datasets loaded".to_string();
+    }
+    output
+        .datasets
+        .iter()
+        .map(|dataset| {
+            format!(
+                "{}  {}  ({} images, {} entities, {} channels{})",
+                dataset.workspace_dataset_id,
+                dataset.name,
+                dataset.image_count,
+                dataset.entity_count,
+                dataset
+                    .channel_count
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                dataset
+                    .active_layout_id
+                    .as_ref()
+                    .map(|layout| format!(", layout {layout}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn format_dataset_info_human(output: &DatasetInfoOutput) -> String {
+    let dataset = &output.dataset;
+    let dimensions = dataset
+        .summary
+        .dimensions
+        .map(format_dimensions)
+        .unwrap_or_else(|| "unknown".to_string());
+    let images = if dataset.images.is_empty() {
+        "Images: none".to_string()
+    } else {
+        format!(
+            "Images:\n{}",
+            dataset
+                .images
+                .iter()
+                .map(|image| {
+                    format!(
+                        "  {} owner={} levels={} dtype={} dims={}",
+                        image.image_id,
+                        image.owner,
+                        image.level_count,
+                        image.data_type,
+                        image
+                            .dimensions
+                            .map(format_dimensions)
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    format!(
+        "Dataset: {}\nID: {}\nKind: {}\nImages: {}\nEntities: {}\nChannels: {}\nDimensions: {}\nActive layout: {}\nDefault layout: {}\nSource layouts: {}\nRegistered layouts: {}\n{}",
+        dataset.summary.name,
+        dataset.summary.workspace_dataset_id,
+        dataset.summary.kind,
+        dataset.summary.image_count,
+        dataset.summary.entity_count,
+        dataset
+            .summary
+            .channel_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        dimensions,
+        dataset
+            .summary
+            .active_layout_id
+            .as_deref()
+            .unwrap_or("none"),
+        dataset.default_layout_id.as_deref().unwrap_or("none"),
+        dataset.source_layout_count,
+        dataset.registered_layout_count,
+        images
+    )
+}
+
+pub fn format_dataset_remove_human(output: &DatasetRemoveOutput) -> String {
+    format!(
+        "Removed dataset: {}\nID: {}\nWorkspace: {} ({})\nSequence: {}",
+        output.removed.name,
+        output.removed.workspace_dataset_id,
+        output.workspace.name,
+        output.workspace.id,
+        output.seq
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IncomingDatasetMessage {
+    Text(String),
+    Close,
+    Ignore,
+}
+
+fn incoming_messages<S>(read: S) -> impl Stream<Item = Result<IncomingDatasetMessage, CliError>>
+where
+    S: Stream<Item = Result<Message, WebSocketError>>,
+{
+    read.map(|message| match message {
+        Ok(Message::Text(text)) => Ok(IncomingDatasetMessage::Text(text.to_string())),
+        Ok(Message::Close(_)) => Ok(IncomingDatasetMessage::Close),
+        Ok(_) => Ok(IncomingDatasetMessage::Ignore),
+        Err(error) => Err(map_websocket_error(error)),
+    })
+}
+
+async fn wait_for_workspace_snapshot<S>(
+    messages: &mut S,
+    wait: Duration,
+) -> Result<WorkspaceDatasetSnapshot, CliError>
+where
+    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+{
+    tokio::time::timeout(wait, async {
+        while let Some(message) = messages.next().await {
+            match message? {
+                IncomingDatasetMessage::Text(text) => {
+                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
+                        CliError::new(
+                            ErrorKind::Protocol,
+                            format!("invalid workspace server message: {error}"),
+                        )
+                    })?;
+                    match message {
+                        ServerMessage::Snapshot { seq, document, .. } => {
+                            return Ok(WorkspaceDatasetSnapshot { seq, document });
+                        }
+                        ServerMessage::WorkspaceArchived { .. } => {
+                            return Err(CliError::new(
+                                ErrorKind::ArchivedWorkspace,
+                                "workspace was archived before snapshot",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                IncomingDatasetMessage::Close => {
+                    return Err(CliError::new(
+                        ErrorKind::SessionDisconnect,
+                        "workspace WebSocket closed before snapshot",
+                    ));
+                }
+                IncomingDatasetMessage::Ignore => {}
+            }
+        }
+        Err(CliError::new(
+            ErrorKind::SessionDisconnect,
+            "workspace WebSocket disconnected before snapshot",
+        ))
+    })
+    .await
+    .map_err(|_| {
+        CliError::new(
+            ErrorKind::SessionDisconnect,
+            format!(
+                "timed out waiting for workspace snapshot after {}s",
+                wait.as_secs()
+            ),
+        )
+    })?
+}
+
+async fn wait_for_remove_ack<S>(
+    messages: &mut S,
+    dataset_id: &str,
+    wait: Duration,
+) -> Result<u64, CliError>
+where
+    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+{
+    tokio::time::timeout(wait, async {
+        while let Some(message) = messages.next().await {
+            match message? {
+                IncomingDatasetMessage::Text(text) => {
+                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
+                        CliError::new(
+                            ErrorKind::Protocol,
+                            format!("invalid workspace server message: {error}"),
+                        )
+                    })?;
+                    match message {
+                        ServerMessage::Ack { seq } => return Ok(seq),
+                        ServerMessage::CommandBroadcast {
+                            seq,
+                            command: DocumentCommand::RemoveDataset { id },
+                        } if id.0 == dataset_id => return Ok(seq),
+                        ServerMessage::WorkspaceArchived { .. } => {
+                            return Err(CliError::new(
+                                ErrorKind::ArchivedWorkspace,
+                                "workspace was archived before the dataset was removed",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                IncomingDatasetMessage::Close => {
+                    return Err(CliError::new(
+                        ErrorKind::SessionDisconnect,
+                        "workspace WebSocket closed before remove confirmation",
+                    ));
+                }
+                IncomingDatasetMessage::Ignore => {}
+            }
+        }
+        Err(CliError::new(
+            ErrorKind::SessionDisconnect,
+            "workspace WebSocket disconnected before remove confirmation",
+        ))
+    })
+    .await
+    .map_err(|_| {
+        CliError::new(
+            ErrorKind::RejectedCommand,
+            format!(
+                "timed out waiting for dataset remove confirmation after {}s",
+                wait.as_secs()
+            ),
+        )
+    })?
+}
+
+fn dataset_summaries_from_document(document: &DocumentState) -> Vec<DatasetSummary> {
+    document
+        .manifests
+        .values()
+        .map(|manifest| dataset_summary(document, manifest))
+        .collect()
+}
+
+fn dataset_info_from_document(
+    document: &DocumentState,
+    selector: &str,
+) -> Result<DatasetInfo, CliError> {
+    let summaries = dataset_summaries_from_document(document);
+    let summary = resolve_dataset_summary(selector, &summaries)?;
+    let dataset_id = DatasetId(summary.workspace_dataset_id.clone());
+    let manifest = document
+        .manifests
+        .get(&dataset_id)
+        .ok_or_else(|| CliError::new(ErrorKind::MissingResource, "dataset was not found"))?;
+    let images = manifest
+        .images()
+        .iter()
+        .map(|image| {
+            let first_level = image.multiscale.levels.first();
+            DatasetImageSummary {
+                image_id: image.image_id.0.clone(),
+                owner: image.owner.0.clone(),
+                data_type: format!("{:?}", image.multiscale.data_type),
+                level_count: image.multiscale.levels.len(),
+                level_indices: image
+                    .multiscale
+                    .levels
+                    .iter()
+                    .map(|level| level.level_index)
+                    .collect(),
+                dimensions: first_level.map(|level| level.shape),
+                channel_count: first_level.map(|level| level.shape[1]),
+            }
+        })
+        .collect();
+    Ok(DatasetInfo {
+        summary,
+        default_layout_id: manifest.default_layout_id.as_ref().map(|id| id.0.clone()),
+        source_layout_count: manifest.source_layouts().len(),
+        registered_layout_count: document
+            .registered_layouts
+            .get(&dataset_id)
+            .map(|layouts| layouts.len())
+            .unwrap_or(0),
+        images,
+    })
+}
+
+fn dataset_summary(
+    document: &DocumentState,
+    manifest: &lucida_core::DatasetManifest,
+) -> DatasetSummary {
+    let first_level = manifest
+        .images()
+        .first()
+        .and_then(|image| image.multiscale.levels.first());
+    DatasetSummary {
+        workspace_dataset_id: manifest.dataset_id.0.clone(),
+        name: manifest.name.clone(),
+        kind: dataset_kind_label(&manifest.kind),
+        image_count: manifest.images().len(),
+        entity_count: manifest.entities().len(),
+        channel_count: first_level.map(|level| level.shape[1]),
+        dimensions: first_level.map(|level| level.shape),
+        active_layout_id: active_layout_id(document, manifest),
+    }
+}
+
+fn active_layout_id(
+    document: &DocumentState,
+    manifest: &lucida_core::DatasetManifest,
+) -> Option<String> {
+    document
+        .active_layout_ids
+        .get(&manifest.dataset_id)
+        .or(manifest.default_layout_id.as_ref())
+        .or_else(|| manifest.source_layouts().first().map(|layout| &layout.id))
+        .map(|id| id.0.clone())
+}
+
+fn resolve_dataset_summary(
+    selector: &str,
+    datasets: &[DatasetSummary],
+) -> Result<DatasetSummary, CliError> {
+    if let Some(dataset) = datasets
+        .iter()
+        .find(|dataset| dataset.workspace_dataset_id == selector)
+        .cloned()
+    {
+        return Ok(dataset);
+    }
+
+    let matches = datasets
+        .iter()
+        .filter(|dataset| dataset.name == selector)
+        .cloned()
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(CliError::new(
+            ErrorKind::MissingResource,
+            format!("no dataset named or identified by {selector:?}"),
+        )),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            let ids = matches
+                .iter()
+                .map(|dataset| dataset.workspace_dataset_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(CliError::new(
+                ErrorKind::AmbiguousName,
+                format!("dataset name {selector:?} is ambiguous; use one of: {ids}"),
+            ))
+        }
+    }
+}
+
+fn remove_dataset_message(dataset_id: &str) -> ClientMessage {
+    ClientMessage::Command {
+        command: DocumentCommand::RemoveDataset {
+            id: DatasetId(dataset_id.to_string()),
+        },
+    }
+}
+
+fn dataset_kind_label(kind: &impl std::fmt::Debug) -> String {
+    let raw = format!("{kind:?}");
+    if raw.starts_with("Plate") {
+        "plate".to_string()
+    } else {
+        raw.to_ascii_lowercase()
+    }
+}
+
+fn format_dimensions(shape: [u64; 5]) -> String {
+    format!(
+        "T{} C{} Z{} Y{} X{}",
+        shape[0], shape[1], shape[2], shape[3], shape[4]
+    )
+}
+
+async fn wait_for_dataset_open_result<S>(
+    mut messages: S,
+    request_id: &str,
+    source: &str,
+    workspace_id: &str,
+    wait: Duration,
+) -> Result<DatasetOpenSummary, CliError>
+where
+    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+{
+    tokio::time::timeout(wait, async {
+        while let Some(message) = messages.next().await {
+            match message? {
+                IncomingDatasetMessage::Text(text) => {
+                    if let Some(result) =
+                        observe_dataset_message(&text, request_id, source, workspace_id)?
+                    {
+                        return Ok(result);
+                    }
+                }
+                IncomingDatasetMessage::Close => {
+                    return Err(CliError::new(
+                        ErrorKind::SessionDisconnect,
+                        "workspace WebSocket closed before the dataset opened",
+                    ));
+                }
+                IncomingDatasetMessage::Ignore => {}
+            }
+        }
+
+        Err(CliError::new(
+            ErrorKind::SessionDisconnect,
+            "workspace WebSocket disconnected before the dataset opened",
+        ))
+    })
+    .await
+    .map_err(|_| {
+        CliError::new(
+            ErrorKind::DatasetOpenFailure,
+            format!(
+                "timed out waiting for dataset open after {}s",
+                wait.as_secs()
+            ),
+        )
+    })?
+}
+
+fn observe_dataset_message(
+    text: &str,
+    request_id: &str,
+    source: &str,
+    workspace_id: &str,
+) -> Result<Option<DatasetOpenSummary>, CliError> {
+    let message: ServerMessage = serde_json::from_str(text).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("invalid workspace server message: {error}"),
+        )
+    })?;
+
+    match message {
+        ServerMessage::OpenDatasetSucceeded {
+            request_id: message_request_id,
+            seq,
+            opened,
+            ..
+        } => {
+            if message_request_id != request_id {
+                return Ok(None);
+            }
+            let image_count = opened.manifest.images().len();
+            let entity_count = opened.manifest.entities().len();
+            Ok(Some(DatasetOpenSummary {
+                workspace_id: workspace_id.to_string(),
+                workspace_dataset_id: opened.manifest.dataset_id.0,
+                name: opened.manifest.name,
+                image_count,
+                entity_count,
+                seq,
+                source: source.to_string(),
+            }))
+        }
+        ServerMessage::OpenDatasetFailed {
+            request_id: message_request_id,
+            url,
+            error,
+        } => {
+            if message_request_id != request_id {
+                return Ok(None);
+            }
+            Err(open_dataset_failure(&url, &error))
+        }
+        ServerMessage::WorkspaceArchived { .. } => Err(CliError::new(
+            ErrorKind::ArchivedWorkspace,
+            "workspace was archived before the dataset opened",
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn dataset_open_request_id() -> String {
+    format!(
+        "cli-{hi:016x}{lo:016x}",
+        hi = rand::random::<u64>(),
+        lo = rand::random::<u64>()
+    )
+}
+
+fn open_dataset_failure(url: &str, error: &str) -> CliError {
+    if error.contains("workspace role cannot add datasets") {
+        return CliError::new(ErrorKind::Unauthorized, error);
+    }
+    if error.contains("workspace runtime is closed") {
+        return CliError::new(ErrorKind::SessionDisconnect, error);
+    }
+    if error.contains("unsupported URL scheme") {
+        return CliError::new(
+            ErrorKind::DatasetOpenFailure,
+            format!("unsupported dataset path or URL {url:?}: {error}"),
+        );
+    }
+
+    CliError::new(
+        ErrorKind::DatasetOpenFailure,
+        format!("dataset open failed for {url:?}: {error}"),
+    )
+}
+
+fn dataset_api_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
+    let mut url = reqwest::Url::parse(server_url)
+        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| CliError::invalid_server("server URL cannot be used as a base URL"))?;
+        path.clear();
+        for segment in segments {
+            path.push(segment);
+        }
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn map_browse_error(status: reqwest::StatusCode, body: &str) -> CliError {
+    let body = body.trim();
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => CliError::new(
+            ErrorKind::Unauthenticated,
+            "not authenticated; run `lucida auth login`",
+        ),
+        reqwest::StatusCode::FORBIDDEN => CliError::new(
+            ErrorKind::Unauthorized,
+            "browse request was forbidden by the server data directory policy",
+        ),
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND => CliError::new(
+            ErrorKind::MissingResource,
+            if body.is_empty() {
+                format!("browse request failed with HTTP {}", status.as_u16())
+            } else {
+                body.to_string()
+            },
+        ),
+        _ => CliError::new(
+            ErrorKind::Protocol,
+            if body.is_empty() {
+                format!("unexpected browse response: HTTP {}", status.as_u16())
+            } else {
+                format!(
+                    "unexpected browse response HTTP {}: {body}",
+                    status.as_u16()
+                )
+            },
+        ),
+    }
+}
+
+fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsRequest<()>, CliError> {
+    let mut request = ws_url.into_client_request().map_err(|error| {
+        CliError::new(
+            ErrorKind::InvalidServer,
+            format!("invalid workspace WebSocket URL: {error}"),
+        )
+    })?;
+    if let Some(token) = token {
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            format!("Bearer {token}").parse().map_err(|error| {
+                CliError::new(
+                    ErrorKind::Config,
+                    format!("failed to build bearer authorization header: {error}"),
+                )
+            })?,
+        );
+    }
+    Ok(request)
+}
+
+fn map_websocket_error(error: WebSocketError) -> CliError {
+    match error {
+        WebSocketError::Http(response) => match response.status() {
+            WsStatusCode::UNAUTHORIZED => CliError::new(
+                ErrorKind::Unauthenticated,
+                "not authenticated; run `lucida auth login`",
+            ),
+            WsStatusCode::FORBIDDEN => CliError::new(
+                ErrorKind::Unauthorized,
+                "workspace WebSocket request was forbidden",
+            ),
+            WsStatusCode::NOT_FOUND => CliError::new(
+                ErrorKind::MissingResource,
+                "workspace WebSocket target was not found",
+            ),
+            WsStatusCode::GONE | WsStatusCode::CONFLICT => {
+                CliError::new(ErrorKind::ArchivedWorkspace, "workspace is archived")
+            }
+            status => CliError::new(
+                ErrorKind::SessionDisconnect,
+                format!(
+                    "workspace WebSocket upgrade failed with HTTP {}",
+                    status.as_u16()
+                ),
+            ),
+        },
+        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => CliError::new(
+            ErrorKind::SessionDisconnect,
+            "workspace WebSocket disconnected",
+        ),
+        WebSocketError::Io(error) => CliError::new(
+            ErrorKind::SessionDisconnect,
+            format!("workspace WebSocket I/O failed: {error}"),
+        ),
+        other => CliError::new(
+            ErrorKind::SessionDisconnect,
+            format!("workspace WebSocket failed: {other}"),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use futures_util::stream;
+
+    use super::*;
+
+    fn dataset_open_succeeded_message(request_id: &str, seq: u64) -> String {
+        serde_json::json!({
+            "type": "open_dataset_succeeded",
+            "request_id": request_id,
+            "url": "/data/demo.zarr",
+            "seq": seq,
+            "opened": {
+                "manifest": {
+                    "dataset_id": "wds-test",
+                    "name": "demo.zarr",
+                    "kind": "Single",
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "kind": "Image",
+                            "parent": null,
+                            "labels": { "name": "field-1" }
+                        },
+                        {
+                            "id": "entity-2",
+                            "kind": "Image",
+                            "parent": null,
+                            "labels": { "name": "field-2" }
+                        }
+                    ],
+                    "transforms": [],
+                    "images": [],
+                    "source_layouts": [],
+                    "default_layout_id": null
+                },
+                "fetch": { "Proxied": { "images": [] } },
+                "catalog": { "entries": [] }
+            }
+        })
+        .to_string()
+    }
+
+    fn snapshot_message(seq: u64) -> String {
+        serde_json::json!({
+            "type": "snapshot",
+            "seq": seq,
+            "document": {
+                "manifests": {
+                    "wds-test": {
+                        "dataset_id": "wds-test",
+                        "name": "demo.zarr",
+                        "kind": "Single",
+                        "entities": [
+                            {
+                                "id": "entity-1",
+                                "kind": "Image",
+                                "parent": null,
+                                "labels": { "name": "field-1" }
+                            }
+                        ],
+                        "transforms": [],
+                        "images": [
+                            {
+                                "image_id": "image-1",
+                                "owner": "entity-1",
+                                "multiscale": {
+                                    "axes": [],
+                                    "levels": [
+                                        {
+                                            "level_index": 0,
+                                            "shape": [1, 3, 5, 64, 32],
+                                            "chunk_shape": [1, 1, 1, 32, 32],
+                                            "grid_shape": [1, 3, 5, 2, 1],
+                                            "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+                                        }
+                                    ],
+                                    "coarse_level_index": null,
+                                    "generated_levels": [],
+                                    "data_type": "Uint16",
+                                    "pinned_axes": []
+                                }
+                            }
+                        ],
+                        "source_layouts": [
+                            {
+                                "id": "layout-source",
+                                "name": "Source layout",
+                                "placements": []
+                            }
+                        ],
+                        "default_layout_id": "layout-source"
+                    },
+                    "wds-duplicate": {
+                        "dataset_id": "wds-duplicate",
+                        "name": "demo.zarr",
+                        "kind": "Single",
+                        "entities": [],
+                        "transforms": [],
+                        "images": [],
+                        "source_layouts": [],
+                        "default_layout_id": null
+                    }
+                },
+                "registered_layouts": {
+                    "wds-test": [
+                        {
+                            "id": "layout-registered",
+                            "name": "Registered layout",
+                            "placements": []
+                        }
+                    ]
+                },
+                "active_layout_ids": {
+                    "wds-test": "layout-registered"
+                },
+                "asset_catalogs": {}
+            },
+            "peers": [],
+            "your_id": 7,
+            "generated_availability": {}
+        })
+        .to_string()
+    }
+
+    fn text_messages(
+        texts: Vec<String>,
+    ) -> impl Stream<Item = Result<IncomingDatasetMessage, CliError>> {
+        stream::iter(texts.into_iter().map(IncomingDatasetMessage::Text).map(Ok))
+    }
+
+    #[tokio::test]
+    async fn returns_dataset_opened_summary() {
+        let result = wait_for_dataset_open_result(
+            text_messages(vec![dataset_open_succeeded_message("req-1", 17)]),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.workspace_id, "workspace-1");
+        assert_eq!(result.workspace_dataset_id, "wds-test");
+        assert_eq!(result.name, "demo.zarr");
+        assert_eq!(result.entity_count, 2);
+        assert_eq!(result.image_count, 0);
+        assert_eq!(result.seq, 17);
+    }
+
+    #[tokio::test]
+    async fn ignores_unrelated_server_messages_before_dataset_opened() {
+        let result = wait_for_dataset_open_result(
+            text_messages(vec![
+                serde_json::json!({
+                    "type": "peer_left",
+                    "client_id": 42
+                })
+                .to_string(),
+                dataset_open_succeeded_message("other-req", 17),
+                serde_json::json!({
+                    "type": "open_dataset_failed",
+                    "request_id": "other-req",
+                    "url": "ftp://example/data.zarr",
+                    "error": "unsupported URL scheme: ftp://example/data.zarr"
+                })
+                .to_string(),
+                dataset_open_succeeded_message("req-1", 18),
+            ]),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.seq, 18);
+    }
+
+    #[tokio::test]
+    async fn reports_open_dataset_failed() {
+        let error = wait_for_dataset_open_result(
+            text_messages(vec![
+                serde_json::json!({
+                    "type": "open_dataset_failed",
+                    "request_id": "req-1",
+                    "url": "ftp://example/data.zarr",
+                    "error": "unsupported URL scheme: ftp://example/data.zarr"
+                })
+                .to_string(),
+            ]),
+            "req-1",
+            "ftp://example/data.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::DatasetOpenFailure);
+        assert!(error.message.contains("unsupported dataset path or URL"));
+    }
+
+    #[tokio::test]
+    async fn reports_timeout() {
+        let error = wait_for_dataset_open_result(
+            stream::pending::<Result<IncomingDatasetMessage, CliError>>(),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::DatasetOpenFailure);
+        assert!(error.message.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn reports_disconnect() {
+        let error = wait_for_dataset_open_result(
+            stream::empty::<Result<IncomingDatasetMessage, CliError>>(),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::SessionDisconnect);
+    }
+
+    #[test]
+    fn permission_failure_maps_to_unauthorized() {
+        let error = open_dataset_failure("/data/demo.zarr", "workspace role cannot add datasets");
+
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+    }
+
+    #[test]
+    fn browse_human_output_marks_directories() {
+        let output = DatasetBrowseOutput {
+            server: EffectiveServer {
+                url: "http://localhost:9876".into(),
+                source: crate::config::ServerSource::Default,
+            },
+            path: "/data".into(),
+            entries: vec![
+                BrowseEntry {
+                    name: "plate.zarr".into(),
+                    entry_type: "directory".into(),
+                },
+                BrowseEntry {
+                    name: "notes.txt".into(),
+                    entry_type: "file".into(),
+                },
+            ],
+        };
+
+        let human = format_dataset_browse_human(&output);
+
+        assert!(human.contains("/data"));
+        assert!(human.contains("directory plate.zarr/"));
+        assert!(human.contains("file      notes.txt"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_yields_dataset_summaries() {
+        let mut messages = text_messages(vec![snapshot_message(22)]);
+        let snapshot = wait_for_workspace_snapshot(&mut messages, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let summaries = dataset_summaries_from_document(&snapshot.document);
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.workspace_dataset_id == "wds-test")
+            .unwrap();
+
+        assert_eq!(snapshot.seq, 22);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summary.channel_count, Some(3));
+        assert_eq!(summary.dimensions, Some([1, 3, 5, 64, 32]));
+        assert_eq!(
+            summary.active_layout_id.as_deref(),
+            Some("layout-registered")
+        );
+    }
+
+    #[tokio::test]
+    async fn dataset_info_includes_image_and_layout_metadata() {
+        let mut messages = text_messages(vec![snapshot_message(22)]);
+        let snapshot = wait_for_workspace_snapshot(&mut messages, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let info = dataset_info_from_document(&snapshot.document, "wds-test").unwrap();
+
+        assert_eq!(info.summary.name, "demo.zarr");
+        assert_eq!(info.summary.image_count, 1);
+        assert_eq!(info.summary.entity_count, 1);
+        assert_eq!(info.default_layout_id.as_deref(), Some("layout-source"));
+        assert_eq!(info.registered_layout_count, 1);
+        assert_eq!(info.source_layout_count, 1);
+        assert_eq!(info.images[0].image_id, "image-1");
+        assert_eq!(info.images[0].data_type, "Uint16");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_dataset_names_fail() {
+        let mut messages = text_messages(vec![snapshot_message(22)]);
+        let snapshot = wait_for_workspace_snapshot(&mut messages, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let error = dataset_info_from_document(&snapshot.document, "demo.zarr").unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::AmbiguousName);
+    }
+
+    #[test]
+    fn remove_dataset_command_maps_to_document_command() {
+        let message = remove_dataset_message("wds-test");
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(value["type"], "command");
+        assert_eq!(value["command"]["type"], "remove_dataset");
+        assert_eq!(value["command"]["id"], "wds-test");
+    }
+
+    #[tokio::test]
+    async fn remove_wait_accepts_ack() {
+        let mut messages = text_messages(vec![
+            serde_json::json!({
+                "type": "peer_left",
+                "client_id": 99
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "ack",
+                "seq": 23
+            })
+            .to_string(),
+        ]);
+
+        let seq = wait_for_remove_ack(&mut messages, "wds-test", Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(seq, 23);
+    }
+
+    #[tokio::test]
+    async fn remove_wait_timeout_is_rejected_command() {
+        let mut messages = stream::pending::<Result<IncomingDatasetMessage, CliError>>();
+
+        let error = wait_for_remove_ack(&mut messages, "wds-test", Duration::from_millis(1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::RejectedCommand);
+    }
+
+    #[tokio::test]
+    async fn viewer_role_cannot_remove_without_socket() {
+        let client = DatasetWorkspaceClient::new("ws://127.0.0.1:1/ws/workspaces/w", None);
+        let workspace = WorkspaceRecord {
+            id: "w".into(),
+            name: "Workspace".into(),
+            role: WorkspaceRole::Viewer,
+            created_by: "dev@local".into(),
+            created_at: "2026-06-06T00:00:00Z".into(),
+            updated_at: "2026-06-06T00:00:00Z".into(),
+            archived_at: None,
+            seq: 0,
+            default_saved_view_id: None,
+            last_opened_at: None,
+            pinned_at: None,
+        };
+
+        let error = client
+            .remove("wds-test", &workspace, Duration::from_millis(1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+    }
+
+    #[allow(dead_code)]
+    fn assert_infallible(_: Infallible) {}
+}

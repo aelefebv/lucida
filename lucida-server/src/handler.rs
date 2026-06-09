@@ -477,22 +477,23 @@ async fn handle_client_inner(
                                 });
                             }
                         }
-                        ClientMessage::OpenRemoteDataset { url } => {
+                        ClientMessage::OpenRemoteDataset { request_id, url } => {
                             tracing::info!(
                                 client_id = %id,
+                                request_id = %request_id,
                                 url = %url,
                                 "open_remote_dataset.received"
                             );
                             let session_clone = Arc::clone(&session);
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
-                            let url_clone = url.clone();
                             let proxy_config_clone = proxy_config.clone();
                             let workspace_clone = workspace.clone();
+                            let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
                                 handle_open_remote_dataset(
                                     id,
-                                    url_clone,
+                                    request,
                                     session_clone,
                                     tx_clone,
                                     unicast_routes_clone,
@@ -764,6 +765,12 @@ fn find_loaded_binding(
     None
 }
 
+#[derive(Debug)]
+struct OpenRemoteDatasetRequest {
+    request_id: String,
+    url: String,
+}
+
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
 ///
 /// The incoming `url` is normalized once at entry via
@@ -779,17 +786,19 @@ fn find_loaded_binding(
 #[tracing::instrument(
     name = "dataset_open",
     skip(session, tx, unicast_routes, proxy_config, workspace),
-    fields(url = %url, client_id = %client_id)
+    fields(url = %request.url, client_id = %client_id)
 )]
 async fn handle_open_remote_dataset(
     client_id: ClientId,
-    url: String,
+    request: OpenRemoteDatasetRequest,
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
     workspace: Option<WorkspaceClientContext>,
 ) {
+    let OpenRemoteDatasetRequest { request_id, url } = request;
+
     // Normalize at the input boundary. Drive-letter case, slash
     // direction, `file://` prefix, UNC backslashes — see ADR-0042.
     // Idempotent (safe even though `backend::open` will also normalize),
@@ -816,6 +825,7 @@ async fn handle_open_remote_dataset(
         );
         send_open_failed(
             client_id,
+            &request_id,
             &canonical_url,
             "workspace runtime is closed",
             &unicast_routes,
@@ -839,6 +849,7 @@ async fn handle_open_remote_dataset(
         );
         send_open_failed(
             client_id,
+            &request_id,
             &canonical_url,
             "workspace role cannot add datasets",
             &unicast_routes,
@@ -865,6 +876,7 @@ async fn handle_open_remote_dataset(
                 );
                 send_open_failed(
                     client_id,
+                    &request_id,
                     &canonical_url,
                     "workspace dataset lookup failed",
                     &unicast_routes,
@@ -899,6 +911,7 @@ async fn handle_open_remote_dataset(
         if let Some((existing_dataset_id, existing)) =
             find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
         {
+            let opened = existing.clone();
             let command = DocumentCommand::DatasetOpened(existing);
             let seq = sess.seq;
             drop(sess);
@@ -914,6 +927,15 @@ async fn handle_open_remote_dataset(
                 url = %canonical_url,
                 "open_remote_dataset.dedup_reuse"
             );
+            send_open_succeeded(
+                client_id,
+                &request_id,
+                &canonical_url,
+                seq,
+                opened,
+                &unicast_routes,
+            )
+            .await;
             return;
         }
     }
@@ -924,7 +946,14 @@ async fn handle_open_remote_dataset(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
-            send_open_failed(client_id, &canonical_url, &e.to_string(), &unicast_routes).await;
+            send_open_failed(
+                client_id,
+                &request_id,
+                &canonical_url,
+                &e.to_string(),
+                &unicast_routes,
+            )
+            .await;
             return;
         }
     };
@@ -955,7 +984,14 @@ async fn handle_open_remote_dataset(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.import_failed");
-            send_open_failed(client_id, &canonical_url, &e.to_string(), &unicast_routes).await;
+            send_open_failed(
+                client_id,
+                &request_id,
+                &canonical_url,
+                &e.to_string(),
+                &unicast_routes,
+            )
+            .await;
             return;
         }
     };
@@ -1114,6 +1150,13 @@ async fn handle_open_remote_dataset(
                 seq,
                 command: DocumentCommand::DatasetOpened(existing),
             };
+            let opened = match &broadcast_msg {
+                ServerMessage::CommandBroadcast {
+                    command: DocumentCommand::DatasetOpened(opened),
+                    ..
+                } => opened.clone(),
+                _ => unreachable!("constructed above"),
+            };
             let _ = tx.send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
                 broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
@@ -1124,6 +1167,15 @@ async fn handle_open_remote_dataset(
                 dataset_source_id = %dataset_source_id,
                 "open_remote_dataset.lost_race"
             );
+            send_open_succeeded(
+                client_id,
+                &request_id,
+                &canonical_url,
+                seq,
+                opened,
+                &unicast_routes,
+            )
+            .await;
             return;
         }
         let seq = sess.apply(command.clone());
@@ -1163,6 +1215,7 @@ async fn handle_open_remote_dataset(
         );
         send_open_failed(
             client_id,
+            &request_id,
             &canonical_url,
             "workspace persistence failed",
             &unicast_routes,
@@ -1175,6 +1228,10 @@ async fn handle_open_remote_dataset(
     // Use u64::MAX as sender so no client matches — everyone gets the
     // CommandBroadcast (not an Ack), since the requester hasn't applied
     // the DatasetOpened locally.
+    let opened = match &command {
+        DocumentCommand::DatasetOpened(opened) => opened.clone(),
+        _ => unreachable!("dataset open command must be DatasetOpened"),
+    };
     let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
 
     let _ = tx.send(BroadcastItem::CommandBroadcast {
@@ -1198,6 +1255,15 @@ async fn handle_open_remote_dataset(
         seq,
         "open_remote_dataset.broadcast_sent"
     );
+    send_open_succeeded(
+        client_id,
+        &request_id,
+        &canonical_url,
+        seq,
+        opened,
+        &unicast_routes,
+    )
+    .await;
 
     if !generated_plans.is_empty() {
         generated_service.enqueue_background_fill().await;
@@ -1659,20 +1725,52 @@ pub(crate) fn proxy_kind_str(kind: ProxyKind) -> &'static str {
     }
 }
 
+/// Send an OpenDatasetSucceeded message to the requesting client.
+async fn send_open_succeeded(
+    client_id: ClientId,
+    request_id: &str,
+    url: &str,
+    seq: u64,
+    opened: DatasetOpened,
+    unicast_routes: &UnicastRoutes,
+) {
+    tracing::info!(
+        client_id = %client_id,
+        request_id = %request_id,
+        url = %url,
+        seq,
+        "open_remote_dataset.succeeded"
+    );
+    let msg = ServerMessage::OpenDatasetSucceeded {
+        request_id: request_id.to_string(),
+        url: url.to_string(),
+        seq,
+        opened,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
+    }
+}
+
 /// Send an OpenDatasetFailed message to the requesting client.
 async fn send_open_failed(
     client_id: ClientId,
+    request_id: &str,
     url: &str,
     error: &str,
     unicast_routes: &UnicastRoutes,
 ) {
     tracing::warn!(
         client_id = %client_id,
+        request_id = %request_id,
         url = %url,
         error = %error,
         "open_remote_dataset.failed"
     );
     let msg = ServerMessage::OpenDatasetFailed {
+        request_id: request_id.to_string(),
         url: url.to_string(),
         error: error.to_string(),
     };

@@ -56,6 +56,16 @@ export interface WorkspaceSavedView {
   view: SavedView;
 }
 
+export interface WorkspaceViewerProfile {
+  workspace_id: string;
+  user_email: string;
+  profile: string;
+  created_at: string;
+  updated_at: string;
+  seed_source: string | null;
+  view: SavedView;
+}
+
 export interface WorkspaceUserState {
   workspace_id: string;
   last_opened_at: string | null;
@@ -71,6 +81,32 @@ async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T
       ...init?.headers,
     },
   });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      detail = body.detail || body.error || detail;
+    } catch {
+      // Keep status text.
+    }
+    throw new Error(detail);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function requestOptionalJson<T>(
+  input: RequestInfo,
+  init?: RequestInit,
+): Promise<T | null> {
+  const res = await fetch(input, {
+    credentials: "same-origin",
+    ...init,
+    headers: {
+      ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...init?.headers,
+    },
+  });
+  if (res.status === 204) return null;
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -214,6 +250,10 @@ function workspaceSavedViewUrl(workspaceId: string, savedViewId: string): string
   return `${workspaceSavedViewsUrl(workspaceId)}/${encodeURIComponent(savedViewId)}`;
 }
 
+function workspaceViewerProfileUrl(workspaceId: string, profile: string): string {
+  return `/api/workspaces/${encodeURIComponent(workspaceId)}/viewer-profiles/${encodeURIComponent(profile)}`;
+}
+
 export function listWorkspaceSavedViews(workspaceId: string): Promise<WorkspaceSavedView[]> {
   return requestJson<WorkspaceSavedView[]>(workspaceSavedViewsUrl(workspaceId));
 }
@@ -259,6 +299,15 @@ export function deleteWorkspaceSavedView(
   return requestNoContent(workspaceSavedViewUrl(workspaceId, savedViewId), {
     method: "DELETE",
   });
+}
+
+export function getWorkspaceViewerProfile(
+  workspaceId: string,
+  profile: string,
+): Promise<WorkspaceViewerProfile | null> {
+  return requestOptionalJson<WorkspaceViewerProfile>(
+    workspaceViewerProfileUrl(workspaceId, profile),
+  );
 }
 
 export function updateWorkspaceDefaultSavedView(

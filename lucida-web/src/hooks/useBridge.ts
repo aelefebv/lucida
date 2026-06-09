@@ -16,6 +16,7 @@ import { Session } from "../session.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
+import { syncSceneViewState } from "./sceneViewState.ts";
 
 /** Callback ref the SavedView applier registers into so it sees the
  * relevant lifecycle events without useBridge importing applier types
@@ -46,6 +47,7 @@ interface Params {
   setC: React.Dispatch<React.SetStateAction<number>>;
   setT: React.Dispatch<React.SetStateAction<number>>;
   setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
+  setMultiChannel: React.Dispatch<React.SetStateAction<boolean>>;
   // Lifted state (from App)
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
   bumpDatasetsVersion: () => void;
@@ -68,6 +70,7 @@ export function useBridge({
   setC,
   setT,
   setViewMode,
+  setMultiChannel,
   setSelectedDatasetId,
   savedViewHooksRef,
   bumpDatasetsVersion,
@@ -361,10 +364,7 @@ export function useBridge({
             try {
               const presenceJson = JSON.stringify({ camera, view, display });
               scene.import_presence(presenceJson);
-              setZ(scene.z());
-              setT(scene.t());
-              setC(scene.c());
-              setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
+              syncSceneViewState(scene, { setZ, setT, setC, setViewMode, setMultiChannel });
               loopRef.current?.markInteractiveDirty();
               sessionRef.current?.bridge.sendPresence(scene.export_presence());
             } catch (e) {
@@ -402,10 +402,7 @@ export function useBridge({
                     display: peer.display,
                   });
                   scene.import_presence(presenceJson);
-                  setZ(scene.z());
-                  setT(scene.t());
-                  setC(scene.c());
-                  setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
+                  syncSceneViewState(scene, { setZ, setT, setC, setViewMode, setMultiChannel });
                   loopRef.current?.markInteractiveDirty();
                   sessionRef.current?.bridge.sendPresence(scene.export_presence());
                 } catch (e) {
@@ -668,10 +665,7 @@ export function useBridge({
                 console.warn("Failed to import peer dataset presence:", e);
               }
             }
-            setZ(scene.z());
-            setT(scene.t());
-            setC(scene.c());
-            setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
+            syncSceneViewState(scene, { setZ, setT, setC, setViewMode, setMultiChannel });
             loopRef.current?.markInteractiveDirty();
           } catch (e) {
             console.warn("Failed to import peer presence:", e);
@@ -679,7 +673,7 @@ export function useBridge({
         }
       }
     }
-  }, [peers, myId, wasmSceneRef, loopRef, setZ, setC, setT, setViewMode, bumpLayerSettingsVersion]);
+  }, [peers, myId, wasmSceneRef, loopRef, setZ, setC, setT, setViewMode, setMultiChannel, bumpLayerSettingsVersion]);
 
   const followablePeers = Array.from(peers.entries())
     .filter(([, p]) => p.following === null || p.following === undefined);
