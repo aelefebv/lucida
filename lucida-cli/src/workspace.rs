@@ -758,7 +758,7 @@ pub fn format_workspace_member_human(output: &WorkspaceMemberOutput) -> String {
 }
 
 fn looks_like_workspace_id(selector: &str) -> bool {
-    uuid_like(selector) || selector.len() >= 24 && !selector.contains(char::is_whitespace)
+    uuid_like(selector)
 }
 
 fn uuid_like(selector: &str) -> bool {
@@ -849,6 +849,7 @@ mod tests {
             "ca7ba7c7-37f8-4f97-988e-a98f8e5d1e62"
         ));
         assert!(!looks_like_workspace_id("Shared analysis"));
+        assert!(!looks_like_workspace_id("cli-dev-smoke-20260609-122456"));
     }
 
     #[test]
