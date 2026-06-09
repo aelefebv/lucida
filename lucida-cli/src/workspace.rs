@@ -550,7 +550,7 @@ pub fn target_for(
     Ok(WorkspaceTarget {
         id: workspace.id.clone(),
         name: workspace.name.clone(),
-        role: workspace.role.clone(),
+        role: workspace.role,
         archived: workspace.archived_at.is_some(),
         server_url: server_url.to_string(),
         web_url,

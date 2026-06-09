@@ -487,14 +487,13 @@ async fn handle_client_inner(
                             let session_clone = Arc::clone(&session);
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
-                            let url_clone = url.clone();
                             let proxy_config_clone = proxy_config.clone();
                             let workspace_clone = workspace.clone();
+                            let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
                                 handle_open_remote_dataset(
                                     id,
-                                    request_id,
-                                    url_clone,
+                                    request,
                                     session_clone,
                                     tx_clone,
                                     unicast_routes_clone,
@@ -766,6 +765,12 @@ fn find_loaded_binding(
     None
 }
 
+#[derive(Debug)]
+struct OpenRemoteDatasetRequest {
+    request_id: String,
+    url: String,
+}
+
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
 ///
 /// The incoming `url` is normalized once at entry via
@@ -781,18 +786,19 @@ fn find_loaded_binding(
 #[tracing::instrument(
     name = "dataset_open",
     skip(session, tx, unicast_routes, proxy_config, workspace),
-    fields(url = %url, client_id = %client_id)
+    fields(url = %request.url, client_id = %client_id)
 )]
 async fn handle_open_remote_dataset(
     client_id: ClientId,
-    request_id: String,
-    url: String,
+    request: OpenRemoteDatasetRequest,
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
     workspace: Option<WorkspaceClientContext>,
 ) {
+    let OpenRemoteDatasetRequest { request_id, url } = request;
+
     // Normalize at the input boundary. Drive-letter case, slash
     // direction, `file://` prefix, UNC backslashes — see ADR-0042.
     // Idempotent (safe even though `backend::open` will also normalize),
