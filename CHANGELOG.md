@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.0](https://github.com/aelefebv/lucida/compare/v0.6.0...v0.7.0) (2026-06-09)
+
+
+### Features
+
+* add idle live workspace eviction ([931c61d](https://github.com/aelefebv/lucida/commit/931c61d0a1cefed5c22e4dd3146e80be27a38005))
+* add workspace admin support endpoints ([dd94557](https://github.com/aelefebv/lucida/commit/dd94557c07ecba3959a20935f380629db5c38ed5))
+* add workspace archive restore ([c7ec844](https://github.com/aelefebv/lucida/commit/c7ec8449902939b7af6dc65734c2ebfdc71bd900))
+* add workspace recents and pins ([50a827d](https://github.com/aelefebv/lucida/commit/50a827d9a86d6aef06fa9b78012b46060bbdfa3f))
+* add workspace saved view routes ([a4d533e](https://github.com/aelefebv/lucida/commit/a4d533e1e00d81a1286f3324aa07f4a641663fd5))
+* add workspace saved views ([38e6478](https://github.com/aelefebv/lucida/commit/38e6478d223417498fb550c1304a8197ed270b6d))
+* implement workspace-first CLI and Python client ([b4a38a5](https://github.com/aelefebv/lucida/commit/b4a38a593b02ba61888948f2c487c5d5d71223f8))
+
+
+### Bug Fixes
+
+* keep workspace inline views local ([01baef1](https://github.com/aelefebv/lucida/commit/01baef143b9a1a7dbd82feb91a15e21036929e5a)), closes [#722](https://github.com/aelefebv/lucida/issues/722)
+
 ## [0.6.0](https://github.com/aelefebv/lucida/compare/v0.5.1...v0.6.0) (2026-05-29)
 
 
