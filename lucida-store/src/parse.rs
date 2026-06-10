@@ -46,7 +46,8 @@ pub(crate) async fn read_zarr_json(
     path: &str,
 ) -> Result<serde_json::Value, StoreError> {
     let bytes = store.get(&Path::from(path)).await?.bytes().await?;
-    serde_json::from_slice(&bytes).map_err(|e| StoreError::Metadata(e.to_string()))
+    serde_json::from_slice(&bytes)
+        .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
 }
 
 /// Parsed OME multiscales metadata.

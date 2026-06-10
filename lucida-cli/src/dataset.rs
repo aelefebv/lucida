@@ -1190,7 +1190,8 @@ fn open_dataset_failure(
             .as_ref()
             .map(|detail| format!("{prefix}: {detail}"))
             .unwrap_or(prefix);
-        return CliError::new(error_kind_for_open_failure(diagnostic.kind), message);
+        return CliError::new(error_kind_for_open_failure(diagnostic.kind), message)
+            .with_context("diagnostic", diagnostic);
     }
     if error.contains("workspace role cannot add datasets") {
         return CliError::new(ErrorKind::Unauthorized, error);
@@ -1650,6 +1651,10 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::MissingResource);
         assert!(error.message.contains("MissingObject"));
         assert!(error.message.contains("zarr.json missing"));
+        let json = error.to_json();
+        assert_eq!(json["error"]["diagnostic"]["stage"], "backend_open");
+        assert_eq!(json["error"]["diagnostic"]["kind"], "missing_object");
+        assert_eq!(json["error"]["diagnostic"]["retryable"], false);
     }
 
     #[test]

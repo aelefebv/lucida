@@ -12,7 +12,7 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
 1. **UI input** — user types/pastes a URL into the open-dataset input. `App.tsx` captures it; `useDatasets.handleUrlSubmit` calls `Bridge.sendOpenRemoteDataset(url)`.
 2. **Wire**: `{type: "open_remote_dataset", url}` JSON to the WebSocket.
 3. **Server** ([[lucida-server]] `handler.rs::handle_open_remote_dataset`):
-   1. Compute `dataset_id` from URL hash (BLAKE3 → `ds-{16 hex}`). If a `ServerBinding` already exists for this URL, **rebroadcast the canonical `DatasetOpened` and return** (cache the import work).
+   1. Normalize the source, compute `dataset_id` from URL hash (BLAKE3 → `ds-{16 hex}`), and emit request-correlated `dataset_open_progress` diagnostics. If a `ServerBinding` already exists for this URL, **rebroadcast the canonical `DatasetOpened` and return** (cache the import work).
    2. Otherwise, `lucida_store::backend::open(url)` → `Arc<dyn ObjectStore>`.
    3. `lucida_store::import::import_dataset(...)` → `ImportResult { manifest, fetch, binding_seed }`.
    4. Build the default client-visible `AssetCatalog` as empty. Legacy proxy catalog generation only runs when `legacy_proxy_enabled` is explicitly set.
@@ -49,7 +49,7 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
 
 ## Where things can hang
 
-- **Server-side import** (step 3.iii) — for slow object stores or many wells, can take seconds. The handler is `tokio::spawn`'d so the connection stays responsive; the client sees nothing until the broadcast arrives.
+- **Server-side import** (step 3.iii) — for slow object stores or many wells, can take seconds. The handler is `tokio::spawn`'d so the connection stays responsive; clients receive request-correlated `dataset_open_progress` messages before the final success/failure.
 - **Generated coarse backlog** (step 3.x) — generated coarse chunks may be advertised before bytes are ready. Detail chunks are independent and arrive in parallel; pending generated chunks surface as status messages and later readiness deltas.
 - **First chunk to GPU** (steps 5–10) — typical first-frame time is one RAF + one network round-trip + one decode + one upload, so on the order of 50–100 ms after `dataset_opened`.
 
@@ -66,6 +66,7 @@ The name is forward-looking: [[decisions/0006-content-source-vs-fetch-source|Fet
 ## Related
 
 - [[chunk-pipeline]] — every step from planning forward
+- [[dataset-diagnostics]] — browser/CLI/Python/server-log diagnostics for open, health, restore, cache, and failure behavior
 - [[decisions/0011-dual-handoff-on-dataset-opened]] — why WASM and JS both consume the event
 - [[decisions/0005-three-output-import-model]] — the `ImportResult` shape
 - [[lucida-server]]

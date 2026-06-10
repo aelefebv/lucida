@@ -10,6 +10,7 @@ End-to-end traces showing how data or control moves through Lucida. Each article
 ## Articles
 
 - [[dataset-opening]] — user pastes URL → server import → `DatasetOpened` broadcast → WASM ingest + JS fetch pipeline → first chunks render
+- [[dataset-diagnostics]] — browser/CLI/Python/server-log path for dataset open, health, restore, cache, and failure diagnostics
 - [[chunk-lifecycle]] — planner decides "wanted" → CPU cache fetch+decode → GPU upload → atlas write → indirection → shader render
 - [[presence-propagation]] — local viewport change → throttled wire emit → server fan-out (self-filtered) → peer apply (or follow-mirror)
 - [[follow-chain-resolution]] — `set_follow` validation, transitive flatten into stars, disconnect-driven reset

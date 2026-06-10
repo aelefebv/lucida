@@ -88,7 +88,7 @@ For headless profile verification, `lucida viewer screenshot <path>` and `lucida
 
 ## Smoke workflows
 
-Run `scripts/smoke_lucida_cli.sh` from the repo root against an already-running `lucida-server` to exercise the common CLI client workflow. It uses a temp `LUCIDA_CONFIG_PATH`, creates a throwaway workspace, opens `LUCIDA_SMOKE_DATASET`, runs workspace/dataset/view/layer/channel/debug/plan commands, and validates screenshot/overview PNGs with `scripts/assert_png_nonblank.py`.
+Run `scripts/smoke_lucida_cli.sh` from the repo root against an already-running `lucida-server` to exercise the common CLI client workflow. It uses a temp `LUCIDA_CONFIG_PATH`, creates a throwaway workspace, opens `LUCIDA_SMOKE_DATASET`, checks `dataset health`, verifies structured JSON diagnostics for missing-path and malformed-metadata opens, runs workspace/dataset/view/layer/channel/debug/plan commands, and validates screenshot/overview PNGs with `scripts/assert_png_nonblank.py`.
 
 Required inputs:
 
@@ -101,7 +101,16 @@ Useful overrides:
 - `LUCIDA_SMOKE_OUTPUT_DIR=/path/to/artifacts` — keep JSON and PNG artifacts somewhere specific.
 - `LUCIDA_SMOKE_CAPTURE=0` — skip screenshot/overview when Chrome/Chromium is unavailable.
 
-The matching Python smoke entry point is `uv run --project lucida-py python scripts/smoke_python_client.py`. It creates a throwaway workspace, opens the same dataset, applies view/layer/channel changes through `LucidaClient`, and writes a structured summary artifact.
+The matching Python smoke entry point is `uv run --project lucida-py python scripts/smoke_python_client.py`. It creates a throwaway workspace, opens the same dataset, checks dataset health, asserts structured diagnostics for missing-path and malformed-metadata opens, applies view/layer/channel changes through `LucidaClient`, and writes a structured summary artifact.
+
+For fixture-backed dataset reliability coverage, run:
+
+```bash
+uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
+  --server http://127.0.0.1:9876
+```
+
+That smoke expects the server to see `/Users/austin/local_data/lucida_test_zarrs` by default. It opens every configured fixture present there, checks required dataset-open progress stages, compares CLI/Python health, and records negative diagnostics for missing and malformed sources.
 
 ## Interactions
 

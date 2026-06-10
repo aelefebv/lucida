@@ -49,6 +49,48 @@ capture_json() {
   "${lucida_cmd[@]}" --server "${server}" --json "$@" > "${output_path}"
 }
 
+capture_json_error() {
+  local output_path="$1"
+  shift
+  local stdout_path="${output_path%.json}.stdout"
+  local stderr_path="${output_path%.json}.stderr"
+  printf '\n$'
+  printf ' %q' "${lucida_cmd[@]}" --server "${server}" --json "$@"
+  printf ' 2> %q\n' "${stderr_path}"
+  set +e
+  "${lucida_cmd[@]}" --server "${server}" --json "$@" > "${stdout_path}" 2> "${stderr_path}"
+  local status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    echo "Expected command to fail, but it succeeded: $*" >&2
+    cat "${stdout_path}" >&2
+    exit 1
+  fi
+  "${python_bin}" - "${stderr_path}" "${output_path}" <<'PY'
+import json
+import sys
+
+stderr_path, output_path = sys.argv[1], sys.argv[2]
+text = open(stderr_path, encoding="utf-8").read()
+decoder = json.JSONDecoder()
+payload = None
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        candidate, end = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(candidate, dict) and "error" in candidate:
+        payload = candidate
+if payload is None:
+    raise SystemExit(f"stderr did not contain a JSON error envelope: {stderr_path}")
+with open(output_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+}
+
 json_value() {
   local path="$1"
   local expression="$2"
@@ -85,6 +127,43 @@ capture_json "${output_dir}/dataset-open.json" dataset open "${dataset}"
 dataset_id="$(json_value "${output_dir}/dataset-open.json" "dataset.workspace_dataset_id")"
 capture_json "${output_dir}/dataset-list.json" dataset list
 capture_json "${output_dir}/dataset-info.json" dataset info "${dataset_id}"
+capture_json "${output_dir}/dataset-health.json" dataset health "${dataset_id}"
+capture_json "${output_dir}/dataset-health-all.json" dataset health
+
+missing_dataset="${output_dir}/missing-dataset-does-not-exist.ome.zarr"
+capture_json_error "${output_dir}/dataset-open-missing-error.json" dataset open "${missing_dataset}"
+"${python_bin}" - "${output_dir}/dataset-open-missing-error.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+error = payload["error"]
+diagnostic = error.get("diagnostic")
+if not isinstance(diagnostic, dict):
+    raise SystemExit("missing dataset open did not include a structured diagnostic")
+if diagnostic.get("stage") != "backend_open":
+    raise SystemExit(f"missing dataset failed at unexpected stage: {diagnostic.get('stage')}")
+if diagnostic.get("kind") not in {"local_path", "missing_object"}:
+    raise SystemExit(f"missing dataset produced unexpected kind: {diagnostic.get('kind')}")
+PY
+
+malformed_dataset="${output_dir}/malformed.ome.zarr"
+mkdir -p "${malformed_dataset}"
+printf '{' > "${malformed_dataset}/zarr.json"
+capture_json_error "${output_dir}/dataset-open-malformed-error.json" dataset open "${malformed_dataset}"
+"${python_bin}" - "${output_dir}/dataset-open-malformed-error.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+diagnostic = payload["error"].get("diagnostic")
+if not isinstance(diagnostic, dict):
+    raise SystemExit("malformed dataset open did not include a structured diagnostic")
+if diagnostic.get("stage") != "metadata_import":
+    raise SystemExit(f"malformed dataset failed at unexpected stage: {diagnostic.get('stage')}")
+if diagnostic.get("kind") != "malformed_metadata":
+    raise SystemExit(f"malformed dataset produced unexpected kind: {diagnostic.get('kind')}")
+PY
 
 capture_json "${output_dir}/viewer-state-initial.json" viewer state
 capture_json "${output_dir}/view-pan.json" view pan --dx 32 --dy=-16

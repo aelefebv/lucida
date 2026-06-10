@@ -302,6 +302,20 @@ Implementation progress:
   Python dictionaries, and the browser DebugPanel Health tab all surface the new
   fields. Local smoke on CPPX verified CLI/Python health JSON and the browser
   Health tab against `http://127.0.0.1:9994`.
+- 2026-06-10: Fixture-backed reliability smokes added. The existing CLI and
+  Python smoke scripts now verify `dataset health` after open and assert
+  structured diagnostics for missing-path and malformed-metadata opens. New
+  `scripts/smoke_dataset_reliability.py` exercises all present fixtures under
+  `/Users/austin/local_data/lucida_test_zarrs`: CPPX plate, yeast 3D, LIF
+  bundled channels, and CZI non-canonical axes. The smoke records per-command
+  artifacts, checks required progress stages, checks CLI/Python health parity,
+  and verifies negative diagnostic branches. Local run against
+  `http://127.0.0.1:9995` passed; see
+  [[outputs/2026-06-07-lucida-use-case-test-matrix#matrix]] row 39.
+- 2026-06-10: Documentation pass added [[flows/dataset-diagnostics]], refreshed
+  [[flows/dataset-opening]], and updated README / CLI / Python docs so browser,
+  CLI, Python, server logs, health fields, retry, and fixture smokes all point
+  at the same diagnostic model.
 
 Likely vertical slices:
 
@@ -313,8 +327,10 @@ Likely vertical slices:
    fixture smokes remain part of slice 6.
 4. Source cache stats and resource diagnostics. Done 2026-06-10.
 5. Generated-coarse health and cache diagnostics. Done 2026-06-10.
-6. Fixture-backed dataset reliability smoke matrix and scripts.
-7. Documentation pass tying browser, CLI, Python, and server logs together.
+6. Fixture-backed dataset reliability smoke matrix and scripts. Done
+   2026-06-10.
+7. Documentation pass tying browser, CLI, Python, and server logs together. Done
+   2026-06-10.
 
 Related shipped work:
 

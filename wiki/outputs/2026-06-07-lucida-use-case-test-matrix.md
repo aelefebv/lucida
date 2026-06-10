@@ -59,6 +59,7 @@ Python, or admin CLI.
 | 36 | Developer / Operator | As a developer or operator, I want to retry a persisted dataset binding without removing and re-adding the dataset so I can recover from transient restore/source failures. | Browser + CLI + Python | Open CPPX, run `dataset retry <dataset>`, call `workspace.datasets.retry(...)`, and click Debug > Health > Retry binding. | Retry uses the persisted workspace dataset source, returns the normal structured dataset-open result, and health remains healthy afterward. | Pass | 2026-06-10 smoke used local server `http://127.0.0.1:9992`, workspace `388e0394-4a9f-4a1e-9a85-95e6dc46f94c`, and CPPX fixture. CLI `dataset retry wds-c45...` returned the persisted source URL and dataset summary; Python printed the same workspace dataset id and source; browser Retry binding refreshed the Health tab with no console errors. Server unit coverage also verifies a missing runtime binding with recorded restore failure reports unavailable health, source URL, backend, and failure notes. |
 | 37 | Developer / Operator | As a developer or operator, I want dataset open to report stable progress stages so slow or stuck opens are diagnosable from headless clients and the browser loading surface. | CLI + Python + Browser | Open CPPX with `dataset open --json`, retry the same dataset from Python, and verify the browser workspace reflects the opened dataset. | Progress events are request-correlated and include request, authorization, source lookup, backend open, metadata import, binding build, generated-coarse planning, workspace persistence, broadcast, and complete stages where applicable. | Partial | 2026-06-10 smoke used local server `http://127.0.0.1:9993`, workspace `4334c654-c6a5-4796-99a7-9a90e14e5792`, and CPPX fixture. CLI `dataset open --json` returned a 15-event `progress` array including `generated_coarse_planning`, `workspace_persist`, `broadcast`, and `complete`; Python `datasets.retry(...)` returned progress stages for the persisted binding reuse path; the already-open browser showed the CLI-opened dataset. A browser-originated open exposed a stale terminal progress/loading state, which was fixed; the final browser input smoke was blocked by the browser automation clipboard/visibility path, while web build/lint cover the handler. |
 | 38 | Developer / Operator | As an operator, I want source-cache pressure and generated-cache storage details so I can diagnose resource pressure and derived-cache reuse without reading server logs. | Browser + CLI + Python | Open CPPX, run `dataset health --json`, call `workspace.datasets.health(...)`, and inspect Debug > Health. | Health reports source-cache used percentage and generated-cache storage, bytes, evictions, and disk root consistently across surfaces. | Pass | 2026-06-10 smoke used local server `http://127.0.0.1:9994`, workspace `aa56c1c7-b4d9-42bc-9b59-2d3248a4edc4`, and CPPX fixture. CLI health JSON included `source_cache.used_percent` and `generated_coarse.cache.storage/root`; Python printed the same fields; browser Debug > Health showed `source cache: ... · 1%`, `generated cache: disk`, and the generated cache root. Server unit coverage verifies source-cache pressure projection and generated-cache recent failure projection. |
+| 39 | Developer / QA | As a developer, I want fixture-backed dataset reliability smokes so CPPX, yeast, LIF, CZI, missing paths, and malformed metadata do not regress silently. | CLI + Python | Run `uv run --project lucida-py python scripts/smoke_dataset_reliability.py` against a local fixture server. | Present fixtures open, report full progress stages, expose healthy dataset health through CLI and Python, and negative opens return structured stage/kind diagnostics. | Pass | 2026-06-10 smoke used local server `http://127.0.0.1:9995`, workspace `f7bf0d4d-cd6d-4272-a3e7-c0774f562866`, and fixtures CPPX, yeast 3D, LIF bundled channels, and CZI non-canonical axes. All four fixtures opened with healthy CLI/Python health and expected progress stages. Missing path returned `backend_open/local_path`; malformed `zarr.json` returned `metadata_import/malformed_metadata`. Artifacts: `/private/tmp/lucida-dataset-reliability-smoke-20260610-r3`. |
 
 ## Full Report
 
@@ -79,7 +80,7 @@ against the local workspace route.
 
 ### Current Status
 
-- Pass: 37
+- Pass: 38
 - Partial: 1
 - Fail: 0
 - Product code changes after the original pass addressed the prior full and
@@ -171,5 +172,8 @@ smoke tracking is:
    `LUCIDA_SMOKE_DATASET` set to a server-visible OME-Zarr path or URL.
 2. Python smoke: `uv run --project lucida-py python
    scripts/smoke_python_client.py` against the same server/dataset.
-3. Keep this matrix current whenever product-surface changes add or alter a
+3. Dataset reliability smoke: `uv run --project lucida-py python
+   scripts/smoke_dataset_reliability.py` against a running server whose
+   `--data-dir` can see `/Users/austin/local_data/lucida_test_zarrs`.
+4. Keep this matrix current whenever product-surface changes add or alter a
    workflow row.
