@@ -14,6 +14,7 @@ pub enum DatasetOpenStage {
     BackendOpen,
     MetadataImport,
     BindingBuild,
+    GeneratedCoarsePlanning,
     WorkspacePersist,
     Broadcast,
     Complete,
@@ -47,6 +48,18 @@ pub struct DatasetOpenFailureDiagnostic {
     pub kind: DatasetOpenFailureKind,
     pub retryable: bool,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetOpenProgressDiagnostic {
+    pub stage: DatasetOpenStage,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_dataset_id: Option<DatasetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_source_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

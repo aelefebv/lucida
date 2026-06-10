@@ -11,10 +11,10 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
     AssetCatalog, AssetMessage, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage,
-    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
-    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    ProxyAvailability, ProxyFootprint,
+    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
+    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
+    DatasetSourceCacheStats, DatasetSourceHealth, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ProxyAvailability, ProxyFootprint,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
 use lucida_store::cache::CachedStore;
@@ -1132,6 +1132,22 @@ fn open_failure(
     }
 }
 
+fn open_progress(
+    stage: DatasetOpenStage,
+    message: impl Into<String>,
+    workspace_dataset_id: Option<DatasetId>,
+    dataset_source_id: Option<String>,
+    detail: Option<String>,
+) -> DatasetOpenProgressDiagnostic {
+    DatasetOpenProgressDiagnostic {
+        stage,
+        message: message.into(),
+        workspace_dataset_id,
+        dataset_source_id,
+        detail,
+    }
+}
+
 fn backend_open_failure(error: &lucida_store::backend::StoreError) -> DatasetOpenFailureDiagnostic {
     match error {
         lucida_store::backend::StoreError::UnsupportedScheme(_) => open_failure(
@@ -1285,6 +1301,20 @@ async fn handle_open_remote_dataset(
     // opened independently in different workspaces while sharing the
     // source/cache identity below.
     let dataset_source_id = dataset_id_for_url(&canonical_url);
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::RequestReceived,
+            "dataset open request received",
+            None,
+            Some(dataset_source_id.clone()),
+            Some(format!("normalized source: {canonical_url}")),
+        ),
+        &unicast_routes,
+    )
+    .await;
 
     if let Some(ctx) = workspace.as_ref()
         && ctx.live.background_cancelled()
@@ -1311,6 +1341,23 @@ async fn handle_open_remote_dataset(
         .await;
         return;
     }
+
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::Authorization,
+            "checking workspace permission",
+            None,
+            Some(dataset_source_id.clone()),
+            workspace
+                .as_ref()
+                .map(|ctx| format!("workspace: {}", ctx.live.workspace_id)),
+        ),
+        &unicast_routes,
+    )
+    .await;
 
     if let Some(ctx) = workspace.as_ref()
         && let Err(e) = ctx
@@ -1342,7 +1389,38 @@ async fn handle_open_remote_dataset(
         return;
     }
 
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::Authorization,
+            "workspace permission accepted",
+            None,
+            Some(dataset_source_id.clone()),
+            workspace
+                .as_ref()
+                .map(|ctx| format!("workspace: {}", ctx.live.workspace_id)),
+        ),
+        &unicast_routes,
+    )
+    .await;
+
     let existing_workspace_source = if let Some(ctx) = workspace.as_ref() {
+        send_open_progress(
+            client_id,
+            &request_id,
+            &canonical_url,
+            open_progress(
+                DatasetOpenStage::SourceLookup,
+                "checking persisted workspace dataset source",
+                None,
+                Some(dataset_source_id.clone()),
+                Some(format!("workspace: {}", ctx.live.workspace_id)),
+            ),
+            &unicast_routes,
+        )
+        .await;
         match ctx
             .manager
             .dataset_by_source(&ctx.live.workspace_id, &dataset_source_id)
@@ -1391,6 +1469,22 @@ async fn handle_open_remote_dataset(
         });
     let dataset_id = dataset_id_key.0.clone();
     let workspace_scoped = workspace.is_some();
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::SourceLookup,
+            "workspace dataset source resolved",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            existing_workspace_source
+                .as_ref()
+                .map(|source| format!("display name: {}", source.display_name)),
+        ),
+        &unicast_routes,
+    )
+    .await;
 
     // If we've already imported this URL in this session, reuse the binding.
     // Re-broadcast the existing DatasetOpened (held on the binding) so the
@@ -1405,6 +1499,34 @@ async fn handle_open_remote_dataset(
             let command = DocumentCommand::DatasetOpened(existing);
             let seq = sess.seq;
             drop(sess);
+            send_open_progress(
+                client_id,
+                &request_id,
+                &canonical_url,
+                open_progress(
+                    DatasetOpenStage::BindingBuild,
+                    "reusing existing server binding",
+                    Some(existing_dataset_id.clone()),
+                    Some(dataset_source_id.clone()),
+                    None,
+                ),
+                &unicast_routes,
+            )
+            .await;
+            send_open_progress(
+                client_id,
+                &request_id,
+                &canonical_url,
+                open_progress(
+                    DatasetOpenStage::Broadcast,
+                    "broadcasting existing dataset to workspace clients",
+                    Some(existing_dataset_id.clone()),
+                    Some(dataset_source_id.clone()),
+                    Some(format!("seq: {seq}")),
+                ),
+                &unicast_routes,
+            )
+            .await;
             let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
             let _ = tx.send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
@@ -1433,6 +1555,20 @@ async fn handle_open_remote_dataset(
 
     // Open storage backend. `backend::open` re-normalizes (idempotent)
     // and dispatches via `is_local_dataset_url`.
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::BackendOpen,
+            "opening dataset storage backend",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            Some(format!("backend: {}", backend_kind_for_url(&canonical_url))),
+        ),
+        &unicast_routes,
+    )
+    .await;
     let store = match lucida_store::backend::open(&canonical_url) {
         Ok(s) => s,
         Err(e) => {
@@ -1464,6 +1600,20 @@ async fn handle_open_remote_dataset(
         });
 
     // Import dataset via the new pipeline.
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::MetadataImport,
+            "importing OME-Zarr metadata",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            Some(format!("name: {name}")),
+        ),
+        &unicast_routes,
+    )
+    .await;
     tracing::info!(
         url = %canonical_url,
         id = %dataset_id,
@@ -1518,8 +1668,41 @@ async fn handle_open_remote_dataset(
         binding_images = result.binding_seed.images.len(),
         "import complete"
     );
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::MetadataImport,
+            "metadata import complete",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            Some(format!(
+                "entities: {n_entities}, images: {n_images}, first image levels: {n_levels}"
+            )),
+        ),
+        &unicast_routes,
+    )
+    .await;
 
     // Build operational binding.
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::BindingBuild,
+            "building server chunk binding",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            Some(format!(
+                "binding images: {}",
+                result.binding_seed.images.len()
+            )),
+        ),
+        &unicast_routes,
+    )
+    .await;
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let generated_config = GeneratedCoarseConfig {
@@ -1527,11 +1710,43 @@ async fn handle_open_remote_dataset(
         chunk_long_axis: proxy_config.generated_chunk_long_axis,
         max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
     };
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::GeneratedCoarsePlanning,
+            if proxy_config.generated_enabled {
+                "planning generated coarse levels"
+            } else {
+                "generated coarse planning disabled"
+            },
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            None,
+        ),
+        &unicast_routes,
+    )
+    .await;
     let generated_plans = if proxy_config.generated_enabled {
         plan_generated_coarse_for_manifest(&result.manifest, generated_config)
     } else {
         vec![]
     };
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::GeneratedCoarsePlanning,
+            "generated coarse planning complete",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            Some(format!("planned levels: {}", generated_plans.len())),
+        ),
+        &unicast_routes,
+    )
+    .await;
 
     // Legacy proxy fallback is opt-in after the coarse/detail default
     // flip. The default DatasetOpened catalog is empty so fallback
@@ -1648,6 +1863,34 @@ async fn handle_open_remote_dataset(
                 } => opened.clone(),
                 _ => unreachable!("constructed above"),
             };
+            send_open_progress(
+                client_id,
+                &request_id,
+                &canonical_url,
+                open_progress(
+                    DatasetOpenStage::BindingBuild,
+                    "reusing binding from concurrent dataset open",
+                    Some(existing_dataset_id.clone()),
+                    Some(dataset_source_id.clone()),
+                    None,
+                ),
+                &unicast_routes,
+            )
+            .await;
+            send_open_progress(
+                client_id,
+                &request_id,
+                &canonical_url,
+                open_progress(
+                    DatasetOpenStage::Broadcast,
+                    "broadcasting existing dataset to workspace clients",
+                    Some(existing_dataset_id.clone()),
+                    Some(dataset_source_id.clone()),
+                    Some(format!("seq: {seq}")),
+                ),
+                &unicast_routes,
+            )
+            .await;
             let _ = tx.send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
                 broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
@@ -1689,6 +1932,23 @@ async fn handle_open_remote_dataset(
         (seq, document)
     };
 
+    if workspace.is_some() {
+        send_open_progress(
+            client_id,
+            &request_id,
+            &canonical_url,
+            open_progress(
+                DatasetOpenStage::WorkspacePersist,
+                "persisting workspace dataset membership",
+                Some(dataset_id_key.clone()),
+                Some(dataset_source_id.clone()),
+                Some(format!("seq: {seq}")),
+            ),
+            &unicast_routes,
+        )
+        .await;
+    }
+
     if let Some(ctx) = workspace.as_ref()
         && let Err(e) = ctx
             .manager
@@ -1729,6 +1989,23 @@ async fn handle_open_remote_dataset(
         return;
     }
 
+    if workspace.is_some() {
+        send_open_progress(
+            client_id,
+            &request_id,
+            &canonical_url,
+            open_progress(
+                DatasetOpenStage::WorkspacePersist,
+                "workspace dataset membership persisted",
+                Some(dataset_id_key.clone()),
+                Some(dataset_source_id.clone()),
+                Some(format!("seq: {seq}")),
+            ),
+            &unicast_routes,
+        )
+        .await;
+    }
+
     // Broadcast to ALL clients including the requester.
     // Use u64::MAX as sender so no client matches — everyone gets the
     // CommandBroadcast (not an Ack), since the requester hasn't applied
@@ -1738,6 +2015,21 @@ async fn handle_open_remote_dataset(
         _ => unreachable!("dataset open command must be DatasetOpened"),
     };
     let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
+
+    send_open_progress(
+        client_id,
+        &request_id,
+        &canonical_url,
+        open_progress(
+            DatasetOpenStage::Broadcast,
+            "broadcasting dataset to workspace clients",
+            Some(dataset_id_key.clone()),
+            Some(dataset_source_id.clone()),
+            Some(format!("seq: {seq}")),
+        ),
+        &unicast_routes,
+    )
+    .await;
 
     let _ = tx.send(BroadcastItem::CommandBroadcast {
         sender: u64::MAX,
@@ -2231,6 +2523,34 @@ pub(crate) fn proxy_kind_str(kind: ProxyKind) -> &'static str {
     }
 }
 
+/// Send a dataset-open progress message to the requesting client.
+async fn send_open_progress(
+    client_id: ClientId,
+    request_id: &str,
+    url: &str,
+    diagnostic: DatasetOpenProgressDiagnostic,
+    unicast_routes: &UnicastRoutes,
+) {
+    tracing::info!(
+        client_id = %client_id,
+        request_id = %request_id,
+        url = %url,
+        stage = ?diagnostic.stage,
+        message = %diagnostic.message,
+        "open_remote_dataset.progress"
+    );
+    let msg = ServerMessage::DatasetOpenProgress {
+        request_id: request_id.to_string(),
+        url: url.to_string(),
+        diagnostic,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
+    }
+}
+
 /// Send an OpenDatasetSucceeded message to the requesting client.
 async fn send_open_succeeded(
     client_id: ClientId,
@@ -2241,6 +2561,20 @@ async fn send_open_succeeded(
     diagnostic: DatasetOpenSuccessDiagnostic,
     unicast_routes: &UnicastRoutes,
 ) {
+    send_open_progress(
+        client_id,
+        request_id,
+        url,
+        open_progress(
+            DatasetOpenStage::Complete,
+            diagnostic.message.clone(),
+            Some(diagnostic.workspace_dataset_id.clone()),
+            diagnostic.dataset_source_id.clone(),
+            Some(format!("seq: {seq}")),
+        ),
+        unicast_routes,
+    )
+    .await;
     tracing::info!(
         client_id = %client_id,
         request_id = %request_id,

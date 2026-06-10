@@ -296,7 +296,18 @@ def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path, monke
         "seq": 13,
         "opened": {"manifest": manifest("wds-new", "new.zarr")},
     }
-    connector = FakeConnector([snapshot(), opened])
+    progress = {
+        "type": "dataset_open_progress",
+        "request_id": "py-abc123",
+        "url": "/data/new.zarr",
+        "diagnostic": {
+            "stage": "metadata_import",
+            "message": "importing OME-Zarr metadata",
+            "workspace_dataset_id": "wds-new",
+            "dataset_source_id": "source-new",
+        },
+    }
+    connector = FakeConnector([snapshot(), progress, opened])
     client = LucidaClient(
         "http://127.0.0.1:9988",
         config_path=tmp_path / "config.json",
@@ -312,6 +323,7 @@ def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path, monke
     assert sent["request_id"] == "py-abc123"
     assert result["workspace_dataset_id"] == "wds-new"
     assert result["seq"] == 13
+    assert result["progress"][0]["stage"] == "metadata_import"
 
 
 def test_dataset_open_failure_preserves_diagnostic(tmp_path, monkeypatch):
@@ -415,7 +427,18 @@ def test_dataset_retry_sends_protocol_message_and_reads_result(tmp_path, monkeyp
         "seq": 14,
         "opened": {"manifest": manifest("wds-test", "demo.zarr")},
     }
-    connector = FakeConnector([snapshot(), retried])
+    progress = {
+        "type": "dataset_open_progress",
+        "request_id": "py-retry-abc123",
+        "url": "/data/demo.zarr",
+        "diagnostic": {
+            "stage": "binding_build",
+            "message": "building server chunk binding",
+            "workspace_dataset_id": "wds-test",
+            "dataset_source_id": "source-test",
+        },
+    }
+    connector = FakeConnector([snapshot(), progress, retried])
     client = LucidaClient(
         "http://127.0.0.1:9988",
         config_path=tmp_path / "config.json",
@@ -432,6 +455,7 @@ def test_dataset_retry_sends_protocol_message_and_reads_result(tmp_path, monkeyp
     assert result["workspace_dataset_id"] == "wds-test"
     assert result["source"] == "/data/demo.zarr"
     assert result["seq"] == 14
+    assert result["progress"][0]["stage"] == "binding_build"
 
 
 def test_view_pan_sends_presence_update(tmp_path):

@@ -43,7 +43,7 @@ Current product commands:
 - `lucida workspace member set-role <email> <viewer|editor|owner> [id-or-name]` — update a member role.
 - `lucida workspace member remove <email> [id-or-name]` — remove an explicit member.
 - `lucida dataset browse [path]` — browse server-visible filesystem roots and directories.
-- `lucida dataset open <path-or-url>` — open a dataset in the selected workspace and wait for completion.
+- `lucida dataset open <path-or-url>` — open a dataset in the selected workspace, wait for completion, and report server-authored progress stages in structured output.
 - `lucida dataset list` — list loaded datasets in the selected workspace.
 - `lucida dataset info <dataset>` — show manifest/image/channel/layout summary for a loaded dataset.
 - `lucida dataset health [dataset]` — show server-authored binding/backend/source-cache and generated-coarse health.
@@ -82,7 +82,7 @@ Global visible flags:
 
 ## Browser verification flow
 
-Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for the request-correlated dataset-open result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
+Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for request-correlated dataset-open progress plus the final result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
 
 For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file. To capture a live browser peer instead of the durable profile, use `lucida peer list` to find its client id, then pass `--from-peer <client-id>` to `viewer state`, `viewer screenshot`, or `viewer overview`. Use `viewer adopt --from-peer <client-id>` when the peer's current view should become the durable headless profile state.
 

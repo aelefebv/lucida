@@ -535,6 +535,7 @@ class DatasetsResource:
                 },
             )
             deadline = asyncio.get_running_loop().time() + timeout
+            progress: list[dict[str, Any]] = []
             while True:
                 remaining = max(0.0, deadline - asyncio.get_running_loop().time())
                 if remaining == 0.0:
@@ -544,6 +545,13 @@ class DatasetsResource:
                     )
                 message = await recv_json(ws, remaining)
                 message_type = message.get("type")
+                if message_type == "dataset_open_progress":
+                    if message.get("request_id") != request_id:
+                        continue
+                    diagnostic = message.get("diagnostic")
+                    if isinstance(diagnostic, dict):
+                        progress.append(diagnostic)
+                    continue
                 if message_type == "open_dataset_failed":
                     if message.get("request_id") != request_id:
                         continue
@@ -565,6 +573,7 @@ class DatasetsResource:
                     seq=message.get("seq", snapshot.get("seq", 0)),
                     workspace_id=self._workspace.id,
                     diagnostic=message.get("diagnostic"),
+                    progress=progress,
                 )
 
     def health(
@@ -591,6 +600,7 @@ class DatasetsResource:
                 },
             )
             deadline = asyncio.get_running_loop().time() + timeout
+            progress: list[dict[str, Any]] = []
             while True:
                 remaining = max(0.0, deadline - asyncio.get_running_loop().time())
                 if remaining == 0.0:
@@ -624,6 +634,7 @@ class DatasetsResource:
                 },
             )
             deadline = asyncio.get_running_loop().time() + timeout
+            progress: list[dict[str, Any]] = []
             while True:
                 remaining = max(0.0, deadline - asyncio.get_running_loop().time())
                 if remaining == 0.0:
@@ -633,6 +644,13 @@ class DatasetsResource:
                     )
                 message = await recv_json(ws, remaining)
                 message_type = message.get("type")
+                if message_type == "dataset_open_progress":
+                    if message.get("request_id") != request_id:
+                        continue
+                    diagnostic = message.get("diagnostic")
+                    if isinstance(diagnostic, dict):
+                        progress.append(diagnostic)
+                    continue
                 if message_type == "open_dataset_failed":
                     if message.get("request_id") != request_id:
                         continue
@@ -654,6 +672,7 @@ class DatasetsResource:
                     seq=message.get("seq", snapshot.get("seq", 0)),
                     workspace_id=self._workspace.id,
                     diagnostic=message.get("diagnostic"),
+                    progress=progress,
                 )
 
 
@@ -1150,6 +1169,7 @@ def dataset_open_summary(
     seq: int,
     workspace_id: str,
     diagnostic: Any = None,
+    progress: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     images = manifest.get("images") or []
     entities = manifest.get("entities") or []
@@ -1164,6 +1184,8 @@ def dataset_open_summary(
     }
     if isinstance(diagnostic, dict):
         result["diagnostic"] = diagnostic
+    if progress:
+        result["progress"] = progress
     return result
 
 

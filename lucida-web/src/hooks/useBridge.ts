@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
-import { Bridge, bridgeLog, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
+import { Bridge, bridgeLog, type BridgeHandlers, type ClientId, type DatasetOpenProgressDiagnostic, type PresenceState } from "../bridge.ts";
 export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import { Axis } from "../axes.ts";
@@ -94,6 +94,7 @@ export function useBridge({
   followTargetRef.current = followTarget;
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
+  const [remoteDatasetProgress, setRemoteDatasetProgress] = useState<string | null>(null);
   // Last open_remote_dataset.send timestamp (performance.now() ms). Used
   // to derive a round-trip on receipt. Approximate when concurrent opens
   // are in flight — overwritten by each send.
@@ -282,6 +283,7 @@ export function useBridge({
             }
 
             setRemoteDatasetLoading(false);
+            setRemoteDatasetProgress(null);
             bridgeLog("open_remote_dataset.loading_clear", {
               datasetId: cmd.manifest?.dataset_id,
               reason: "success",
@@ -445,7 +447,23 @@ export function useBridge({
         bridgeLog("open_remote_dataset.failed", { url, error });
         setRemoteDatasetLoading(false);
         setRemoteDatasetError(error);
+        setRemoteDatasetProgress(null);
         savedViewHooksRef?.current?.onOpenDatasetFailed(url, error);
+      },
+      onDatasetOpenProgress: (_requestId: string, url: string, diagnostic: DatasetOpenProgressDiagnostic) => {
+        bridgeLog("open_remote_dataset.progress_state", {
+          url,
+          stage: diagnostic.stage,
+          message: diagnostic.message,
+        });
+        if (diagnostic.stage === "complete") {
+          setRemoteDatasetLoading(false);
+          setRemoteDatasetProgress(null);
+          return;
+        }
+        setRemoteDatasetLoading(true);
+        setRemoteDatasetError(null);
+        setRemoteDatasetProgress(diagnostic.message);
       },
       onAssetCatalogUpdate: (datasetId, deltaJson) => {
         try {
@@ -474,11 +492,13 @@ export function useBridge({
       },
       onWorkspaceArchived: () => {
         setRemoteDatasetLoading(false);
+        setRemoteDatasetProgress(null);
         contentSource.rejectAll();
         onWorkspaceArchived?.();
       },
       onDisconnect: () => {
         setRemoteDatasetLoading(false);
+        setRemoteDatasetProgress(null);
         contentSource.rejectAll();
       },
     };
@@ -626,6 +646,7 @@ export function useBridge({
     bridgeLog("open_remote_dataset.loading_start", { url });
     setRemoteDatasetLoading(true);
     setRemoteDatasetError(null);
+    setRemoteDatasetProgress("dataset open request sent");
     sessionRef.current?.bridge.sendOpenRemoteDataset(url);
   }, []);
 
@@ -694,6 +715,7 @@ export function useBridge({
     sendOpenRemoteDataset,
     remoteDatasetLoading,
     remoteDatasetError,
+    remoteDatasetProgress,
     breakFollow,
     handleFollow,
     followablePeers,

@@ -45,6 +45,26 @@ export interface DatasetSourceHealth {
   messages?: string[];
 }
 
+export type DatasetOpenStage =
+  | "request_received"
+  | "authorization"
+  | "source_lookup"
+  | "backend_open"
+  | "metadata_import"
+  | "binding_build"
+  | "generated_coarse_planning"
+  | "workspace_persist"
+  | "broadcast"
+  | "complete";
+
+export interface DatasetOpenProgressDiagnostic {
+  stage: DatasetOpenStage;
+  message: string;
+  workspace_dataset_id?: string | null;
+  dataset_source_id?: string | null;
+  detail?: string | null;
+}
+
 interface PendingDatasetHealthRequest {
   resolve: (datasets: DatasetSourceHealth[]) => void;
   reject: (error: Error) => void;
@@ -97,6 +117,11 @@ export interface BridgeHandlers {
   onCursorUpdate?: (clientId: ClientId, position: [number, number] | null) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
+  onDatasetOpenProgress?: (
+    requestId: string,
+    url: string,
+    diagnostic: DatasetOpenProgressDiagnostic,
+  ) => void;
   onOpenDatasetFailed?: (url: string, error: string) => void;
   /**
    * The server may emit an empty `delta.added` as a sanity check (no-op).
@@ -231,6 +256,9 @@ export class Bridge {
           case "dataset_presence_update":
             this.handlers.onDatasetPresenceUpdate?.(msg.client_id, msg.dataset_order, msg.dataset_settings);
             break;
+          case "dataset_open_progress":
+            this.handleDatasetOpenProgress(msg);
+            break;
           case "open_dataset_failed":
             this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
             break;
@@ -334,6 +362,26 @@ export class Bridge {
       datasetCount: datasets.length,
     }, this.ws?.readyState);
     pending.resolve(datasets);
+  }
+
+  private handleDatasetOpenProgress(msg: unknown) {
+    const obj = msg as {
+      request_id?: unknown;
+      url?: unknown;
+      diagnostic?: unknown;
+    };
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    const url = typeof obj.url === "string" ? obj.url : "";
+    const diagnostic = obj.diagnostic as DatasetOpenProgressDiagnostic | undefined;
+    if (!requestId || !diagnostic || typeof diagnostic.message !== "string") return;
+    bridgeLog("open_remote_dataset.progress", {
+      requestId,
+      url,
+      stage: diagnostic.stage,
+      message: diagnostic.message,
+      datasetId: diagnostic.workspace_dataset_id ?? null,
+    }, this.ws?.readyState);
+    this.handlers.onDatasetOpenProgress?.(requestId, url, diagnostic);
   }
 
   private scheduleReconnect() {

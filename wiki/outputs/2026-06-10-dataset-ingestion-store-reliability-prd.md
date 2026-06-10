@@ -285,11 +285,20 @@ Implementation progress:
   <dataset>`, Python `WorkspaceResource.datasets.retry(...)`, and a DebugPanel
   Health-tab "Retry binding" button. Retry resolves the persisted
   workspace-dataset source and then reuses the normal dataset-open path.
+- 2026-06-10: Dataset-open progress events implemented. The server now emits
+  request-correlated `dataset_open_progress` messages for the stable open
+  stages: request received, authorization, source lookup, backend open,
+  metadata import, binding build, generated-coarse planning, workspace
+  persistence, broadcast, and complete. CLI `dataset open` / `dataset retry`
+  include progress in `--json` output and show a compact stage trail in human
+  output; Python `datasets.open(...)` / `datasets.retry(...)` return progress
+  arrays; the browser bridge logs progress and the existing loading line shows
+  the latest server-authored message.
 
 Likely vertical slices:
 
-1. Structured dataset-open result and failure categories. Initial implementation
-   done 2026-06-10; progress-event streaming remains future work.
+1. Structured dataset-open result, failure categories, and progress-event
+   streaming. Done 2026-06-10.
 2. Dataset source health API surfaced through CLI, Python, and a minimal browser
    status/debug affordance. Done 2026-06-10.
 3. Binding restore health and retry. Done 2026-06-10; deeper restart/failure

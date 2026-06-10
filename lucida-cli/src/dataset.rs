@@ -7,7 +7,8 @@ use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_core::scene::DocumentState;
 use lucida_protocol::{
     DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenSuccessDiagnostic, DatasetSourceHealth,
+    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic,
+    DatasetSourceHealth,
 };
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::connect_async;
@@ -152,6 +153,8 @@ pub struct DatasetOpenSummary {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<DatasetOpenSuccessDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub progress: Vec<DatasetOpenProgressDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -395,8 +398,9 @@ impl DatasetWorkspaceClient {
 }
 
 pub fn format_dataset_open_human(output: &DatasetOpenOutput) -> String {
+    let progress = format_dataset_open_progress_trail(&output.dataset.progress);
     format!(
-        "Opened dataset: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nURL: {}",
+        "Opened dataset: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nURL: {}{}",
         output.dataset.name,
         output.workspace.name,
         output.dataset.workspace_id,
@@ -405,6 +409,21 @@ pub fn format_dataset_open_human(output: &DatasetOpenOutput) -> String {
         output.dataset.entity_count,
         output.dataset.seq,
         output.target.web_url,
+        progress,
+    )
+}
+
+fn format_dataset_open_progress_trail(progress: &[DatasetOpenProgressDiagnostic]) -> String {
+    if progress.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nProgress: {}",
+        progress
+            .iter()
+            .map(|progress| dataset_open_stage_label(progress.stage))
+            .collect::<Vec<_>>()
+            .join(" -> ")
     )
 }
 
@@ -426,6 +445,21 @@ pub fn format_dataset_browse_human(output: &DatasetBrowseOutput) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("{}\n{}", output.path, entries)
+}
+
+fn dataset_open_stage_label(stage: DatasetOpenStage) -> &'static str {
+    match stage {
+        DatasetOpenStage::RequestReceived => "request_received",
+        DatasetOpenStage::Authorization => "authorization",
+        DatasetOpenStage::SourceLookup => "source_lookup",
+        DatasetOpenStage::BackendOpen => "backend_open",
+        DatasetOpenStage::MetadataImport => "metadata_import",
+        DatasetOpenStage::BindingBuild => "binding_build",
+        DatasetOpenStage::GeneratedCoarsePlanning => "generated_coarse_planning",
+        DatasetOpenStage::WorkspacePersist => "workspace_persist",
+        DatasetOpenStage::Broadcast => "broadcast",
+        DatasetOpenStage::Complete => "complete",
+    }
 }
 
 pub fn format_dataset_list_human(output: &DatasetListOutput) -> String {
@@ -527,8 +561,9 @@ pub fn format_dataset_health_human(output: &DatasetHealthOutput) -> String {
 }
 
 pub fn format_dataset_retry_human(output: &DatasetRetryOutput) -> String {
+    let progress = format_dataset_open_progress_trail(&output.dataset.progress);
     format!(
-        "Retried dataset binding: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nSource: {}\nURL: {}",
+        "Retried dataset binding: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nSource: {}\nURL: {}{}",
         output.dataset.name,
         output.workspace.name,
         output.dataset.workspace_id,
@@ -538,6 +573,7 @@ pub fn format_dataset_retry_human(output: &DatasetRetryOutput) -> String {
         output.dataset.seq,
         output.dataset.source,
         output.target.web_url,
+        progress,
     )
 }
 
@@ -910,12 +946,17 @@ where
     S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
 {
     tokio::time::timeout(wait, async {
+        let mut progress = Vec::new();
         while let Some(message) = messages.next().await {
             match message? {
                 IncomingDatasetMessage::Text(text) => {
-                    if let Some(result) =
-                        observe_dataset_message(&text, request_id, source, workspace_id)?
-                    {
+                    if let Some(result) = observe_dataset_message(
+                        &text,
+                        request_id,
+                        source,
+                        workspace_id,
+                        &mut progress,
+                    )? {
                         return Ok(result);
                     }
                 }
@@ -951,6 +992,7 @@ fn observe_dataset_message(
     request_id: &str,
     _source: &str,
     workspace_id: &str,
+    progress: &mut Vec<DatasetOpenProgressDiagnostic>,
 ) -> Result<Option<DatasetOpenSummary>, CliError> {
     let message: ServerMessage = serde_json::from_str(text).map_err(|error| {
         CliError::new(
@@ -960,6 +1002,16 @@ fn observe_dataset_message(
     })?;
 
     match message {
+        ServerMessage::DatasetOpenProgress {
+            request_id: message_request_id,
+            diagnostic,
+            ..
+        } => {
+            if message_request_id == request_id {
+                progress.push(diagnostic);
+            }
+            Ok(None)
+        }
         ServerMessage::OpenDatasetSucceeded {
             request_id: message_request_id,
             url,
@@ -981,6 +1033,7 @@ fn observe_dataset_message(
                 seq,
                 source: url,
                 diagnostic,
+                progress: progress.clone(),
             }))
         }
         ServerMessage::OpenDatasetFailed {
@@ -1291,6 +1344,21 @@ mod tests {
         .to_string()
     }
 
+    fn dataset_open_progress_message(request_id: &str, stage: &str) -> String {
+        serde_json::json!({
+            "type": "dataset_open_progress",
+            "request_id": request_id,
+            "url": "/data/demo.zarr",
+            "diagnostic": {
+                "stage": stage,
+                "message": format!("{stage} started"),
+                "workspace_dataset_id": "wds-test",
+                "dataset_source_id": "source-test"
+            }
+        })
+        .to_string()
+    }
+
     fn snapshot_message(seq: u64) -> String {
         serde_json::json!({
             "type": "snapshot",
@@ -1397,6 +1465,7 @@ mod tests {
         assert_eq!(result.entity_count, 2);
         assert_eq!(result.image_count, 0);
         assert_eq!(result.seq, 17);
+        assert!(result.progress.is_empty());
     }
 
     #[tokio::test]
@@ -1427,6 +1496,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.seq, 18);
+    }
+
+    #[tokio::test]
+    async fn collects_dataset_open_progress_for_matching_request() {
+        let result = wait_for_dataset_open_result(
+            text_messages(vec![
+                dataset_open_progress_message("other-req", "backend_open"),
+                dataset_open_progress_message("req-1", "request_received"),
+                dataset_open_progress_message("req-1", "metadata_import"),
+                dataset_open_succeeded_message("req-1", 19),
+            ]),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result
+                .progress
+                .iter()
+                .map(|progress| progress.stage)
+                .collect::<Vec<_>>(),
+            vec![
+                DatasetOpenStage::RequestReceived,
+                DatasetOpenStage::MetadataImport
+            ]
+        );
     }
 
     #[tokio::test]

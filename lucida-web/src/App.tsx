@@ -780,7 +780,9 @@ function App({
             onClose={() => setShowFileBrowser(false)}
           />
         )}
-        {bridge.remoteDatasetLoading && <p className="secondary">Loading volume...</p>}
+        {bridge.remoteDatasetLoading && (
+          <p className="secondary">{bridge.remoteDatasetProgress ?? "Loading volume..."}</p>
+        )}
         {(render.renderError || bridge.remoteDatasetError) && (
           <p style={{ color: "#f44" }}>{render.renderError || bridge.remoteDatasetError}</p>
         )}

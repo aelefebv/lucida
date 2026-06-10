@@ -45,7 +45,7 @@ Three concrete uses:
 - **Server config mirrors [[lucida-cli]] where practical.** `LUCIDA_CONFIG_PATH` wins, then `$XDG_CONFIG_HOME/lucida/config.json`, then `~/.config/lucida/config.json`; `LucidaClient(...).workspaces.use(...)` persists the default workspace id under the normalized server URL.
 - **Local bindings import** [[lucida-core]] and [[lucida-store]] directly. No FFI tricks — pyo3 handles the conversion.
 - **JSON is the lingua franca**: `apply_command(json)`, `presence_json()`, `chunk_plan()` all use serde JSON to cross the boundary. This avoids defining a parallel pyo3 type for every Rust struct.
-- **Workspace commands use the same protocol messages as browser/CLI sessions.** Dataset open sends `open_remote_dataset`; dataset diagnostics use `dataset_health`; dataset binding retry sends `dataset_retry`; view commands send `presence`; layer/channel commands send `dataset_presence`.
+- **Workspace commands use the same protocol messages as browser/CLI sessions.** Dataset open sends `open_remote_dataset`; dataset-open progress uses `dataset_open_progress`; dataset diagnostics use `dataset_health`; dataset binding retry sends `dataset_retry`; view commands send `presence`; layer/channel commands send `dataset_presence`.
 
 ## Invariants
 
