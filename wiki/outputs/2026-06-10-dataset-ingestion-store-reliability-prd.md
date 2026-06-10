@@ -271,13 +271,19 @@ Implementation progress:
   `WorkspaceResource.datasets.health(...)`. Local smoke covered CPPX through CLI
   and Python; see [[outputs/2026-06-07-lucida-use-case-test-matrix#matrix]] row
   35.
+- 2026-06-10: Browser parity for dataset health added. The web bridge can issue
+  request-correlated `dataset_health` WebSocket requests, and the DebugPanel has
+  a Health tab that refreshes server-authored binding/backend/source-cache and
+  generated-coarse status. Browser smoke covered CPPX in a real workspace on a
+  local server; the tab showed the same healthy local binding state as CLI/Python
+  diagnostics.
 
 Likely vertical slices:
 
 1. Structured dataset-open result and failure categories. Initial implementation
    done 2026-06-10; progress-event streaming remains future work.
 2. Dataset source health API surfaced through CLI, Python, and a minimal browser
-   status/debug affordance.
+   status/debug affordance. Done 2026-06-10.
 3. Binding restore health and retry.
 4. Source cache stats and resource diagnostics.
 5. Generated-coarse health and cache diagnostics.

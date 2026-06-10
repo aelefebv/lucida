@@ -6,6 +6,51 @@ import type {
 
 export type ClientId = number;
 
+export type DatasetHealthStatus = "healthy" | "degraded" | "unavailable";
+
+export interface DatasetHealthComponent {
+  status: DatasetHealthStatus;
+  message?: string | null;
+}
+
+export interface DatasetSourceCacheStats {
+  max_bytes: number;
+  current_bytes: number;
+  entry_count: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  backend_errors: number;
+}
+
+export interface DatasetGeneratedCoarseHealth {
+  status: DatasetHealthStatus;
+  level_count: number;
+  ready_chunks: number;
+  pending_chunks: number;
+  failed_chunks: number;
+  unavailable_chunks: number;
+  message?: string | null;
+}
+
+export interface DatasetSourceHealth {
+  workspace_dataset_id: string;
+  name: string;
+  status: DatasetHealthStatus;
+  source_url?: string | null;
+  backend?: string | null;
+  binding: DatasetHealthComponent;
+  source_cache?: DatasetSourceCacheStats | null;
+  generated_coarse: DatasetGeneratedCoarseHealth;
+  messages?: string[];
+}
+
+interface PendingDatasetHealthRequest {
+  resolve: (datasets: DatasetSourceHealth[]) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 /**
  * Gated debug logger for bridge events. Toggle via the DebugPanel "Logging"
  * tab or `localStorage.setItem("debug", "bridge")`. See
@@ -108,6 +153,7 @@ export class Bridge {
   private pendingDatasetPresence: string | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
+  private pendingDatasetHealth = new Map<string, PendingDatasetHealthRequest>();
   /** Bookmark-sidebar cross-peer subscribers. Owned on the bridge so
    *  feature code subscribes via a stable handle instead of wiring
    *  callbacks through React props. */
@@ -188,6 +234,9 @@ export class Bridge {
           case "open_dataset_failed":
             this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
             break;
+          case "dataset_health":
+            this.handleDatasetHealth(msg);
+            break;
           case "asset_catalog_update":
             this.handlers.onAssetCatalogUpdate?.(
               msg.dataset_id,
@@ -267,6 +316,26 @@ export class Bridge {
     this.handlers.onBinary?.(key, payload);
   }
 
+  private handleDatasetHealth(msg: unknown) {
+    const obj = msg as { request_id?: unknown; datasets?: unknown };
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    if (!requestId) return;
+
+    const pending = this.pendingDatasetHealth.get(requestId);
+    if (!pending) return;
+    this.pendingDatasetHealth.delete(requestId);
+    clearTimeout(pending.timer);
+
+    const datasets = Array.isArray(obj.datasets)
+      ? (obj.datasets as DatasetSourceHealth[])
+      : [];
+    bridgeLog("dataset_health.received", {
+      requestId,
+      datasetCount: datasets.length,
+    }, this.ws?.readyState);
+    pending.resolve(datasets);
+  }
+
   private scheduleReconnect() {
     if (this.destroyed) return;
     this.reconnectTimer = setTimeout(() => this.connect(), 2000);
@@ -329,6 +398,31 @@ export class Bridge {
     this.send(JSON.stringify({ type: "viewer_interest", interest }));
   }
 
+  requestDatasetHealth(datasetId?: string | null, timeoutMs = 5000): Promise<DatasetSourceHealth[]> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("WebSocket is not connected"));
+    }
+    const requestId = makeBridgeRequestId("web-health");
+    const payload: Record<string, unknown> = {
+      type: "dataset_health",
+      request_id: requestId,
+    };
+    if (datasetId) payload.dataset_id = datasetId;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingDatasetHealth.delete(requestId);
+        reject(new Error("Timed out waiting for dataset health"));
+      }, timeoutMs);
+      this.pendingDatasetHealth.set(requestId, { resolve, reject, timer });
+      bridgeLog("dataset_health.send", {
+        requestId,
+        datasetId: datasetId ?? null,
+      }, this.ws?.readyState);
+      this.send(JSON.stringify(payload));
+    });
+  }
+
   sendFollow(target: ClientId | null) {
     this.send(JSON.stringify({ type: "follow", target }));
   }
@@ -388,14 +482,23 @@ export class Bridge {
     if (this.cursorTimer !== null) {
       clearTimeout(this.cursorTimer);
     }
+    for (const pending of this.pendingDatasetHealth.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Bridge destroyed"));
+    }
+    this.pendingDatasetHealth.clear();
     this.ws?.close();
     this.ws = null;
   }
 }
 
 function makeOpenDatasetRequestId(): string {
+  return makeBridgeRequestId("web");
+}
+
+function makeBridgeRequestId(prefix: string): string {
   if (globalThis.crypto?.randomUUID) {
-    return `web-${globalThis.crypto.randomUUID()}`;
+    return `${prefix}-${globalThis.crypto.randomUUID()}`;
   }
-  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
