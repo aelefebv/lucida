@@ -561,7 +561,7 @@ class DatasetsResource:
                 manifest = opened.get("manifest") or {}
                 return dataset_open_summary(
                     manifest,
-                    source=source,
+                    source=str(message.get("url") or source),
                     seq=message.get("seq", snapshot.get("seq", 0)),
                     workspace_id=self._workspace.id,
                     diagnostic=message.get("diagnostic"),
@@ -605,6 +605,56 @@ class DatasetsResource:
                 ):
                     datasets = message.get("datasets")
                     return datasets if isinstance(datasets, list) else []
+
+    def retry(self, dataset: str, *, timeout: float = 300.0) -> dict[str, Any]:
+        return run_sync(self.async_retry(dataset, timeout=timeout))
+
+    async def async_retry(self, dataset: str, *, timeout: float = 300.0) -> dict[str, Any]:
+        async with self._workspace._connect_ws() as ws:
+            snapshot = await recv_snapshot(ws, timeout)
+            summaries = dataset_summaries_from_document(snapshot.get("document", {}))
+            dataset_id = resolve_dataset_id(dataset, summaries)
+            request_id = f"py-retry-{uuid.uuid4().hex}"
+            await send_json(
+                ws,
+                {
+                    "type": "dataset_retry",
+                    "request_id": request_id,
+                    "dataset_id": dataset_id,
+                },
+            )
+            deadline = asyncio.get_running_loop().time() + timeout
+            while True:
+                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+                if remaining == 0.0:
+                    raise LucidaError(
+                        "rejected_command",
+                        f"timed out waiting for dataset retry after {timeout:g}s",
+                    )
+                message = await recv_json(ws, remaining)
+                message_type = message.get("type")
+                if message_type == "open_dataset_failed":
+                    if message.get("request_id") != request_id:
+                        continue
+                    diagnostic = message.get("diagnostic")
+                    raise LucidaError(
+                        dataset_open_error_kind(diagnostic),
+                        f"dataset retry failed for {message.get('url')!r}: {message.get('error')}",
+                        diagnostic=diagnostic if isinstance(diagnostic, dict) else None,
+                    )
+                if message_type != "open_dataset_succeeded":
+                    continue
+                if message.get("request_id") != request_id:
+                    continue
+                opened = message.get("opened") or {}
+                manifest = opened.get("manifest") or {}
+                return dataset_open_summary(
+                    manifest,
+                    source=str(message.get("url") or dataset),
+                    seq=message.get("seq", snapshot.get("seq", 0)),
+                    workspace_id=self._workspace.id,
+                    diagnostic=message.get("diagnostic"),
+                )
 
 
 class ViewResource:

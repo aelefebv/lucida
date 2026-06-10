@@ -125,6 +125,14 @@ pub struct DatasetHealthOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DatasetRetryOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub dataset: DatasetOpenSummary,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DatasetRemoveOutput {
     pub server: EffectiveServer,
     pub workspace: WorkspaceRecord,
@@ -326,6 +334,33 @@ impl DatasetWorkspaceClient {
         Ok((snapshot.seq, health))
     }
 
+    pub async fn retry(
+        &self,
+        selector: &str,
+        workspace_id: &str,
+        wait: Duration,
+    ) -> Result<DatasetOpenSummary, CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let datasets = dataset_summaries_from_document(&snapshot.document);
+        let dataset = resolve_dataset_summary(selector, &datasets)?;
+        let request_id = dataset_retry_request_id();
+        let message = ClientMessage::DatasetRetry {
+            request_id: request_id.clone(),
+            dataset_id: DatasetId(dataset.workspace_dataset_id.clone()),
+        };
+        write
+            .send(Message::Text(serde_json::to_string(&message)?.into()))
+            .await
+            .map_err(map_websocket_error)?;
+        wait_for_dataset_open_result(incoming, &request_id, &dataset.name, workspace_id, wait).await
+    }
+
     pub async fn remove(
         &self,
         selector: &str,
@@ -489,6 +524,21 @@ pub fn format_dataset_health_human(output: &DatasetHealthOutput) -> String {
         .map(format_one_dataset_health)
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+pub fn format_dataset_retry_human(output: &DatasetRetryOutput) -> String {
+    format!(
+        "Retried dataset binding: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nSource: {}\nURL: {}",
+        output.dataset.name,
+        output.workspace.name,
+        output.dataset.workspace_id,
+        output.dataset.workspace_dataset_id,
+        output.dataset.image_count,
+        output.dataset.entity_count,
+        output.dataset.seq,
+        output.dataset.source,
+        output.target.web_url,
+    )
 }
 
 fn format_one_dataset_health(dataset: &DatasetSourceHealth) -> String {
@@ -899,7 +949,7 @@ where
 fn observe_dataset_message(
     text: &str,
     request_id: &str,
-    source: &str,
+    _source: &str,
     workspace_id: &str,
 ) -> Result<Option<DatasetOpenSummary>, CliError> {
     let message: ServerMessage = serde_json::from_str(text).map_err(|error| {
@@ -912,10 +962,10 @@ fn observe_dataset_message(
     match message {
         ServerMessage::OpenDatasetSucceeded {
             request_id: message_request_id,
+            url,
             seq,
             opened,
             diagnostic,
-            ..
         } => {
             if message_request_id != request_id {
                 return Ok(None);
@@ -929,7 +979,7 @@ fn observe_dataset_message(
                 image_count,
                 entity_count,
                 seq,
-                source: source.to_string(),
+                source: url,
                 diagnostic,
             }))
         }
@@ -963,6 +1013,14 @@ fn dataset_open_request_id() -> String {
 fn dataset_health_request_id() -> String {
     format!(
         "cli-health-{hi:016x}{lo:016x}",
+        hi = rand::random::<u64>(),
+        lo = rand::random::<u64>()
+    )
+}
+
+fn dataset_retry_request_id() -> String {
+    format!(
+        "cli-retry-{hi:016x}{lo:016x}",
         hi = rand::random::<u64>(),
         lo = rand::random::<u64>()
     )

@@ -1658,6 +1658,18 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     status: <span style={{ color: statusColor(health.status) }}>{health.status}</span>
                     {health.backend && <> · backend: {health.backend}</>}
                   </div>
+                  <div style={{ marginTop: 4 }}>
+                    <button
+                      className="debug-config-toggle"
+                      onClick={() => {
+                        sessionRef?.current?.bridge.sendDatasetRetry(health.workspace_dataset_id);
+                        window.setTimeout(refreshDatasetHealth, 750);
+                      }}
+                      disabled={datasetHealthLoading}
+                    >
+                      Retry binding
+                    </button>
+                  </div>
                   {health.source_url && (
                     <div className="debug-break-anywhere" title={health.source_url}>
                       source: {health.source_url}

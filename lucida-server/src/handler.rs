@@ -81,23 +81,42 @@ pub async fn restore_workspace_bindings(
 ) {
     for source in sources {
         {
-            let sess = session.lock().await;
+            let mut sess = session.lock().await;
             if sess
                 .server_bindings
                 .contains_key(&source.workspace_dataset_id)
             {
                 continue;
             }
+            sess.record_binding_source(
+                source.workspace_dataset_id.clone(),
+                normalize_dataset_url(&source.canonical_url),
+                Some(source.dataset_source_id.clone()),
+                source.display_name.clone(),
+            );
         }
         if let Err(e) =
             restore_one_workspace_binding(Arc::clone(&session), tx.clone(), &source, &proxy_config)
                 .await
         {
+            {
+                let mut sess = session.lock().await;
+                sess.record_binding_restore_failure(
+                    source.workspace_dataset_id.clone(),
+                    normalize_dataset_url(&source.canonical_url),
+                    Some(source.dataset_source_id.clone()),
+                    source.display_name.clone(),
+                    e.clone(),
+                );
+            }
             tracing::warn!(
                 dataset_id = %source.workspace_dataset_id,
                 dataset_source_id = %source.dataset_source_id,
                 url = %source.canonical_url,
-                error = %e,
+                error = %e.message,
+                stage = ?e.stage,
+                kind = ?e.kind,
+                retryable = e.retryable,
                 "workspace.binding_restore_failed"
             );
         }
@@ -109,15 +128,16 @@ async fn restore_one_workspace_binding(
     tx: broadcast::Sender<BroadcastItem>,
     source: &WorkspaceDatasetSource,
     proxy_config: &ProxyConfig,
-) -> Result<(), String> {
+) -> Result<(), DatasetOpenFailureDiagnostic> {
     let canonical_url = normalize_dataset_url(&source.canonical_url);
     let dataset_id = source.workspace_dataset_id.0.clone();
     let dataset_id_key = DatasetId(dataset_id.clone());
 
-    let store = lucida_store::backend::open(&canonical_url).map_err(|e| e.to_string())?;
+    let store =
+        lucida_store::backend::open(&canonical_url).map_err(|e| backend_open_failure(&e))?;
     let result = lucida_store::import::import_dataset(&store, &dataset_id, &source.display_name)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| import_failure(&e))?;
 
     let catalog_entries =
         proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
@@ -194,7 +214,7 @@ async fn restore_one_workspace_binding(
     ));
 
     let binding = ServerBinding {
-        source_url: canonical_url,
+        source_url: canonical_url.clone(),
         store,
         resolver,
         cache: cached,
@@ -208,6 +228,13 @@ async fn restore_one_workspace_binding(
 
     {
         let mut sess = session.lock().await;
+        sess.record_binding_source(
+            dataset_id_key.clone(),
+            canonical_url,
+            Some(source.dataset_source_id.clone()),
+            source.display_name.clone(),
+        );
+        sess.clear_binding_restore_failure(&dataset_id_key);
         if !generated_initial_delta.levels.is_empty() {
             sess.apply_generated_availability_delta(
                 dataset_id_key.clone(),
@@ -527,6 +554,119 @@ async fn handle_client_inner(
                                 ));
                             }
                         }
+                        ClientMessage::DatasetRetry {
+                            request_id,
+                            dataset_id,
+                        } => {
+                            let Some(ctx) = workspace.as_ref() else {
+                                send_open_failed(
+                                    id,
+                                    &request_id,
+                                    dataset_id.as_ref(),
+                                    open_failure(
+                                        DatasetOpenStage::Authorization,
+                                        DatasetOpenFailureKind::Internal,
+                                        false,
+                                        "dataset retry requires a workspace session",
+                                        None,
+                                    ),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            };
+                            if let Err(e) = ctx
+                                .manager
+                                .require_editor(&ctx.live.workspace_id, &ctx.principal)
+                                .await
+                            {
+                                send_open_failed(
+                                    id,
+                                    &request_id,
+                                    dataset_id.as_ref(),
+                                    open_failure(
+                                        DatasetOpenStage::Authorization,
+                                        DatasetOpenFailureKind::Authorization,
+                                        false,
+                                        "workspace role cannot retry dataset bindings",
+                                        Some(e.to_string()),
+                                    ),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            }
+                            let source = match ctx
+                                .manager
+                                .dataset_by_workspace_dataset(&ctx.live.workspace_id, &dataset_id)
+                                .await
+                            {
+                                Ok(Some(source)) => source,
+                                Ok(None) => {
+                                    send_open_failed(
+                                        id,
+                                        &request_id,
+                                        dataset_id.as_ref(),
+                                        open_failure(
+                                            DatasetOpenStage::SourceLookup,
+                                            DatasetOpenFailureKind::WorkspaceLookup,
+                                            false,
+                                            "workspace dataset source was not found",
+                                            None,
+                                        ),
+                                        &unicast_routes,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    send_open_failed(
+                                        id,
+                                        &request_id,
+                                        dataset_id.as_ref(),
+                                        open_failure(
+                                            DatasetOpenStage::SourceLookup,
+                                            DatasetOpenFailureKind::WorkspaceLookup,
+                                            true,
+                                            "workspace dataset source lookup failed",
+                                            Some(e.to_string()),
+                                        ),
+                                        &unicast_routes,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+
+                            tracing::info!(
+                                client_id = %id,
+                                request_id = %request_id,
+                                workspace_dataset_id = %dataset_id,
+                                url = %source.canonical_url,
+                                "dataset_retry.received"
+                            );
+                            let session_clone = Arc::clone(&session);
+                            let tx_clone = tx.clone();
+                            let unicast_routes_clone = Arc::clone(&unicast_routes);
+                            let proxy_config_clone = proxy_config.clone();
+                            let workspace_clone = workspace.clone();
+                            let request = OpenRemoteDatasetRequest {
+                                request_id,
+                                url: source.canonical_url,
+                            };
+                            tokio::spawn(async move {
+                                handle_open_remote_dataset(
+                                    id,
+                                    request,
+                                    session_clone,
+                                    tx_clone,
+                                    unicast_routes_clone,
+                                    proxy_config_clone,
+                                    workspace_clone,
+                                )
+                                .await;
+                            });
+                        }
                         ClientMessage::ViewerInterest { interest } => {
                             let service = {
                                 let sess = session.lock().await;
@@ -801,23 +941,44 @@ fn dataset_health_snapshot(sess: &Session, filter: Option<&DatasetId>) -> Vec<Da
 fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> DatasetSourceHealth {
     let dataset_id = manifest.dataset_id.clone();
     let binding = sess.server_bindings.get(&dataset_id);
+    let runtime = sess.binding_runtime.get(&dataset_id);
     let generated = generated_coarse_health(sess.generated_availability.get(&dataset_id));
     let binding_component = match binding {
         Some(_) => DatasetHealthComponent {
             status: DatasetHealthStatus::Healthy,
             message: Some("server binding is ready".to_string()),
         },
-        None => DatasetHealthComponent {
-            status: DatasetHealthStatus::Unavailable,
-            message: Some("server binding is missing; chunks cannot be served".to_string()),
+        None => match runtime.and_then(|state| state.last_restore_failure.as_ref()) {
+            Some(failure) => DatasetHealthComponent {
+                status: DatasetHealthStatus::Unavailable,
+                message: Some(format!(
+                    "binding restore failed at {:?}: {}",
+                    failure.stage, failure.message
+                )),
+            },
+            None => DatasetHealthComponent {
+                status: DatasetHealthStatus::Unavailable,
+                message: Some("server binding is missing; chunks cannot be served".to_string()),
+            },
         },
     };
     let source_cache = binding.map(|binding| cache_stats_for_protocol(binding.cache.stats()));
-    let source_url = binding.map(|binding| binding.source_url.clone());
+    let source_url = binding
+        .map(|binding| binding.source_url.clone())
+        .or_else(|| runtime.map(|state| state.source_url.clone()));
     let backend = source_url.as_deref().map(backend_kind_for_url);
     let mut messages = Vec::new();
     if binding.is_none() {
-        messages.push("dataset exists in the workspace document but has no runtime binding".into());
+        messages.push(
+            "dataset exists in the workspace document but has no runtime binding; retry dataset restore"
+                .into(),
+        );
+    }
+    if let Some(failure) = runtime.and_then(|state| state.last_restore_failure.as_ref()) {
+        messages.push(format!(
+            "last restore failure: stage {:?}, kind {:?}, retryable {}, {}",
+            failure.stage, failure.kind, failure.retryable, failure.message
+        ));
     }
     if generated.status == DatasetHealthStatus::Degraded {
         messages.push(
@@ -1516,6 +1677,13 @@ async fn handle_open_remote_dataset(
                 generated_initial_delta.clone(),
             );
         }
+        sess.record_binding_source(
+            dataset_id_key.clone(),
+            canonical_url.clone(),
+            Some(dataset_source_id.clone()),
+            name.clone(),
+        );
+        sess.clear_binding_restore_failure(&dataset_id_key);
         sess.server_bindings.insert(dataset_id_key.clone(), binding);
         let document = sess.document.clone();
         (seq, document)
@@ -2189,6 +2357,51 @@ mod tests {
             vec![],
             None,
         )
+    }
+
+    #[test]
+    fn dataset_health_reports_recorded_restore_failure() {
+        let manifest = single_image_manifest();
+        let dataset_id = manifest.dataset_id.clone();
+        let mut sess = Session::new();
+        sess.document
+            .manifests
+            .insert(dataset_id.clone(), manifest.clone());
+        sess.record_binding_restore_failure(
+            dataset_id,
+            "/data/missing.zarr".into(),
+            Some("source-1".into()),
+            manifest.name,
+            open_failure(
+                DatasetOpenStage::BackendOpen,
+                DatasetOpenFailureKind::MissingObject,
+                false,
+                "object was not found",
+                Some("zarr.json missing".into()),
+            ),
+        );
+
+        let health = dataset_health_snapshot(&sess, None);
+
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].status, DatasetHealthStatus::Unavailable);
+        assert_eq!(health[0].source_url.as_deref(), Some("/data/missing.zarr"));
+        assert_eq!(health[0].backend.as_deref(), Some("local"));
+        assert_eq!(health[0].binding.status, DatasetHealthStatus::Unavailable);
+        assert!(
+            health[0]
+                .binding
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("object was not found")
+        );
+        assert!(
+            health[0]
+                .messages
+                .iter()
+                .any(|message| message.contains("last restore failure"))
+        );
     }
 
     fn sample_asset(zyx: [u32; 3]) -> ProxyAsset {

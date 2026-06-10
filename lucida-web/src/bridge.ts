@@ -423,6 +423,19 @@ export class Bridge {
     });
   }
 
+  sendDatasetRetry(datasetId: string) {
+    const requestId = makeBridgeRequestId("web-retry");
+    bridgeLog("dataset_retry.send", {
+      requestId,
+      datasetId,
+    }, this.ws?.readyState);
+    this.send(JSON.stringify({
+      type: "dataset_retry",
+      request_id: requestId,
+      dataset_id: datasetId,
+    }));
+  }
+
   sendFollow(target: ClientId | null) {
     this.send(JSON.stringify({ type: "follow", target }));
   }

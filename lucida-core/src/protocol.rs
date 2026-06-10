@@ -64,6 +64,11 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dataset_id: Option<DatasetId>,
     },
+    /// Retry rebuilding a persisted workspace dataset's server binding.
+    DatasetRetry {
+        request_id: String,
+        dataset_id: DatasetId,
+    },
     /// Advisory, unsequenced scheduling hint for server-generated chunks.
     /// This is session/runtime state only; it is not a document command and
     /// must not be persisted in saved views.
@@ -668,6 +673,27 @@ mod tests {
                 assert_eq!(dataset_id, Some(DatasetId("wds-1".into())));
             }
             _ => panic!("expected DatasetHealth"),
+        }
+    }
+
+    #[test]
+    fn dataset_retry_request_round_trips() {
+        let msg = ClientMessage::DatasetRetry {
+            request_id: "retry-1".into(),
+            dataset_id: DatasetId("wds-1".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"dataset_retry\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::DatasetRetry {
+                request_id,
+                dataset_id,
+            } => {
+                assert_eq!(request_id, "retry-1");
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+            }
+            _ => panic!("expected DatasetRetry"),
         }
     }
 

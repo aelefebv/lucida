@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-06-07
+modified: 2026-06-10
 ---
 
 # lucida-cli
@@ -46,6 +46,8 @@ Current product commands:
 - `lucida dataset open <path-or-url>` — open a dataset in the selected workspace and wait for completion.
 - `lucida dataset list` — list loaded datasets in the selected workspace.
 - `lucida dataset info <dataset>` — show manifest/image/channel/layout summary for a loaded dataset.
+- `lucida dataset health [dataset]` — show server-authored binding/backend/source-cache and generated-coarse health.
+- `lucida dataset retry <dataset>` — retry rebuilding a loaded workspace dataset's server binding from its persisted source.
 - `lucida dataset remove <dataset>` — remove a loaded workspace dataset.
 - `lucida view pan|zoom|set-zoom|center|slice|z-range|viewport-size` — update the selected durable viewer profile's 2D slice view.
 - `lucida camera mode|rotate|pan|zoom|fly-tick` — update slice/arcball/fly camera state.
@@ -125,7 +127,7 @@ The matching Python smoke entry point is `uv run --project lucida-py python scri
 ## Gotchas
 
 - **Keychain is opportunistic.** `lucida auth login` stores the approved token in macOS Keychain when available. If Keychain rejects the write or the platform has no supported keychain integration, the CLI falls back to the `0600` config file.
-- **No retry loop yet.** The foundation status/config commands make single HTTP requests. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
+- **No automatic retry loop yet.** The foundation status/config commands make single HTTP requests, and `dataset retry` is an explicit user action for one persisted workspace dataset binding. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
 - **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.
 - **Admin workspace commands are id-based.** Search can discover ids, but `admin workspace info/archive/restore/owner` intentionally do not reuse member-scoped workspace name resolution.
 - **Negative numeric flags use clap's accepted forms.** The parser accepts `--flag=-2` and the relevant commands enable hyphen values where practical; scripts should prefer equals-style values for clarity.

@@ -45,9 +45,9 @@ use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store
 use crate::dataset::{
     DatasetBrowseOutput, DatasetHealthOutput, DatasetHttpClient, DatasetInfoOutput,
     DatasetListOutput, DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput,
-    DatasetWorkspaceClient, format_dataset_browse_human, format_dataset_health_human,
-    format_dataset_info_human, format_dataset_list_human, format_dataset_open_human,
-    format_dataset_remove_human,
+    DatasetRetryOutput, DatasetWorkspaceClient, format_dataset_browse_human,
+    format_dataset_health_human, format_dataset_info_human, format_dataset_list_human,
+    format_dataset_open_human, format_dataset_remove_human, format_dataset_retry_human,
 };
 use crate::error::{CliError, ErrorKind};
 use crate::layout::{
@@ -543,6 +543,14 @@ enum DatasetCommand {
         dataset: Option<String>,
         /// Seconds to wait for the workspace snapshot and health response
         #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+    },
+    /// Retry rebuilding a loaded dataset's server binding from its persisted source
+    Retry {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// Seconds to wait for the server to finish retrying the dataset binding
+        #[arg(long, default_value_t = 300)]
         timeout_seconds: u64,
     },
     /// Remove a loaded dataset from the selected workspace
@@ -1937,6 +1945,40 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 };
                 output.print_either(&output_payload, || {
                     format_dataset_health_human(&output_payload)
+                })?;
+            }
+            DatasetCommand::Retry {
+                dataset,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token);
+                let dataset = dataset_client
+                    .retry(
+                        dataset,
+                        &workspace.id,
+                        Duration::from_secs(*timeout_seconds),
+                    )
+                    .await?;
+                let output_payload = DatasetRetryOutput {
+                    server,
+                    workspace,
+                    target,
+                    dataset,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_retry_human(&output_payload)
                 })?;
             }
             DatasetCommand::Remove {
@@ -4287,6 +4329,25 @@ mod tests {
                 assert_eq!(timeout_seconds, 9);
             }
             _ => panic!("expected dataset remove"),
+        }
+    }
+
+    #[test]
+    fn dataset_retry_parses_product_shape() {
+        let cli = parse(&["dataset", "retry", "wds-1", "--timeout-seconds", "11"]);
+
+        match cli.command {
+            Command::Dataset {
+                command:
+                    DatasetCommand::Retry {
+                        dataset,
+                        timeout_seconds,
+                    },
+            } => {
+                assert_eq!(dataset, "wds-1");
+                assert_eq!(timeout_seconds, 11);
+            }
+            _ => panic!("expected dataset retry"),
         }
     }
 

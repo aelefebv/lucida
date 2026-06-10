@@ -277,6 +277,14 @@ Implementation progress:
   generated-coarse status. Browser smoke covered CPPX in a real workspace on a
   local server; the tab showed the same healthy local binding state as CLI/Python
   diagnostics.
+- 2026-06-10: Binding restore health and retry implemented. Workspace restore
+  records server-private source metadata and structured restore failures outside
+  `DocumentState`, so health can report a persisted dataset with no runtime
+  binding as unavailable while preserving source URL, backend, and last failure.
+  Added `dataset_retry` to the WebSocket protocol, CLI `dataset retry
+  <dataset>`, Python `WorkspaceResource.datasets.retry(...)`, and a DebugPanel
+  Health-tab "Retry binding" button. Retry resolves the persisted
+  workspace-dataset source and then reuses the normal dataset-open path.
 
 Likely vertical slices:
 
@@ -284,7 +292,8 @@ Likely vertical slices:
    done 2026-06-10; progress-event streaming remains future work.
 2. Dataset source health API surfaced through CLI, Python, and a minimal browser
    status/debug affordance. Done 2026-06-10.
-3. Binding restore health and retry.
+3. Binding restore health and retry. Done 2026-06-10; deeper restart/failure
+   fixture smokes remain part of slice 6.
 4. Source cache stats and resource diagnostics.
 5. Generated-coarse health and cache diagnostics.
 6. Fixture-backed dataset reliability smoke matrix and scripts.

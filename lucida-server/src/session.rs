@@ -6,7 +6,9 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
 use lucida_core::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use lucida_core::view::ViewState;
-use lucida_protocol::{GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot};
+use lucida_protocol::{
+    DatasetOpenFailureDiagnostic, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot,
+};
 
 use crate::binding::ServerBinding;
 
@@ -18,12 +20,24 @@ pub struct Session {
     history: VecDeque<(u64, DocumentCommand)>,
     /// Server-hosted datasets: dataset_id → operational binding (store + resolver + cache).
     pub server_bindings: HashMap<DatasetId, ServerBinding>,
+    /// Server-private source/restore metadata for workspace datasets.
+    /// Kept outside `DocumentState` so client-visible membership remains
+    /// the source of truth while operational restore failures stay diagnosable.
+    pub binding_runtime: HashMap<DatasetId, DatasetBindingRuntimeState>,
     /// Server-authored runtime generated coarse metadata/readiness.
     /// Kept outside `DocumentState` so it is never treated as a user
     /// document command or saved-view payload.
     pub generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DatasetBindingRuntimeState {
+    pub source_url: String,
+    pub dataset_source_id: Option<String>,
+    pub display_name: String,
+    pub last_restore_failure: Option<DatasetOpenFailureDiagnostic>,
 }
 
 impl Default for Session {
@@ -39,6 +53,7 @@ impl Session {
             seq: 0,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
             server_bindings: HashMap::new(),
+            binding_runtime: HashMap::new(),
             generated_availability: HashMap::new(),
             clients: HashMap::new(),
         }
@@ -58,6 +73,7 @@ impl Session {
     pub fn apply(&mut self, cmd: DocumentCommand) -> u64 {
         if let DocumentCommand::RemoveDataset { id } = &cmd {
             self.generated_availability.remove(id);
+            self.binding_runtime.remove(id);
         }
         self.document.apply(cmd.clone());
 
@@ -78,6 +94,53 @@ impl Session {
             .entry(dataset_id)
             .or_default()
             .apply_delta(delta);
+    }
+
+    pub fn record_binding_source(
+        &mut self,
+        dataset_id: DatasetId,
+        source_url: String,
+        dataset_source_id: Option<String>,
+        display_name: String,
+    ) {
+        self.binding_runtime
+            .entry(dataset_id)
+            .and_modify(|state| {
+                state.source_url = source_url.clone();
+                state.dataset_source_id = dataset_source_id.clone();
+                state.display_name = display_name.clone();
+            })
+            .or_insert(DatasetBindingRuntimeState {
+                source_url,
+                dataset_source_id,
+                display_name,
+                last_restore_failure: None,
+            });
+    }
+
+    pub fn record_binding_restore_failure(
+        &mut self,
+        dataset_id: DatasetId,
+        source_url: String,
+        dataset_source_id: Option<String>,
+        display_name: String,
+        diagnostic: DatasetOpenFailureDiagnostic,
+    ) {
+        self.binding_runtime.insert(
+            dataset_id,
+            DatasetBindingRuntimeState {
+                source_url,
+                dataset_source_id,
+                display_name,
+                last_restore_failure: Some(diagnostic),
+            },
+        );
+    }
+
+    pub fn clear_binding_restore_failure(&mut self, dataset_id: &DatasetId) {
+        if let Some(state) = self.binding_runtime.get_mut(dataset_id) {
+            state.last_restore_failure = None;
+        }
     }
 
     pub fn add_client(&mut self, id: ClientId) -> PresenceState {

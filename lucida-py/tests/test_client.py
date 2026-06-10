@@ -403,6 +403,37 @@ def test_dataset_health_sends_protocol_message_and_returns_health(tmp_path, monk
     assert result[0]["source_cache"]["hits"] == 3
 
 
+def test_dataset_retry_sends_protocol_message_and_reads_result(tmp_path, monkeypatch):
+    class FakeUuid:
+        hex = "abc123"
+
+    monkeypatch.setattr("lucida.client.uuid.uuid4", lambda: FakeUuid())
+    retried = {
+        "type": "open_dataset_succeeded",
+        "request_id": "py-retry-abc123",
+        "url": "/data/demo.zarr",
+        "seq": 14,
+        "opened": {"manifest": manifest("wds-test", "demo.zarr")},
+    }
+    connector = FakeConnector([snapshot(), retried])
+    client = LucidaClient(
+        "http://127.0.0.1:9988",
+        config_path=tmp_path / "config.json",
+        ws_connect=connector,
+    )
+    workspace = WorkspaceResource(client, workspace_record())
+
+    result = workspace.datasets.retry("demo.zarr")
+
+    sent = connector.websocket.sent[0]
+    assert sent["type"] == "dataset_retry"
+    assert sent["request_id"] == "py-retry-abc123"
+    assert sent["dataset_id"] == "wds-test"
+    assert result["workspace_dataset_id"] == "wds-test"
+    assert result["source"] == "/data/demo.zarr"
+    assert result["seq"] == 14
+
+
 def test_view_pan_sends_presence_update(tmp_path):
     connector = FakeConnector([snapshot()])
     client = LucidaClient(

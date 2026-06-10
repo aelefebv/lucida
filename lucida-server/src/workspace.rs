@@ -376,6 +376,12 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         dataset_source_id: &str,
     ) -> Result<Option<WorkspaceDatasetSource>, StoreError>;
 
+    async fn dataset_by_workspace_dataset(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+    ) -> Result<Option<WorkspaceDatasetSource>, StoreError>;
+
     async fn sharing_settings(
         &self,
         workspace_id: &str,
@@ -1257,6 +1263,32 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         )
         .bind(workspace_id)
         .bind(dataset_source_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        Ok(row.map(row_to_dataset_source))
+    }
+
+    async fn dataset_by_workspace_dataset(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+    ) -> Result<Option<WorkspaceDatasetSource>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                wd.id AS workspace_dataset_id,
+                wd.dataset_source_id,
+                ds.canonical_url,
+                wd.display_name
+            FROM workspace_datasets wd
+            INNER JOIN dataset_sources ds ON ds.id = wd.dataset_source_id
+            WHERE wd.workspace_id = ? AND wd.id = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(workspace_dataset_id.as_ref())
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sql)?;
@@ -2741,6 +2773,17 @@ impl WorkspaceManager {
     ) -> Result<Option<WorkspaceDatasetSource>, WorkspaceError> {
         self.store
             .dataset_by_source(workspace_id, dataset_source_id)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    pub async fn dataset_by_workspace_dataset(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+    ) -> Result<Option<WorkspaceDatasetSource>, WorkspaceError> {
+        self.store
+            .dataset_by_workspace_dataset(workspace_id, workspace_dataset_id)
             .await
             .map_err(WorkspaceError::Store)
     }
