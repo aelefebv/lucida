@@ -85,8 +85,8 @@ against the local workspace route.
   multichannel UI reflection, aggregate plate overview bounds, and the minimap
   viewport overlay on a CPPX plate workspace.
 - 2026-06-10 repo state: the shared CLI/Python client PRD landed on `main` in
-  PR #760. Remaining work is stabilization rather than known failed use cases:
-  repeatable smoke scripts and install/invocation docs. Live-peer to
+  PR #760. Stabilization now has repeatable smoke scripts and
+  install/invocation docs for the CLI/Python rows. Live-peer to
   headless-profile semantics are covered by row 34. See
   `wiki/outputs/2026-06-10-client-surface-stabilization-plan.md`.
 
@@ -160,12 +160,12 @@ against the local workspace route.
 
 ### Stabilization Follow-Up
 
-The original follow-up list is now mostly closed by PR #760. Current follow-up
-tracking is:
+The original follow-up list is now mostly closed by PR #760. Current reusable
+smoke tracking is:
 
-1. Add repeatable CLI and Python smoke commands/scripts for the rows above.
-2. Clarify install and source-checkout invocation paths so users can move
-   between `lucida ...`, `cargo run -p lucida-cli -- ...`, and Python examples
-   without guessing.
-3. Keep this matrix current as stabilization work turns ad hoc manual checks
-   into reusable smoke flows.
+1. CLI smoke: `scripts/smoke_lucida_cli.sh` against a running server with
+   `LUCIDA_SMOKE_DATASET` set to a server-visible OME-Zarr path or URL.
+2. Python smoke: `uv run --project lucida-py python
+   scripts/smoke_python_client.py` against the same server/dataset.
+3. Keep this matrix current whenever product-surface changes add or alter a
+   workflow row.

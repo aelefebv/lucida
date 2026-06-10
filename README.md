@@ -60,6 +60,13 @@ Visit <http://localhost:5173>.
 
 The product CLI command is `lucida`. From a source checkout, run the same binary by replacing `lucida` with `cargo run -p lucida-cli --`, for example `cargo run -p lucida-cli -- --server http://127.0.0.1:9876 status`.
 
+To install the CLI from a checkout for repeated local use:
+
+```bash
+cargo install --path lucida-cli
+lucida --server http://127.0.0.1:9876 status
+```
+
 For an auth-disabled local server:
 
 ```bash
@@ -110,6 +117,23 @@ print(workspace.datasets.list())
 ```
 
 `LucidaClient` reads explicit constructor tokens, `LUCIDA_TOKEN`, macOS Keychain credentials created by `lucida auth login`, and the CLI-compatible config file. Default workspaces and config-file token fallback are scoped to the normalized server URL.
+
+From a source checkout, run Python examples through the package environment:
+
+```bash
+uv run --project lucida-py python your_script.py
+```
+
+For a repeatable local smoke pass against a running server, set a server-visible dataset path and run:
+
+```bash
+export LUCIDA_SMOKE_SERVER=http://127.0.0.1:9876
+export LUCIDA_SMOKE_DATASET=/var/lib/lucida/data/sample.ome.zarr
+scripts/smoke_lucida_cli.sh
+uv run --project lucida-py python scripts/smoke_python_client.py
+```
+
+The CLI smoke script isolates `LUCIDA_CONFIG_PATH` in a temp directory, creates a throwaway workspace, opens the dataset, mutates view/layer/channel state, runs debug/plan diagnostics, and validates screenshot/overview PNGs. Set `LUCIDA_SMOKE_CAPTURE=0` to skip browser-rendered captures when Chrome/Chromium is unavailable.
 
 ### Useful options
 

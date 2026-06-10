@@ -84,6 +84,23 @@ Use `lucida workspace open [workspace]` to print/open the browser route for the 
 
 For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file. To capture a live browser peer instead of the durable profile, use `lucida peer list` to find its client id, then pass `--from-peer <client-id>` to `viewer state`, `viewer screenshot`, or `viewer overview`. Use `viewer adopt --from-peer <client-id>` when the peer's current view should become the durable headless profile state.
 
+## Smoke workflows
+
+Run `scripts/smoke_lucida_cli.sh` from the repo root against an already-running `lucida-server` to exercise the common CLI client workflow. It uses a temp `LUCIDA_CONFIG_PATH`, creates a throwaway workspace, opens `LUCIDA_SMOKE_DATASET`, runs workspace/dataset/view/layer/channel/debug/plan commands, and validates screenshot/overview PNGs with `scripts/assert_png_nonblank.py`.
+
+Required inputs:
+
+- `LUCIDA_SMOKE_SERVER` — server base URL; defaults to `http://127.0.0.1:9876`.
+- `LUCIDA_SMOKE_DATASET` — server-visible OME-Zarr path or URL. On Austin's laptop the script falls back to the CPPX test dataset if present.
+
+Useful overrides:
+
+- `LUCIDA_SMOKE_CLI="target/debug/lucida"` — use a prebuilt binary instead of `cargo run -p lucida-cli --`.
+- `LUCIDA_SMOKE_OUTPUT_DIR=/path/to/artifacts` — keep JSON and PNG artifacts somewhere specific.
+- `LUCIDA_SMOKE_CAPTURE=0` — skip screenshot/overview when Chrome/Chromium is unavailable.
+
+The matching Python smoke entry point is `uv run --project lucida-py python scripts/smoke_python_client.py`. It creates a throwaway workspace, opens the same dataset, applies view/layer/channel changes through `LucidaClient`, and writes a structured summary artifact.
+
 ## Interactions
 
 - Config is local JSON under `$LUCIDA_CONFIG_PATH`, `$XDG_CONFIG_HOME/lucida/config.json`, or `~/.config/lucida/config.json`.

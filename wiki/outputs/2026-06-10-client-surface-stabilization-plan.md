@@ -77,6 +77,10 @@ API design.
 Done when the Python happy path works from the documented project environment
 and failure guidance points users at the right setup fix.
 
+Current implementation note: `scripts/smoke_python_client.py` is the runnable
+happy-path script. Run it with `uv run --project lucida-py python
+scripts/smoke_python_client.py` against an already-running server.
+
 ### 4. Install And Invocation Ergonomics
 
 Reduce dependence on remembering source-checkout incantations.
@@ -92,6 +96,10 @@ Done when docs distinguish product commands (`lucida ...`) from source-checkout
 substitutions (`cargo run -p lucida-cli -- ...`) clearly enough that users do
 not paste shell variables as literal commands.
 
+Current implementation note: the README documents `cargo install --path
+lucida-cli`, the source-checkout substitution, and the Python
+`uv run --project lucida-py python ...` invocation.
+
 ### 5. End-To-End Smoke Scripts
 
 Codify the workflows we currently test manually.
@@ -106,6 +114,12 @@ Codify the workflows we currently test manually.
 
 Done when the use-case matrix can cite concrete smoke commands for the CLI and
 Python rows instead of relying on ad hoc transcript memory.
+
+Current implementation note: `scripts/smoke_lucida_cli.sh` covers status,
+workspace create/use/open/info, dataset open/list/info, view/layer/channel
+mutations, viewer state, debug state, visible-chunks, screenshot, and overview.
+`scripts/assert_png_nonblank.py` verifies the captured PNGs decode and contain
+more than one sampled color.
 
 ### 6. Headless Peer/View Semantics
 
@@ -160,7 +174,8 @@ examples from the pre-clean-cut CLI.
 
 - Whether stabilization should be a single small PRD issue with child slices or
   a sequence of direct small PRs.
-- Whether smoke scripts should live under `scripts/`, `tests/smoke/`, or a
-  package-specific location.
-- Whether smoke scripts should also cover a browser peer `--from-peer` capture
-  once browser automation is stable enough for that workflow.
+- Smoke scripts live under `scripts/` because they are developer-run workflows,
+  not hermetic CI tests yet.
+- Browser peer `--from-peer` capture remains documented in the use-case matrix
+  and manual smoke notes; the reusable smoke script covers durable profile
+  capture first because it does not need a concurrently driven browser peer.
