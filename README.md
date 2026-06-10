@@ -91,6 +91,13 @@ lucida viewer screenshot current-view.png
 
 The already-open browser workspace should update when `dataset open`, layout, saved-view, or other shared workspace commands land. View, camera, layer, and channel commands update the selected durable headless viewer profile by default, and can also broadcast ephemeral presence while connected. `viewer screenshot`/`viewer overview` use the web renderer through Chrome/Chromium and wait for a nonblank canvas before writing the PNG.
 
+Live peer following is intentionally ephemeral. To inspect or capture what an
+already-open browser peer is looking at, run `lucida peer list` to find the
+client id, then use `lucida viewer state --from-peer <client-id>`,
+`lucida viewer screenshot --from-peer <client-id> peer-view.png`, or
+`lucida viewer adopt --from-peer <client-id>` to copy that peer's current view
+into the durable headless viewer profile.
+
 Python scripts use the same server/client model:
 
 ```python

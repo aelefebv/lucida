@@ -11,14 +11,18 @@ mod status;
 mod view;
 mod workspace;
 
+use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use lucida_core::command::ViewportCommand;
+use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -63,9 +67,10 @@ use crate::view::{
     DatasetDisplayCommand, DatasetPresenceOutput, DebugStateOutput, PeerCursorOutput,
     PeerFollowOutput, PeerListOutput, PeerWorkspaceClient, PlanVisibleChunksOutput,
     ViewApplyOutput, ViewWorkspaceClient, ViewerProfileClient, ViewerProfileOutput,
-    format_dataset_presence_human, format_debug_state_human, format_peer_cursor_human,
-    format_peer_follow_human, format_peer_list_human, format_plan_visible_chunks_human,
-    format_view_apply_human, format_viewer_profile_human,
+    ViewerSourceOutput, format_dataset_presence_human, format_debug_state_human,
+    format_diagnostic_source, format_peer_cursor_human, format_peer_follow_human,
+    format_peer_list_human, format_plan_visible_chunks_human, format_view_apply_human,
+    format_viewer_profile_human, format_viewer_source_human,
 };
 use crate::workspace::{
     WorkspaceClient, WorkspaceLifecycleOutput, WorkspaceLinkAccess, WorkspaceListOutput,
@@ -972,14 +977,27 @@ impl ChannelCommand {
 
 #[derive(Subcommand, Debug)]
 enum ViewerCommand {
-    /// Show the durable viewer profile state
-    State,
+    /// Show the durable viewer profile state or an explicit live peer source
+    State {
+        /// Inspect an explicit live peer's current view instead of the viewer profile
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
+    },
     /// Print a browser URL that opens this viewer profile
     Link,
-    /// Capture a browser screenshot of this viewer profile
+    /// Copy a live peer's current view into this durable viewer profile
+    Adopt {
+        /// Live peer client id to copy into the viewer profile
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: u64,
+    },
+    /// Capture a browser screenshot of this viewer profile or an explicit live peer
     Screenshot {
         /// PNG output path
         output: String,
+        /// Capture an explicit live peer's current view instead of the viewer profile
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
         /// Browser viewport width in pixels
         #[arg(long, default_value_t = 1200)]
         width: u32,
@@ -990,10 +1008,13 @@ enum ViewerCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
-    /// Capture a browser screenshot after opening this viewer profile
+    /// Capture a browser screenshot after fitting this viewer profile or live peer
     Overview {
         /// PNG output path
         output: String,
+        /// Capture an explicit live peer's current view instead of the viewer profile
+        #[arg(long, value_name = "CLIENT_ID")]
+        from_peer: Option<u64>,
         /// Browser viewport width in pixels
         #[arg(long, default_value_t = 1200)]
         width: u32,
@@ -2569,17 +2590,32 @@ async fn emit_viewer_command(
         ViewerProfileClient::new(server.url.clone(), target.ws_url.clone(), token.clone());
 
     match command {
-        ViewerCommand::State => {
-            let result = view_client.state(&workspace, profile, wait).await?;
-            let output_payload = ViewerProfileOutput {
-                server,
-                workspace,
-                target,
-                result,
-            };
-            output.print_either(&output_payload, || {
-                format_viewer_profile_human(&output_payload)
-            })?;
+        ViewerCommand::State { from_peer } => {
+            if from_peer.is_some() {
+                let result = view_client
+                    .source_state(&workspace, profile, *from_peer, None, wait)
+                    .await?;
+                let output_payload = ViewerSourceOutput {
+                    server,
+                    workspace,
+                    target,
+                    result,
+                };
+                output.print_either(&output_payload, || {
+                    format_viewer_source_human(&output_payload)
+                })?;
+            } else {
+                let result = view_client.state(&workspace, profile, wait).await?;
+                let output_payload = ViewerProfileOutput {
+                    server,
+                    workspace,
+                    target,
+                    result,
+                };
+                output.print_either(&output_payload, || {
+                    format_viewer_profile_human(&output_payload)
+                })?;
+            }
         }
         ViewerCommand::Link => {
             let result = view_client.state(&workspace, profile, wait).await?;
@@ -2593,57 +2629,133 @@ async fn emit_viewer_command(
             });
             output.print_either(&payload, || url)?;
         }
+        ViewerCommand::Adopt { from_peer } => {
+            let result = view_client
+                .adopt_from_peer(&workspace, profile, *from_peer, wait)
+                .await?;
+            let output_payload = ViewerProfileOutput {
+                server,
+                workspace,
+                target,
+                result,
+            };
+            output.print_either(&output_payload, || {
+                let mut human = format_viewer_profile_human(&output_payload);
+                human.push_str(&format!("\nAdopted from peer: {from_peer}"));
+                human
+            })?;
+        }
         ViewerCommand::Screenshot {
             output: output_path,
+            from_peer,
             width,
             height,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
-            let result = view_client.state(&workspace, profile, wait).await?;
-            let url = viewer_profile_web_url(&target, profile)?;
-            capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                .await?;
-            let payload = serde_json::json!({
-                "server": server,
-                "workspace": workspace,
-                "target": target,
-                "profile": result.profile,
-                "url": url,
-                "output": output_path,
-                "width": width,
-                "height": height,
-            });
-            output.print_either(&payload, || {
-                format!("Captured viewer screenshot: {output_path}\nURL: {url}")
-            })?;
+            if from_peer.is_some() {
+                let result = view_client
+                    .source_state(&workspace, profile, *from_peer, None, wait)
+                    .await?;
+                let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
+                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
+                    .await?;
+                let source = result.source.clone();
+                let payload = serde_json::json!({
+                    "server": server,
+                    "workspace": workspace,
+                    "target": target,
+                    "source": source,
+                    "url": url,
+                    "output": output_path,
+                    "width": width,
+                    "height": height,
+                });
+                output.print_either(&payload, || {
+                    format!(
+                        "Captured viewer screenshot: {output_path}\nSource: {}\nURL: {url}",
+                        format_diagnostic_source(&result.source)
+                    )
+                })?;
+            } else {
+                let result = view_client.state(&workspace, profile, wait).await?;
+                let url = viewer_profile_web_url(&target, profile)?;
+                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
+                    .await?;
+                let payload = serde_json::json!({
+                    "server": server,
+                    "workspace": workspace,
+                    "target": target,
+                    "profile": result.profile,
+                    "url": url,
+                    "output": output_path,
+                    "width": width,
+                    "height": height,
+                });
+                output.print_either(&payload, || {
+                    format!("Captured viewer screenshot: {output_path}\nURL: {url}")
+                })?;
+            }
         }
         ViewerCommand::Overview {
             output: output_path,
+            from_peer,
             width,
             height,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
-            let result = view_client
-                .overview(&workspace, profile, [*width, *height], wait)
-                .await?;
-            let url = viewer_profile_web_url(&target, profile)?;
-            capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                .await?;
-            let payload = serde_json::json!({
-                "server": server,
-                "workspace": workspace,
-                "target": target,
-                "profile": result.profile,
-                "url": url,
-                "output": output_path,
-                "width": width,
-                "height": height,
-            });
-            output.print_either(&payload, || {
-                format!("Captured viewer overview: {output_path}\nURL: {url}")
-            })?;
+            if from_peer.is_some() {
+                let result = view_client
+                    .source_state(
+                        &workspace,
+                        profile,
+                        *from_peer,
+                        Some([*width, *height]),
+                        wait,
+                    )
+                    .await?;
+                let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
+                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
+                    .await?;
+                let source = result.source.clone();
+                let payload = serde_json::json!({
+                    "server": server,
+                    "workspace": workspace,
+                    "target": target,
+                    "source": source,
+                    "url": url,
+                    "output": output_path,
+                    "width": width,
+                    "height": height,
+                });
+                output.print_either(&payload, || {
+                    format!(
+                        "Captured viewer overview: {output_path}\nSource: {}\nURL: {url}",
+                        format_diagnostic_source(&result.source)
+                    )
+                })?;
+            } else {
+                let result = view_client
+                    .overview(&workspace, profile, [*width, *height], wait)
+                    .await?;
+                let url = viewer_profile_web_url(&target, profile)?;
+                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
+                    .await?;
+                let payload = serde_json::json!({
+                    "server": server,
+                    "workspace": workspace,
+                    "target": target,
+                    "profile": result.profile,
+                    "url": url,
+                    "output": output_path,
+                    "width": width,
+                    "height": height,
+                });
+                output.print_either(&payload, || {
+                    format!("Captured viewer overview: {output_path}\nURL: {url}")
+                })?;
+            }
         }
     }
 
@@ -2837,6 +2949,25 @@ fn viewer_profile_web_url(target: &WorkspaceTarget, profile: &str) -> Result<Str
         .map_err(|error| CliError::invalid_server(format!("invalid workspace URL: {error}")))?;
     url.query_pairs_mut().append_pair("viewer_profile", profile);
     Ok(url.to_string())
+}
+
+fn viewer_inline_view_web_url(
+    target: &WorkspaceTarget,
+    saved_view: &SavedView,
+) -> Result<String, CliError> {
+    let payload = encode_saved_view_url_payload(saved_view)?;
+    let mut url = reqwest::Url::parse(&target.web_url)
+        .map_err(|error| CliError::invalid_server(format!("invalid workspace URL: {error}")))?;
+    url.set_fragment(Some(&format!("view={payload}")));
+    Ok(url.to_string())
+}
+
+fn encode_saved_view_url_payload(saved_view: &SavedView) -> Result<String, CliError> {
+    let json = serde_json::to_vec(saved_view)?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&json)?;
+    let gz = encoder.finish()?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gz))
 }
 
 async fn capture_viewer_screenshot(
@@ -3592,6 +3723,7 @@ fn first_workspace_selector<'a>(
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::io::Read;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::parse_from(std::iter::once("lucida").chain(args.iter().copied()))
@@ -4491,18 +4623,39 @@ mod tests {
             Command::Viewer {
                 profile,
                 timeout_seconds,
-                command: ViewerCommand::State,
+                command: ViewerCommand::State { from_peer },
             } => {
                 assert_eq!(profile, "cli.default");
                 assert_eq!(timeout_seconds, 30);
+                assert_eq!(from_peer, None);
             }
             _ => panic!("expected viewer state"),
+        }
+
+        let peer_state = parse(&["viewer", "state", "--from-peer", "7"]);
+        match peer_state.command {
+            Command::Viewer {
+                command: ViewerCommand::State { from_peer },
+                ..
+            } => assert_eq!(from_peer, Some(7)),
+            _ => panic!("expected viewer state from peer"),
+        }
+
+        let adopt = parse(&["viewer", "adopt", "--from-peer", "8"]);
+        match adopt.command {
+            Command::Viewer {
+                command: ViewerCommand::Adopt { from_peer },
+                ..
+            } => assert_eq!(from_peer, 8),
+            _ => panic!("expected viewer adopt"),
         }
 
         let screenshot = parse(&[
             "viewer",
             "screenshot",
             "/tmp/view.png",
+            "--from-peer",
+            "9",
             "--width",
             "900",
             "--height",
@@ -4515,6 +4668,7 @@ mod tests {
                 command:
                     ViewerCommand::Screenshot {
                         output,
+                        from_peer,
                         width,
                         height,
                         timeout_seconds,
@@ -4522,12 +4676,51 @@ mod tests {
                 ..
             } => {
                 assert_eq!(output, "/tmp/view.png");
+                assert_eq!(from_peer, Some(9));
                 assert_eq!(width, 900);
                 assert_eq!(height, 700);
                 assert_eq!(timeout_seconds, Some(60));
             }
             _ => panic!("expected viewer screenshot"),
         }
+
+        let overview = parse(&[
+            "viewer",
+            "overview",
+            "/tmp/overview.png",
+            "--from-peer",
+            "10",
+        ]);
+        match overview.command {
+            Command::Viewer {
+                command:
+                    ViewerCommand::Overview {
+                        output, from_peer, ..
+                    },
+                ..
+            } => {
+                assert_eq!(output, "/tmp/overview.png");
+                assert_eq!(from_peer, Some(10));
+            }
+            _ => panic!("expected viewer overview"),
+        }
+    }
+
+    #[test]
+    fn saved_view_url_payload_is_gzip_base64url_json() {
+        let view = SavedView::empty([640, 480]);
+        let payload = encode_saved_view_url_payload(&view).unwrap();
+        assert!(!payload.contains(['+', '/', '=']));
+
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(bytes.as_slice());
+        let mut json = String::new();
+        decoder.read_to_string(&mut json).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["v"].as_u64(), Some(view.v as u64));
+        assert!(parsed["camera"].is_object());
     }
 
     #[test]

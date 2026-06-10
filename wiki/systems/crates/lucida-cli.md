@@ -51,7 +51,10 @@ Current product commands:
 - `lucida camera mode|rotate|pan|zoom|fly-tick` — update slice/arcball/fly camera state.
 - `lucida layer list|order|show|hide|opacity|contrast|gamma|colormap|blend-mode|render-mode|detail-level` — inspect or update dataset display state.
 - `lucida channel mode|show|hide|colormap|contrast|gamma|blend-mode` — update multichannel display state.
-- `lucida viewer state|link|screenshot|overview` — inspect or render a durable headless viewer profile.
+- `lucida viewer state [--from-peer <client-id>]` — inspect a durable headless viewer profile or a live peer's current view source.
+- `lucida viewer link` — print a browser URL that opens the durable viewer profile.
+- `lucida viewer adopt --from-peer <client-id>` — copy a live peer's current view into the selected durable viewer profile.
+- `lucida viewer screenshot|overview [--from-peer <client-id>] <path>` — render a durable headless viewer profile or a live peer's current view through the web renderer.
 - `lucida layout list|active|set` — inspect or change shared dataset layouts.
 - `lucida saved-view list|show|apply|capture|rename|update|delete|set-default|clear-default|link` — manage workspace saved views.
 - `lucida peer list` — list live workspace clients from the WebSocket snapshot, including follow state and compact presence summaries.
@@ -79,7 +82,7 @@ Global visible flags:
 
 Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for the request-correlated dataset-open result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
 
-For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file.
+For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file. To capture a live browser peer instead of the durable profile, use `lucida peer list` to find its client id, then pass `--from-peer <client-id>` to `viewer state`, `viewer screenshot`, or `viewer overview`. Use `viewer adopt --from-peer <client-id>` when the peer's current view should become the durable headless profile state.
 
 ## Interactions
 
@@ -99,7 +102,7 @@ For headless profile verification, `lucida viewer screenshot <path>` and `lucida
 - **Every scriptable command needs `--json`.** Human output can be concise, but automation should not parse tables.
 - **Errors are categorized.** The foundation defines stable categories such as `unreachable_server`, `unauthenticated`, `unauthorized`, `missing_resource`, `ambiguous_name`, `archived_workspace`, `dataset_open_failure`, `session_disconnect`, and `rejected_command`.
 - **Most commands are one-shot.** `peer follow` is intentionally long-lived because follow state is tied to a live WebSocket client. Other commands should remain one-shot unless a later slice explicitly designs another long-lived mode.
-- **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness. `peer follow` stays connected precisely because a disconnected CLI client cannot keep following anyone.
+- **Presence is ephemeral.** `peer` diagnostics operate on live WebSocket clients; durable headless viewer profiles store view state, not client id, cursor, follow target, or peer liveness. `peer follow` stays connected precisely because a disconnected CLI client cannot keep following anyone. Copying live peer state into a durable profile is explicit via `viewer adopt --from-peer`; screenshot/overview can render a peer directly via `--from-peer` without persisting it.
 - **Plan diagnostics are labeled by parity.** `plan visible-chunks` is a lower-level scene diagnostic, not a web-planner-equivalent dump of lanes, carry-forward state, CPU-cache filtering, minimap, or generated-coarse tier selection.
 
 ## Gotchas

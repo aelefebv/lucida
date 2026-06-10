@@ -54,6 +54,7 @@ Python, or admin CLI.
 | 31 | Developer / QA | As a developer, I want failed auth, missing workspace, bad dataset path, and unauthorized mutations to produce clear errors. | CLI + Python | Trigger representative error cases. | Errors are categorized and actionable. | Pass | Missing workspace, bad path, Python missing resource, and unauthorized member mutation returned useful errors. |
 | 32 | New User | As a new user, I want the CLI help and command names to be discoverable so I can find the next obvious action. | CLI | Inspect top-level and nested help. | Help exposes current noun model without legacy commands. | Pass | Help exposes the noun model without legacy command families. `peer follow` also accepts its timeout at the leaf command where users naturally try it. |
 | 33 | Biologist | As a biologist, I want the minimap to show where my viewport sits on the whole plate so I can navigate fields confidently. | Browser + CLI screenshot | Open CPPX plate, enable multichannel profile state, capture a viewer screenshot, and inspect the minimap. | Minimap renders plate fields and the viewport marker appears on the intersecting field(s), not fixed to the top-left field. | Pass | 2026-06-08 regression smoke used the freshly built web bundle on local server `http://127.0.0.1:9876`; the screenshot showed the member-aware minimap overlay on visible fields while Multi and all channel sublayers were reflected in the UI. |
+| 34 | Collaborator / CLI User | As a collaborator using the CLI headlessly, I want to inspect, screenshot, overview, and adopt a live browser peer's current view so I can capture what someone else is seeing without relying on hidden follow persistence. | CLI + Browser | Open a browser peer, run `viewer state --from-peer`, `viewer screenshot --from-peer`, `viewer overview --from-peer`, and `viewer adopt --from-peer`. | Commands read the live peer state, direct captures are nonblank, and adopt persists the peer state into the durable viewer profile. | Pass | 2026-06-10 smoke used workspace `752dddb7-82d3-4899-af44-08292419af1e` on `http://127.0.0.1:9876`; browser peer was client `1`; `viewer state --from-peer 1` reported peer channel contrast, screenshot and overview wrote nonblank 900x650 PNGs, and `viewer state` after adopt showed `Seed: peer:1`. |
 
 ## Full Report
 
@@ -74,7 +75,7 @@ against the local workspace route.
 
 ### Current Status
 
-- Pass: 33
+- Pass: 34
 - Partial: 0
 - Fail: 0
 - Product code changes after the original pass addressed the prior full and
@@ -85,8 +86,8 @@ against the local workspace route.
   viewport overlay on a CPPX plate workspace.
 - 2026-06-10 repo state: the shared CLI/Python client PRD landed on `main` in
   PR #760. Remaining work is stabilization rather than known failed use cases:
-  repeatable smoke scripts, install/invocation docs, and explicit live-peer to
-  headless-profile semantics. See
+  repeatable smoke scripts and install/invocation docs. Live-peer to
+  headless-profile semantics are covered by row 34. See
   `wiki/outputs/2026-06-10-client-surface-stabilization-plan.md`.
 
 ### What Worked Well
@@ -166,8 +167,5 @@ tracking is:
 2. Clarify install and source-checkout invocation paths so users can move
    between `lucida ...`, `cargo run -p lucida-cli -- ...`, and Python examples
    without guessing.
-3. Make live-peer/headless-profile behavior explicit with commands such as
-   `viewer screenshot --from-peer <client-id>` and `viewer adopt --from-peer
-   <client-id>`, while keeping `peer follow` ephemeral by default.
-4. Keep this matrix current as stabilization work turns ad hoc manual checks
+3. Keep this matrix current as stabilization work turns ad hoc manual checks
    into reusable smoke flows.

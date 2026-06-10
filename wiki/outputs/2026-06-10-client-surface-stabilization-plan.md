@@ -125,6 +125,13 @@ Done when a user can follow a browser, inspect the browser's current view from
 the CLI, capture a screenshot of that live view, and intentionally persist it to
 a named headless viewer profile.
 
+Current implementation note: `viewer state --from-peer`, `viewer screenshot
+--from-peer`, `viewer overview --from-peer`, and `viewer adopt --from-peer` are
+being added on `codex/client-surface-stabilization`. `--from-peer` screenshot
+and overview render an inline `#view=` URL derived from the peer's live presence;
+`adopt` writes the peer state into the selected durable profile (`--profile`,
+default `default`).
+
 ### 7. Practical Docs Pass
 
 Turn the stable workflow into user-facing docs.
@@ -155,5 +162,5 @@ examples from the pre-clean-cut CLI.
   a sequence of direct small PRs.
 - Whether smoke scripts should live under `scripts/`, `tests/smoke/`, or a
   package-specific location.
-- Whether `viewer adopt --from-peer` should update only the default profile by
-  default or require an explicit `--profile` when copying from a peer.
+- Whether smoke scripts should also cover a browser peer `--from-peer` capture
+  once browser automation is stable enough for that workflow.
