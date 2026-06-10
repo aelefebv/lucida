@@ -314,6 +314,95 @@ def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path, monke
     assert result["seq"] == 13
 
 
+def test_dataset_open_failure_preserves_diagnostic(tmp_path, monkeypatch):
+    class FakeUuid:
+        hex = "abc123"
+
+    monkeypatch.setattr("lucida.client.uuid.uuid4", lambda: FakeUuid())
+    failed = {
+        "type": "open_dataset_failed",
+        "request_id": "py-abc123",
+        "url": "/data/missing.zarr",
+        "error": "object was not found",
+        "diagnostic": {
+            "stage": "backend_open",
+            "kind": "missing_object",
+            "retryable": False,
+            "message": "object was not found",
+            "detail": "zarr.json missing",
+        },
+    }
+    connector = FakeConnector([snapshot(), failed])
+    client = LucidaClient(
+        "http://127.0.0.1:9988",
+        config_path=tmp_path / "config.json",
+        ws_connect=connector,
+    )
+    workspace = WorkspaceResource(client, workspace_record())
+
+    with pytest.raises(LucidaError) as err:
+        workspace.datasets.open("/data/missing.zarr")
+
+    assert err.value.kind == "missing_resource"
+    assert err.value.diagnostic["kind"] == "missing_object"
+    assert err.value.to_dict()["error"]["diagnostic"]["stage"] == "backend_open"
+
+
+def test_dataset_health_sends_protocol_message_and_returns_health(tmp_path, monkeypatch):
+    class FakeUuid:
+        hex = "abc123"
+
+    monkeypatch.setattr("lucida.client.uuid.uuid4", lambda: FakeUuid())
+    health = {
+        "type": "dataset_health",
+        "request_id": "py-health-abc123",
+        "datasets": [
+            {
+                "workspace_dataset_id": "wds-test",
+                "name": "demo.zarr",
+                "status": "healthy",
+                "source_url": "/data/demo.zarr",
+                "backend": "local",
+                "binding": {"status": "healthy", "message": "server binding is ready"},
+                "source_cache": {
+                    "max_bytes": 1024,
+                    "current_bytes": 128,
+                    "entry_count": 2,
+                    "hits": 3,
+                    "misses": 4,
+                    "evictions": 1,
+                    "backend_errors": 0,
+                },
+                "generated_coarse": {
+                    "status": "healthy",
+                    "level_count": 0,
+                    "ready_chunks": 0,
+                    "pending_chunks": 0,
+                    "failed_chunks": 0,
+                    "unavailable_chunks": 0,
+                    "message": "no generated coarse levels advertised",
+                },
+                "messages": [],
+            }
+        ],
+    }
+    connector = FakeConnector([snapshot(), health])
+    client = LucidaClient(
+        "http://127.0.0.1:9988",
+        config_path=tmp_path / "config.json",
+        ws_connect=connector,
+    )
+    workspace = WorkspaceResource(client, workspace_record())
+
+    result = workspace.datasets.health("demo.zarr")
+
+    sent = connector.websocket.sent[0]
+    assert sent["type"] == "dataset_health"
+    assert sent["request_id"] == "py-health-abc123"
+    assert sent["dataset_id"] == "wds-test"
+    assert result[0]["source_cache"]["hits"] == 3
+
+
 def test_view_pan_sends_presence_update(tmp_path):
     connector = FakeConnector([snapshot()])
     client = LucidaClient(

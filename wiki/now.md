@@ -9,7 +9,7 @@ Snapshot of what's active. Refresh via the `/repo-wiki` now pass after significa
 
 ## In flight
 
-- **Dataset ingestion and store reliability PRD (#762)** — next planning arc after the CLI/Python/browser client surface stabilized. The working goal is to make real dataset open/restore/cache/failure behavior diagnosable across browser, CLI, Python, and server logs without reopening the old legacy proxy or flat CLI compatibility surfaces. Draft artifact: [[outputs/2026-06-10-dataset-ingestion-store-reliability-prd]].
+- **Dataset ingestion and store reliability PRD (#762)** — active implementation arc after the CLI/Python/browser client surface stabilized. The working goal is to make real dataset open/restore/cache/failure behavior diagnosable across browser, CLI, Python, and server logs without reopening the old legacy proxy or flat CLI compatibility surfaces. First slice has landed locally on this branch: structured dataset-open diagnostics, server-authored `dataset_health` WebSocket response, CLI `dataset health`, Python `datasets.health(...)`, and source-cache counters. Draft artifact: [[outputs/2026-06-10-dataset-ingestion-store-reliability-prd]].
 
 ## Designed, on hold
 

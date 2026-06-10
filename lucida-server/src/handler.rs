@@ -2,13 +2,18 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
+use lucida_content::url::{
+    dataset_id_for_url, dataset_url_hash16, is_local_dataset_url, normalize_dataset_url,
+};
 use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, AssetMessage, DatasetOpened, GeneratedAvailabilityDelta, GeneratedChunkStatus,
+    AssetCatalog, AssetMessage, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
+    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage,
+    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
+    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
     ProxyAvailability, ProxyFootprint,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
@@ -503,6 +508,25 @@ async fn handle_client_inner(
                                 .await;
                             });
                         }
+                        ClientMessage::DatasetHealth {
+                            request_id,
+                            dataset_id,
+                        } => {
+                            let datasets = {
+                                let sess = session.lock().await;
+                                dataset_health_snapshot(&sess, dataset_id.as_ref())
+                            };
+                            let msg = ServerMessage::DatasetHealth {
+                                request_id,
+                                datasets,
+                            };
+                            let senders = unicast_routes.lock().await;
+                            if let Some(sender) = senders.get(&id) {
+                                let _ = sender.send(Message::Text(
+                                    serde_json::to_string(&msg).unwrap().into(),
+                                ));
+                            }
+                        }
                         ClientMessage::ViewerInterest { interest } => {
                             let service = {
                                 let sess = session.lock().await;
@@ -765,6 +789,293 @@ fn find_loaded_binding(
     None
 }
 
+fn dataset_health_snapshot(sess: &Session, filter: Option<&DatasetId>) -> Vec<DatasetSourceHealth> {
+    sess.document
+        .manifests
+        .values()
+        .filter(|manifest| filter.is_none_or(|id| &manifest.dataset_id == id))
+        .map(|manifest| dataset_health_for_manifest(sess, manifest))
+        .collect()
+}
+
+fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> DatasetSourceHealth {
+    let dataset_id = manifest.dataset_id.clone();
+    let binding = sess.server_bindings.get(&dataset_id);
+    let generated = generated_coarse_health(sess.generated_availability.get(&dataset_id));
+    let binding_component = match binding {
+        Some(_) => DatasetHealthComponent {
+            status: DatasetHealthStatus::Healthy,
+            message: Some("server binding is ready".to_string()),
+        },
+        None => DatasetHealthComponent {
+            status: DatasetHealthStatus::Unavailable,
+            message: Some("server binding is missing; chunks cannot be served".to_string()),
+        },
+    };
+    let source_cache = binding.map(|binding| cache_stats_for_protocol(binding.cache.stats()));
+    let source_url = binding.map(|binding| binding.source_url.clone());
+    let backend = source_url.as_deref().map(backend_kind_for_url);
+    let mut messages = Vec::new();
+    if binding.is_none() {
+        messages.push("dataset exists in the workspace document but has no runtime binding".into());
+    }
+    if generated.status == DatasetHealthStatus::Degraded {
+        messages.push(
+            generated
+                .message
+                .clone()
+                .unwrap_or_else(|| "generated coarse has degraded readiness".into()),
+        );
+    }
+
+    DatasetSourceHealth {
+        workspace_dataset_id: dataset_id,
+        name: manifest.name.clone(),
+        status: combine_health(binding_component.status, generated.status),
+        source_url,
+        backend,
+        binding: binding_component,
+        source_cache,
+        generated_coarse: generated,
+        messages,
+    }
+}
+
+fn cache_stats_for_protocol(stats: lucida_store::cache::CacheStats) -> DatasetSourceCacheStats {
+    DatasetSourceCacheStats {
+        max_bytes: stats.max_bytes,
+        current_bytes: stats.current_bytes,
+        entry_count: stats.entry_count,
+        hits: stats.hits,
+        misses: stats.misses,
+        evictions: stats.evictions,
+        backend_errors: stats.backend_errors,
+    }
+}
+
+fn generated_coarse_health(
+    snapshot: Option<&GeneratedAvailabilitySnapshot>,
+) -> DatasetGeneratedCoarseHealth {
+    let Some(snapshot) = snapshot else {
+        return DatasetGeneratedCoarseHealth {
+            status: DatasetHealthStatus::Healthy,
+            level_count: 0,
+            ready_chunks: 0,
+            pending_chunks: 0,
+            failed_chunks: 0,
+            unavailable_chunks: 0,
+            message: Some("no generated coarse levels advertised".to_string()),
+        };
+    };
+
+    let mut ready_chunks = 0;
+    let mut pending_chunks = 0;
+    let mut failed_chunks = 0;
+    let mut unavailable_chunks = 0;
+
+    if snapshot.chunks.is_empty() {
+        for summary in snapshot
+            .levels
+            .iter()
+            .filter_map(|level| level.summary.as_ref())
+        {
+            ready_chunks += summary.ready_chunks;
+            pending_chunks += summary.pending_chunks;
+            failed_chunks += summary.failed_chunks;
+        }
+    } else {
+        for chunk in &snapshot.chunks {
+            match chunk.status {
+                GeneratedChunkStatus::Ready => ready_chunks += 1,
+                GeneratedChunkStatus::Pending => pending_chunks += 1,
+                GeneratedChunkStatus::FailedTransient | GeneratedChunkStatus::FailedPermanent => {
+                    failed_chunks += 1
+                }
+                GeneratedChunkStatus::Unavailable => unavailable_chunks += 1,
+            }
+        }
+    }
+
+    let status = if failed_chunks > 0 || unavailable_chunks > 0 {
+        DatasetHealthStatus::Degraded
+    } else {
+        DatasetHealthStatus::Healthy
+    };
+    let message = if failed_chunks > 0 {
+        Some(format!("{failed_chunks} generated coarse chunks failed"))
+    } else if unavailable_chunks > 0 {
+        Some(format!(
+            "{unavailable_chunks} generated coarse chunks are unavailable"
+        ))
+    } else if pending_chunks > 0 {
+        Some(format!(
+            "{pending_chunks} generated coarse chunks are pending"
+        ))
+    } else if snapshot.levels.is_empty() {
+        Some("no generated coarse levels advertised".to_string())
+    } else {
+        Some("generated coarse is healthy".to_string())
+    };
+
+    DatasetGeneratedCoarseHealth {
+        status,
+        level_count: snapshot.levels.len(),
+        ready_chunks,
+        pending_chunks,
+        failed_chunks,
+        unavailable_chunks,
+        message,
+    }
+}
+
+fn combine_health(
+    binding: DatasetHealthStatus,
+    generated: DatasetHealthStatus,
+) -> DatasetHealthStatus {
+    if binding == DatasetHealthStatus::Unavailable {
+        DatasetHealthStatus::Unavailable
+    } else if generated == DatasetHealthStatus::Degraded {
+        DatasetHealthStatus::Degraded
+    } else {
+        DatasetHealthStatus::Healthy
+    }
+}
+
+fn backend_kind_for_url(url: &str) -> String {
+    if is_local_dataset_url(url) {
+        "local".to_string()
+    } else if url.starts_with("gs://") {
+        "gcs".to_string()
+    } else if url.starts_with("s3://") {
+        "s3".to_string()
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        "http".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn open_failure(
+    stage: DatasetOpenStage,
+    kind: DatasetOpenFailureKind,
+    retryable: bool,
+    message: impl Into<String>,
+    detail: Option<String>,
+) -> DatasetOpenFailureDiagnostic {
+    DatasetOpenFailureDiagnostic {
+        stage,
+        kind,
+        retryable,
+        message: message.into(),
+        detail,
+    }
+}
+
+fn backend_open_failure(error: &lucida_store::backend::StoreError) -> DatasetOpenFailureDiagnostic {
+    match error {
+        lucida_store::backend::StoreError::UnsupportedScheme(_) => open_failure(
+            DatasetOpenStage::BackendOpen,
+            DatasetOpenFailureKind::UnsupportedScheme,
+            false,
+            error.to_string(),
+            None,
+        ),
+        lucida_store::backend::StoreError::Metadata(message) => {
+            let lower = message.to_ascii_lowercase();
+            let kind = if lower.contains("bucket") || lower.contains("credential") {
+                DatasetOpenFailureKind::CloudConfiguration
+            } else {
+                DatasetOpenFailureKind::MissingMetadata
+            };
+            open_failure(
+                DatasetOpenStage::BackendOpen,
+                kind,
+                false,
+                error.to_string(),
+                None,
+            )
+        }
+        lucida_store::backend::StoreError::ObjectStore(inner) => {
+            let message = inner.to_string();
+            let lower = message.to_ascii_lowercase();
+            let (kind, retryable) = if is_not_found(inner) {
+                (DatasetOpenFailureKind::MissingObject, false)
+            } else if lower.contains("canonical")
+                || lower.contains("no such file")
+                || lower.contains("not a directory")
+            {
+                (DatasetOpenFailureKind::LocalPath, false)
+            } else if lower.contains("permission")
+                || lower.contains("forbidden")
+                || lower.contains("unauthorized")
+                || lower.contains("denied")
+            {
+                (DatasetOpenFailureKind::Permission, false)
+            } else if lower.contains("credential")
+                || lower.contains("token")
+                || lower.contains("region")
+                || lower.contains("bucket")
+            {
+                (DatasetOpenFailureKind::CloudConfiguration, false)
+            } else if lower.contains("http") || lower.contains("status") {
+                (DatasetOpenFailureKind::Http, true)
+            } else {
+                (DatasetOpenFailureKind::StorageBackend, true)
+            };
+            open_failure(
+                DatasetOpenStage::BackendOpen,
+                kind,
+                retryable,
+                format!("storage error: {message}"),
+                None,
+            )
+        }
+    }
+}
+
+fn import_failure(error: &dyn std::fmt::Display) -> DatasetOpenFailureDiagnostic {
+    let message = error.to_string();
+    let lower = message.to_ascii_lowercase();
+    let kind = if lower.contains("codec")
+        || lower.contains("blosc")
+        || lower.contains("cname")
+        || lower.contains("compressor")
+    {
+        DatasetOpenFailureKind::UnsupportedCodec
+    } else if lower.contains("chunk")
+        || lower.contains("axis")
+        || lower.contains("non-prefix")
+        || lower.contains("layout")
+    {
+        DatasetOpenFailureKind::UnsupportedLayout
+    } else if lower.contains("missing") || lower.contains("not found") {
+        DatasetOpenFailureKind::MissingMetadata
+    } else if lower.contains("json")
+        || lower.contains("metadata")
+        || lower.contains("multiscale")
+        || lower.contains("malformed")
+    {
+        DatasetOpenFailureKind::MalformedMetadata
+    } else {
+        DatasetOpenFailureKind::Import
+    };
+    open_failure(DatasetOpenStage::MetadataImport, kind, false, message, None)
+}
+
+fn open_success(
+    url: &str,
+    opened: &DatasetOpened,
+    dataset_source_id: Option<String>,
+) -> DatasetOpenSuccessDiagnostic {
+    DatasetOpenSuccessDiagnostic {
+        stage: DatasetOpenStage::Complete,
+        source_url: url.to_string(),
+        workspace_dataset_id: opened.manifest.dataset_id.clone(),
+        dataset_source_id,
+        message: "dataset opened and broadcast".to_string(),
+    }
+}
+
 #[derive(Debug)]
 struct OpenRemoteDatasetRequest {
     request_id: String,
@@ -827,7 +1138,13 @@ async fn handle_open_remote_dataset(
             client_id,
             &request_id,
             &canonical_url,
-            "workspace runtime is closed",
+            open_failure(
+                DatasetOpenStage::Authorization,
+                DatasetOpenFailureKind::SessionClosed,
+                true,
+                "workspace runtime is closed",
+                None,
+            ),
             &unicast_routes,
         )
         .await;
@@ -851,7 +1168,13 @@ async fn handle_open_remote_dataset(
             client_id,
             &request_id,
             &canonical_url,
-            "workspace role cannot add datasets",
+            open_failure(
+                DatasetOpenStage::Authorization,
+                DatasetOpenFailureKind::Authorization,
+                false,
+                "workspace role cannot add datasets",
+                Some(e.to_string()),
+            ),
             &unicast_routes,
         )
         .await;
@@ -878,7 +1201,13 @@ async fn handle_open_remote_dataset(
                     client_id,
                     &request_id,
                     &canonical_url,
-                    "workspace dataset lookup failed",
+                    open_failure(
+                        DatasetOpenStage::SourceLookup,
+                        DatasetOpenFailureKind::WorkspaceLookup,
+                        true,
+                        "workspace dataset lookup failed",
+                        Some(e.to_string()),
+                    ),
                     &unicast_routes,
                 )
                 .await;
@@ -932,7 +1261,8 @@ async fn handle_open_remote_dataset(
                 &request_id,
                 &canonical_url,
                 seq,
-                opened,
+                opened.clone(),
+                open_success(&canonical_url, &opened, Some(dataset_source_id.clone())),
                 &unicast_routes,
             )
             .await;
@@ -950,7 +1280,7 @@ async fn handle_open_remote_dataset(
                 client_id,
                 &request_id,
                 &canonical_url,
-                &e.to_string(),
+                backend_open_failure(&e),
                 &unicast_routes,
             )
             .await;
@@ -988,7 +1318,7 @@ async fn handle_open_remote_dataset(
                 client_id,
                 &request_id,
                 &canonical_url,
-                &e.to_string(),
+                import_failure(&e),
                 &unicast_routes,
             )
             .await;
@@ -1172,7 +1502,8 @@ async fn handle_open_remote_dataset(
                 &request_id,
                 &canonical_url,
                 seq,
-                opened,
+                opened.clone(),
+                open_success(&canonical_url, &opened, Some(dataset_source_id.clone())),
                 &unicast_routes,
             )
             .await;
@@ -1217,7 +1548,13 @@ async fn handle_open_remote_dataset(
             client_id,
             &request_id,
             &canonical_url,
-            "workspace persistence failed",
+            open_failure(
+                DatasetOpenStage::WorkspacePersist,
+                DatasetOpenFailureKind::Persistence,
+                true,
+                "workspace persistence failed",
+                Some(e.to_string()),
+            ),
             &unicast_routes,
         )
         .await;
@@ -1260,7 +1597,8 @@ async fn handle_open_remote_dataset(
         &request_id,
         &canonical_url,
         seq,
-        opened,
+        opened.clone(),
+        open_success(&canonical_url, &opened, Some(dataset_source_id.clone())),
         &unicast_routes,
     )
     .await;
@@ -1732,6 +2070,7 @@ async fn send_open_succeeded(
     url: &str,
     seq: u64,
     opened: DatasetOpened,
+    diagnostic: DatasetOpenSuccessDiagnostic,
     unicast_routes: &UnicastRoutes,
 ) {
     tracing::info!(
@@ -1746,6 +2085,7 @@ async fn send_open_succeeded(
         url: url.to_string(),
         seq,
         opened,
+        diagnostic: Some(diagnostic),
     };
     let json = serde_json::to_string(&msg).unwrap();
     let senders = unicast_routes.lock().await;
@@ -1759,20 +2099,24 @@ async fn send_open_failed(
     client_id: ClientId,
     request_id: &str,
     url: &str,
-    error: &str,
+    diagnostic: DatasetOpenFailureDiagnostic,
     unicast_routes: &UnicastRoutes,
 ) {
     tracing::warn!(
         client_id = %client_id,
         request_id = %request_id,
         url = %url,
-        error = %error,
+        error = %diagnostic.message,
+        stage = ?diagnostic.stage,
+        kind = ?diagnostic.kind,
+        retryable = diagnostic.retryable,
         "open_remote_dataset.failed"
     );
     let msg = ServerMessage::OpenDatasetFailed {
         request_id: request_id.to_string(),
         url: url.to_string(),
-        error: error.to_string(),
+        error: diagnostic.message.clone(),
+        diagnostic: Some(diagnostic),
     };
     let json = serde_json::to_string(&msg).unwrap();
     let senders = unicast_routes.lock().await;

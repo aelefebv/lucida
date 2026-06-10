@@ -5,6 +5,10 @@ use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_core::scene::DocumentState;
+use lucida_protocol::{
+    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
+    DatasetOpenSuccessDiagnostic, DatasetSourceHealth,
+};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -112,6 +116,15 @@ pub struct DatasetInfoOutput {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DatasetHealthOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    pub seq: u64,
+    pub datasets: Vec<DatasetSourceHealth>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DatasetRemoveOutput {
     pub server: EffectiveServer,
     pub workspace: WorkspaceRecord,
@@ -129,6 +142,8 @@ pub struct DatasetOpenSummary {
     pub entity_count: usize,
     pub seq: u64,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<DatasetOpenSuccessDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -275,6 +290,40 @@ impl DatasetWorkspaceClient {
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
         let dataset = dataset_info_from_document(&snapshot.document, selector)?;
         Ok((snapshot.seq, dataset))
+    }
+
+    pub async fn health(
+        &self,
+        selector: Option<&str>,
+        wait: Duration,
+    ) -> Result<(u64, Vec<DatasetSourceHealth>), CliError> {
+        let (socket, _response) =
+            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
+                .await
+                .map_err(map_websocket_error)?;
+        let (mut write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let dataset_id = match selector {
+            Some(selector) => {
+                let datasets = dataset_summaries_from_document(&snapshot.document);
+                Some(DatasetId(
+                    resolve_dataset_summary(selector, &datasets)?.workspace_dataset_id,
+                ))
+            }
+            None => None,
+        };
+        let request_id = dataset_health_request_id();
+        let message = ClientMessage::DatasetHealth {
+            request_id: request_id.clone(),
+            dataset_id,
+        };
+        write
+            .send(Message::Text(serde_json::to_string(&message)?.into()))
+            .await
+            .map_err(map_websocket_error)?;
+        let health = wait_for_dataset_health_result(&mut incoming, &request_id, wait).await?;
+        Ok((snapshot.seq, health))
     }
 
     pub async fn remove(
@@ -428,6 +477,85 @@ pub fn format_dataset_info_human(output: &DatasetInfoOutput) -> String {
         dataset.registered_layout_count,
         images
     )
+}
+
+pub fn format_dataset_health_human(output: &DatasetHealthOutput) -> String {
+    if output.datasets.is_empty() {
+        return "No datasets loaded".to_string();
+    }
+    output
+        .datasets
+        .iter()
+        .map(format_one_dataset_health)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_one_dataset_health(dataset: &DatasetSourceHealth) -> String {
+    let mut lines = vec![
+        format!(
+            "Dataset health: {} ({})",
+            dataset.name, dataset.workspace_dataset_id
+        ),
+        format!("Status: {}", health_status_label(dataset.status)),
+        format!(
+            "Source: {}",
+            dataset.source_url.as_deref().unwrap_or("unavailable")
+        ),
+        format!(
+            "Backend: {}",
+            dataset.backend.as_deref().unwrap_or("unknown")
+        ),
+        format!(
+            "Binding: {}{}",
+            health_status_label(dataset.binding.status),
+            dataset
+                .binding
+                .message
+                .as_ref()
+                .map(|message| format!(" ({message})"))
+                .unwrap_or_default()
+        ),
+        format!(
+            "Generated coarse: {} (levels {}, ready {}, pending {}, failed {}, unavailable {}){}",
+            health_status_label(dataset.generated_coarse.status),
+            dataset.generated_coarse.level_count,
+            dataset.generated_coarse.ready_chunks,
+            dataset.generated_coarse.pending_chunks,
+            dataset.generated_coarse.failed_chunks,
+            dataset.generated_coarse.unavailable_chunks,
+            dataset
+                .generated_coarse
+                .message
+                .as_ref()
+                .map(|message| format!(" - {message}"))
+                .unwrap_or_default()
+        ),
+    ];
+    if let Some(cache) = &dataset.source_cache {
+        lines.push(format!(
+            "Source cache: {} / {} bytes, {} entries, hits {}, misses {}, evictions {}, backend errors {}",
+            cache.current_bytes,
+            cache.max_bytes,
+            cache.entry_count,
+            cache.hits,
+            cache.misses,
+            cache.evictions,
+            cache.backend_errors
+        ));
+    }
+    for message in &dataset.messages {
+        lines.push(format!("Note: {message}"));
+    }
+    lines.join("\n")
+}
+
+fn health_status_label(status: DatasetHealthStatus) -> &'static str {
+    match status {
+        DatasetHealthStatus::Healthy => "healthy",
+        DatasetHealthStatus::Degraded => "degraded",
+        DatasetHealthStatus::Unavailable => "unavailable",
+    }
 }
 
 pub fn format_dataset_remove_human(output: &DatasetRemoveOutput) -> String {
@@ -786,6 +914,7 @@ fn observe_dataset_message(
             request_id: message_request_id,
             seq,
             opened,
+            diagnostic,
             ..
         } => {
             if message_request_id != request_id {
@@ -801,17 +930,19 @@ fn observe_dataset_message(
                 entity_count,
                 seq,
                 source: source.to_string(),
+                diagnostic,
             }))
         }
         ServerMessage::OpenDatasetFailed {
             request_id: message_request_id,
             url,
             error,
+            diagnostic,
         } => {
             if message_request_id != request_id {
                 return Ok(None);
             }
-            Err(open_dataset_failure(&url, &error))
+            Err(open_dataset_failure(&url, &error, diagnostic.as_ref()))
         }
         ServerMessage::WorkspaceArchived { .. } => Err(CliError::new(
             ErrorKind::ArchivedWorkspace,
@@ -829,7 +960,89 @@ fn dataset_open_request_id() -> String {
     )
 }
 
-fn open_dataset_failure(url: &str, error: &str) -> CliError {
+fn dataset_health_request_id() -> String {
+    format!(
+        "cli-health-{hi:016x}{lo:016x}",
+        hi = rand::random::<u64>(),
+        lo = rand::random::<u64>()
+    )
+}
+
+async fn wait_for_dataset_health_result<S>(
+    messages: &mut S,
+    request_id: &str,
+    wait: Duration,
+) -> Result<Vec<DatasetSourceHealth>, CliError>
+where
+    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+{
+    tokio::time::timeout(wait, async {
+        while let Some(message) = messages.next().await {
+            match message? {
+                IncomingDatasetMessage::Text(text) => {
+                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
+                        CliError::new(
+                            ErrorKind::Protocol,
+                            format!("invalid workspace server message: {error}"),
+                        )
+                    })?;
+                    match message {
+                        ServerMessage::DatasetHealth {
+                            request_id: message_request_id,
+                            datasets,
+                        } if message_request_id == request_id => return Ok(datasets),
+                        ServerMessage::WorkspaceArchived { .. } => {
+                            return Err(CliError::new(
+                                ErrorKind::ArchivedWorkspace,
+                                "workspace was archived before dataset health returned",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                IncomingDatasetMessage::Close => {
+                    return Err(CliError::new(
+                        ErrorKind::SessionDisconnect,
+                        "workspace WebSocket closed before dataset health returned",
+                    ));
+                }
+                IncomingDatasetMessage::Ignore => {}
+            }
+        }
+        Err(CliError::new(
+            ErrorKind::SessionDisconnect,
+            "workspace WebSocket disconnected before dataset health returned",
+        ))
+    })
+    .await
+    .map_err(|_| {
+        CliError::new(
+            ErrorKind::RejectedCommand,
+            format!(
+                "timed out waiting for dataset health after {}s",
+                wait.as_secs()
+            ),
+        )
+    })?
+}
+
+fn open_dataset_failure(
+    url: &str,
+    error: &str,
+    diagnostic: Option<&DatasetOpenFailureDiagnostic>,
+) -> CliError {
+    if let Some(diagnostic) = diagnostic {
+        let prefix = format!(
+            "dataset open failed for {url:?} at {:?} ({:?}, retryable={}): {}",
+            diagnostic.stage, diagnostic.kind, diagnostic.retryable, diagnostic.message
+        );
+        let message = diagnostic
+            .detail
+            .as_ref()
+            .map(|detail| format!("{prefix}: {detail}"))
+            .unwrap_or(prefix);
+        return CliError::new(error_kind_for_open_failure(diagnostic.kind), message);
+    }
     if error.contains("workspace role cannot add datasets") {
         return CliError::new(ErrorKind::Unauthorized, error);
     }
@@ -847,6 +1060,20 @@ fn open_dataset_failure(url: &str, error: &str) -> CliError {
         ErrorKind::DatasetOpenFailure,
         format!("dataset open failed for {url:?}: {error}"),
     )
+}
+
+fn error_kind_for_open_failure(kind: DatasetOpenFailureKind) -> ErrorKind {
+    match kind {
+        DatasetOpenFailureKind::Authorization => ErrorKind::Unauthorized,
+        DatasetOpenFailureKind::SessionClosed => ErrorKind::SessionDisconnect,
+        DatasetOpenFailureKind::LocalPath
+        | DatasetOpenFailureKind::MissingObject
+        | DatasetOpenFailureKind::MissingMetadata => ErrorKind::MissingResource,
+        DatasetOpenFailureKind::CloudConfiguration | DatasetOpenFailureKind::UnsupportedScheme => {
+            ErrorKind::Config
+        }
+        _ => ErrorKind::DatasetOpenFailure,
+    }
 }
 
 fn dataset_api_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
@@ -1201,9 +1428,102 @@ mod tests {
 
     #[test]
     fn permission_failure_maps_to_unauthorized() {
-        let error = open_dataset_failure("/data/demo.zarr", "workspace role cannot add datasets");
+        let error = open_dataset_failure(
+            "/data/demo.zarr",
+            "workspace role cannot add datasets",
+            None,
+        );
 
         assert_eq!(error.kind, ErrorKind::Unauthorized);
+    }
+
+    #[test]
+    fn structured_missing_object_maps_to_missing_resource() {
+        let diagnostic = DatasetOpenFailureDiagnostic {
+            stage: lucida_protocol::DatasetOpenStage::BackendOpen,
+            kind: DatasetOpenFailureKind::MissingObject,
+            retryable: false,
+            message: "object was not found".into(),
+            detail: Some("zarr.json missing".into()),
+        };
+        let error = open_dataset_failure(
+            "/data/missing.zarr",
+            "object was not found",
+            Some(&diagnostic),
+        );
+
+        assert_eq!(error.kind, ErrorKind::MissingResource);
+        assert!(error.message.contains("MissingObject"));
+        assert!(error.message.contains("zarr.json missing"));
+    }
+
+    #[test]
+    fn health_human_output_includes_cache_and_generated_status() {
+        let output = DatasetHealthOutput {
+            server: EffectiveServer {
+                url: "http://localhost:9876".into(),
+                source: crate::config::ServerSource::Default,
+            },
+            workspace: WorkspaceRecord {
+                id: "workspace-1".into(),
+                name: "Workspace".into(),
+                role: WorkspaceRole::Owner,
+                created_by: "dev@local".into(),
+                created_at: "2026-06-10T00:00:00Z".into(),
+                updated_at: "2026-06-10T00:00:00Z".into(),
+                archived_at: None,
+                seq: 1,
+                default_saved_view_id: None,
+                last_opened_at: None,
+                pinned_at: None,
+            },
+            target: WorkspaceTarget {
+                id: "workspace-1".into(),
+                name: "Workspace".into(),
+                role: WorkspaceRole::Owner,
+                archived: false,
+                server_url: "http://localhost:9876".into(),
+                web_url: "http://localhost:9876/w/workspace-1".into(),
+                ws_url: "ws://localhost:9876/ws/workspaces/workspace-1".into(),
+            },
+            seq: 1,
+            datasets: vec![DatasetSourceHealth {
+                workspace_dataset_id: DatasetId("wds-test".into()),
+                name: "demo.zarr".into(),
+                status: DatasetHealthStatus::Healthy,
+                source_url: Some("/data/demo.zarr".into()),
+                backend: Some("local".into()),
+                binding: lucida_protocol::DatasetHealthComponent {
+                    status: DatasetHealthStatus::Healthy,
+                    message: Some("server binding is ready".into()),
+                },
+                source_cache: Some(lucida_protocol::DatasetSourceCacheStats {
+                    max_bytes: 1024,
+                    current_bytes: 128,
+                    entry_count: 2,
+                    hits: 3,
+                    misses: 4,
+                    evictions: 1,
+                    backend_errors: 0,
+                }),
+                generated_coarse: lucida_protocol::DatasetGeneratedCoarseHealth {
+                    status: DatasetHealthStatus::Healthy,
+                    level_count: 1,
+                    ready_chunks: 2,
+                    pending_chunks: 0,
+                    failed_chunks: 0,
+                    unavailable_chunks: 0,
+                    message: Some("generated coarse is healthy".into()),
+                },
+                messages: vec![],
+            }],
+        };
+
+        let human = format_dataset_health_human(&output);
+
+        assert!(human.contains("Dataset health: demo.zarr"));
+        assert!(human.contains("Source cache: 128 / 1024 bytes"));
+        assert!(human.contains("Generated coarse: healthy"));
     }
 
     #[test]

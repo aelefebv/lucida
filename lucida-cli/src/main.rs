@@ -43,10 +43,11 @@ use crate::auth::{
 use crate::config::{CliConfig, ConfigStore, normalize_server_base_url, resolve_server};
 use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store_local_token};
 use crate::dataset::{
-    DatasetBrowseOutput, DatasetHttpClient, DatasetInfoOutput, DatasetListOutput,
-    DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput, DatasetWorkspaceClient,
-    format_dataset_browse_human, format_dataset_info_human, format_dataset_list_human,
-    format_dataset_open_human, format_dataset_remove_human,
+    DatasetBrowseOutput, DatasetHealthOutput, DatasetHttpClient, DatasetInfoOutput,
+    DatasetListOutput, DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput,
+    DatasetWorkspaceClient, format_dataset_browse_human, format_dataset_health_human,
+    format_dataset_info_human, format_dataset_list_human, format_dataset_open_human,
+    format_dataset_remove_human,
 };
 use crate::error::{CliError, ErrorKind};
 use crate::layout::{
@@ -533,6 +534,14 @@ enum DatasetCommand {
         /// Workspace-local dataset id or unambiguous dataset name
         dataset: String,
         /// Seconds to wait for the workspace snapshot
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+    },
+    /// Show server-authored runtime dataset health
+    Health {
+        /// Workspace-local dataset id or unambiguous dataset name. Omit for all datasets.
+        dataset: Option<String>,
+        /// Seconds to wait for the workspace snapshot and health response
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
     },
@@ -1897,6 +1906,37 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 };
                 output.print_either(&output_payload, || {
                     format_dataset_info_human(&output_payload)
+                })?;
+            }
+            DatasetCommand::Health {
+                dataset,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token);
+                let (seq, datasets) = dataset_client
+                    .health(dataset.as_deref(), Duration::from_secs(*timeout_seconds))
+                    .await?;
+                let output_payload = DatasetHealthOutput {
+                    server,
+                    workspace,
+                    target,
+                    seq,
+                    datasets,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_health_human(&output_payload)
                 })?;
             }
             DatasetCommand::Remove {

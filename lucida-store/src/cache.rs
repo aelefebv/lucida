@@ -10,6 +10,18 @@ use bytes::Bytes;
 use lru::LruCache;
 use object_store::ObjectStore;
 use object_store::path::Path;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheStats {
+    pub max_bytes: usize,
+    pub current_bytes: usize,
+    pub entry_count: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub backend_errors: u64,
+}
 
 /// A memory-bounded LRU cache wrapping an ObjectStore.
 pub struct CachedStore {
@@ -21,6 +33,10 @@ struct LruState {
     lru: LruCache<String, Bytes>,
     current_bytes: usize,
     max_bytes: usize,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    backend_errors: u64,
 }
 
 impl CachedStore {
@@ -32,7 +48,24 @@ impl CachedStore {
                 lru: LruCache::unbounded(),
                 current_bytes: 0,
                 max_bytes,
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+                backend_errors: 0,
             }),
+        }
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        let state = self.cache.lock().unwrap();
+        CacheStats {
+            max_bytes: state.max_bytes,
+            current_bytes: state.current_bytes,
+            entry_count: state.lru.len(),
+            hits: state.hits,
+            misses: state.misses,
+            evictions: state.evictions,
+            backend_errors: state.backend_errors,
         }
     }
 
@@ -44,22 +77,43 @@ impl CachedStore {
         {
             let mut state = self.cache.lock().unwrap();
             if let Some(bytes) = state.lru.get(&key) {
-                return Ok(bytes.clone());
+                let bytes = bytes.clone();
+                state.hits += 1;
+                return Ok(bytes);
             }
+            state.misses += 1;
         }
 
         // Cache miss — fetch from inner store
-        let bytes = self.inner.get(path).await?.bytes().await?;
+        let bytes = match self.inner.get(path).await {
+            Ok(object) => match object.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let mut state = self.cache.lock().unwrap();
+                    state.backend_errors += 1;
+                    return Err(error);
+                }
+            },
+            Err(error) => {
+                let mut state = self.cache.lock().unwrap();
+                state.backend_errors += 1;
+                return Err(error);
+            }
+        };
 
         // Insert into cache, evict LRU entries if over budget
         {
             let mut state = self.cache.lock().unwrap();
+            if let Some(bytes) = state.lru.get(&key) {
+                return Ok(bytes.clone());
+            }
             let new_size = bytes.len();
 
             while state.current_bytes + new_size > state.max_bytes {
                 match state.lru.pop_lru() {
                     Some((_, evicted)) => {
                         state.current_bytes -= evicted.len();
+                        state.evictions += 1;
                     }
                     None => break,
                 }
@@ -101,6 +155,11 @@ mod tests {
         let second = cached.get_bytes(&path).await.unwrap();
         assert_eq!(first, second);
         assert_eq!(&first[..], b"hello world");
+        let stats = cached.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.entry_count, 1);
+        assert_eq!(stats.current_bytes, b"hello world".len());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -127,6 +186,8 @@ mod tests {
             assert!(state.current_bytes <= 100);
             assert_eq!(state.lru.len(), 1);
         }
+        let stats = cached.stats();
+        assert_eq!(stats.evictions, 1);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -140,6 +201,8 @@ mod tests {
 
         let result = cached.get_bytes(&Path::from("nonexistent")).await;
         assert!(result.is_err());
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

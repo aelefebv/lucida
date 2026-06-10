@@ -258,9 +258,24 @@ second direct-reader product surface.
 
 ## Further Notes
 
+Implementation progress:
+
+- 2026-06-10: First slice implemented on `codex/dataset-store-reliability-prd`.
+  Dataset-open failure messages now carry structured diagnostics
+  (`stage`, `kind`, `retryable`, `message`, optional `detail`) while preserving
+  the legacy `error` string for existing browser consumers. Successful open
+  messages carry a final success diagnostic. The server handles
+  `dataset_health` WebSocket requests and reports per-dataset binding status,
+  backend kind, generated-coarse summary, and source-cache counters. The CLI has
+  `dataset health [dataset]` with human and `--json` output; Python has
+  `WorkspaceResource.datasets.health(...)`. Local smoke covered CPPX through CLI
+  and Python; see [[outputs/2026-06-07-lucida-use-case-test-matrix#matrix]] row
+  35.
+
 Likely vertical slices:
 
-1. Structured dataset-open result and failure categories.
+1. Structured dataset-open result and failure categories. Initial implementation
+   done 2026-06-10; progress-event streaming remains future work.
 2. Dataset source health API surfaced through CLI, Python, and a minimal browser
    status/debug affordance.
 3. Binding restore health and retry.
