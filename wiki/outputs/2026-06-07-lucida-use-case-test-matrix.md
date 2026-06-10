@@ -1,6 +1,6 @@
 ---
 created: 2026-06-07
-modified: 2026-06-07
+modified: 2026-06-10
 ---
 
 # Lucida Use Case Test Matrix
@@ -54,6 +54,7 @@ Python, or admin CLI.
 | 31 | Developer / QA | As a developer, I want failed auth, missing workspace, bad dataset path, and unauthorized mutations to produce clear errors. | CLI + Python | Trigger representative error cases. | Errors are categorized and actionable. | Pass | Missing workspace, bad path, Python missing resource, and unauthorized member mutation returned useful errors. |
 | 32 | New User | As a new user, I want the CLI help and command names to be discoverable so I can find the next obvious action. | CLI | Inspect top-level and nested help. | Help exposes current noun model without legacy commands. | Pass | Help exposes the noun model without legacy command families. `peer follow` also accepts its timeout at the leaf command where users naturally try it. |
 | 33 | Biologist | As a biologist, I want the minimap to show where my viewport sits on the whole plate so I can navigate fields confidently. | Browser + CLI screenshot | Open CPPX plate, enable multichannel profile state, capture a viewer screenshot, and inspect the minimap. | Minimap renders plate fields and the viewport marker appears on the intersecting field(s), not fixed to the top-left field. | Pass | 2026-06-08 regression smoke used the freshly built web bundle on local server `http://127.0.0.1:9876`; the screenshot showed the member-aware minimap overlay on visible fields while Multi and all channel sublayers were reflected in the UI. |
+| 34 | Collaborator / CLI User | As a collaborator using the CLI headlessly, I want to inspect, screenshot, overview, and adopt a live browser peer's current view so I can capture what someone else is seeing without relying on hidden follow persistence. | CLI + Browser | Open a browser peer, run `viewer state --from-peer`, `viewer screenshot --from-peer`, `viewer overview --from-peer`, and `viewer adopt --from-peer`. | Commands read the live peer state, direct captures are nonblank, and adopt persists the peer state into the durable viewer profile. | Pass | 2026-06-10 smoke used workspace `752dddb7-82d3-4899-af44-08292419af1e` on `http://127.0.0.1:9876`; browser peer was client `1`; `viewer state --from-peer 1` reported peer channel contrast, screenshot and overview wrote nonblank 900x650 PNGs, and `viewer state` after adopt showed `Seed: peer:1`. |
 
 ## Full Report
 
@@ -74,7 +75,7 @@ against the local workspace route.
 
 ### Current Status
 
-- Pass: 33
+- Pass: 34
 - Partial: 0
 - Fail: 0
 - Product code changes after the original pass addressed the prior full and
@@ -83,6 +84,11 @@ against the local workspace route.
 - 2026-06-08 regression smoke targeted CLI profile screenshot/overview,
   multichannel UI reflection, aggregate plate overview bounds, and the minimap
   viewport overlay on a CPPX plate workspace.
+- 2026-06-10 repo state: the shared CLI/Python client PRD landed on `main` in
+  PR #760. Stabilization now has repeatable smoke scripts and
+  install/invocation docs for the CLI/Python rows. Live-peer to
+  headless-profile semantics are covered by row 34. See
+  `wiki/outputs/2026-06-10-client-surface-stabilization-plan.md`.
 
 ### What Worked Well
 
@@ -152,16 +158,14 @@ against the local workspace route.
 - LIF opened through Python with 5 channels and dimensions
   `[1, 5, 1, 1024, 1024]`.
 
-### Recommended Follow-Up Issues
+### Stabilization Follow-Up
 
-1. Fix headless screenshot and overview blank-canvas capture.
-2. Fix `workspace pin` and `workspace unpin` response decoding.
-3. Decide and document the exact relationship between durable CLI viewer
-   profiles, existing browser peers, viewer profile links, and peer following.
-4. Investigate viewer profile link parity for Z and layer order.
-5. Add bounds validation or explicit clamping/warnings for CLI Z/T/C mutations.
-6. Improve browser control discoverability and accessibility for contrast,
-   gamma, colormap, sliders, and increment buttons.
-7. Clarify Python installation/runtime expectations for WebSocket operations.
-8. Smooth CLI nested option ergonomics where possible, or document the pattern
-   prominently in help examples.
+The original follow-up list is now mostly closed by PR #760. Current reusable
+smoke tracking is:
+
+1. CLI smoke: `scripts/smoke_lucida_cli.sh` against a running server with
+   `LUCIDA_SMOKE_DATASET` set to a server-visible OME-Zarr path or URL.
+2. Python smoke: `uv run --project lucida-py python
+   scripts/smoke_python_client.py` against the same server/dataset.
+3. Keep this matrix current whenever product-surface changes add or alter a
+   workflow row.

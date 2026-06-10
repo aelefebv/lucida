@@ -113,6 +113,15 @@ pub struct ViewerProfileOutput {
     pub result: ViewerProfileResult,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ViewerSourceOutput {
+    pub server: EffectiveServer,
+    pub workspace: WorkspaceRecord,
+    pub target: WorkspaceTarget,
+    #[serde(flatten)]
+    pub result: ViewerSourceResult,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ViewerProfileResult {
     pub snapshot_seq: u64,
@@ -130,6 +139,20 @@ pub struct ViewerProfileResult {
     pub display: DisplayState,
     pub multi_channel: bool,
     pub layers: Vec<LayerState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ViewerSourceResult {
+    pub snapshot_seq: u64,
+    pub own_client_id: ClientId,
+    pub source: DiagnosticViewSource,
+    pub camera: Camera,
+    pub view: ViewState,
+    pub display: DisplayState,
+    pub multi_channel: bool,
+    pub layers: Vec<LayerState>,
+    #[serde(skip)]
+    pub saved_view: SavedView,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -827,6 +850,45 @@ impl ViewerProfileClient {
         Ok(viewer_profile_result(&snapshot, record, None))
     }
 
+    pub async fn source_state(
+        &self,
+        workspace: &WorkspaceRecord,
+        profile: &str,
+        from_peer: Option<ClientId>,
+        overview_viewport: Option<[u32; 2]>,
+        wait: Duration,
+    ) -> Result<ViewerSourceResult, CliError> {
+        let mut diagnostic = self
+            .diagnostic_scene(workspace, profile, from_peer, wait)
+            .await?;
+        if let Some(viewport) = overview_viewport {
+            apply_overview_to_scene(&mut diagnostic.scene, viewport)?;
+        }
+        Ok(viewer_source_result(
+            &diagnostic.snapshot,
+            diagnostic.source,
+            diagnostic.scene,
+        ))
+    }
+
+    pub async fn adopt_from_peer(
+        &self,
+        workspace: &WorkspaceRecord,
+        profile: &str,
+        client_id: ClientId,
+        wait: Duration,
+    ) -> Result<ViewerProfileResult, CliError> {
+        let diagnostic = self
+            .diagnostic_scene(workspace, profile, Some(client_id), wait)
+            .await?;
+        let next_view = saved_view_from_scene(&diagnostic.snapshot.document, diagnostic.scene);
+        let seed_source = format!("peer:{client_id}");
+        let record = self
+            .upsert_profile(workspace, profile, Some(seed_source.as_str()), &next_view)
+            .await?;
+        Ok(viewer_profile_result(&diagnostic.snapshot, record, None))
+    }
+
     pub async fn plan_visible_chunks(
         &self,
         workspace: &WorkspaceRecord,
@@ -1305,6 +1367,35 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
         format!("Client: {}", output.result.own_client_id),
         format!("Seed: {seed}"),
         format!("Updated: {}", output.result.updated_at),
+        format!("Camera: {}", format_camera(&output.result.camera)),
+        format!("View: {}", format_view(&output.result.view)),
+        format!("Multi-channel: {multi}"),
+    ];
+    if output.result.layers.is_empty() {
+        lines.push("No datasets loaded".to_string());
+    } else {
+        lines.push(format_layers(&output.result.layers));
+    }
+    lines.join("\n")
+}
+
+pub fn format_viewer_source_human(output: &ViewerSourceOutput) -> String {
+    let multi = if output.result.multi_channel {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let mut lines = vec![
+        "Viewer source".to_string(),
+        format!(
+            "Workspace: {} ({})",
+            output.workspace.name, output.workspace.id
+        ),
+        format!("Client: {}", output.result.own_client_id),
+        format!(
+            "Source: {}",
+            format_diagnostic_source(&output.result.source)
+        ),
         format!("Camera: {}", format_camera(&output.result.camera)),
         format!("View: {}", format_view(&output.result.view)),
         format!("Multi-channel: {multi}"),
@@ -2399,6 +2490,27 @@ fn viewer_profile_result(
     }
 }
 
+fn viewer_source_result(
+    snapshot: &WorkspacePresenceSnapshot,
+    source: DiagnosticViewSource,
+    scene: Scene,
+) -> ViewerSourceResult {
+    let saved_view = saved_view_from_scene(&snapshot.document, scene.clone());
+    let layers = layer_states(&scene);
+    let multi_channel = scene.view.multi_channel;
+    ViewerSourceResult {
+        snapshot_seq: snapshot.seq,
+        own_client_id: snapshot.your_id,
+        source,
+        camera: scene.camera,
+        view: scene.view,
+        display: scene.display,
+        multi_channel,
+        layers,
+        saved_view,
+    }
+}
+
 fn presence_message(result: &ViewApplyResult) -> ClientMessage {
     ClientMessage::Presence {
         camera: result.camera.clone(),
@@ -2776,7 +2888,7 @@ fn format_source(source: &ViewPresenceSource) -> String {
     }
 }
 
-fn format_diagnostic_source(source: &DiagnosticViewSource) -> String {
+pub fn format_diagnostic_source(source: &DiagnosticViewSource) -> String {
     match source.kind {
         DiagnosticViewSourceKind::ViewerProfile => {
             let profile = source.profile.as_deref().unwrap_or("unknown");

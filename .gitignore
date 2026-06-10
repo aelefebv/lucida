@@ -189,6 +189,8 @@ tmp/
 
 # Node / frontend
 node_modules/
+.pnpm-store/
+.playwright-mcp/
 client-web/dist/
 AGENTS.md
 
