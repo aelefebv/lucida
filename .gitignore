@@ -189,6 +189,7 @@ tmp/
 
 # Node / frontend
 node_modules/
+.pnpm-store/
 client-web/dist/
 AGENTS.md
 

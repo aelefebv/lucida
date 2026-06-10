@@ -1,6 +1,6 @@
 ---
 created: 2026-06-07
-modified: 2026-06-07
+modified: 2026-06-10
 ---
 
 # Lucida Use Case Test Matrix
@@ -83,6 +83,11 @@ against the local workspace route.
 - 2026-06-08 regression smoke targeted CLI profile screenshot/overview,
   multichannel UI reflection, aggregate plate overview bounds, and the minimap
   viewport overlay on a CPPX plate workspace.
+- 2026-06-10 repo state: the shared CLI/Python client PRD landed on `main` in
+  PR #760. Remaining work is stabilization rather than known failed use cases:
+  repeatable smoke scripts, install/invocation docs, and explicit live-peer to
+  headless-profile semantics. See
+  `wiki/outputs/2026-06-10-client-surface-stabilization-plan.md`.
 
 ### What Worked Well
 
@@ -152,16 +157,17 @@ against the local workspace route.
 - LIF opened through Python with 5 channels and dimensions
   `[1, 5, 1, 1024, 1024]`.
 
-### Recommended Follow-Up Issues
+### Stabilization Follow-Up
 
-1. Fix headless screenshot and overview blank-canvas capture.
-2. Fix `workspace pin` and `workspace unpin` response decoding.
-3. Decide and document the exact relationship between durable CLI viewer
-   profiles, existing browser peers, viewer profile links, and peer following.
-4. Investigate viewer profile link parity for Z and layer order.
-5. Add bounds validation or explicit clamping/warnings for CLI Z/T/C mutations.
-6. Improve browser control discoverability and accessibility for contrast,
-   gamma, colormap, sliders, and increment buttons.
-7. Clarify Python installation/runtime expectations for WebSocket operations.
-8. Smooth CLI nested option ergonomics where possible, or document the pattern
-   prominently in help examples.
+The original follow-up list is now mostly closed by PR #760. Current follow-up
+tracking is:
+
+1. Add repeatable CLI and Python smoke commands/scripts for the rows above.
+2. Clarify install and source-checkout invocation paths so users can move
+   between `lucida ...`, `cargo run -p lucida-cli -- ...`, and Python examples
+   without guessing.
+3. Make live-peer/headless-profile behavior explicit with commands such as
+   `viewer screenshot --from-peer <client-id>` and `viewer adopt --from-peer
+   <client-id>`, while keeping `peer follow` ephemeral by default.
+4. Keep this matrix current as stabilization work turns ad hoc manual checks
+   into reusable smoke flows.
