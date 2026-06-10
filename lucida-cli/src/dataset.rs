@@ -620,14 +620,52 @@ fn format_one_dataset_health(dataset: &DatasetSourceHealth) -> String {
     ];
     if let Some(cache) = &dataset.source_cache {
         lines.push(format!(
-            "Source cache: {} / {} bytes, {} entries, hits {}, misses {}, evictions {}, backend errors {}",
+            "Source cache: {} / {} bytes ({}%), {} entries, hits {}, misses {}, evictions {}, backend errors {}",
             cache.current_bytes,
             cache.max_bytes,
+            cache.used_percent,
             cache.entry_count,
             cache.hits,
             cache.misses,
             cache.evictions,
             cache.backend_errors
+        ));
+    }
+    if let Some(cache) = &dataset.generated_coarse.cache {
+        let budget = cache
+            .max_bytes
+            .map(|bytes| format!(" / {bytes} bytes"))
+            .unwrap_or_default();
+        let percent = cache
+            .used_percent
+            .map(|percent| format!(" ({percent}%)"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "Generated cache: {}{}{} on {}, evictions {}{}",
+            cache.current_bytes,
+            budget,
+            percent,
+            cache.storage,
+            cache.evictions,
+            cache
+                .root
+                .as_ref()
+                .map(|root| format!(", root {root}"))
+                .unwrap_or_default()
+        ));
+    }
+    for failure in &dataset.generated_coarse.recent_failures {
+        lines.push(format!(
+            "Generated failure: {:?} image {} L{} key {}{}",
+            failure.status,
+            failure.image_id,
+            failure.level_index,
+            failure.key,
+            failure
+                .message
+                .as_ref()
+                .map(|message| format!(" ({message})"))
+                .unwrap_or_default()
         ));
     }
     for message in &dataset.messages {
@@ -1657,6 +1695,7 @@ mod tests {
                 source_cache: Some(lucida_protocol::DatasetSourceCacheStats {
                     max_bytes: 1024,
                     current_bytes: 128,
+                    used_percent: 12,
                     entry_count: 2,
                     hits: 3,
                     misses: 4,
@@ -1671,6 +1710,21 @@ mod tests {
                     failed_chunks: 0,
                     unavailable_chunks: 0,
                     message: Some("generated coarse is healthy".into()),
+                    cache: Some(lucida_protocol::DatasetGeneratedCoarseCacheStats {
+                        storage: "disk".into(),
+                        current_bytes: 256,
+                        max_bytes: Some(2048),
+                        used_percent: Some(12),
+                        evictions: 1,
+                        root: Some("/tmp/lucida-generated".into()),
+                    }),
+                    recent_failures: vec![lucida_protocol::DatasetGeneratedCoarseFailure {
+                        image_id: "image-1".into(),
+                        level_index: 3,
+                        key: "3/0/0/0/0/0".into(),
+                        status: lucida_protocol::GeneratedChunkStatus::FailedTransient,
+                        message: Some("temporary source error".into()),
+                    }],
                 },
                 messages: vec![],
             }],
@@ -1679,8 +1733,10 @@ mod tests {
         let human = format_dataset_health_human(&output);
 
         assert!(human.contains("Dataset health: demo.zarr"));
-        assert!(human.contains("Source cache: 128 / 1024 bytes"));
+        assert!(human.contains("Source cache: 128 / 1024 bytes (12%)"));
         assert!(human.contains("Generated coarse: healthy"));
+        assert!(human.contains("Generated cache: 256 / 2048 bytes (12%) on disk"));
+        assert!(human.contains("Generated failure: FailedTransient"));
     }
 
     #[test]

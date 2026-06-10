@@ -46,7 +46,7 @@ Current product commands:
 - `lucida dataset open <path-or-url>` — open a dataset in the selected workspace, wait for completion, and report server-authored progress stages in structured output.
 - `lucida dataset list` — list loaded datasets in the selected workspace.
 - `lucida dataset info <dataset>` — show manifest/image/channel/layout summary for a loaded dataset.
-- `lucida dataset health [dataset]` — show server-authored binding/backend/source-cache and generated-coarse health.
+- `lucida dataset health [dataset]` — show server-authored binding/backend/source-cache pressure and generated-coarse cache/readiness health.
 - `lucida dataset retry <dataset>` — retry rebuilding a loaded workspace dataset's server binding from its persisted source.
 - `lucida dataset remove <dataset>` — remove a loaded workspace dataset.
 - `lucida view pan|zoom|set-zoom|center|slice|z-range|viewport-size` — update the selected durable viewer profile's 2D slice view.

@@ -1690,7 +1690,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     <div style={{ marginTop: 5 }}>
                       <div>
                         source cache: {fmtBytes(cache.current_bytes)} / {fmtBytes(cache.max_bytes)}
-                        {" "}· entries {cache.entry_count}
+                        {" "}· {cache.used_percent}% · entries {cache.entry_count}
                       </div>
                       <div style={{ color: "#888" }}>
                         hits {cache.hits} · misses {cache.misses} · evictions {cache.evictions}
@@ -1718,6 +1718,33 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   </div>
                   {generated.message && (
                     <div style={{ color: "#888" }}>{generated.message}</div>
+                  )}
+                  {generated.cache && (
+                    <div style={{ color: "#888", marginTop: 3 }}>
+                      generated cache: {generated.cache.storage} · {fmtBytes(generated.cache.current_bytes)}
+                      {generated.cache.max_bytes !== undefined && generated.cache.max_bytes !== null && (
+                        <> / {fmtBytes(generated.cache.max_bytes)}</>
+                      )}
+                      {generated.cache.used_percent !== undefined && generated.cache.used_percent !== null && (
+                        <> · {generated.cache.used_percent}%</>
+                      )}
+                      {" "}· evictions {generated.cache.evictions}
+                      {generated.cache.root && (
+                        <div className="debug-break-anywhere" title={generated.cache.root}>
+                          root: {generated.cache.root}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {(generated.recent_failures ?? []).length > 0 && (
+                    <div style={{ marginTop: 3 }}>
+                      {(generated.recent_failures ?? []).map((failure, index) => (
+                        <div key={index} style={{ color: "#f88" }} title={`${failure.image_id} ${failure.key}`}>
+                          generated failure: {failure.status} L{failure.level_index} {shortId(failure.image_id, 18)}
+                          {failure.message && <> · {failure.message}</>}
+                        </div>
+                      ))}
+                    </div>
                   )}
 
                   {(health.messages ?? []).length > 0 && (

@@ -16,11 +16,29 @@ export interface DatasetHealthComponent {
 export interface DatasetSourceCacheStats {
   max_bytes: number;
   current_bytes: number;
+  used_percent: number;
   entry_count: number;
   hits: number;
   misses: number;
   evictions: number;
   backend_errors: number;
+}
+
+export interface DatasetGeneratedCoarseCacheStats {
+  storage: string;
+  current_bytes: number;
+  max_bytes?: number | null;
+  used_percent?: number | null;
+  evictions: number;
+  root?: string | null;
+}
+
+export interface DatasetGeneratedCoarseFailure {
+  image_id: string;
+  level_index: number;
+  key: string;
+  status: GeneratedChunkStatus;
+  message?: string | null;
 }
 
 export interface DatasetGeneratedCoarseHealth {
@@ -31,6 +49,8 @@ export interface DatasetGeneratedCoarseHealth {
   failed_chunks: number;
   unavailable_chunks: number;
   message?: string | null;
+  cache?: DatasetGeneratedCoarseCacheStats | null;
+  recent_failures?: DatasetGeneratedCoarseFailure[];
 }
 
 export interface DatasetSourceHealth {

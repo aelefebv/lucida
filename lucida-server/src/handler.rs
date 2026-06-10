@@ -10,11 +10,12 @@ use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, AssetMessage, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    DatasetSourceCacheStats, DatasetSourceHealth, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ProxyAvailability, ProxyFootprint,
+    AssetCatalog, AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
+    DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
+    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
+    DatasetSourceHealth, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot,
+    GeneratedChunkStatus, ProxyAvailability, ProxyFootprint,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
 use lucida_store::cache::CachedStore;
@@ -24,8 +25,9 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::decode::decode_storage_bytes;
 use crate::generated::{
-    DerivedChunkCache, DerivedChunkLookup, GeneratedCoarseConfig, GeneratedCoarseService,
-    GeneratedSchedulingConfig, plan_generated_coarse_for_manifest,
+    DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
+    GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
+    plan_generated_coarse_for_manifest,
 };
 use crate::proxy::{ProxyCache, ProxyGenerator};
 use crate::session::Session;
@@ -942,7 +944,10 @@ fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> Da
     let dataset_id = manifest.dataset_id.clone();
     let binding = sess.server_bindings.get(&dataset_id);
     let runtime = sess.binding_runtime.get(&dataset_id);
-    let generated = generated_coarse_health(sess.generated_availability.get(&dataset_id));
+    let generated = generated_coarse_health(
+        sess.generated_availability.get(&dataset_id),
+        binding.map(|binding| binding.derived_chunks.telemetry()),
+    );
     let binding_component = match binding {
         Some(_) => DatasetHealthComponent {
             status: DatasetHealthStatus::Healthy,
@@ -963,6 +968,16 @@ fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> Da
         },
     };
     let source_cache = binding.map(|binding| cache_stats_for_protocol(binding.cache.stats()));
+    let source_cache_status = source_cache
+        .as_ref()
+        .map(|cache| {
+            if cache.backend_errors > 0 {
+                DatasetHealthStatus::Degraded
+            } else {
+                DatasetHealthStatus::Healthy
+            }
+        })
+        .unwrap_or(DatasetHealthStatus::Healthy);
     let source_url = binding
         .map(|binding| binding.source_url.clone())
         .or_else(|| runtime.map(|state| state.source_url.clone()));
@@ -988,11 +1003,50 @@ fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> Da
                 .unwrap_or_else(|| "generated coarse has degraded readiness".into()),
         );
     }
+    if let Some(cache) = &source_cache {
+        if cache.backend_errors > 0 {
+            messages.push(format!(
+                "source cache saw {} backend errors while serving chunks",
+                cache.backend_errors
+            ));
+        }
+        if cache.used_percent >= 90 {
+            messages.push(format!(
+                "source cache is {}% full ({} / {} bytes)",
+                cache.used_percent, cache.current_bytes, cache.max_bytes
+            ));
+        }
+        if cache.evictions > 0 {
+            messages.push(format!(
+                "source cache evicted {} entries under its byte budget",
+                cache.evictions
+            ));
+        }
+    }
+    if let Some(cache) = generated.cache.as_ref() {
+        if cache.evictions > 0 {
+            messages.push(format!(
+                "generated coarse cache evicted {} level directories",
+                cache.evictions
+            ));
+        }
+        if let Some(used_percent) = cache.used_percent
+            && used_percent >= 90
+        {
+            messages.push(format!(
+                "generated coarse cache is {used_percent}% full ({} bytes)",
+                cache.current_bytes
+            ));
+        }
+    }
 
     DatasetSourceHealth {
         workspace_dataset_id: dataset_id,
         name: manifest.name.clone(),
-        status: combine_health(binding_component.status, generated.status),
+        status: combine_health(
+            combine_health(binding_component.status, source_cache_status),
+            generated.status,
+        ),
         source_url,
         backend,
         binding: binding_component,
@@ -1006,6 +1060,8 @@ fn cache_stats_for_protocol(stats: lucida_store::cache::CacheStats) -> DatasetSo
     DatasetSourceCacheStats {
         max_bytes: stats.max_bytes,
         current_bytes: stats.current_bytes,
+        used_percent: cache_used_percent(stats.current_bytes as u64, Some(stats.max_bytes as u64))
+            .unwrap_or(0),
         entry_count: stats.entry_count,
         hits: stats.hits,
         misses: stats.misses,
@@ -1016,7 +1072,9 @@ fn cache_stats_for_protocol(stats: lucida_store::cache::CacheStats) -> DatasetSo
 
 fn generated_coarse_health(
     snapshot: Option<&GeneratedAvailabilitySnapshot>,
+    cache: Option<DerivedCacheTelemetry>,
 ) -> DatasetGeneratedCoarseHealth {
+    let cache = cache.map(generated_cache_stats_for_protocol);
     let Some(snapshot) = snapshot else {
         return DatasetGeneratedCoarseHealth {
             status: DatasetHealthStatus::Healthy,
@@ -1026,6 +1084,8 @@ fn generated_coarse_health(
             failed_chunks: 0,
             unavailable_chunks: 0,
             message: Some("no generated coarse levels advertised".to_string()),
+            cache,
+            recent_failures: Vec::new(),
         };
     };
 
@@ -1056,6 +1116,27 @@ fn generated_coarse_health(
             }
         }
     }
+    let recent_failures = snapshot
+        .chunks
+        .iter()
+        .filter(|chunk| {
+            matches!(
+                chunk.status,
+                GeneratedChunkStatus::FailedTransient
+                    | GeneratedChunkStatus::FailedPermanent
+                    | GeneratedChunkStatus::Unavailable
+            )
+        })
+        .rev()
+        .take(5)
+        .map(|chunk| DatasetGeneratedCoarseFailure {
+            image_id: chunk.image_id.0.clone(),
+            level_index: chunk.level_index,
+            key: chunk.key.clone(),
+            status: chunk.status,
+            message: chunk.message.clone(),
+        })
+        .collect::<Vec<_>>();
 
     let status = if failed_chunks > 0 || unavailable_chunks > 0 {
         DatasetHealthStatus::Degraded
@@ -1086,7 +1167,37 @@ fn generated_coarse_health(
         failed_chunks,
         unavailable_chunks,
         message,
+        cache,
+        recent_failures,
     }
+}
+
+fn generated_cache_stats_for_protocol(
+    telemetry: DerivedCacheTelemetry,
+) -> DatasetGeneratedCoarseCacheStats {
+    DatasetGeneratedCoarseCacheStats {
+        storage: match telemetry.storage {
+            DerivedCacheStorage::Memory => "memory".to_string(),
+            DerivedCacheStorage::Disk => "disk".to_string(),
+        },
+        current_bytes: telemetry.bytes,
+        max_bytes: telemetry.budget_bytes,
+        used_percent: cache_used_percent(telemetry.bytes, telemetry.budget_bytes),
+        evictions: telemetry.evictions,
+        root: telemetry.root_dir.map(|root| root.display().to_string()),
+    }
+}
+
+fn cache_used_percent(current_bytes: u64, max_bytes: Option<u64>) -> Option<u8> {
+    let max_bytes = max_bytes?;
+    if max_bytes == 0 {
+        return Some(0);
+    }
+    Some(
+        ((current_bytes.saturating_mul(100) / max_bytes).min(100))
+            .try_into()
+            .unwrap_or(100),
+    )
 }
 
 fn combine_health(
@@ -2735,6 +2846,60 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| message.contains("last restore failure"))
+        );
+    }
+
+    #[test]
+    fn source_cache_stats_report_pressure_percent() {
+        let stats = cache_stats_for_protocol(lucida_store::cache::CacheStats {
+            max_bytes: 1000,
+            current_bytes: 925,
+            entry_count: 4,
+            hits: 10,
+            misses: 3,
+            evictions: 2,
+            backend_errors: 1,
+        });
+
+        assert_eq!(stats.used_percent, 92);
+        assert_eq!(stats.backend_errors, 1);
+    }
+
+    #[test]
+    fn generated_coarse_health_reports_cache_and_recent_failures() {
+        let snapshot = GeneratedAvailabilitySnapshot {
+            levels: vec![],
+            chunks: vec![lucida_protocol::GeneratedChunkStatusUpdate {
+                image_id: ImageId("img-1".into()),
+                level_index: 3,
+                key: "3/0/0/0/0/0".into(),
+                status: GeneratedChunkStatus::FailedTransient,
+                message: Some("temporary source error".into()),
+            }],
+        };
+        let health = generated_coarse_health(
+            Some(&snapshot),
+            Some(DerivedCacheTelemetry {
+                storage: DerivedCacheStorage::Disk,
+                bytes: 950,
+                budget_bytes: Some(1000),
+                root_dir: Some(std::path::PathBuf::from("/tmp/generated")),
+                evictions: 2,
+            }),
+        );
+
+        assert_eq!(health.status, DatasetHealthStatus::Degraded);
+        assert_eq!(health.failed_chunks, 1);
+        assert_eq!(health.cache.as_ref().unwrap().storage, "disk");
+        assert_eq!(health.cache.as_ref().unwrap().used_percent, Some(95));
+        assert_eq!(
+            health.cache.as_ref().unwrap().root.as_deref(),
+            Some("/tmp/generated")
+        );
+        assert_eq!(health.recent_failures.len(), 1);
+        assert_eq!(
+            health.recent_failures[0].status,
+            GeneratedChunkStatus::FailedTransient
         );
     }
 

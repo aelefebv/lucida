@@ -1,6 +1,8 @@
 use lucida_content::DatasetId;
 use serde::{Deserialize, Serialize};
 
+use crate::generated::GeneratedChunkStatus;
+
 /// Coarse stages for a dataset-open request.
 ///
 /// These names are intentionally user/API-facing. Server internals may have
@@ -93,11 +95,35 @@ pub struct DatasetHealthComponent {
 pub struct DatasetSourceCacheStats {
     pub max_bytes: usize,
     pub current_bytes: usize,
+    pub used_percent: u8,
     pub entry_count: usize,
     pub hits: u64,
     pub misses: u64,
     pub evictions: u64,
     pub backend_errors: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetGeneratedCoarseCacheStats {
+    pub storage: String,
+    pub current_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<u8>,
+    pub evictions: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetGeneratedCoarseFailure {
+    pub image_id: String,
+    pub level_index: u32,
+    pub key: String,
+    pub status: GeneratedChunkStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +136,10 @@ pub struct DatasetGeneratedCoarseHealth {
     pub unavailable_chunks: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<DatasetGeneratedCoarseCacheStats>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_failures: Vec<DatasetGeneratedCoarseFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

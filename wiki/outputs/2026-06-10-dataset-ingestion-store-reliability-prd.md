@@ -294,6 +294,14 @@ Implementation progress:
   output; Python `datasets.open(...)` / `datasets.retry(...)` return progress
   arrays; the browser bridge logs progress and the existing loading line shows
   the latest server-authored message.
+- 2026-06-10: Source/generated cache diagnostics deepened. `dataset_health`
+  now reports source-cache pressure percentage, degrades health on observed
+  source backend errors, and includes generated-coarse cache telemetry: storage
+  mode, current bytes, optional byte budget and pressure percentage, evictions,
+  disk root, and recent generated failure entries. CLI human/JSON output,
+  Python dictionaries, and the browser DebugPanel Health tab all surface the new
+  fields. Local smoke on CPPX verified CLI/Python health JSON and the browser
+  Health tab against `http://127.0.0.1:9994`.
 
 Likely vertical slices:
 
@@ -303,8 +311,8 @@ Likely vertical slices:
    status/debug affordance. Done 2026-06-10.
 3. Binding restore health and retry. Done 2026-06-10; deeper restart/failure
    fixture smokes remain part of slice 6.
-4. Source cache stats and resource diagnostics.
-5. Generated-coarse health and cache diagnostics.
+4. Source cache stats and resource diagnostics. Done 2026-06-10.
+5. Generated-coarse health and cache diagnostics. Done 2026-06-10.
 6. Fixture-backed dataset reliability smoke matrix and scripts.
 7. Documentation pass tying browser, CLI, Python, and server logs together.
 
