@@ -479,3 +479,97 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
     expect(screen.queryByTestId("pin-delete-confirm-pin-a")).toBeNull();
   });
 });
+
+describe("AnnotationOverlay — open thread stacks above other pins (issue #772)", () => {
+  /** Read a pin wrapper's inline numeric z-index (NaN if it carries none), so
+   * the assertions compare the actual stacking the browser would apply. */
+  function wrapperZ(pinId: string): number {
+    const el = screen.getByTestId(`annot-pin-wrapper-${pinId}`);
+    return Number.parseInt((el as HTMLElement).style.zIndex, 10);
+  }
+
+  /** Open a pin's thread with a pure click (down+up same point, then click), the
+   * same gesture the other suites use so drag-suppression never interferes. */
+  function openThread(pinId: string) {
+    const marker = screen.getByTestId(`annot-pin-${pinId}`);
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(marker, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.click(marker, { clientX: 200, clientY: 200 });
+  }
+
+  /** Two pins: "pin-a" first in the array, "pin-b" later (so by DOM order alone
+   * pin-b would paint on top — the exact bug). Both authored by me. */
+  function twoPins() {
+    return renderOverlay({
+      pins: [
+        ownPin({ id: "pin-a", position: [10, 20] }),
+        ownPin({ id: "pin-b", position: [12, 22] }),
+      ],
+    });
+  }
+
+  it("with pin A's thread open and B's closed, A's wrapper z-index > B's", () => {
+    twoPins();
+    openThread("pin-a");
+
+    // The open pin (A) is lifted strictly above the closed pin (B), so A's
+    // popover paints over B's dot regardless of DOM order.
+    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
+  });
+
+  it("the open pin's thread popover is present while open", () => {
+    twoPins();
+    openThread("pin-a");
+    expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
+    // The closed pin has no popover.
+    expect(screen.queryByTestId("annot-thread-pin-b")).toBeNull();
+  });
+
+  it("with no thread open, no pin is elevated above the others (equal base)", () => {
+    twoPins();
+    // Nothing opened: both wrappers sit at the same FINITE base level — pins render
+    // normally, none jockeys above another. (Finiteness guards against a regression
+    // that drops the z-index entirely, which would make both NaN and trivially "equal".)
+    expect(Number.isFinite(wrapperZ("pin-a"))).toBe(true);
+    expect(wrapperZ("pin-a")).toBe(wrapperZ("pin-b"));
+    // And neither popover exists.
+    expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
+    expect(screen.queryByTestId("annot-thread-pin-b")).toBeNull();
+  });
+
+  it("opening B after A elevates B and de-elevates A (only the open thread lifts)", () => {
+    twoPins();
+
+    openThread("pin-a");
+    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
+
+    // Switch: opening B closes A (one thread at a time) and moves the lift to B.
+    openThread("pin-b");
+    expect(wrapperZ("pin-b")).toBeGreaterThan(wrapperZ("pin-a"));
+    // A is back at base and its popover is gone; B now owns the open popover.
+    expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
+    expect(screen.getByTestId("annot-thread-pin-b")).toBeTruthy();
+  });
+
+  it("closing the open thread restores equal stacking (no lingering lift)", () => {
+    twoPins();
+    openThread("pin-a");
+    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
+
+    // Click the same dot again to close: both wrappers return to the same base.
+    openThread("pin-a");
+    expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
+    expect(wrapperZ("pin-a")).toBe(wrapperZ("pin-b"));
+  });
+
+  it("the open thread still carries its Delete + comment controls (no regression)", () => {
+    twoPins();
+    openThread("pin-a");
+
+    // The lifted thread is the real, interactive popover: its Delete trigger and
+    // the add-comment box are both present inside the elevated wrapper.
+    const thread = screen.getByTestId("annot-thread-pin-a");
+    expect(screen.getByTestId("pin-delete-pin-a")).toBeTruthy();
+    expect(thread.querySelector('input[placeholder="Add a comment…"]')).toBeTruthy();
+  });
+});

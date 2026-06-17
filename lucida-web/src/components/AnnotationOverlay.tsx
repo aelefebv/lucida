@@ -556,6 +556,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
         return (
           <div
             key={pin.id}
+            data-testid={`annot-pin-wrapper-${pin.id}`}
             ref={(el) => {
               if (el) dotRefs.current.set(pin.id, el);
               else dotRefs.current.delete(pin.id);
@@ -569,6 +570,16 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
               transform: "translate(0px, 0px)",
               willChange: "transform",
               pointerEvents: "none",
+              // Every pin shares one overlay layer with no per-marker stacking,
+              // so DOM order alone decides paint order — a *later* pin's dot
+              // would paint over an *earlier* pin's open popover (issue #772).
+              // Fix: give every wrapper a base z-index and lift only the pin
+              // whose thread is open above the rest, so its popover (a child of
+              // this wrapper) clears every other marker. Closing or switching
+              // pins drops it back to the shared base, so normal pins never
+              // jockey. Keyed solely to the existing `openPinId` — no reorder,
+              // no portal, no new state.
+              zIndex: isOpen ? 2 : 1,
             }}
           >
             {/* The pin marker itself: a circular dot centered on the anchor,
@@ -651,9 +662,12 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
               </div>
             )}
             {/* Thread popover: the flat, ordered comment list plus an add box.
-                Anchored just below-right of the pin. */}
+                Anchored just below-right of the pin. Because it lives inside
+                this pin's wrapper, lifting the wrapper's z-index when the thread
+                is open (above) carries the popover above every other marker. */}
             {isOpen && (
               <div
+                data-testid={`annot-thread-${pin.id}`}
                 style={{
                   position: "absolute",
                   top: 10,
