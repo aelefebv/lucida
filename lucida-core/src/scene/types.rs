@@ -242,6 +242,35 @@ impl Annotation {
         self.comments.retain(|c| c.id != id);
         self.comments.len() != before
     }
+
+    /// Reposition this pin: overwrite its in-plane `position` and depth `z` in
+    /// place. Every other field — `id`, `author`, `kind`, and the comment thread
+    /// — is left untouched: a move repositions the existing pin, it does not
+    /// replace it. This is the single owner of the reposition mutation, so it is
+    /// unit-testable on a bare `Annotation`; `DocumentState` only locates the pin
+    /// and delegates here. Idempotent by construction (an overwrite to the same
+    /// value is a no-op-equivalent).
+    pub fn set_position(&mut self, position: [f64; 2], z: f64) {
+        self.position = position;
+        self.z = z;
+    }
+
+    /// Overwrite an existing comment's `text` by `id`. Returns `true` if a
+    /// comment matched and was edited. No-op (returns `false`) if the id is
+    /// unknown, so an edit targeting a comment that was never added (or has since
+    /// been removed) is harmless and never appends a phantom. The comment's `id`
+    /// and `author` — and its position in the thread — are preserved; only the
+    /// text changes. The sibling of [`Self::add_comment`] /
+    /// [`Self::remove_comment`]: the thread's mutation invariants live here on
+    /// `Annotation`, so this is unit-testable on a bare pin.
+    pub fn edit_comment(&mut self, id: &str, text: String) -> bool {
+        if let Some(existing) = self.comments.iter_mut().find(|c| c.id == id) {
+            existing.text = text;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Shared document state — dataset manifests synced across all clients.
@@ -320,9 +349,11 @@ impl DocumentState {
 
     /// Locate the pin `annotation_id` under `dataset_id` for mutation.
     ///
-    /// Shared by [`Self::add_comment`] / [`Self::remove_comment`]: both must
-    /// target an existing pin and otherwise be a clean no-op. Centralizing the
-    /// lookup keeps that "missing pin/dataset is harmless" rule in one place.
+    /// Shared by [`Self::move_annotation`] / [`Self::add_comment`] /
+    /// [`Self::remove_comment`] / [`Self::edit_comment`]: each must target an
+    /// existing pin and otherwise be a clean no-op. Centralizing the lookup keeps
+    /// that "missing pin/dataset is harmless" rule in one place — the same
+    /// find-by-id used by `add`/`remove`.
     fn annotation_mut(
         &mut self,
         dataset_id: &DatasetId,
@@ -332,6 +363,26 @@ impl DocumentState {
             .get_mut(dataset_id)?
             .iter_mut()
             .find(|a| a.id == annotation_id)
+    }
+
+    /// Reposition the pin `id` under `dataset_id`, overwriting its `position`
+    /// and depth `z`.
+    ///
+    /// Pure delegation: locate the pin via the shared [`Self::annotation_mut`]
+    /// lookup, then hand the mutation to [`Annotation::set_position`]. Moving a
+    /// missing pin or dataset is a clean no-op — it must NOT create a phantom pin
+    /// (reposition acts on an existing pin, never a way to mint one). The pin's
+    /// author, kind, and comment thread are preserved.
+    pub fn move_annotation(
+        &mut self,
+        dataset_id: &DatasetId,
+        id: &str,
+        position: [f64; 2],
+        z: f64,
+    ) {
+        if let Some(annotation) = self.annotation_mut(dataset_id, id) {
+            annotation.set_position(position, z);
+        }
     }
 
     /// Add (or replace) a comment on the pin `annotation_id` under `dataset_id`.
@@ -358,6 +409,27 @@ impl DocumentState {
     ) {
         if let Some(annotation) = self.annotation_mut(dataset_id, annotation_id) {
             annotation.remove_comment(comment_id);
+        }
+    }
+
+    /// Overwrite the `text` of the comment `comment_id` on the pin
+    /// `annotation_id` under `dataset_id`.
+    ///
+    /// Pure delegation: locate the pin via the shared [`Self::annotation_mut`]
+    /// lookup, then hand the edit to [`Annotation::edit_comment`]. Editing a
+    /// comment on a missing dataset, pin, or comment id is a clean no-op — it
+    /// must NOT create a phantom pin or comment (an edit acts on an existing
+    /// comment, never a way to mint one). The comment's `id`/`author` and its
+    /// place in the thread are preserved.
+    pub fn edit_comment(
+        &mut self,
+        dataset_id: &DatasetId,
+        annotation_id: &str,
+        comment_id: &str,
+        text: String,
+    ) {
+        if let Some(annotation) = self.annotation_mut(dataset_id, annotation_id) {
+            annotation.edit_comment(comment_id, text);
         }
     }
 
@@ -463,6 +535,14 @@ impl DocumentState {
             DocumentCommand::RemoveAnnotation { dataset_id, id } => {
                 self.remove_annotation(&dataset_id, &id);
             }
+            DocumentCommand::MoveAnnotation {
+                dataset_id,
+                id,
+                position,
+                z,
+            } => {
+                self.move_annotation(&dataset_id, &id, position, z);
+            }
             DocumentCommand::AddComment {
                 dataset_id,
                 annotation_id,
@@ -478,6 +558,14 @@ impl DocumentState {
                 id,
             } => {
                 self.remove_comment(&dataset_id, &annotation_id, &id);
+            }
+            DocumentCommand::EditComment {
+                dataset_id,
+                annotation_id,
+                id,
+                text,
+            } => {
+                self.edit_comment(&dataset_id, &annotation_id, &id, text);
             }
         }
     }

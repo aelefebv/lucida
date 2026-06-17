@@ -572,6 +572,107 @@ mod tests {
     }
 
     #[test]
+    fn client_message_move_annotation_matches_wire_envelope() {
+        // The exact client->server envelope from the slice wire contract.
+        let json = r#"{"type":"command","command":{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::Command {
+                command:
+                    DocumentCommand::MoveAnnotation {
+                        dataset_id,
+                        id,
+                        position,
+                        z,
+                    },
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(id, "pin-1");
+                assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(z, 5.0);
+            }
+            _ => panic!("expected Command(MoveAnnotation)"),
+        }
+    }
+
+    #[test]
+    fn client_message_edit_comment_matches_wire_envelope() {
+        // The exact client->server envelope from the slice wire contract.
+        let json = r#"{"type":"command","command":{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::Command {
+                command:
+                    DocumentCommand::EditComment {
+                        dataset_id,
+                        annotation_id,
+                        id,
+                        text,
+                    },
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+                assert_eq!(text, "edited");
+            }
+            _ => panic!("expected Command(EditComment)"),
+        }
+    }
+
+    #[test]
+    fn snapshot_reflects_moved_position_and_edited_text() {
+        // A late joiner loads the pin at its moved position/z and the comment at
+        // its edited text, straight from snapshot.document.annotations.
+        let mut doc = DocumentState::default();
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [10.0, 20.0],
+            z: 1.0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        });
+        doc.apply(DocumentCommand::AddComment {
+            dataset_id: DatasetId("wds-1".into()),
+            annotation_id: "pin-1".into(),
+            id: "c-1".into(),
+            author: "alice".into(),
+            text: "before".into(),
+        });
+        // Now update both.
+        doc.apply(DocumentCommand::MoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [55.0, 66.0],
+            z: 7.5,
+        });
+        doc.apply(DocumentCommand::EditComment {
+            dataset_id: DatasetId("wds-1".into()),
+            annotation_id: "pin-1".into(),
+            id: "c-1".into(),
+            text: "after".into(),
+        });
+
+        let msg = ServerMessage::Snapshot {
+            seq: 5,
+            document: doc,
+            peers: Vec::new(),
+            your_id: 1,
+            generated_availability: HashMap::new(),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        let pin = &v["document"]["annotations"]["wds-1"][0];
+        assert_eq!(pin["position"][0], 55.0);
+        assert_eq!(pin["position"][1], 66.0);
+        assert_eq!(pin["z"], 7.5);
+        assert_eq!(pin["comments"][0]["id"], "c-1");
+        assert_eq!(pin["comments"][0]["text"], "after");
+        // Author is preserved across the edit.
+        assert_eq!(pin["comments"][0]["author"], "alice");
+    }
+
+    #[test]
     fn client_message_presence_round_trips() {
         let msg = ClientMessage::Presence {
             camera: Camera::new_2d([800, 600]),

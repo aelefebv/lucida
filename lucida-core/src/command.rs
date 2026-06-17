@@ -82,6 +82,37 @@ pub enum DocumentCommand {
         annotation_id: String,
         id: String,
     },
+    /// Reposition an existing pin: find the annotation by `id` within
+    /// `dataset_id` and overwrite its in-plane `position` and depth `z`. A
+    /// **no-op** if the pin or dataset is absent — this command must NOT mint a
+    /// pin (that is `AddAnnotation`'s job), so a stray move for an unknown id
+    /// leaves the document untouched. Every other field (author, kind, and the
+    /// pin's comment thread) is preserved. Idempotent: re-applying the same move
+    /// is equivalent to applying it once, so a replayed/twice-delivered command
+    /// keeps every peer convergent. Bumps `epochs.annotation`.
+    ///
+    /// `z` is `#[serde(default)]`, mirroring [`Self::AddAnnotation`], so a move
+    /// emitted by a depth-unaware client (or a replayed older log entry) applies
+    /// with `z = 0.0` rather than failing to parse.
+    MoveAnnotation {
+        dataset_id: DatasetId,
+        id: String,
+        position: [f64; 2],
+        #[serde(default)]
+        z: f64,
+    },
+    /// Edit an existing comment's text: find the comment by `id` within the pin
+    /// `annotation_id` under `dataset_id` and overwrite its `text`. A **no-op**
+    /// if the dataset, pin, or comment id is unknown — this command must NOT mint
+    /// a comment (that is `AddComment`'s job). The comment's `id` and `author`
+    /// are preserved, as is its position in the thread. Idempotent: re-applying
+    /// the same edit is a no-op-equivalent. Bumps `epochs.annotation`.
+    EditComment {
+        dataset_id: DatasetId,
+        annotation_id: String,
+        id: String,
+        text: String,
+    },
 }
 
 /// Commands that mutate local-only viewport/display state.
@@ -373,13 +404,15 @@ impl Scene {
                     }
                     DocumentCommand::AddAnnotation { .. }
                     | DocumentCommand::RemoveAnnotation { .. }
+                    | DocumentCommand::MoveAnnotation { .. }
                     | DocumentCommand::AddComment { .. }
-                    | DocumentCommand::RemoveComment { .. } => {
+                    | DocumentCommand::RemoveComment { .. }
+                    | DocumentCommand::EditComment { .. } => {
                         // Bump the annotation epoch. A pin's comment thread is
-                        // part of its annotation state, so add/remove_comment
-                        // invalidate the same epoch as add/remove_annotation.
-                        // Document state update happens below via
-                        // self.document.apply().
+                        // part of its annotation state, so add/remove/edit_comment
+                        // and move_annotation all invalidate the same epoch as
+                        // add/remove_annotation. Document state update happens
+                        // below via self.document.apply().
                         self.epochs.annotation += 1;
                     }
                 }
@@ -2244,6 +2277,289 @@ mod tests {
         assert_eq!(pins[0].author, "alice");
     }
 
+    // --- Move-annotation (reposition) tests ---
+    //
+    // The reposition mutation lives on `Annotation::set_position` and is
+    // unit-testable on a bare pin with no DocumentState scaffolding. The
+    // DocumentState arm only locates the pin (via the same find-by-id used by
+    // add/remove) and delegates.
+
+    fn move_annotation_cmd(ds: &str, id: &str, position: [f64; 2], z: f64) -> DocumentCommand {
+        DocumentCommand::MoveAnnotation {
+            dataset_id: DatasetId(ds.into()),
+            id: id.into(),
+            position,
+            z,
+        }
+    }
+
+    #[test]
+    fn move_annotation_command_matches_wire_contract() {
+        // Field-for-field check against the slice's documented move wire shape.
+        let cmd = move_annotation_cmd("wds-abc", "pin-1", [12.5, -7.25], 3.5);
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "move_annotation");
+        assert_eq!(v["dataset_id"], "wds-abc");
+        assert_eq!(v["id"], "pin-1");
+        assert_eq!(v["position"][0], 12.5);
+        assert_eq!(v["position"][1], -7.25);
+        assert_eq!(v["z"], 3.5);
+        // Move carries only dataset_id + id + position + z (no author/kind).
+        assert!(v.get("author").is_none());
+        assert!(v.get("kind").is_none());
+
+        // And it parses back from exactly that shape.
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::MoveAnnotation {
+                dataset_id,
+                id,
+                position,
+                z,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-abc".into()));
+                assert_eq!(id, "pin-1");
+                assert_eq!(position, [12.5, -7.25]);
+                assert_eq!(z, 3.5);
+            }
+            _ => panic!("expected MoveAnnotation"),
+        }
+    }
+
+    #[test]
+    fn move_annotation_parses_from_documented_client_payload() {
+        // Verbatim client->server payload from the slice wire contract.
+        let json = r#"{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::MoveAnnotation {
+                dataset_id,
+                id,
+                position,
+                z,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(id, "pin-1");
+                assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(z, 5.0);
+            }
+            _ => panic!("expected MoveAnnotation"),
+        }
+    }
+
+    #[test]
+    fn move_annotation_z_defaults_to_zero_when_absent() {
+        // A depth-unaware client (or a replayed older log entry) sends no `z`.
+        // #[serde(default)] must parse it as z = 0.0 rather than failing —
+        // mirroring AddAnnotation's wire backward-compatibility guarantee.
+        let json =
+            r#"{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0]}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::MoveAnnotation { position, z, .. } => {
+                assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(z, 0.0);
+            }
+            _ => panic!("expected MoveAnnotation"),
+        }
+    }
+
+    #[test]
+    fn move_annotation_broadcast_is_byte_identical_to_inbound_command() {
+        // A peer sees the pin's new position (and z) because the inbound command
+        // and its rebroadcast carry the same command object byte-for-byte.
+        use crate::protocol::{ClientMessage, ServerMessage};
+        let cmd = move_annotation_cmd("wds-1", "pin-1", [3.0, 4.0], 8.5);
+        let inbound = ClientMessage::Command {
+            command: cmd.clone(),
+        };
+        let broadcast = ServerMessage::CommandBroadcast {
+            seq: 11,
+            command: cmd,
+        };
+        let inbound_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&inbound).unwrap()).unwrap();
+        let broadcast_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&broadcast).unwrap()).unwrap();
+        assert_eq!(inbound_v["command"], broadcast_v["command"]);
+        assert_eq!(broadcast_v["command"]["position"][0], 3.0);
+        assert_eq!(broadcast_v["command"]["z"], 8.5);
+        assert_eq!(broadcast_v["seq"], 11);
+    }
+
+    // --- Annotation-level reposition helper (no DocumentState) ---
+
+    #[test]
+    fn annotation_set_position_overwrites_position_and_z() {
+        let mut pin = point_pin("pin-1");
+        pin.set_position([5.0, 6.0], 7.5);
+        assert_eq!(pin.position, [5.0, 6.0]);
+        assert_eq!(pin.z, 7.5);
+    }
+
+    #[test]
+    fn annotation_set_position_preserves_other_fields_including_thread() {
+        let mut pin = point_pin("pin-1");
+        pin.author = "biologist".into();
+        pin.add_comment(comment("c1", "alice", "look here"));
+        pin.set_position([9.0, 9.0], 1.0);
+        // Position/z change; id, author, kind, and the thread are untouched.
+        assert_eq!(pin.position, [9.0, 9.0]);
+        assert_eq!(pin.z, 1.0);
+        assert_eq!(pin.id, "pin-1");
+        assert_eq!(pin.author, "biologist");
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].text, "look here");
+    }
+
+    // --- DocumentState delegation ---
+
+    #[test]
+    fn document_state_move_annotation_overwrites_position_and_z() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [1.0, 2.0],
+            3.0,
+            "alice",
+        ));
+        doc.apply(move_annotation_cmd("wds-1", "p1", [10.0, 20.0], 30.0));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1, "move must not create extra pins");
+        assert_eq!(pins[0].position, [10.0, 20.0]);
+        assert_eq!(pins[0].z, 30.0);
+    }
+
+    #[test]
+    fn document_state_move_annotation_preserves_author_kind_and_thread() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "p1", "c1", "bob", "keep me"));
+        doc.apply(move_annotation_cmd("wds-1", "p1", [5.0, 6.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [5.0, 6.0]);
+        assert_eq!(pin.author, "alice");
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
+        assert_eq!(pin.comments.len(), 1, "thread must survive a move");
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].text, "keep me");
+    }
+
+    #[test]
+    fn document_state_move_only_targets_the_matching_pin() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(add_annotation_cmd("wds-1", "p2", [3.0, 4.0], "alice"));
+        doc.apply(move_annotation_cmd("wds-1", "p2", [99.0, 99.0], 0.0));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        // p1 untouched, only p2 moved; order preserved.
+        assert_eq!(pins[0].id, "p1");
+        assert_eq!(pins[0].position, [1.0, 2.0]);
+        assert_eq!(pins[1].id, "p2");
+        assert_eq!(pins[1].position, [99.0, 99.0]);
+    }
+
+    #[test]
+    fn document_state_move_missing_pin_is_noop_no_phantom() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        // Wrong pin id, wrong dataset id: both must be clean no-ops that do NOT
+        // create a phantom pin or dataset entry.
+        doc.apply(move_annotation_cmd("wds-1", "p-missing", [7.0, 7.0], 7.0));
+        doc.apply(move_annotation_cmd("wds-missing", "p1", [7.0, 7.0], 7.0));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        // The real pin is unchanged.
+        assert_eq!(pins[0].position, [1.0, 2.0]);
+        assert_eq!(pins[0].z, 0.0);
+        assert!(
+            !doc.annotations
+                .contains_key(&DatasetId("wds-missing".into()))
+        );
+    }
+
+    #[test]
+    fn document_state_move_into_empty_document_is_noop() {
+        // No pins at all: a move must not conjure a dataset entry or a pin.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(move_annotation_cmd("wds-1", "p1", [1.0, 2.0], 3.0));
+        assert!(doc.annotations.is_empty());
+    }
+
+    #[test]
+    fn document_state_move_annotation_is_idempotent() {
+        // Re-applying the same move (a replayed/twice-delivered command) lands
+        // on the same state — peers stay convergent.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(move_annotation_cmd("wds-1", "p1", [8.0, 9.0], 4.0));
+        doc.apply(move_annotation_cmd("wds-1", "p1", [8.0, 9.0], 4.0));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position, [8.0, 9.0]);
+        assert_eq!(pins[0].z, 4.0);
+    }
+
+    #[test]
+    fn moved_position_survives_document_serde_round_trip() {
+        // Durability/persistence path: the moved position + z persist via the
+        // document_json blob and restore for a post-restart reconnect.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [1.0, 2.0],
+            3.0,
+            "alice",
+        ));
+        doc.apply(move_annotation_cmd("wds-1", "p1", [42.5, -8.25], 16.0));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pin = &restored.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [42.5, -8.25]);
+        assert_eq!(pin.z, 16.0);
+    }
+
+    #[test]
+    fn move_annotation_bumps_only_annotation_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(add_annotation_cmd("ds1", "p1", [1.0, 2.0], "alice").into());
+        let baseline = scene.epochs.clone();
+
+        scene.apply(move_annotation_cmd("ds1", "p1", [5.0, 6.0], 0.0).into());
+        assert_eq!(scene.epochs.annotation, baseline.annotation + 1);
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+        assert_eq!(scene.epochs.asset, baseline.asset);
+    }
+
+    #[test]
+    fn move_missing_pin_still_bumps_epoch_but_creates_nothing() {
+        // The annotation epoch is the message-arrival counter (mirrors the
+        // add/remove_comment semantics): it bumps per applied command even when
+        // the state-level effect is a no-op. The no-op must not mint a pin.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let before = scene.epochs.annotation;
+        scene.apply(move_annotation_cmd("ds1", "ghost", [1.0, 2.0], 3.0).into());
+        assert_eq!(scene.epochs.annotation, before + 1);
+        assert!(
+            !scene
+                .document
+                .annotations
+                .contains_key(&DatasetId("ds1".into()))
+        );
+    }
+
     // --- Comment thread tests ---
     //
     // Comments nest on the annotation, so the dedup + insertion-order
@@ -2651,6 +2967,246 @@ mod tests {
         assert_eq!(pin["kind"], "point");
         assert!(pin["comments"].is_array());
         assert_eq!(pin["comments"].as_array().unwrap().len(), 0);
+    }
+
+    // --- Edit-comment tests ---
+    //
+    // The text-overwrite mutation lives on `Annotation::edit_comment`, sibling
+    // to add/remove_comment, and is unit-testable on a bare pin. The
+    // DocumentState arm only locates the pin (via the shared find-by-id) and
+    // delegates.
+
+    fn edit_comment_cmd(ds: &str, ann: &str, id: &str, text: &str) -> DocumentCommand {
+        DocumentCommand::EditComment {
+            dataset_id: DatasetId(ds.into()),
+            annotation_id: ann.into(),
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn edit_comment_command_matches_wire_contract() {
+        // Field-for-field check against the slice's documented edit wire shape.
+        let cmd = edit_comment_cmd("wds-abc", "pin-1", "c-1", "fixed typo");
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "edit_comment");
+        assert_eq!(v["dataset_id"], "wds-abc");
+        assert_eq!(v["annotation_id"], "pin-1");
+        assert_eq!(v["id"], "c-1");
+        assert_eq!(v["text"], "fixed typo");
+        // Edit carries no author (author is preserved on the existing comment).
+        assert!(v.get("author").is_none());
+
+        // And it parses back from exactly that shape.
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::EditComment {
+                dataset_id,
+                annotation_id,
+                id,
+                text,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-abc".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+                assert_eq!(text, "fixed typo");
+            }
+            _ => panic!("expected EditComment"),
+        }
+    }
+
+    #[test]
+    fn edit_comment_parses_from_documented_client_payload() {
+        // Verbatim client->server payload from the slice wire contract.
+        let json = r#"{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::EditComment {
+                dataset_id,
+                annotation_id,
+                id,
+                text,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+                assert_eq!(text, "edited");
+            }
+            _ => panic!("expected EditComment"),
+        }
+    }
+
+    #[test]
+    fn edit_comment_broadcast_is_byte_identical_to_inbound_command() {
+        // A peer sees the new text because the inbound command and its
+        // rebroadcast carry the same command object byte-for-byte.
+        use crate::protocol::{ClientMessage, ServerMessage};
+        let cmd = edit_comment_cmd("wds-1", "pin-1", "c-1", "new text");
+        let inbound = ClientMessage::Command {
+            command: cmd.clone(),
+        };
+        let broadcast = ServerMessage::CommandBroadcast {
+            seq: 13,
+            command: cmd,
+        };
+        let inbound_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&inbound).unwrap()).unwrap();
+        let broadcast_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&broadcast).unwrap()).unwrap();
+        assert_eq!(inbound_v["command"], broadcast_v["command"]);
+        assert_eq!(broadcast_v["command"]["text"], "new text");
+        assert_eq!(broadcast_v["seq"], 13);
+    }
+
+    // --- Annotation-level edit helper (no DocumentState) ---
+
+    #[test]
+    fn annotation_edit_comment_overwrites_text_in_place() {
+        let mut pin = point_pin("pin-1");
+        pin.add_comment(comment("c1", "alice", "first"));
+        pin.add_comment(comment("c2", "bob", "second"));
+        // Edit c1: replace its text, keep id/author and its place in the thread.
+        assert!(pin.edit_comment("c1", "edited".into()));
+        assert_eq!(pin.comments.len(), 2);
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].author, "alice");
+        assert_eq!(pin.comments[0].text, "edited");
+        assert_eq!(pin.comments[1].id, "c2");
+        assert_eq!(pin.comments[1].text, "second");
+    }
+
+    #[test]
+    fn annotation_edit_missing_comment_is_noop_and_reports_false() {
+        let mut pin = point_pin("pin-1");
+        pin.add_comment(comment("c1", "alice", "only"));
+        // Unknown comment id: no edit, no append, reports false.
+        assert!(!pin.edit_comment("c-missing", "ignored".into()));
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].text, "only");
+    }
+
+    #[test]
+    fn annotation_edit_comment_on_empty_thread_is_noop() {
+        let mut pin = point_pin("pin-1");
+        assert!(!pin.edit_comment("c1", "x".into()));
+        assert!(pin.comments.is_empty());
+    }
+
+    // --- DocumentState delegation ---
+
+    #[test]
+    fn document_state_edit_comment_overwrites_text() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "draft"));
+        doc.apply(edit_comment_cmd("wds-1", "pin-1", "c1", "final"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 1, "edit must not append a comment");
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].author, "alice");
+        assert_eq!(pin.comments[0].text, "final");
+    }
+
+    #[test]
+    fn document_state_edit_comment_only_targets_the_matching_comment() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "a"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c2", "bob", "b"));
+        doc.apply(edit_comment_cmd("wds-1", "pin-1", "c2", "b-edited"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].text, "a");
+        assert_eq!(pin.comments[1].id, "c2");
+        assert_eq!(pin.comments[1].text, "b-edited");
+    }
+
+    #[test]
+    fn document_state_edit_missing_comment_is_noop_no_phantom() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "keep"));
+        // Unknown comment id, unknown pin, unknown dataset: all clean no-ops that
+        // create no phantom comment, pin, or dataset entry.
+        doc.apply(edit_comment_cmd("wds-1", "pin-1", "c-missing", "x"));
+        doc.apply(edit_comment_cmd("wds-1", "pin-missing", "c1", "x"));
+        doc.apply(edit_comment_cmd("wds-missing", "pin-1", "c1", "x"));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].comments.len(), 1);
+        assert_eq!(pins[0].comments[0].text, "keep");
+        assert!(
+            !doc.annotations
+                .contains_key(&DatasetId("wds-missing".into()))
+        );
+    }
+
+    #[test]
+    fn document_state_edit_comment_is_idempotent() {
+        // Re-applying the same edit (a replayed/twice-delivered command) lands on
+        // the same text — peers stay convergent.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "v1"));
+        doc.apply(edit_comment_cmd("wds-1", "pin-1", "c1", "v2"));
+        doc.apply(edit_comment_cmd("wds-1", "pin-1", "c1", "v2"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].text, "v2");
+    }
+
+    #[test]
+    fn edited_comment_text_survives_document_serde_round_trip() {
+        // Durability/persistence path: the edited text persists via the
+        // document_json blob and restores for a late joiner / post-restart peer.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "before"));
+        doc.apply(edit_comment_cmd("wds-1", "pin-1", "c1", "after"));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pin = &restored.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].author, "alice");
+        assert_eq!(pin.comments[0].text, "after");
+    }
+
+    #[test]
+    fn edit_comment_bumps_only_annotation_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(add_annotation_cmd("ds1", "pin-1", [1.0, 2.0], "alice").into());
+        scene.apply(add_comment_cmd("ds1", "pin-1", "c1", "alice", "a").into());
+        let baseline = scene.epochs.clone();
+
+        scene.apply(edit_comment_cmd("ds1", "pin-1", "c1", "a-edited").into());
+        assert_eq!(scene.epochs.annotation, baseline.annotation + 1);
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+        assert_eq!(scene.epochs.asset, baseline.asset);
+    }
+
+    #[test]
+    fn edit_missing_comment_still_bumps_epoch_but_creates_nothing() {
+        // The annotation epoch is the message-arrival counter: it bumps per
+        // applied command even when the state-level effect is a no-op. The no-op
+        // must not mint a comment or a pin.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(add_annotation_cmd("ds1", "pin-1", [1.0, 2.0], "alice").into());
+        let before = scene.epochs.annotation;
+        scene.apply(edit_comment_cmd("ds1", "pin-1", "ghost-comment", "x").into());
+        assert_eq!(scene.epochs.annotation, before + 1);
+        let pin = &scene.document.annotations[&DatasetId("ds1".into())][0];
+        assert!(pin.comments.is_empty());
     }
 
     #[test]
