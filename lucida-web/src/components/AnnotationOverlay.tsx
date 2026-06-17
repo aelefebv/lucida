@@ -116,6 +116,14 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
   // (or saving/cancelling) replaces it.
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  // The pin whose delete is awaiting confirmation (by pin id), or null when none.
+  // Mirrors the in-place `editingCommentId` pattern: a small piece of local UI
+  // state — NOT a modal — that turns the popover's Delete trigger into a two-step
+  // Confirm/Cancel. Only one pin confirms at a time; opening one pin's confirm or
+  // resolving it (Confirm/Cancel) clears any other. Deletion is intentionally
+  // deliberate: nothing is emitted until Confirm, so a pin and its whole comment
+  // thread can never be destroyed by a single click.
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
 
   // The live pin drag, if any. A ref (not state) so the per-pointer handlers
   // mutate it without re-rendering mid-drag; the RAF tick keeps repositioning
@@ -142,6 +150,16 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
       setOpenPinId(null);
     }
   }, [annotations, openPinId]);
+
+  // A pending delete confirm only ever lives inside an open thread. If that
+  // thread is no longer the open one (closed, switched to another pin, or its
+  // pin vanished), drop the confirm so a stale Confirm control can never linger
+  // — re-opening the pin always starts back at the non-confirming Delete trigger.
+  useEffect(() => {
+    if (confirmingDeleteId !== null && confirmingDeleteId !== openPinId) {
+      setConfirmingDeleteId(null);
+    }
+  }, [openPinId, confirmingDeleteId]);
 
   useEffect(() => {
     setOpenPinId(null);
@@ -303,6 +321,45 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     onDocumentChanged();
   };
 
+  // --- Delete a pin (remove_annotation), two-step + author-only ---------------
+  // Deletion is deliberate: the Delete trigger only arms the confirm (emits
+  // nothing); Confirm is the single point that emits remove_annotation, which
+  // cascades the pin's whole comment thread on apply. Cancel just disarms.
+
+  // Step 1: arm the confirm for this pin. Emits nothing — a single click can no
+  // longer destroy a pin. Closing any in-flight comment edit keeps the popover
+  // showing exactly one active affordance at a time.
+  const requestDeletePin = (pinId: string) => {
+    cancelEdit();
+    setConfirmingDeleteId(pinId);
+  };
+
+  // Step 2a (Cancel): disarm without emitting; the pin and its thread are intact.
+  const cancelDeletePin = () => {
+    setConfirmingDeleteId(null);
+  };
+
+  // Step 2b (Confirm): emit exactly one remove_annotation for this pin via the
+  // apply-locally-and-send seam (the local apply removes it from the author's own
+  // view; the client-supplied id is the pin's own, so peers converge). The pin's
+  // disappearance then closes the popover and clears the confirm via the effects
+  // above, so we don't need to reset openPinId/confirmingDeleteId by hand.
+  const confirmDeletePin = (pinId: string) => {
+    const scene = wasmSceneRef.current;
+    if (!scene) {
+      // No scene to apply against: disarm rather than leave a dangling confirm.
+      setConfirmingDeleteId(null);
+      return;
+    }
+    applyDocumentCommand(
+      scene,
+      { type: "remove_annotation", dataset_id: datasetId, id: pinId },
+      sendCommand,
+    );
+    setConfirmingDeleteId(null);
+    onDocumentChanged();
+  };
+
   /** Convert a pointer event to 2D world coords — the inverse camera projection,
    * identical to SliceViewer's `eventToWorld` (world = (screenPx − half)/zoom +
    * center). Reused so a moved pin lands in the SAME world frame add_annotation
@@ -328,8 +385,11 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
   // the interaction contract asks for and the harness dispatches to.
 
   const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
-    // Only the author drags; only a primary, non-shift press (shift-click stays
-    // the remove gesture). Anything else falls through to the click handlers.
+    // Only the author drags, and only on a primary, non-shift press. A
+    // shift-press is left inert here: it no longer removes (that one-shot delete
+    // is gone) and we don't start a drag on it, so it falls through to the click
+    // handler — which just toggles the thread. Shift is otherwise free for a
+    // later slice. Anything else (other buttons) also falls through.
     if (pin.author !== String(myId)) return;
     if (e.button !== 0 || e.shiftKey) return;
     // A drag is already in flight (a second pointer pressed mid-drag): ignore it
@@ -391,8 +451,8 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
       // ignore — capture may not have been taken
     }
     // A press that never passed the slop is a click, not a move: emit nothing and
-    // let the marker's onClick run (toggle thread / shift-remove). Only a real
-    // drag emits, and it suppresses the trailing click so the thread doesn't pop.
+    // let the marker's onClick run (toggle thread). Only a real drag emits, and it
+    // suppresses the trailing click so the thread doesn't pop.
     if (!drag.moved) return;
     suppressClickRef.current = pin.id;
     const scene = wasmSceneRef.current;
@@ -512,43 +572,35 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
             }}
           >
             {/* The pin marker itself: a circular dot centered on the anchor,
-                mirroring the peer-cursor dot. For the author it is also the drag
-                handle (Pointer Events below) — a click toggles the thread, a
-                shift-click removes, a real drag moves. A peer's pin only clicks
-                (it carries no drag testid and ignores the drag handlers). */}
+                mirroring the peer-cursor dot, AND the thread-open click target
+                for every pin — so its testid is now on every dot regardless of
+                author. A plain click toggles the thread. For the author the dot
+                is also the drag handle (Pointer Events below) — a real drag
+                moves it; deletion now lives in the open thread as a deliberate,
+                confirmed Delete (no single-action shift-click delete). A peer's
+                pin only clicks (no drag handlers, no delete affordance). */}
             <div
-              data-testid={mine ? `annot-pin-${pin.id}` : undefined}
+              data-testid={`annot-pin-${pin.id}`}
               title={
                 mine
-                  ? `Pin by you — click for thread, drag to move, shift-click to remove`
+                  ? `Pin by you — click for thread, drag to move`
                   : `Pin by ${pin.author} — click for thread`
               }
               onPointerDown={mine ? onPinPointerDown(pin) : undefined}
               onPointerMove={mine ? onPinPointerMove(pin) : undefined}
               onPointerUp={mine ? onPinPointerUp(pin) : undefined}
               onPointerCancel={mine ? onPinPointerCancel(pin) : undefined}
-              onClick={(e) => {
+              onClick={() => {
                 // A real drag just finished: swallow the trailing click so the
                 // drop doesn't also toggle the thread. Consume the flag once.
                 if (suppressClickRef.current === pin.id) {
                   suppressClickRef.current = null;
                   return;
                 }
-                // Shift-click removes the pin (author only); plain click toggles
-                // the comment thread popover. This keeps pin-removal available
-                // without stealing the click that opens a discussion.
-                if (e.shiftKey) {
-                  if (!mine) return;
-                  const scene = wasmSceneRef.current;
-                  if (!scene) return;
-                  applyDocumentCommand(
-                    scene,
-                    { type: "remove_annotation", dataset_id: datasetId, id: pin.id },
-                    sendCommand,
-                  );
-                  onDocumentChanged();
-                  return;
-                }
+                // A click on the dot only ever toggles the comment thread popover
+                // (for any modifier, including Shift — the old shift-click-to-
+                // remove one-shot delete is gone; deletion is now the deliberate,
+                // confirmed Delete control inside the open thread).
                 setOpenPinId((cur) => (cur === pin.id ? null : pin.id));
               }}
               style={{
@@ -633,22 +685,110 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                   <span>
                     Thread{comments.length > 0 ? ` (${comments.length})` : ""}
                   </span>
-                  <button
-                    onClick={() => setOpenPinId(null)}
-                    aria-label="Close thread"
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {/* Delete trigger — author-only. Activating it arms the
+                        confirm below (it does NOT emit), so a pin and its whole
+                        thread can never be removed in one click. A peer's pin
+                        renders no pin-delete-* control at all. */}
+                    {mine && (
+                      <button
+                        data-testid={`pin-delete-${pin.id}`}
+                        onClick={() => requestDeletePin(pin.id)}
+                        title="Delete pin"
+                        aria-label="Delete pin"
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "#f85149",
+                          cursor: "pointer",
+                          fontSize: 12,
+                          lineHeight: 1,
+                          padding: 0,
+                          fontWeight: 600,
+                        }}
+                      >
+                        Delete
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setOpenPinId(null)}
+                      aria-label="Close thread"
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "#8b949e",
+                        cursor: "pointer",
+                        fontSize: 14,
+                        lineHeight: 1,
+                        padding: 0,
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+                {/* Confirm strip — only when this pin's delete is armed (and only
+                    ever for the author, since only the author can arm it). Names
+                    what is at stake: the pin AND its `comments.length` comments,
+                    so the user sees the blast radius before committing. Confirm is
+                    the single emit point (remove_annotation); Cancel disarms and
+                    emits nothing, returning to the plain Delete trigger. */}
+                {mine && confirmingDeleteId === pin.id && (
+                  <div
+                    role="alertdialog"
+                    aria-label={`Delete this pin and its ${comments.length} comment${comments.length === 1 ? "" : "s"}?`}
                     style={{
-                      background: "none",
-                      border: "none",
-                      color: "#8b949e",
-                      cursor: "pointer",
-                      fontSize: 14,
-                      lineHeight: 1,
-                      padding: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      padding: "8px",
+                      borderBottom: "1px solid #30363d",
+                      background: "rgba(248,81,73,0.08)",
                     }}
                   >
-                    ×
-                  </button>
-                </div>
+                    <span style={{ color: "#e6edf3" }}>
+                      Delete this pin and its {comments.length} comment
+                      {comments.length === 1 ? "" : "s"}? This can&rsquo;t be undone.
+                    </span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        data-testid={`pin-delete-confirm-${pin.id}`}
+                        onClick={() => confirmDeletePin(pin.id)}
+                        aria-label={`Confirm delete pin and ${comments.length} comment${comments.length === 1 ? "" : "s"}`}
+                        style={{
+                          flex: 1,
+                          padding: "4px 8px",
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          color: "white",
+                          background: "#da3633",
+                          border: "1px solid #f85149",
+                          borderRadius: 4,
+                        }}
+                      >
+                        Delete {comments.length} comment{comments.length === 1 ? "" : "s"}
+                      </button>
+                      <button
+                        data-testid={`pin-delete-cancel-${pin.id}`}
+                        onClick={cancelDeletePin}
+                        aria-label="Cancel delete"
+                        style={{
+                          flex: 1,
+                          padding: "4px 8px",
+                          fontSize: 12,
+                          cursor: "pointer",
+                          color: "#e6edf3",
+                          background: "transparent",
+                          border: "1px solid #30363d",
+                          borderRadius: 4,
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div style={{ overflowY: "auto", padding: "4px 0", flex: 1 }}>
                   {comments.length === 0 ? (
                     <div style={{ padding: "8px", color: "#8b949e" }}>

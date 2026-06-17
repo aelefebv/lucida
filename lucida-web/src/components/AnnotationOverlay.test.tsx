@@ -196,32 +196,35 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
     expect(screen.getByText("hi")).toBeTruthy();
   });
 
-  it("a non-author pin is not draggable and emits no move (no testid, drag ignored)", () => {
+  it("a non-author pin carries the dot testid but is not draggable (no move emitted)", () => {
     const { sent } = renderOverlay({
       pins: [ownPin({ id: "pin-b", author: "999" })],
     });
-    // A peer's pin carries no drag testid.
-    expect(screen.queryByTestId("annot-pin-pin-b")).toBeNull();
+    // Slice 7 widened the dot testid to EVERY pin so any pin's thread can be
+    // opened — a peer's pin now carries `annot-pin-<id>` too.
+    expect(screen.getByTestId("annot-pin-pin-b")).toBeTruthy();
 
-    // Even if the harness reached the marker element, dragging emits nothing.
-    // (We grab it by title since it has no testid.)
-    const marker = screen.getByTitle(/Pin by 999/);
+    // The drag behavior stays author-only: dragging a peer's pin emits nothing
+    // (the dot has no pointer handlers wired for a non-author).
+    const marker = screen.getByTestId("annot-pin-pin-b");
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
     fireEvent.pointerMove(marker, { pointerId: 1, clientX: 400, clientY: 400 });
     fireEvent.pointerUp(marker, { pointerId: 1, clientX: 400, clientY: 400 });
     expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
   });
 
-  it("shift-click still removes an own pin (no move emitted)", () => {
-    const { sent } = renderOverlay({ pins: [ownPin()] });
+  it("shift-click no longer removes a pin (the one-shot delete is gone)", () => {
+    const { sent, getChanged } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
-    // A shift-press is the remove gesture, not a drag: pointerdown bails early.
+    // The old one-shot shift-click-to-remove is gone: a shift-click neither
+    // moves nor removes — it just toggles the thread like any other click.
     fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.pointerUp(marker, { pointerId: 1, shiftKey: true, clientX: 200, clientY: 200 });
     fireEvent.click(marker, { shiftKey: true, clientX: 200, clientY: 200 });
 
     expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
-    expect(sent.some((c) => c.type === "remove_annotation")).toBe(true);
+    expect(sent.some((c) => c.type === "remove_annotation")).toBe(false);
+    expect(getChanged()).toBe(0);
   });
 });
 
@@ -330,5 +333,149 @@ describe("AnnotationOverlay — edit a comment (edit_comment)", () => {
     openThreadWithComment("from a peer", "999");
     expect(screen.getByText("from a peer")).toBeTruthy();
     expect(screen.queryByTestId("comment-edit-c1")).toBeNull();
+  });
+});
+
+describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", () => {
+  /** Render with one pin and open its thread via a pure click, returning the
+   * harness handles. Mirrors the edit suite's opener. */
+  function openOwnThread(overrides: Partial<Annotation> = {}) {
+    const result = renderOverlay({ pins: [ownPin(overrides)] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(marker, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.click(marker, { clientX: 200, clientY: 200 });
+    return result;
+  }
+
+  it("an open own-pin thread shows a Delete trigger", () => {
+    openOwnThread();
+    expect(screen.getByTestId("pin-delete-pin-a")).toBeTruthy();
+    // Before arming, neither confirm control is present.
+    expect(screen.queryByTestId("pin-delete-confirm-pin-a")).toBeNull();
+    expect(screen.queryByTestId("pin-delete-cancel-pin-a")).toBeNull();
+  });
+
+  it("activating Delete reveals a confirm but emits nothing (no one-shot delete)", () => {
+    const { sent, getChanged } = openOwnThread({
+      comments: [
+        { id: "c1", author: String(MY_ID), text: "one" },
+        { id: "c2", author: "999", text: "two" },
+        { id: "c3", author: String(MY_ID), text: "three" },
+      ],
+    });
+
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+
+    // The confirm appears…
+    expect(screen.getByTestId("pin-delete-confirm-pin-a")).toBeTruthy();
+    expect(screen.getByTestId("pin-delete-cancel-pin-a")).toBeTruthy();
+    // …but arming the confirm has emitted nothing — deletion is deliberate.
+    expect(sent.some((c) => c.type === "remove_annotation")).toBe(false);
+    expect(getChanged()).toBe(0);
+  });
+
+  it("the confirm control's accessible text includes the pin's comment count", () => {
+    openOwnThread({
+      comments: [
+        { id: "c1", author: String(MY_ID), text: "one" },
+        { id: "c2", author: "999", text: "two" },
+        { id: "c3", author: String(MY_ID), text: "three" },
+      ],
+    });
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+
+    const confirm = screen.getByTestId("pin-delete-confirm-pin-a");
+    // The integer pin.comments.length (3) must be visible to the user, via the
+    // control's text content or its aria-label.
+    const accessible = `${confirm.textContent ?? ""} ${confirm.getAttribute("aria-label") ?? ""}`;
+    expect(accessible).toContain("3");
+  });
+
+  it("the confirm count reflects a single comment too", () => {
+    openOwnThread({ comments: [{ id: "c1", author: String(MY_ID), text: "solo" }] });
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+
+    const confirm = screen.getByTestId("pin-delete-confirm-pin-a");
+    const accessible = `${confirm.textContent ?? ""} ${confirm.getAttribute("aria-label") ?? ""}`;
+    expect(accessible).toContain("1");
+  });
+
+  it("Confirm emits exactly one remove_annotation for that pin", () => {
+    const { sent, getChanged } = openOwnThread({
+      comments: [{ id: "c1", author: String(MY_ID), text: "one" }],
+    });
+
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    fireEvent.click(screen.getByTestId("pin-delete-confirm-pin-a"));
+
+    const removes = sent.filter((c) => c.type === "remove_annotation");
+    expect(removes).toHaveLength(1);
+    expect(removes[0]).toEqual({
+      type: "remove_annotation",
+      dataset_id: "wds-1",
+      id: "pin-a",
+    });
+    expect(getChanged()).toBe(1);
+  });
+
+  it("Cancel emits nothing and dismisses the confirm, leaving the pin intact", () => {
+    const { sent, getChanged } = openOwnThread({
+      comments: [{ id: "c1", author: String(MY_ID), text: "keep me" }],
+    });
+
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    fireEvent.click(screen.getByTestId("pin-delete-cancel-pin-a"));
+
+    // Nothing emitted; confirm gone; the Delete trigger and thread remain.
+    expect(sent.some((c) => c.type === "remove_annotation")).toBe(false);
+    expect(getChanged()).toBe(0);
+    expect(screen.queryByTestId("pin-delete-confirm-pin-a")).toBeNull();
+    expect(screen.getByTestId("pin-delete-pin-a")).toBeTruthy();
+    expect(screen.getByText("keep me")).toBeTruthy();
+  });
+
+  it("re-arming after Cancel still leads to a working Confirm", () => {
+    const { sent } = openOwnThread();
+    // Arm, cancel, arm again, confirm — the second pass must still emit once.
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    fireEvent.click(screen.getByTestId("pin-delete-cancel-pin-a"));
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    fireEvent.click(screen.getByTestId("pin-delete-confirm-pin-a"));
+
+    expect(sent.filter((c) => c.type === "remove_annotation")).toHaveLength(1);
+  });
+
+  it("a non-author pin shows no delete affordance in its open thread", () => {
+    // Open a peer's pin thread: the dot testid is widened to every pin, so it
+    // opens, but no pin-delete-* control should render for a non-author.
+    renderOverlay({ pins: [ownPin({ id: "pin-b", author: "999", comments: [] })] });
+    const marker = screen.getByTestId("annot-pin-pin-b");
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(marker, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.click(marker, { clientX: 200, clientY: 200 });
+
+    // Thread is open (its add-comment placeholder is present) …
+    expect(screen.getByPlaceholderText("Add a comment…")).toBeTruthy();
+    // … but there's no delete trigger or confirm for a pin that isn't mine.
+    expect(screen.queryByTestId("pin-delete-pin-b")).toBeNull();
+    expect(screen.queryByTestId("pin-delete-confirm-pin-b")).toBeNull();
+    expect(screen.queryByTestId("pin-delete-cancel-pin-b")).toBeNull();
+  });
+
+  it("closing the thread drops a pending confirm (re-opening starts un-armed)", () => {
+    openOwnThread();
+    const marker = screen.getByTestId("annot-pin-pin-a");
+
+    // Arm the confirm, then close the thread by clicking the dot again.
+    fireEvent.click(screen.getByTestId("pin-delete-pin-a"));
+    expect(screen.getByTestId("pin-delete-confirm-pin-a")).toBeTruthy();
+    fireEvent.click(marker); // toggles the thread closed
+    expect(screen.queryByTestId("pin-delete-confirm-pin-a")).toBeNull();
+
+    // Re-open: back to the plain Delete trigger, not the confirm.
+    fireEvent.click(marker);
+    expect(screen.getByTestId("pin-delete-pin-a")).toBeTruthy();
+    expect(screen.queryByTestId("pin-delete-confirm-pin-a")).toBeNull();
   });
 });
