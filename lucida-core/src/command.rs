@@ -52,6 +52,28 @@ pub enum DocumentCommand {
         dataset_id: DatasetId,
         id: String,
     },
+    /// Attach a text comment to the pin `annotation_id` under `dataset_id`,
+    /// forming a flat discussion thread. The comment `id` is client-supplied
+    /// (a uuid string) so this command and its rebroadcast are byte-identical
+    /// and apply identically on every peer. Idempotent on a repeated comment
+    /// `id` (last write wins on `text`/`author`). A `add_comment` to a missing
+    /// annotation or dataset is a clean no-op — it must not mint a phantom pin.
+    /// Bumps `epochs.annotation` (the pin's thread is part of annotation state).
+    AddComment {
+        dataset_id: DatasetId,
+        annotation_id: String,
+        id: String,
+        author: String,
+        text: String,
+    },
+    /// Remove a comment by `id` from the pin `annotation_id` under `dataset_id`.
+    /// No-op if the dataset, pin, or comment id is unknown. Bumps
+    /// `epochs.annotation`.
+    RemoveComment {
+        dataset_id: DatasetId,
+        annotation_id: String,
+        id: String,
+    },
 }
 
 /// Commands that mutate local-only viewport/display state.
@@ -342,9 +364,14 @@ impl Scene {
                         self.epochs.asset += 1;
                     }
                     DocumentCommand::AddAnnotation { .. }
-                    | DocumentCommand::RemoveAnnotation { .. } => {
-                        // Bump the annotation epoch. Document state update
-                        // happens below via self.document.apply().
+                    | DocumentCommand::RemoveAnnotation { .. }
+                    | DocumentCommand::AddComment { .. }
+                    | DocumentCommand::RemoveComment { .. } => {
+                        // Bump the annotation epoch. A pin's comment thread is
+                        // part of its annotation state, so add/remove_comment
+                        // invalidate the same epoch as add/remove_annotation.
+                        // Document state update happens below via
+                        // self.document.apply().
                         self.epochs.annotation += 1;
                     }
                 }
@@ -2061,6 +2088,414 @@ mod tests {
         assert_eq!(pins[0].id, "p1");
         assert_eq!(pins[0].position, [1.5, 2.5]);
         assert_eq!(pins[0].author, "alice");
+    }
+
+    // --- Comment thread tests ---
+    //
+    // Comments nest on the annotation, so the dedup + insertion-order
+    // invariants live on `Annotation` (`add_comment`/`remove_comment`) and are
+    // unit-testable on a bare pin with no DocumentState scaffolding. The
+    // DocumentState arms below only locate the pin and delegate.
+
+    fn add_comment_cmd(ds: &str, ann: &str, id: &str, author: &str, text: &str) -> DocumentCommand {
+        DocumentCommand::AddComment {
+            dataset_id: DatasetId(ds.into()),
+            annotation_id: ann.into(),
+            id: id.into(),
+            author: author.into(),
+            text: text.into(),
+        }
+    }
+
+    fn remove_comment_cmd(ds: &str, ann: &str, id: &str) -> DocumentCommand {
+        DocumentCommand::RemoveComment {
+            dataset_id: DatasetId(ds.into()),
+            annotation_id: ann.into(),
+            id: id.into(),
+        }
+    }
+
+    fn point_pin(id: &str) -> crate::scene::Annotation {
+        crate::scene::Annotation {
+            id: id.into(),
+            position: [0.0, 0.0],
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+            comments: Vec::new(),
+        }
+    }
+
+    fn comment(id: &str, author: &str, text: &str) -> crate::scene::Comment {
+        crate::scene::Comment {
+            id: id.into(),
+            author: author.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn add_comment_command_matches_wire_contract() {
+        // Field-for-field check against the slice's documented add wire shape.
+        let cmd = add_comment_cmd("wds-abc", "pin-1", "c-1", "biologist", "nice finding");
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "add_comment");
+        assert_eq!(v["dataset_id"], "wds-abc");
+        assert_eq!(v["annotation_id"], "pin-1");
+        assert_eq!(v["id"], "c-1");
+        assert_eq!(v["author"], "biologist");
+        assert_eq!(v["text"], "nice finding");
+
+        // And it parses back from exactly that shape.
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::AddComment {
+                dataset_id,
+                annotation_id,
+                id,
+                author,
+                text,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-abc".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+                assert_eq!(author, "biologist");
+                assert_eq!(text, "nice finding");
+            }
+            _ => panic!("expected AddComment"),
+        }
+    }
+
+    #[test]
+    fn add_comment_parses_from_documented_client_payload() {
+        // Verbatim client->server payload from the slice wire contract.
+        let json = r#"{"type":"add_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","author":"alice","text":"hello"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddComment {
+                dataset_id,
+                annotation_id,
+                id,
+                author,
+                text,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+                assert_eq!(author, "alice");
+                assert_eq!(text, "hello");
+            }
+            _ => panic!("expected AddComment"),
+        }
+    }
+
+    #[test]
+    fn remove_comment_command_matches_wire_contract() {
+        let json =
+            r#"{"type":"remove_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::RemoveComment {
+                dataset_id,
+                annotation_id,
+                id,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+            }
+            _ => panic!("expected RemoveComment"),
+        }
+
+        // Remove carries only dataset_id + annotation_id + id (no author/text).
+        let cmd = remove_comment_cmd("wds-1", "pin-1", "c-1");
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        assert!(v.get("author").is_none());
+        assert!(v.get("text").is_none());
+    }
+
+    #[test]
+    fn add_comment_broadcast_is_byte_identical_to_inbound_command() {
+        // Client-supplied comment id means the inbound command and its
+        // rebroadcast carry the same command object byte-for-byte.
+        use crate::protocol::{ClientMessage, ServerMessage};
+        let cmd = add_comment_cmd("wds-1", "pin-1", "c-1", "alice", "hi");
+        let inbound = ClientMessage::Command {
+            command: cmd.clone(),
+        };
+        let broadcast = ServerMessage::CommandBroadcast {
+            seq: 9,
+            command: cmd,
+        };
+        let inbound_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&inbound).unwrap()).unwrap();
+        let broadcast_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&broadcast).unwrap()).unwrap();
+        assert_eq!(inbound_v["command"], broadcast_v["command"]);
+        assert_eq!(broadcast_v["seq"], 9);
+    }
+
+    // --- Annotation-level helpers (no DocumentState) ---
+
+    #[test]
+    fn annotation_add_comment_appends_in_insertion_order() {
+        let mut pin = point_pin("pin-1");
+        pin.add_comment(comment("c1", "alice", "first"));
+        pin.add_comment(comment("c2", "bob", "second"));
+        pin.add_comment(comment("c3", "alice", "third"));
+        let ids: Vec<&str> = pin.comments.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["c1", "c2", "c3"]);
+    }
+
+    #[test]
+    fn annotation_add_comment_dedups_by_id_last_write_wins() {
+        let mut pin = point_pin("pin-1");
+        pin.add_comment(comment("c1", "alice", "draft"));
+        pin.add_comment(comment("c2", "bob", "keep"));
+        // Re-apply c1 with new text: replace in place, do not append, and do
+        // not disturb the order of the other comments.
+        pin.add_comment(comment("c1", "alice", "final"));
+        assert_eq!(pin.comments.len(), 2);
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].text, "final");
+        assert_eq!(pin.comments[1].id, "c2");
+    }
+
+    #[test]
+    fn annotation_remove_comment_reports_and_preserves_order() {
+        let mut pin = point_pin("pin-1");
+        pin.add_comment(comment("c1", "alice", "a"));
+        pin.add_comment(comment("c2", "bob", "b"));
+        pin.add_comment(comment("c3", "alice", "c"));
+        assert!(pin.remove_comment("c2"));
+        let ids: Vec<&str> = pin.comments.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["c1", "c3"]);
+        // Removing an unknown id is a no-op and reports false.
+        assert!(!pin.remove_comment("c2"));
+        assert_eq!(pin.comments.len(), 2);
+    }
+
+    // --- DocumentState delegation ---
+
+    #[test]
+    fn document_state_add_comment_nests_on_the_pin_in_order() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "first"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c2", "bob", "second"));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1, "must not create extra pins");
+        assert_eq!(pins[0].comments.len(), 2);
+        assert_eq!(pins[0].comments[0].id, "c1");
+        assert_eq!(pins[0].comments[0].text, "first");
+        assert_eq!(pins[0].comments[1].id, "c2");
+        assert_eq!(pins[0].comments[1].author, "bob");
+    }
+
+    #[test]
+    fn document_state_add_comment_dedups_by_id_last_write_wins() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "v1"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "v2"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].text, "v2");
+    }
+
+    #[test]
+    fn document_state_remove_comment_by_id() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "a"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c2", "bob", "b"));
+        doc.apply(remove_comment_cmd("wds-1", "pin-1", "c1"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].id, "c2");
+    }
+
+    #[test]
+    fn document_state_add_comment_to_missing_pin_is_noop_no_phantom() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        // Wrong pin id, wrong dataset id: both must be clean no-ops that do
+        // NOT create a phantom pin or dataset entry.
+        doc.apply(add_comment_cmd("wds-1", "pin-missing", "c1", "alice", "x"));
+        doc.apply(add_comment_cmd("wds-missing", "pin-1", "c1", "alice", "x"));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert!(pins[0].comments.is_empty());
+        assert!(
+            !doc.annotations
+                .contains_key(&DatasetId("wds-missing".into()))
+        );
+    }
+
+    #[test]
+    fn document_state_remove_missing_comment_is_noop() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "a"));
+        // Unknown comment id, unknown pin, unknown dataset: all harmless.
+        doc.apply(remove_comment_cmd("wds-1", "pin-1", "nope"));
+        doc.apply(remove_comment_cmd("wds-1", "pin-missing", "c1"));
+        doc.apply(remove_comment_cmd("wds-missing", "pin-1", "c1"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 1);
+        assert_eq!(pin.comments[0].id, "c1");
+    }
+
+    #[test]
+    fn cross_peer_comments_on_same_pin_are_ordered_for_a_late_joiner() {
+        // Two peers each comment on the same pin; the thread that a late joiner
+        // would load (the serialized DocumentState) carries both in the order
+        // the server sequenced them.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd(
+            "wds-1", "pin-1", "c-alice", "alice", "from A",
+        ));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c-bob", "bob", "from B"));
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        let thread = &v["annotations"]["wds-1"][0]["comments"];
+        assert_eq!(thread[0]["id"], "c-alice");
+        assert_eq!(thread[0]["author"], "alice");
+        assert_eq!(thread[1]["id"], "c-bob");
+        assert_eq!(thread[1]["author"], "bob");
+    }
+
+    #[test]
+    fn removing_pin_cascades_its_comments() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "a"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c2", "bob", "b"));
+        doc.apply(DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+        });
+        // The pin (and therefore its whole thread) is gone — no orphans.
+        assert!(!doc.annotations.contains_key(&DatasetId("wds-1".into())));
+    }
+
+    #[test]
+    fn removing_dataset_cascades_pins_and_their_comments() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(add_annotation_cmd("ds1", "pin-1", [1.0, 2.0], "alice").into());
+        scene.apply(add_comment_cmd("ds1", "pin-1", "c1", "alice", "a").into());
+        scene.apply(
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("ds1".into()),
+            }
+            .into(),
+        );
+        assert!(
+            !scene
+                .document
+                .annotations
+                .contains_key(&DatasetId("ds1".into()))
+        );
+    }
+
+    #[test]
+    fn re_applied_add_annotation_preserves_existing_thread() {
+        // A rebroadcast/replayed add_annotation for an existing pin id must not
+        // wipe a discussion that has accrued on that pin.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "a"));
+        // Re-deliver the pin (same id, new position).
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [9.0, 9.0], "alice"));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [9.0, 9.0]);
+        assert_eq!(pin.comments.len(), 1, "thread must survive pin re-apply");
+        assert_eq!(pin.comments[0].id, "c1");
+    }
+
+    #[test]
+    fn add_and_remove_comment_bump_only_annotation_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(add_annotation_cmd("ds1", "pin-1", [1.0, 2.0], "alice").into());
+        let baseline = scene.epochs.clone();
+
+        scene.apply(add_comment_cmd("ds1", "pin-1", "c1", "alice", "a").into());
+        assert_eq!(scene.epochs.annotation, baseline.annotation + 1);
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+        assert_eq!(scene.epochs.asset, baseline.asset);
+
+        scene.apply(remove_comment_cmd("ds1", "pin-1", "c1").into());
+        assert_eq!(scene.epochs.annotation, baseline.annotation + 2);
+    }
+
+    #[test]
+    fn add_comment_to_missing_pin_still_bumps_epoch_but_creates_nothing() {
+        // The epoch is the message-arrival counter (mirrors asset-delta
+        // semantics): it bumps per applied command even when the state-level
+        // effect is a no-op. The no-op must not create a phantom pin.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let before = scene.epochs.annotation;
+        scene.apply(add_comment_cmd("ds1", "ghost", "c1", "alice", "a").into());
+        assert_eq!(scene.epochs.annotation, before + 1);
+        assert!(
+            !scene
+                .document
+                .annotations
+                .contains_key(&DatasetId("ds1".into()))
+        );
+    }
+
+    #[test]
+    fn comment_thread_survives_document_serde_round_trip() {
+        // Durability path: the thread persists via the document_json blob.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.5, 2.5], "alice"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c1", "alice", "first"));
+        doc.apply(add_comment_cmd("wds-1", "pin-1", "c2", "bob", "second"));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pin = &restored.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.comments.len(), 2);
+        assert_eq!(pin.comments[0].id, "c1");
+        assert_eq!(pin.comments[0].text, "first");
+        assert_eq!(pin.comments[1].id, "c2");
+        assert_eq!(pin.comments[1].author, "bob");
+    }
+
+    #[test]
+    fn slice1_pin_without_comments_field_deserializes_with_empty_thread() {
+        // A pin persisted by slice 1 (before threads existed) has no `comments`
+        // field; #[serde(default)] must load it with an empty thread.
+        let json = r#"{"manifests":{},"annotations":{"wds-1":[{"id":"pin-1","position":[1.0,2.0],"author":"alice","kind":"point"}]}}"#;
+        let doc: crate::scene::DocumentState = serde_json::from_str(json).unwrap();
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert!(pin.comments.is_empty());
+    }
+
+    #[test]
+    fn pin_with_empty_thread_serializes_like_a_slice1_pin() {
+        // A comment-less pin must still expose the documented snapshot shape;
+        // `comments` serializes as an empty array (harmless for old clients).
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "pin-1", [10.0, 20.0], "alice"));
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        let pin = &v["annotations"]["wds-1"][0];
+        assert_eq!(pin["id"], "pin-1");
+        assert_eq!(pin["kind"], "point");
+        assert!(pin["comments"].is_array());
+        assert_eq!(pin["comments"].as_array().unwrap().len(), 0);
     }
 
     #[test]

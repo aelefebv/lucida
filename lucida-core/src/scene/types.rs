@@ -161,6 +161,22 @@ pub enum AnnotationKind {
     Point,
 }
 
+/// A single text comment attached to an [`Annotation`], forming a flat
+/// discussion thread on a pin.
+///
+/// The `id` is client-supplied (a uuid string) so — exactly like the pin
+/// itself — an inbound `add_comment` command and its rebroadcast are
+/// byte-identical and apply identically on every peer. Comments live
+/// nested on the annotation (`Annotation::comments`), so they ride the
+/// existing snapshot, broadcast, and `document_json` persistence machinery
+/// for free, and cascade away when the pin (or its dataset) is removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: String,
+    pub author: String,
+    pub text: String,
+}
+
 /// A single collaborative annotation: a marker anchored to a position in
 /// 2D world space (the same frame `centroidWorld`/layout positions use, per
 /// ADR-0030) so it stays glued to the data for every peer regardless of
@@ -170,6 +186,11 @@ pub enum AnnotationKind {
 /// its rebroadcast are byte-identical — one command applied identically on
 /// every peer, with no server-side id asymmetry. Apply is idempotent on a
 /// repeated `id` (last write wins; see [`DocumentState::add_annotation`]).
+///
+/// `comments` is the pin's discussion thread (insertion-ordered, deduped by
+/// comment id). It is `#[serde(default)]` so pins persisted by slice 1
+/// (before threads existed) still deserialize with an empty thread, and so a
+/// pin with no comments serializes/round-trips identically to a slice-1 pin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     pub id: String,
@@ -178,6 +199,40 @@ pub struct Annotation {
     pub author: String,
     #[serde(default)]
     pub kind: AnnotationKind,
+    /// Flat, ordered comment thread on this pin. Owns its dedup/order
+    /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
+    #[serde(default)]
+    pub comments: Vec<Comment>,
+}
+
+impl Annotation {
+    /// Append (or replace) a comment on this annotation's thread.
+    ///
+    /// Idempotent / last-write-wins on a repeated comment `id`: re-applying a
+    /// command with an existing id replaces that comment in place (updating its
+    /// text/author) rather than appending a duplicate — so a replayed or
+    /// twice-delivered `add_comment` keeps every peer convergent. Distinct ids
+    /// are appended, preserving insertion order. This is the single owner of the
+    /// thread's dedup + ordering invariants; `DocumentState` only locates the
+    /// pin and delegates here, which keeps the comment logic unit-testable on a
+    /// bare `Annotation`.
+    pub fn add_comment(&mut self, comment: Comment) {
+        if let Some(existing) = self.comments.iter_mut().find(|c| c.id == comment.id) {
+            *existing = comment;
+        } else {
+            self.comments.push(comment);
+        }
+    }
+
+    /// Remove a comment from this annotation's thread by `id`. Returns `true`
+    /// if a comment was removed. No-op (returns `false`) if the id is unknown,
+    /// so a duplicate/late removal is harmless. Surviving comments keep their
+    /// relative insertion order.
+    pub fn remove_comment(&mut self, id: &str) -> bool {
+        let before = self.comments.len();
+        self.comments.retain(|c| c.id != id);
+        self.comments.len() != before
+    }
 }
 
 /// Shared document state — dataset manifests synced across all clients.
@@ -220,14 +275,22 @@ impl DocumentState {
     /// Add (or replace) an annotation under `dataset_id`.
     ///
     /// Idempotent / last-write-wins on a repeated `id`: re-applying a command
-    /// with an existing id replaces that annotation in place rather than
-    /// appending a duplicate. This keeps every peer convergent even if a
-    /// command is delivered or replayed more than once. Distinct ids are kept
-    /// as independent entries, preserving insertion order.
+    /// with an existing id replaces that annotation's position/author/kind in
+    /// place rather than appending a duplicate. This keeps every peer convergent
+    /// even if a command is delivered or replayed more than once. Distinct ids
+    /// are kept as independent entries, preserving insertion order.
+    ///
+    /// The pin's existing comment thread is **preserved** across such a
+    /// re-apply: an `add_annotation` rebroadcast/replay must not silently wipe a
+    /// discussion that has since accrued on that pin. (Threads are mutated only
+    /// via add/remove_comment.) A genuinely new pin carries an empty thread, so
+    /// for the common unique-id-per-drop case this is a no-op.
     pub fn add_annotation(&mut self, dataset_id: DatasetId, annotation: Annotation) {
         let list = self.annotations.entry(dataset_id).or_default();
         if let Some(existing) = list.iter_mut().find(|a| a.id == annotation.id) {
+            let comments = std::mem::take(&mut existing.comments);
             *existing = annotation;
+            existing.comments = comments;
         } else {
             list.push(annotation);
         }
@@ -235,13 +298,57 @@ impl DocumentState {
 
     /// Remove an annotation by id from `dataset_id`. No-op if the dataset or
     /// the id is unknown (so a duplicate/late removal is harmless). Drops the
-    /// dataset's now-empty entry to keep the map tidy.
+    /// dataset's now-empty entry to keep the map tidy. The pin's comment thread
+    /// cascades away with it (comments nest on the annotation).
     pub fn remove_annotation(&mut self, dataset_id: &DatasetId, id: &str) {
         if let Some(list) = self.annotations.get_mut(dataset_id) {
             list.retain(|a| a.id != id);
             if list.is_empty() {
                 self.annotations.shift_remove(dataset_id);
             }
+        }
+    }
+
+    /// Locate the pin `annotation_id` under `dataset_id` for mutation.
+    ///
+    /// Shared by [`Self::add_comment`] / [`Self::remove_comment`]: both must
+    /// target an existing pin and otherwise be a clean no-op. Centralizing the
+    /// lookup keeps that "missing pin/dataset is harmless" rule in one place.
+    fn annotation_mut(
+        &mut self,
+        dataset_id: &DatasetId,
+        annotation_id: &str,
+    ) -> Option<&mut Annotation> {
+        self.annotations
+            .get_mut(dataset_id)?
+            .iter_mut()
+            .find(|a| a.id == annotation_id)
+    }
+
+    /// Add (or replace) a comment on the pin `annotation_id` under `dataset_id`.
+    ///
+    /// Pure delegation: locate the pin, then hand the dedup + insertion-order
+    /// invariants to [`Annotation::add_comment`]. Adding a comment to a missing
+    /// annotation or dataset is a clean no-op — it must NOT create a phantom pin
+    /// (comments are content *on* an existing pin, never a way to mint one).
+    pub fn add_comment(&mut self, dataset_id: &DatasetId, annotation_id: &str, comment: Comment) {
+        if let Some(annotation) = self.annotation_mut(dataset_id, annotation_id) {
+            annotation.add_comment(comment);
+        }
+    }
+
+    /// Remove a comment by `comment_id` from the pin `annotation_id` under
+    /// `dataset_id`. No-op if the dataset, pin, or comment id is unknown (so a
+    /// duplicate/late removal is harmless). Delegates the actual removal to
+    /// [`Annotation::remove_comment`].
+    pub fn remove_comment(
+        &mut self,
+        dataset_id: &DatasetId,
+        annotation_id: &str,
+        comment_id: &str,
+    ) {
+        if let Some(annotation) = self.annotation_mut(dataset_id, annotation_id) {
+            annotation.remove_comment(comment_id);
         }
     }
 
@@ -335,11 +442,31 @@ impl DocumentState {
                         position,
                         author,
                         kind,
+                        // A freshly dropped pin starts with an empty thread.
+                        // On a re-applied (duplicate) pin id, add_annotation
+                        // preserves any thread already accrued on that pin.
+                        comments: Vec::new(),
                     },
                 );
             }
             DocumentCommand::RemoveAnnotation { dataset_id, id } => {
                 self.remove_annotation(&dataset_id, &id);
+            }
+            DocumentCommand::AddComment {
+                dataset_id,
+                annotation_id,
+                id,
+                author,
+                text,
+            } => {
+                self.add_comment(&dataset_id, &annotation_id, Comment { id, author, text });
+            }
+            DocumentCommand::RemoveComment {
+                dataset_id,
+                annotation_id,
+                id,
+            } => {
+                self.remove_comment(&dataset_id, &annotation_id, &id);
             }
         }
     }

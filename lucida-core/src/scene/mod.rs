@@ -1,8 +1,8 @@
 mod types;
 
 pub use types::{
-    Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings,
-    DisplayState, DocumentState, MemberChunkPlan, RenderMode,
+    Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
+    DatasetDisplaySettings, DisplayState, DocumentState, MemberChunkPlan, RenderMode,
 };
 
 use std::collections::HashMap;
