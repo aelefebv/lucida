@@ -150,6 +150,36 @@ impl Default for DisplayState {
     }
 }
 
+/// The shape of a collaborative annotation. Fixed at `Point` for this
+/// slice; the field exists so richer geometries (line, box, freehand) can
+/// be added later without a breaking wire change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum AnnotationKind {
+    #[default]
+    Point,
+}
+
+/// A single collaborative annotation: a marker anchored to a position in
+/// 2D world space (the same frame `centroidWorld`/layout positions use, per
+/// ADR-0030) so it stays glued to the data for every peer regardless of
+/// their viewport.
+///
+/// The `id` is client-supplied (a uuid string) so an inbound command and
+/// its rebroadcast are byte-identical — one command applied identically on
+/// every peer, with no server-side id asymmetry. Apply is idempotent on a
+/// repeated `id` (last write wins; see [`DocumentState::add_annotation`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Annotation {
+    pub id: String,
+    /// 2D world-space position `[x, y]`.
+    pub position: [f64; 2],
+    pub author: String,
+    #[serde(default)]
+    pub kind: AnnotationKind,
+}
+
 /// Shared document state — dataset manifests synced across all clients.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentState {
@@ -163,6 +193,13 @@ pub struct DocumentState {
     /// `DocumentCommand::ApplyAssetCatalogDelta`.
     #[serde(default)]
     pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
+    /// Per-dataset collaborative annotations, keyed by dataset id (mirrors
+    /// `asset_catalogs`). Populated via `DocumentCommand::AddAnnotation` /
+    /// `RemoveAnnotation`. `#[serde(default)]` so this persists and restores
+    /// for free through the existing `document_json` blob and older snapshots
+    /// (without the field) still deserialize.
+    #[serde(default)]
+    pub annotations: IndexMap<DatasetId, Vec<Annotation>>,
 }
 
 impl DocumentState {
@@ -171,10 +208,41 @@ impl DocumentState {
         self.manifests.insert(manifest.dataset_id.clone(), manifest);
     }
 
-    /// Remove a dataset by id.
+    /// Remove a dataset by id. Drops its annotations along with its
+    /// manifest and asset catalog — annotations are scoped per dataset, so a
+    /// removed dataset's pins must not linger.
     pub fn remove_dataset(&mut self, id: &DatasetId) {
         self.manifests.shift_remove(id);
         self.asset_catalogs.shift_remove(id);
+        self.annotations.shift_remove(id);
+    }
+
+    /// Add (or replace) an annotation under `dataset_id`.
+    ///
+    /// Idempotent / last-write-wins on a repeated `id`: re-applying a command
+    /// with an existing id replaces that annotation in place rather than
+    /// appending a duplicate. This keeps every peer convergent even if a
+    /// command is delivered or replayed more than once. Distinct ids are kept
+    /// as independent entries, preserving insertion order.
+    pub fn add_annotation(&mut self, dataset_id: DatasetId, annotation: Annotation) {
+        let list = self.annotations.entry(dataset_id).or_default();
+        if let Some(existing) = list.iter_mut().find(|a| a.id == annotation.id) {
+            *existing = annotation;
+        } else {
+            list.push(annotation);
+        }
+    }
+
+    /// Remove an annotation by id from `dataset_id`. No-op if the dataset or
+    /// the id is unknown (so a duplicate/late removal is harmless). Drops the
+    /// dataset's now-empty entry to keep the map tidy.
+    pub fn remove_annotation(&mut self, dataset_id: &DatasetId, id: &str) {
+        if let Some(list) = self.annotations.get_mut(dataset_id) {
+            list.retain(|a| a.id != id);
+            if list.is_empty() {
+                self.annotations.shift_remove(dataset_id);
+            }
+        }
     }
 
     /// Merge an [`AssetCatalogDelta`] into the catalog for `dataset_id`.
@@ -252,6 +320,26 @@ impl DocumentState {
             }
             DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
                 self.apply_asset_catalog_delta(dataset_id, delta);
+            }
+            DocumentCommand::AddAnnotation {
+                dataset_id,
+                id,
+                position,
+                author,
+                kind,
+            } => {
+                self.add_annotation(
+                    dataset_id,
+                    Annotation {
+                        id,
+                        position,
+                        author,
+                        kind,
+                    },
+                );
+            }
+            DocumentCommand::RemoveAnnotation { dataset_id, id } => {
+                self.remove_annotation(&dataset_id, &id);
             }
         }
     }

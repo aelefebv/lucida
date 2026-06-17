@@ -301,6 +301,13 @@ export function useBridge({
             sessionRef.current?.generatedAvailability.removeDataset(cmd.id);
             sessionRef.current?.ensureLayoutRegistry()?.removeDataset(cmd.id);
           }
+          if (cmd.type === "add_annotation" || cmd.type === "remove_annotation") {
+            // A peer dropped or removed a pin. WASM authoritative state was
+            // already updated by apply_command above; mark the canvas dirty so
+            // the overlay re-projects. The bumpRemoteDocumentVersion() below
+            // re-renders the React overlay with the new annotation set.
+            loopRef.current?.markInteractiveDirty();
+          }
           if (cmd.type === "register_layout" || cmd.type === "set_active_layout") {
             // Inbound layout broadcast: refresh the mirror so peers' changes
             // appear locally. setActiveLocal updates the active id without

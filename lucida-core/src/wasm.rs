@@ -1075,6 +1075,19 @@ impl WasmScene {
         serde_json::to_string(&output).unwrap()
     }
 
+    /// Collaborative annotations for `dataset_id` as JSON, in document order:
+    /// `[{"id","position":[x,y],"author","kind"}, ...]`. Returns `"[]"` when
+    /// the dataset has no pins. Positions are 2D world-space coordinates, so
+    /// the caller projects them to screen with the current camera each frame
+    /// (mirrors the peer-cursor overlay), keeping pins glued to the data.
+    pub fn annotations(&self, dataset_id: &str) -> String {
+        let key = DatasetId(dataset_id.to_string());
+        match self.inner.document.annotations.get(&key) {
+            Some(list) => serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string()),
+            None => "[]".to_string(),
+        }
+    }
+
     /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]
     pub fn minimap_camera(&self, theta: f64, phi: f64, w: f64, h: f64) -> Vec<f32> {
         // Compute bounding box of all members to frame the camera

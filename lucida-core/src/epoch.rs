@@ -20,4 +20,8 @@ pub struct SceneEpochs {
     /// Bumped by `DocumentCommand::ApplyAssetCatalogDelta`.
     #[serde(default)]
     pub asset: u64,
+    /// Collaborative annotations changed (a pin added or removed).
+    /// Bumped by `DocumentCommand::AddAnnotation` / `RemoveAnnotation`.
+    #[serde(default)]
+    pub annotation: u64,
 }

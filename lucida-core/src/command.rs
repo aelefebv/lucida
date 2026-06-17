@@ -33,6 +33,25 @@ pub enum DocumentCommand {
         dataset_id: DatasetId,
         delta: AssetCatalogDelta,
     },
+    /// Drop a collaborative annotation (point pin) onto `dataset_id` at a 2D
+    /// world-space `position`. The `id` is client-supplied (a uuid string)
+    /// so this command and its rebroadcast are byte-identical and apply
+    /// identically on every peer. Idempotent on a repeated `id` (last write
+    /// wins). Bumps `epochs.annotation`.
+    AddAnnotation {
+        dataset_id: DatasetId,
+        id: String,
+        position: [f64; 2],
+        author: String,
+        #[serde(default)]
+        kind: crate::scene::AnnotationKind,
+    },
+    /// Remove a collaborative annotation by `id` from `dataset_id`. No-op if
+    /// the id is unknown. Bumps `epochs.annotation`.
+    RemoveAnnotation {
+        dataset_id: DatasetId,
+        id: String,
+    },
 }
 
 /// Commands that mutate local-only viewport/display state.
@@ -321,6 +340,12 @@ impl Scene {
                         // Bump the asset epoch. Document state update happens
                         // below via self.document.apply().
                         self.epochs.asset += 1;
+                    }
+                    DocumentCommand::AddAnnotation { .. }
+                    | DocumentCommand::RemoveAnnotation { .. } => {
+                        // Bump the annotation epoch. Document state update
+                        // happens below via self.document.apply().
+                        self.epochs.annotation += 1;
                     }
                 }
                 self.document.apply(doc_cmd);
@@ -1515,6 +1540,7 @@ mod tests {
             view: 3,
             selection: 4,
             asset: 5,
+            annotation: 6,
         };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
@@ -1743,6 +1769,298 @@ mod tests {
             scene.document.active_layout_ids[&ds_id],
             LayoutId("some-layout".into()),
         );
+    }
+
+    // --- Annotation tests ---
+
+    #[test]
+    fn add_annotation_command_matches_wire_contract() {
+        // Field-for-field check against the slice's documented add wire shape.
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-abc".into()),
+            id: "11111111-2222-3333-4444-555555555555".into(),
+            position: [12.5, -7.25],
+            author: "biologist".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "add_annotation");
+        assert_eq!(v["dataset_id"], "wds-abc");
+        assert_eq!(v["id"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(v["position"][0], 12.5);
+        assert_eq!(v["position"][1], -7.25);
+        assert_eq!(v["author"], "biologist");
+        assert_eq!(v["kind"], "point");
+
+        // And it parses back from exactly that shape.
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation {
+                dataset_id,
+                id,
+                position,
+                author,
+                kind,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-abc".into()));
+                assert_eq!(id, "11111111-2222-3333-4444-555555555555");
+                assert_eq!(position, [12.5, -7.25]);
+                assert_eq!(author, "biologist");
+                assert_eq!(kind, crate::scene::AnnotationKind::Point);
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn add_annotation_parses_from_documented_client_payload() {
+        // Verbatim client->server payload from the slice wire contract.
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation {
+                dataset_id,
+                id,
+                position,
+                author,
+                kind,
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(id, "pin-1");
+                assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(author, "alice");
+                assert_eq!(kind, crate::scene::AnnotationKind::Point);
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn remove_annotation_command_matches_wire_contract() {
+        let cmd = DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "remove_annotation");
+        assert_eq!(v["dataset_id"], "wds-1");
+        assert_eq!(v["id"], "pin-1");
+        // Remove carries only dataset_id + id.
+        assert!(v.get("position").is_none());
+        assert!(v.get("author").is_none());
+
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, DocumentCommand::RemoveAnnotation { .. }));
+    }
+
+    #[test]
+    fn add_annotation_kind_defaults_to_point_when_absent() {
+        // `kind` is #[serde(default)] for forward-compat; absent => point.
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"p","position":[0.0,0.0],"author":"a"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation { kind, .. } => {
+                assert_eq!(kind, crate::scene::AnnotationKind::Point);
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    fn add_annotation_cmd(ds: &str, id: &str, position: [f64; 2], author: &str) -> DocumentCommand {
+        DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId(ds.into()),
+            id: id.into(),
+            position,
+            author: author.into(),
+            kind: crate::scene::AnnotationKind::Point,
+        }
+    }
+
+    #[test]
+    fn document_state_add_annotation_inserts_keyed_by_dataset() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].id, "p1");
+        assert_eq!(pins[0].position, [1.0, 2.0]);
+        assert_eq!(pins[0].author, "alice");
+    }
+
+    #[test]
+    fn document_state_two_pins_same_dataset_are_independent() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(add_annotation_cmd("wds-1", "p2", [9.0, 9.0], "alice"));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 2);
+        assert_eq!(pins[0].id, "p1");
+        assert_eq!(pins[1].id, "p2");
+    }
+
+    #[test]
+    fn document_state_add_annotation_dedups_by_id_last_write_wins() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        // Re-apply the same id with a new position (e.g. a replayed/duplicated
+        // command): must replace in place, not append.
+        doc.apply(add_annotation_cmd("wds-1", "p1", [5.0, 6.0], "alice"));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position, [5.0, 6.0]);
+    }
+
+    #[test]
+    fn document_state_remove_annotation_by_id() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(add_annotation_cmd("wds-1", "p2", [3.0, 4.0], "alice"));
+        doc.apply(DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "p1".into(),
+        });
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].id, "p2");
+    }
+
+    #[test]
+    fn document_state_remove_last_annotation_drops_dataset_entry() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "p1".into(),
+        });
+        assert!(!doc.annotations.contains_key(&DatasetId("wds-1".into())));
+    }
+
+    #[test]
+    fn document_state_remove_unknown_annotation_is_noop() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        // Unknown id and unknown dataset must both be harmless no-ops.
+        doc.apply(DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "does-not-exist".into(),
+        });
+        doc.apply(DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-other".into()),
+            id: "p1".into(),
+        });
+        assert_eq!(doc.annotations[&DatasetId("wds-1".into())].len(), 1);
+    }
+
+    #[test]
+    fn annotations_are_scoped_per_dataset() {
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(add_annotation_cmd("wds-2", "p2", [3.0, 4.0], "bob"));
+        assert_eq!(doc.annotations[&DatasetId("wds-1".into())].len(), 1);
+        assert_eq!(doc.annotations[&DatasetId("wds-2".into())].len(), 1);
+        // Removing from one dataset leaves the other untouched.
+        doc.apply(DocumentCommand::RemoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "p1".into(),
+        });
+        assert!(!doc.annotations.contains_key(&DatasetId("wds-1".into())));
+        assert_eq!(doc.annotations[&DatasetId("wds-2".into())].len(), 1);
+    }
+
+    #[test]
+    fn remove_dataset_drops_its_annotations() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(add_annotation_cmd("ds1", "p1", [1.0, 2.0], "alice").into());
+        assert_eq!(
+            scene.document.annotations[&DatasetId("ds1".into())].len(),
+            1
+        );
+
+        scene.apply(
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("ds1".into()),
+            }
+            .into(),
+        );
+        assert!(
+            !scene
+                .document
+                .annotations
+                .contains_key(&DatasetId("ds1".into()))
+        );
+    }
+
+    #[test]
+    fn add_and_remove_annotation_bump_only_annotation_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let baseline = scene.epochs.clone();
+        assert_eq!(baseline.annotation, 0);
+
+        scene.apply(add_annotation_cmd("ds1", "p1", [1.0, 2.0], "alice").into());
+        assert_eq!(scene.epochs.annotation, 1);
+        // Adding a pin is not a content/layout/view/selection/asset change.
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+        assert_eq!(scene.epochs.asset, baseline.asset);
+
+        scene.apply(
+            DocumentCommand::RemoveAnnotation {
+                dataset_id: DatasetId("ds1".into()),
+                id: "p1".into(),
+            }
+            .into(),
+        );
+        assert_eq!(scene.epochs.annotation, 2);
+    }
+
+    #[test]
+    fn snapshot_document_annotations_shape_matches_wire_contract() {
+        // The snapshot ships `DocumentState` whole under `document`, so its
+        // serialized shape IS `snapshot.document.annotations`. Assert the
+        // documented nested shape: { "<dataset_id>": [ {id,position,author,kind} ] }.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [10.0, 20.0], "alice"));
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        let arr = &v["annotations"]["wds-1"];
+        assert!(arr.is_array());
+        assert_eq!(arr[0]["id"], "p1");
+        assert_eq!(arr[0]["position"][0], 10.0);
+        assert_eq!(arr[0]["position"][1], 20.0);
+        assert_eq!(arr[0]["author"], "alice");
+        assert_eq!(arr[0]["kind"], "point");
+    }
+
+    #[test]
+    fn document_state_without_annotations_field_deserializes() {
+        // Older persisted snapshots predate the field; #[serde(default)]
+        // must let them load with an empty annotations map.
+        let json = r#"{"manifests":{}}"#;
+        let doc: crate::scene::DocumentState = serde_json::from_str(json).unwrap();
+        assert!(doc.annotations.is_empty());
+    }
+
+    #[test]
+    fn annotation_survives_document_serde_round_trip() {
+        // Stand-in for the durability path: DocumentState is what gets
+        // blob-serialized to document_json and restored on workspace reload.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.5, 2.5], "alice"));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pins = &restored.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].id, "p1");
+        assert_eq!(pins[0].position, [1.5, 2.5]);
+        assert_eq!(pins[0].author, "alice");
     }
 
     #[test]
