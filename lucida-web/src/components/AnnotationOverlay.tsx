@@ -22,6 +22,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, ty
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
+import { ThreadPopover } from "./ThreadPopover.tsx";
 
 /** One comment in a pin's thread (as returned nested in `annotations()`). */
 export interface Comment {
@@ -117,36 +118,18 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-/** Stable client-supplied id so the local apply and peers' broadcast converge. */
-function newId(prefix: string): string {
-  return globalThis.crypto?.randomUUID
-    ? globalThis.crypto.randomUUID()
-    : `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
 export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, myId, sendCommand, onDocumentChanged, onViewportChanged }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
   const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  // Which pin's thread popover is open (by pin id), or null when none.
+  // Which pin's thread popover is open (by pin id), or null when none. The
+  // overlay owns only WHICH pin is open and where it sits on screen; the thread
+  // UI itself (comment list, add box, edit/remove, delete+confirm) lives in the
+  // shared <ThreadPopover>, which owns its own ephemeral draft/edit/confirm state
+  // and is remounted (keyed by pin id) whenever the open pin changes.
   const [openPinId, setOpenPinId] = useState<string | null>(null);
-  // Draft comment text, keyed by pin id, so each open thread keeps its own.
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  // The comment currently being edited (by comment id), or null when none, plus
-  // its in-flight draft text. Only one comment edits at a time — opening another
-  // (or saving/cancelling) replaces it.
-  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
-  // The pin whose delete is awaiting confirmation (by pin id), or null when none.
-  // Mirrors the in-place `editingCommentId` pattern: a small piece of local UI
-  // state — NOT a modal — that turns the popover's Delete trigger into a two-step
-  // Confirm/Cancel. Only one pin confirms at a time; opening one pin's confirm or
-  // resolving it (Confirm/Cancel) clears any other. Deletion is intentionally
-  // deliberate: nothing is emitted until Confirm, so a pin and its whole comment
-  // thread can never be destroyed by a single click.
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
 
   // The live pin drag, if any. A ref (not state) so the per-pointer handlers
   // mutate it without re-rendering mid-drag; the RAF tick keeps repositioning
@@ -174,25 +157,15 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     }
   }, [annotations, openPinId]);
 
-  // A pending delete confirm only ever lives inside an open thread. If that
-  // thread is no longer the open one (closed, switched to another pin, or its
-  // pin vanished), drop the confirm so a stale Confirm control can never linger
-  // — re-opening the pin always starts back at the non-confirming Delete trigger.
-  useEffect(() => {
-    if (confirmingDeleteId !== null && confirmingDeleteId !== openPinId) {
-      setConfirmingDeleteId(null);
-    }
-  }, [openPinId, confirmingDeleteId]);
-
   useEffect(() => {
     setOpenPinId(null);
   }, [datasetId]);
 
-  // No separate effect is needed to clear a stale edit: the edit field only
-  // renders for a comment still present in the open thread's `comments` (we map
-  // over them), so a removed/closed comment's field simply stops rendering, and
-  // `startEdit` always re-seeds `editDraft` from the comment's current text — so
-  // a dangling `editingCommentId` can never surface old text over another pin.
+  // A pending delete confirm and an in-flight edit live INSIDE <ThreadPopover>,
+  // which the host remounts (keyed by pin id) whenever the open pin changes — so
+  // closing the thread, switching pins, or a pin vanishing all drop that
+  // transient state automatically: re-opening a pin always starts back at the
+  // plain Delete trigger with an empty edit/draft. No effect is needed here.
 
   // Reposition markers every frame from world space using the live camera,
   // exactly like PeerCursors. Read the latest pins via a ref so the loop
@@ -268,125 +241,6 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, [wasmSceneRef, canvas]);
-
-  const addComment = (pinId: string) => {
-    const text = (drafts[pinId] ?? "").trim();
-    if (!text) return;
-    const scene = wasmSceneRef.current;
-    if (!scene) return;
-    // Apply locally AND send (mirrors every other doc command): the sender is
-    // excluded from the server's rebroadcast, so the local apply is what shows
-    // the comment in the author's own thread. The client-supplied id makes the
-    // local apply and the peers' broadcast converge on the same comment.
-    applyDocumentCommand(
-      scene,
-      {
-        type: "add_comment",
-        dataset_id: datasetId,
-        annotation_id: pinId,
-        id: newId("comment"),
-        author: String(myId),
-        text,
-      },
-      sendCommand,
-    );
-    setDrafts((d) => ({ ...d, [pinId]: "" }));
-    onDocumentChanged();
-  };
-
-  const removeComment = (pinId: string, commentId: string) => {
-    const scene = wasmSceneRef.current;
-    if (!scene) return;
-    applyDocumentCommand(
-      scene,
-      {
-        type: "remove_comment",
-        dataset_id: datasetId,
-        annotation_id: pinId,
-        id: commentId,
-      },
-      sendCommand,
-    );
-    onDocumentChanged();
-  };
-
-  // Begin editing a comment: seed the field with its current text. Mirrors how
-  // a draft is opened for a new comment, but keyed to the comment being edited.
-  const startEdit = (comment: Comment) => {
-    setEditingCommentId(comment.id);
-    setEditDraft(comment.text);
-  };
-
-  const cancelEdit = () => {
-    setEditingCommentId(null);
-    setEditDraft("");
-  };
-
-  // Commit an edit: trim, reject empty (emit nothing — mirrors addComment), and
-  // otherwise apply-locally-and-send a single edit_comment for this comment id.
-  const saveEdit = (pinId: string, commentId: string) => {
-    const text = editDraft.trim();
-    if (!text) {
-      // An empty/whitespace edit is a no-op: leave edit mode without emitting,
-      // so a cleared field never wipes the comment.
-      cancelEdit();
-      return;
-    }
-    const scene = wasmSceneRef.current;
-    if (!scene) return;
-    applyDocumentCommand(
-      scene,
-      {
-        type: "edit_comment",
-        dataset_id: datasetId,
-        annotation_id: pinId,
-        id: commentId,
-        text,
-      },
-      sendCommand,
-    );
-    cancelEdit();
-    onDocumentChanged();
-  };
-
-  // --- Delete a pin (remove_annotation), two-step + author-only ---------------
-  // Deletion is deliberate: the Delete trigger only arms the confirm (emits
-  // nothing); Confirm is the single point that emits remove_annotation, which
-  // cascades the pin's whole comment thread on apply. Cancel just disarms.
-
-  // Step 1: arm the confirm for this pin. Emits nothing — a single click can no
-  // longer destroy a pin. Closing any in-flight comment edit keeps the popover
-  // showing exactly one active affordance at a time.
-  const requestDeletePin = (pinId: string) => {
-    cancelEdit();
-    setConfirmingDeleteId(pinId);
-  };
-
-  // Step 2a (Cancel): disarm without emitting; the pin and its thread are intact.
-  const cancelDeletePin = () => {
-    setConfirmingDeleteId(null);
-  };
-
-  // Step 2b (Confirm): emit exactly one remove_annotation for this pin via the
-  // apply-locally-and-send seam (the local apply removes it from the author's own
-  // view; the client-supplied id is the pin's own, so peers converge). The pin's
-  // disappearance then closes the popover and clears the confirm via the effects
-  // above, so we don't need to reset openPinId/confirmingDeleteId by hand.
-  const confirmDeletePin = (pinId: string) => {
-    const scene = wasmSceneRef.current;
-    if (!scene) {
-      // No scene to apply against: disarm rather than leave a dangling confirm.
-      setConfirmingDeleteId(null);
-      return;
-    }
-    applyDocumentCommand(
-      scene,
-      { type: "remove_annotation", dataset_id: datasetId, id: pinId },
-      sendCommand,
-    );
-    setConfirmingDeleteId(null);
-    onDocumentChanged();
-  };
 
   /** Convert a pointer event to 2D world coords — the inverse camera projection,
    * identical to SliceViewer's `eventToWorld` (world = (screenPx − half)/zoom +
@@ -753,321 +607,25 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                 {comments.length}
               </div>
             )}
-            {/* Thread popover: the flat, ordered comment list plus an add box.
-                Anchored just below-right of the pin. Because it lives inside
-                this pin's wrapper, lifting the wrapper's z-index when the thread
-                is open (above) carries the popover above every other marker. */}
+            {/* Thread popover: the flat, ordered comment list plus an add box,
+                edit/remove, and delete+confirm — all in the shared
+                <ThreadPopover>, the ONE place this UI lives (2D and 3D). Anchored
+                just below-right of the pin; because it's a child of this pin's
+                wrapper, lifting the wrapper's z-index when open (above) carries
+                the popover above every other marker. Keyed by pin id so its
+                ephemeral draft/edit/confirm state resets when the open pin
+                switches. */}
             {isOpen && (
-              <div
-                data-testid={`annot-thread-${pin.id}`}
-                style={{
-                  position: "absolute",
-                  top: 10,
-                  left: 10,
-                  width: 240,
-                  maxHeight: 280,
-                  display: "flex",
-                  flexDirection: "column",
-                  background: "rgba(22,27,34,0.97)",
-                  color: "#e6edf3",
-                  border: "1px solid #30363d",
-                  borderRadius: 8,
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-                  fontSize: 12,
-                  pointerEvents: "auto",
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    padding: "6px 8px",
-                    borderBottom: "1px solid #30363d",
-                    fontWeight: 600,
-                  }}
-                >
-                  <span>
-                    Thread{comments.length > 0 ? ` (${comments.length})` : ""}
-                  </span>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {/* Delete trigger — author-only. Activating it arms the
-                        confirm below (it does NOT emit), so a pin and its whole
-                        thread can never be removed in one click. A peer's pin
-                        renders no pin-delete-* control at all. */}
-                    {mine && (
-                      <button
-                        data-testid={`pin-delete-${pin.id}`}
-                        onClick={() => requestDeletePin(pin.id)}
-                        title="Delete pin"
-                        aria-label="Delete pin"
-                        style={{
-                          background: "none",
-                          border: "none",
-                          color: "#f85149",
-                          cursor: "pointer",
-                          fontSize: 12,
-                          lineHeight: 1,
-                          padding: 0,
-                          fontWeight: 600,
-                        }}
-                      >
-                        Delete
-                      </button>
-                    )}
-                    <button
-                      onClick={() => setOpenPinId(null)}
-                      aria-label="Close thread"
-                      style={{
-                        background: "none",
-                        border: "none",
-                        color: "#8b949e",
-                        cursor: "pointer",
-                        fontSize: 14,
-                        lineHeight: 1,
-                        padding: 0,
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                </div>
-                {/* Confirm strip — only when this pin's delete is armed (and only
-                    ever for the author, since only the author can arm it). Names
-                    what is at stake: the pin AND its `comments.length` comments,
-                    so the user sees the blast radius before committing. Confirm is
-                    the single emit point (remove_annotation); Cancel disarms and
-                    emits nothing, returning to the plain Delete trigger. */}
-                {mine && confirmingDeleteId === pin.id && (
-                  <div
-                    role="alertdialog"
-                    aria-label={`Delete this pin and its ${comments.length} comment${comments.length === 1 ? "" : "s"}?`}
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 6,
-                      padding: "8px",
-                      borderBottom: "1px solid #30363d",
-                      background: "rgba(248,81,73,0.08)",
-                    }}
-                  >
-                    <span style={{ color: "#e6edf3" }}>
-                      Delete this pin and its {comments.length} comment
-                      {comments.length === 1 ? "" : "s"}? This can&rsquo;t be undone.
-                    </span>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        data-testid={`pin-delete-confirm-${pin.id}`}
-                        onClick={() => confirmDeletePin(pin.id)}
-                        aria-label={`Confirm delete pin and ${comments.length} comment${comments.length === 1 ? "" : "s"}`}
-                        style={{
-                          flex: 1,
-                          padding: "4px 8px",
-                          fontSize: 12,
-                          fontWeight: 600,
-                          cursor: "pointer",
-                          color: "white",
-                          background: "#da3633",
-                          border: "1px solid #f85149",
-                          borderRadius: 4,
-                        }}
-                      >
-                        Delete {comments.length} comment{comments.length === 1 ? "" : "s"}
-                      </button>
-                      <button
-                        data-testid={`pin-delete-cancel-${pin.id}`}
-                        onClick={cancelDeletePin}
-                        aria-label="Cancel delete"
-                        style={{
-                          flex: 1,
-                          padding: "4px 8px",
-                          fontSize: 12,
-                          cursor: "pointer",
-                          color: "#e6edf3",
-                          background: "transparent",
-                          border: "1px solid #30363d",
-                          borderRadius: 4,
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                )}
-                <div style={{ overflowY: "auto", padding: "4px 0", flex: 1 }}>
-                  {comments.length === 0 ? (
-                    <div style={{ padding: "8px", color: "#8b949e" }}>
-                      No comments yet. Start the discussion.
-                    </div>
-                  ) : (
-                    comments.map((c) => {
-                      const mineComment = c.author === String(myId);
-                      const isEditing = mineComment && editingCommentId === c.id;
-                      return (
-                        <div
-                          key={c.id}
-                          style={{
-                            padding: "4px 8px",
-                            display: "flex",
-                            gap: 6,
-                            alignItems: "baseline",
-                          }}
-                        >
-                          <span style={{ color: "#58a6ff", fontWeight: 600, whiteSpace: "nowrap" }}>
-                            {mineComment ? "you" : c.author}
-                          </span>
-                          {isEditing ? (
-                            // Edit mode: a field seeded with the current text.
-                            // Enter saves (trimmed; empty rejected), Escape and
-                            // blur cancel — mirroring the rename/draft patterns.
-                            <>
-                              <input
-                                type="text"
-                                data-testid={`comment-edit-input-${c.id}`}
-                                value={editDraft}
-                                autoFocus
-                                aria-label="Edit comment"
-                                onChange={(e) => setEditDraft(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    saveEdit(pin.id, c.id);
-                                  } else if (e.key === "Escape") {
-                                    e.preventDefault();
-                                    cancelEdit();
-                                  }
-                                }}
-                                onBlur={(e) => {
-                                  // Blur cancels the edit — UNLESS focus is
-                                  // moving to this comment's save control, in
-                                  // which case let the save's click commit it.
-                                  const next = e.relatedTarget as HTMLElement | null;
-                                  if (next?.dataset?.testid === `comment-edit-save-${c.id}`) {
-                                    return;
-                                  }
-                                  cancelEdit();
-                                }}
-                                style={{
-                                  flex: 1,
-                                  minWidth: 0,
-                                  padding: "2px 4px",
-                                  fontSize: 12,
-                                  background: "#0d1117",
-                                  color: "#e6edf3",
-                                  border: "1px solid #30363d",
-                                  borderRadius: 4,
-                                }}
-                              />
-                              <button
-                                data-testid={`comment-edit-save-${c.id}`}
-                                // preventDefault on mousedown keeps focus on the
-                                // input so its onBlur cancel doesn't fire first
-                                // and tear the field down before the click saves;
-                                // the actual save runs on click (so a plain
-                                // click — real or synthetic — commits once).
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => saveEdit(pin.id, c.id)}
-                                title="Save comment"
-                                aria-label="Save comment"
-                                style={{
-                                  background: "none",
-                                  border: "none",
-                                  color: "#3fb950",
-                                  cursor: "pointer",
-                                  fontSize: 12,
-                                  lineHeight: 1,
-                                  padding: 0,
-                                }}
-                              >
-                                ✓
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <span style={{ wordBreak: "break-word", flex: 1 }}>{c.text}</span>
-                              {mineComment && (
-                                <>
-                                  <button
-                                    data-testid={`comment-edit-${c.id}`}
-                                    onClick={() => startEdit(c)}
-                                    title="Edit comment"
-                                    aria-label="Edit comment"
-                                    style={{
-                                      background: "none",
-                                      border: "none",
-                                      color: "#8b949e",
-                                      cursor: "pointer",
-                                      fontSize: 12,
-                                      lineHeight: 1,
-                                      padding: 0,
-                                    }}
-                                  >
-                                    ✎
-                                  </button>
-                                  <button
-                                    onClick={() => removeComment(pin.id, c.id)}
-                                    title="Remove comment"
-                                    aria-label="Remove comment"
-                                    style={{
-                                      background: "none",
-                                      border: "none",
-                                      color: "#8b949e",
-                                      cursor: "pointer",
-                                      fontSize: 12,
-                                      lineHeight: 1,
-                                      padding: 0,
-                                    }}
-                                  >
-                                    ×
-                                  </button>
-                                </>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-                <div style={{ display: "flex", gap: 4, padding: 6, borderTop: "1px solid #30363d" }}>
-                  <input
-                    type="text"
-                    value={drafts[pin.id] ?? ""}
-                    placeholder="Add a comment…"
-                    onChange={(e) =>
-                      setDrafts((d) => ({ ...d, [pin.id]: e.target.value }))
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        addComment(pin.id);
-                      }
-                    }}
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      padding: "4px 6px",
-                      fontSize: 12,
-                      background: "#0d1117",
-                      color: "#e6edf3",
-                      border: "1px solid #30363d",
-                      borderRadius: 4,
-                    }}
-                  />
-                  <button
-                    onClick={() => addComment(pin.id)}
-                    disabled={!(drafts[pin.id] ?? "").trim()}
-                    style={{
-                      padding: "4px 8px",
-                      fontSize: 12,
-                      cursor: (drafts[pin.id] ?? "").trim() ? "pointer" : "default",
-                    }}
-                  >
-                    Send
-                  </button>
-                </div>
-              </div>
+              <ThreadPopover
+                key={pin.id}
+                pin={pin}
+                datasetId={datasetId}
+                myId={myId}
+                wasmSceneRef={wasmSceneRef}
+                sendCommand={sendCommand}
+                onDocumentChanged={onDocumentChanged}
+                onClose={() => setOpenPinId(null)}
+              />
             )}
           </div>
         );
