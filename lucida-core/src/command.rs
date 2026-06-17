@@ -2114,9 +2114,12 @@ mod tests {
     }
 
     #[test]
-    fn move_annotation_preserves_a_lines_end_vertex() {
-        // MoveAnnotation slides the anchor (position/z) and must NOT clobber the
-        // far vertex `end` (or kind) — the wire carries only position + z.
+    fn move_annotation_translates_a_lines_end_vertex_rigidly() {
+        // MoveAnnotation moves the WHOLE line: the anchor goes to position/z and
+        // the far vertex `end` rides along by the same delta, so length/angle are
+        // preserved (not a stretch/rotate). The wire still carries only
+        // position + z, and `kind` is untouched. Anchor (0,0) -> (2,3) is a
+        // +2,+3 delta, so end (10,10) -> (12,13).
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_shape_cmd(
             "wds-1",
@@ -2135,7 +2138,7 @@ mod tests {
         assert_eq!(line.position, [2.0, 3.0]);
         assert_eq!(line.z, 5.0);
         assert_eq!(line.kind, crate::scene::AnnotationKind::Line);
-        assert_eq!(line.end, Some([10.0, 10.0]));
+        assert_eq!(line.end, Some([12.0, 13.0]));
     }
 
     fn add_annotation_cmd(ds: &str, id: &str, position: [f64; 2], author: &str) -> DocumentCommand {
@@ -2614,6 +2617,88 @@ mod tests {
         assert_eq!(pin.comments[0].text, "look here");
     }
 
+    #[test]
+    fn annotation_set_position_keeps_point_end_none() {
+        // A point has no second vertex: moving it must never invent an `end`.
+        let mut pin = point_pin("pin-1");
+        pin.set_position([5.0, 6.0], 2.0);
+        assert_eq!(pin.position, [5.0, 6.0]);
+        assert_eq!(pin.z, 2.0);
+        assert_eq!(pin.end, None, "moving a point must not synthesize an end");
+    }
+
+    #[test]
+    fn annotation_set_position_translates_line_end_by_the_anchor_delta() {
+        // Anchor (1,1) -> (11,11) is a +10,+10 delta; the far endpoint must ride
+        // along by the same delta so the line moves as a whole — same length and
+        // angle, not a stretch/rotate about the far end.
+        let mut line = shape_pin(
+            "ln",
+            [1.0, 1.0],
+            Some([3.0, 3.0]),
+            crate::scene::AnnotationKind::Line,
+        );
+        line.set_position([11.0, 11.0], 0.0);
+        assert_eq!(line.position, [11.0, 11.0]);
+        assert_eq!(line.end, Some([13.0, 13.0]));
+    }
+
+    #[test]
+    fn annotation_set_position_translates_box_opposite_corner_by_the_delta() {
+        // Both corners shift by the same delta, so the box keeps its size/shape
+        // (only its location changes). Anchor (1,1) -> (4,5) is a +3,+4 delta;
+        // the opposite corner (5,5) -> (8,9).
+        let mut r#box = shape_pin(
+            "bx",
+            [1.0, 1.0],
+            Some([5.0, 5.0]),
+            crate::scene::AnnotationKind::Box,
+        );
+        r#box.set_position([4.0, 5.0], 0.0);
+        assert_eq!(r#box.position, [4.0, 5.0]);
+        assert_eq!(r#box.end, Some([8.0, 9.0]));
+    }
+
+    #[test]
+    fn annotation_set_position_preserves_line_length_and_angle() {
+        // Stronger than the point-check: the vector from anchor to far endpoint
+        // is identical before and after an arbitrary (non-diagonal, negative)
+        // move, which is exactly "length + angle preserved".
+        let mut line = shape_pin(
+            "ln",
+            [2.0, 9.0],
+            Some([6.0, 1.0]),
+            crate::scene::AnnotationKind::Line,
+        );
+        let before = [
+            line.end.unwrap()[0] - line.position[0],
+            line.end.unwrap()[1] - line.position[1],
+        ];
+        line.set_position([-3.5, 4.0], 7.0);
+        let after = [
+            line.end.unwrap()[0] - line.position[0],
+            line.end.unwrap()[1] - line.position[1],
+        ];
+        assert_eq!(before, after, "anchor->end vector must be invariant");
+        assert_eq!(line.position, [-3.5, 4.0]);
+        assert_eq!(line.z, 7.0);
+    }
+
+    #[test]
+    fn annotation_set_position_zero_delta_leaves_shape_unchanged() {
+        // Moving a line to its current anchor (a zero delta — e.g. a replayed
+        // command) must be a no-op on the far endpoint, not a drift.
+        let mut line = shape_pin(
+            "ln",
+            [4.0, 4.0],
+            Some([10.0, 2.0]),
+            crate::scene::AnnotationKind::Line,
+        );
+        line.set_position([4.0, 4.0], 0.0);
+        assert_eq!(line.position, [4.0, 4.0]);
+        assert_eq!(line.end, Some([10.0, 2.0]));
+    }
+
     // --- DocumentState delegation ---
 
     #[test]
@@ -2721,6 +2806,78 @@ mod tests {
         let pin = &restored.annotations[&DatasetId("wds-1".into())][0];
         assert_eq!(pin.position, [42.5, -8.25]);
         assert_eq!(pin.z, 16.0);
+    }
+
+    #[test]
+    fn document_state_move_line_translates_whole_shape() {
+        // Full apply path (the wire path peers use): adding a line then moving
+        // its anchor 1,1 -> 11,11 must carry the far endpoint 3,3 -> 13,13.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "ln",
+            [1.0, 1.0],
+            [3.0, 3.0],
+            crate::scene::AnnotationKind::Line,
+        ));
+        doc.apply(move_annotation_cmd("wds-1", "ln", [11.0, 11.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [11.0, 11.0]);
+        assert_eq!(pin.end, Some([13.0, 13.0]));
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Line);
+    }
+
+    #[test]
+    fn document_state_move_box_translates_opposite_corner() {
+        // A box shares the same reposition owner, so it too moves as a whole:
+        // anchor 0,0 -> 2,3 carries the opposite corner 4,4 -> 6,7.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(move_annotation_cmd("wds-1", "bx", [2.0, 3.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [2.0, 3.0]);
+        assert_eq!(pin.end, Some([6.0, 7.0]));
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Box);
+    }
+
+    #[test]
+    fn moved_line_whole_shape_survives_document_serde_round_trip() {
+        // Persistence of a whole-line move: both the moved anchor AND the
+        // rigidly-carried far endpoint must restore after a (simulated) restart.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "ln",
+            [1.0, 1.0],
+            [3.0, 3.0],
+            crate::scene::AnnotationKind::Line,
+        ));
+        doc.apply(move_annotation_cmd("wds-1", "ln", [11.0, 11.0], 0.0));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pin = &restored.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [11.0, 11.0]);
+        assert_eq!(pin.end, Some([13.0, 13.0]));
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Line);
+    }
+
+    #[test]
+    fn document_state_move_point_keeps_end_null() {
+        // Regression guard on the wire path: moving a point never invents an
+        // `end` (it stays null), so a point still moves as a plain point.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        doc.apply(move_annotation_cmd("wds-1", "p1", [7.0, 8.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [7.0, 8.0]);
+        assert_eq!(pin.end, None);
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
     }
 
     #[test]

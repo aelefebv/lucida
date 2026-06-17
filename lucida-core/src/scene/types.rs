@@ -307,18 +307,40 @@ impl Annotation {
         self.comments.len() != before
     }
 
-    /// Reposition this pin: overwrite its in-plane `position` and depth `z` in
-    /// place. Every other field — `id`, `author`, `kind`, the second vertex
-    /// `end`, and the comment thread — is left untouched: a move repositions the
-    /// existing pin's anchor, it does not replace it. (For a line/box this slides
-    /// the anchor vertex while preserving the far vertex; editing individual
-    /// vertices is a later slice.) This is the single owner of the reposition
-    /// mutation, so it is unit-testable on a bare `Annotation`; `DocumentState`
-    /// only locates the pin and delegates here. Idempotent by construction (an
-    /// overwrite to the same value is a no-op-equivalent).
+    /// Reposition this pin, moving the **whole shape** rigidly.
+    ///
+    /// The given `position`/`z` become the anchor vertex, and any second vertex
+    /// (`end` — a line's far endpoint or a box's opposite corner) is translated
+    /// by the *same* in-plane delta the anchor moved, so a line keeps its
+    /// length/angle and a box keeps its size: dragging slides the shape, it does
+    /// not stretch or rotate it. A `Point` (`end == None`) has no second vertex
+    /// and is simply repositioned.
+    ///
+    /// The delta is `position − self.position` and MUST be read **before**
+    /// `self.position` is overwritten — taking it after would always be zero,
+    /// silently reverting this to the deform-the-shape behaviour. Depth `z` is
+    /// shared by both vertices (per-vertex depth is a later slice), so it is a
+    /// plain overwrite, not a delta.
+    ///
+    /// Every other field — `id`, `author`, `kind`, and the comment thread — is
+    /// left untouched: a move repositions the existing pin, it does not replace
+    /// it (and editing an *individual* vertex / resizing is a later slice). This
+    /// is the single owner of the reposition mutation, so it is unit-testable on
+    /// a bare `Annotation`; `DocumentState` only locates the pin and delegates
+    /// here. Idempotent by construction (a move by a zero delta — i.e. to the
+    /// same anchor/z — leaves the shape unchanged).
     pub fn set_position(&mut self, position: [f64; 2], z: f64) {
+        // Delta of the anchor move, captured BEFORE overwriting `position`.
+        let [dx, dy] = [position[0] - self.position[0], position[1] - self.position[1]];
         self.position = position;
         self.z = z;
+        // Carry the second vertex rigidly so the whole line/box translates
+        // (length/angle and size preserved). A point has no `end`, so this is
+        // a no-op for it.
+        if let Some(end) = self.end.as_mut() {
+            end[0] += dx;
+            end[1] += dy;
+        }
     }
 
     /// Overwrite an existing comment's `text` by `id`. Returns `true` if a
@@ -431,14 +453,16 @@ impl DocumentState {
             .find(|a| a.id == annotation_id)
     }
 
-    /// Reposition the pin `id` under `dataset_id`, overwriting its `position`
-    /// and depth `z`.
+    /// Reposition the pin `id` under `dataset_id` to anchor `position`/`z`,
+    /// moving the whole shape rigidly (a line/box keeps its length/angle and
+    /// size; see [`Annotation::set_position`]).
     ///
     /// Pure delegation: locate the pin via the shared [`Self::annotation_mut`]
-    /// lookup, then hand the mutation to [`Annotation::set_position`]. Moving a
-    /// missing pin or dataset is a clean no-op — it must NOT create a phantom pin
-    /// (reposition acts on an existing pin, never a way to mint one). The pin's
-    /// author, kind, and comment thread are preserved.
+    /// lookup, then hand the mutation to [`Annotation::set_position`] (the single
+    /// owner of the reposition geometry, so the same whole-shape move applies in
+    /// 2D and 3D). Moving a missing pin or dataset is a clean no-op — it must NOT
+    /// create a phantom pin (reposition acts on an existing pin, never a way to
+    /// mint one). The pin's author, kind, and comment thread are preserved.
     pub fn move_annotation(
         &mut self,
         dataset_id: &DatasetId,
