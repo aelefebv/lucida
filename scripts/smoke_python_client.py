@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from lucida import LucidaClient
+from lucida import LucidaClient, LucidaError
 
 
 DEFAULT_DATASET = Path(
@@ -59,6 +59,47 @@ def main() -> int:
     dataset_id = opened["workspace_dataset_id"]
     datasets = workspace.datasets.list(timeout=args.timeout)
     info = workspace.datasets.info(dataset_id, timeout=args.timeout)
+    health = workspace.datasets.health(dataset_id, timeout=args.timeout)
+    if len(health) != 1:
+        raise SystemExit(f"Expected one dataset health record for {dataset_id}, got {len(health)}")
+    if health[0].get("status") != "healthy":
+        raise SystemExit(f"Expected healthy dataset after open, got {health[0].get('status')}")
+
+    missing_path = output_dir / "missing-dataset-does-not-exist.ome.zarr"
+    try:
+        workspace.datasets.open(str(missing_path), timeout=args.timeout)
+    except LucidaError as error:
+        missing_error = {
+            "kind": error.kind,
+            "message": str(error),
+            "diagnostic": error.diagnostic,
+        }
+        diagnostic = error.diagnostic or {}
+        if diagnostic.get("stage") != "backend_open":
+            raise SystemExit(f"Missing dataset failed at unexpected stage: {diagnostic.get('stage')}")
+        if diagnostic.get("kind") not in {"local_path", "missing_object"}:
+            raise SystemExit(f"Missing dataset produced unexpected kind: {diagnostic.get('kind')}")
+    else:
+        raise SystemExit("Missing dataset unexpectedly opened")
+
+    malformed_path = output_dir / "malformed.ome.zarr"
+    malformed_path.mkdir(parents=True, exist_ok=True)
+    (malformed_path / "zarr.json").write_text("{", encoding="utf-8")
+    try:
+        workspace.datasets.open(str(malformed_path), timeout=args.timeout)
+    except LucidaError as error:
+        malformed_error = {
+            "kind": error.kind,
+            "message": str(error),
+            "diagnostic": error.diagnostic,
+        }
+        diagnostic = error.diagnostic or {}
+        if diagnostic.get("stage") != "metadata_import":
+            raise SystemExit(f"Malformed dataset failed at unexpected stage: {diagnostic.get('stage')}")
+        if diagnostic.get("kind") != "malformed_metadata":
+            raise SystemExit(f"Malformed dataset produced unexpected kind: {diagnostic.get('kind')}")
+    else:
+        raise SystemExit("Malformed dataset unexpectedly opened")
 
     view_pan = workspace.view.pan(24.0, -12.0, timeout=args.timeout)
     view_zoom = workspace.view.set_zoom(1.2, timeout=args.timeout)
@@ -85,6 +126,9 @@ def main() -> int:
         "status": status,
         "dataset_count": len(datasets),
         "debug_dataset_count": len(debug.get("datasets", [])),
+        "dataset_health": health,
+        "missing_dataset_error": missing_error,
+        "malformed_dataset_error": malformed_error,
         "view": {
             "pan": view_pan,
             "zoom": view_zoom,

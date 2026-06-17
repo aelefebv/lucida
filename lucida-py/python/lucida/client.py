@@ -30,12 +30,14 @@ class LucidaError(RuntimeError):
         *,
         status: int | None = None,
         body: str | None = None,
+        diagnostic: dict[str, Any] | None = None,
     ):
         super().__init__(message)
         self.kind = kind
         self.message = message
         self.status = status
         self.body = body
+        self.diagnostic = diagnostic
 
     def to_dict(self) -> dict[str, Any]:
         error: dict[str, Any] = {
@@ -44,6 +46,8 @@ class LucidaError(RuntimeError):
         }
         if self.status is not None:
             error["status"] = self.status
+        if self.diagnostic is not None:
+            error["diagnostic"] = self.diagnostic
         return {"error": error}
 
 
@@ -531,6 +535,7 @@ class DatasetsResource:
                 },
             )
             deadline = asyncio.get_running_loop().time() + timeout
+            progress: list[dict[str, Any]] = []
             while True:
                 remaining = max(0.0, deadline - asyncio.get_running_loop().time())
                 if remaining == 0.0:
@@ -540,12 +545,21 @@ class DatasetsResource:
                     )
                 message = await recv_json(ws, remaining)
                 message_type = message.get("type")
+                if message_type == "dataset_open_progress":
+                    if message.get("request_id") != request_id:
+                        continue
+                    diagnostic = message.get("diagnostic")
+                    if isinstance(diagnostic, dict):
+                        progress.append(diagnostic)
+                    continue
                 if message_type == "open_dataset_failed":
                     if message.get("request_id") != request_id:
                         continue
+                    diagnostic = message.get("diagnostic")
                     raise LucidaError(
-                        "dataset_open_failure",
+                        dataset_open_error_kind(diagnostic),
                         f"dataset open failed for {message.get('url')!r}: {message.get('error')}",
+                        diagnostic=diagnostic if isinstance(diagnostic, dict) else None,
                     )
                 if message_type != "open_dataset_succeeded":
                     continue
@@ -555,9 +569,110 @@ class DatasetsResource:
                 manifest = opened.get("manifest") or {}
                 return dataset_open_summary(
                     manifest,
-                    source=source,
+                    source=str(message.get("url") or source),
                     seq=message.get("seq", snapshot.get("seq", 0)),
                     workspace_id=self._workspace.id,
+                    diagnostic=message.get("diagnostic"),
+                    progress=progress,
+                )
+
+    def health(
+        self, dataset: str | None = None, *, timeout: float = 30.0
+    ) -> list[dict[str, Any]]:
+        return run_sync(self.async_health(dataset, timeout=timeout))
+
+    async def async_health(
+        self, dataset: str | None = None, *, timeout: float = 30.0
+    ) -> list[dict[str, Any]]:
+        async with self._workspace._connect_ws() as ws:
+            snapshot = await recv_snapshot(ws, timeout)
+            dataset_id = None
+            if dataset is not None:
+                summaries = dataset_summaries_from_document(snapshot.get("document", {}))
+                dataset_id = resolve_dataset_id(dataset, summaries)
+            request_id = f"py-health-{uuid.uuid4().hex}"
+            await send_json(
+                ws,
+                {
+                    "type": "dataset_health",
+                    "request_id": request_id,
+                    "dataset_id": dataset_id,
+                },
+            )
+            deadline = asyncio.get_running_loop().time() + timeout
+            progress: list[dict[str, Any]] = []
+            while True:
+                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+                if remaining == 0.0:
+                    raise LucidaError(
+                        "rejected_command",
+                        f"timed out waiting for dataset health after {timeout:g}s",
+                    )
+                message = await recv_json(ws, remaining)
+                if (
+                    message.get("type") == "dataset_health"
+                    and message.get("request_id") == request_id
+                ):
+                    datasets = message.get("datasets")
+                    return datasets if isinstance(datasets, list) else []
+
+    def retry(self, dataset: str, *, timeout: float = 300.0) -> dict[str, Any]:
+        return run_sync(self.async_retry(dataset, timeout=timeout))
+
+    async def async_retry(self, dataset: str, *, timeout: float = 300.0) -> dict[str, Any]:
+        async with self._workspace._connect_ws() as ws:
+            snapshot = await recv_snapshot(ws, timeout)
+            summaries = dataset_summaries_from_document(snapshot.get("document", {}))
+            dataset_id = resolve_dataset_id(dataset, summaries)
+            request_id = f"py-retry-{uuid.uuid4().hex}"
+            await send_json(
+                ws,
+                {
+                    "type": "dataset_retry",
+                    "request_id": request_id,
+                    "dataset_id": dataset_id,
+                },
+            )
+            deadline = asyncio.get_running_loop().time() + timeout
+            progress: list[dict[str, Any]] = []
+            while True:
+                remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+                if remaining == 0.0:
+                    raise LucidaError(
+                        "rejected_command",
+                        f"timed out waiting for dataset retry after {timeout:g}s",
+                    )
+                message = await recv_json(ws, remaining)
+                message_type = message.get("type")
+                if message_type == "dataset_open_progress":
+                    if message.get("request_id") != request_id:
+                        continue
+                    diagnostic = message.get("diagnostic")
+                    if isinstance(diagnostic, dict):
+                        progress.append(diagnostic)
+                    continue
+                if message_type == "open_dataset_failed":
+                    if message.get("request_id") != request_id:
+                        continue
+                    diagnostic = message.get("diagnostic")
+                    raise LucidaError(
+                        dataset_open_error_kind(diagnostic),
+                        f"dataset retry failed for {message.get('url')!r}: {message.get('error')}",
+                        diagnostic=diagnostic if isinstance(diagnostic, dict) else None,
+                    )
+                if message_type != "open_dataset_succeeded":
+                    continue
+                if message.get("request_id") != request_id:
+                    continue
+                opened = message.get("opened") or {}
+                manifest = opened.get("manifest") or {}
+                return dataset_open_summary(
+                    manifest,
+                    source=str(message.get("url") or dataset),
+                    seq=message.get("seq", snapshot.get("seq", 0)),
+                    workspace_id=self._workspace.id,
+                    diagnostic=message.get("diagnostic"),
+                    progress=progress,
                 )
 
 
@@ -1053,10 +1168,12 @@ def dataset_open_summary(
     source: str,
     seq: int,
     workspace_id: str,
+    diagnostic: Any = None,
+    progress: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     images = manifest.get("images") or []
     entities = manifest.get("entities") or []
-    return {
+    result = {
         "workspace_id": workspace_id,
         "workspace_dataset_id": manifest.get("dataset_id"),
         "name": manifest.get("name"),
@@ -1065,6 +1182,26 @@ def dataset_open_summary(
         "seq": seq,
         "source": source,
     }
+    if isinstance(diagnostic, dict):
+        result["diagnostic"] = diagnostic
+    if progress:
+        result["progress"] = progress
+    return result
+
+
+def dataset_open_error_kind(diagnostic: Any) -> str:
+    if not isinstance(diagnostic, dict):
+        return "dataset_open_failure"
+    kind = diagnostic.get("kind")
+    if kind == "authorization":
+        return "unauthorized"
+    if kind == "session_closed":
+        return "session_disconnect"
+    if kind in {"local_path", "missing_object", "missing_metadata"}:
+        return "missing_resource"
+    if kind in {"cloud_configuration", "unsupported_scheme"}:
+        return "config"
+    return "dataset_open_failure"
 
 
 def own_presence(snapshot: dict[str, Any]) -> dict[str, Any]:

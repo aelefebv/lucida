@@ -16,7 +16,7 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 
 ## Crate ownership
 
-- [[lucida-store]] — import pipeline, codec abstraction, server-side chunk serving (per the in-flight redesign in PRD #148)
+- [[lucida-store]] — import pipeline, codec abstraction, server-side chunk serving, storage backend routing, and server-private binding seeds
 - [[generated-coarse]] — server-managed derived coarse pyramid levels cached outside source storage
 - [[lucida-proxy]] — historical/legacy pure-compute proxy generation; no I/O, no async
 - [[lucida-protocol]] — wire types: `DatasetOpened`, `FetchSource`, `AssetCatalog`, `AssetMessage`

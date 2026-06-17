@@ -5,7 +5,7 @@
  * When wasmSceneRef and datasetId are provided, also shows Scene Query
  * debug info: epochs, per-entity ViewQueryResult, and last ray pick.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
 import {
   DEBUG_CATEGORIES,
@@ -23,6 +23,7 @@ import type { DatasetState } from "../types.ts";
 import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
 import type { GeneratedStatusCountsByDataset } from "../pipeline/generatedAvailability.ts";
 import type { Session } from "../session.ts";
+import type { DatasetHealthStatus, DatasetSourceHealth } from "../bridge.ts";
 import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
 
@@ -56,7 +57,7 @@ function modeColor(mode: string): string {
   }
 }
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "catalog" | "config" | "logging";
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "health" | "orch" | "catalog" | "config" | "logging";
 
 const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
@@ -135,6 +136,19 @@ function fmtBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)}KB`;
   return `${bytes}B`;
+}
+
+function statusColor(status: DatasetHealthStatus | string | null | undefined): string {
+  switch (status) {
+    case "healthy":
+      return "#4f4";
+    case "degraded":
+      return "#fb4";
+    case "unavailable":
+      return "#f66";
+    default:
+      return "#888";
+  }
 }
 
 /** Truncate a long id to "...lastN" form, leaving short ids untouched. */
@@ -497,8 +511,41 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
   // Catalog tab state
   const [catalogSnap, setCatalogSnap] = useState<CatalogSnap | null>(null);
 
+  // Server-authored dataset health tab state
+  const [datasetHealthSnap, setDatasetHealthSnap] = useState<DatasetSourceHealth[]>([]);
+  const [datasetHealthLoading, setDatasetHealthLoading] = useState(false);
+  const [datasetHealthError, setDatasetHealthError] = useState<string | null>(null);
+  const [datasetHealthUpdatedAt, setDatasetHealthUpdatedAt] = useState<number | null>(null);
+  const datasetHealthRequestSeqRef = useRef(0);
+
   // Render loop snapshot (FPS, dirty flags, throttle, sticky max times)
   const [loopSnap, setLoopSnap] = useState<RenderLoopSnap | null>(null);
+
+  const refreshDatasetHealth = useCallback(() => {
+    const bridge = sessionRef?.current?.bridge ?? null;
+    const seq = ++datasetHealthRequestSeqRef.current;
+    if (!bridge) {
+      setDatasetHealthError("WebSocket session not ready");
+      setDatasetHealthLoading(false);
+      return;
+    }
+    setDatasetHealthLoading(true);
+    setDatasetHealthError(null);
+    bridge.requestDatasetHealth(null)
+      .then((rows) => {
+        if (seq !== datasetHealthRequestSeqRef.current) return;
+        setDatasetHealthSnap(rows);
+        setDatasetHealthUpdatedAt(Date.now());
+      })
+      .catch((e) => {
+        if (seq !== datasetHealthRequestSeqRef.current) return;
+        setDatasetHealthError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (seq !== datasetHealthRequestSeqRef.current) return;
+        setDatasetHealthLoading(false);
+      });
+  }, [sessionRef]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -580,6 +627,19 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     return () => clearInterval(id);
   }, [wasmSceneRef, datasetId, datasets, sessionRef, renderLoopRef]);
 
+  useEffect(() => {
+    if (activeTab !== "health") return;
+    refreshDatasetHealth();
+    const id = setInterval(refreshDatasetHealth, 5000);
+    return () => clearInterval(id);
+  }, [activeTab, refreshDatasetHealth, datasets.size]);
+
+  useEffect(() => {
+    return () => {
+      datasetHealthRequestSeqRef.current += 1;
+    };
+  }, []);
+
   // Ray pick on click
   useEffect(() => {
     if (!lastClickScreen || !wasmSceneRef?.current || !datasetId) return;
@@ -604,6 +664,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "pick", label: "Pick" },
     { id: "planning", label: "Planning" },
     { id: "cache", label: "Cache" },
+    { id: "health", label: "Health" },
     { id: "orch", label: "Orch" },
     { id: "catalog", label: "Catalog" },
     { id: "config", label: "Config" },
@@ -634,6 +695,14 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     if (ms < 500) return { color: "#963", glyph: "◐" };
     return { color: "#444", glyph: "○" };
   })();
+
+  const datasetHealthCounts = datasetHealthSnap.reduce(
+    (acc, row) => {
+      acc[row.status] = (acc[row.status] ?? 0) + 1;
+      return acc;
+    },
+    { healthy: 0, degraded: 0, unavailable: 0 } as Record<DatasetHealthStatus, number>,
+  );
 
   return (
     <div className="debug-panel" style={style}>
@@ -1515,6 +1584,181 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div style={{ color: "#666" }}>Enable debug (D key) and load a dataset</div>
               </div>
             )}
+          </>
+        )}
+
+        {activeTab === "health" && (
+          <>
+            <div className="debug-section">
+              <div className="debug-title">Dataset Health</div>
+              <div className="debug-config-row">
+                <span>
+                  {datasetHealthSnap.length} dataset{datasetHealthSnap.length === 1 ? "" : "s"}
+                </span>
+                <button
+                  className="debug-config-toggle"
+                  onClick={refreshDatasetHealth}
+                  disabled={datasetHealthLoading}
+                >
+                  {datasetHealthLoading ? "Refreshing" : "Refresh"}
+                </button>
+              </div>
+              {datasetHealthUpdatedAt !== null && (
+                <div style={{ color: "#888", fontSize: 10 }}>
+                  updated {new Date(datasetHealthUpdatedAt).toLocaleTimeString()}
+                </div>
+              )}
+              {datasetHealthSnap.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <span style={{ color: statusColor("healthy") }}>
+                    {datasetHealthCounts.healthy} healthy
+                  </span>
+                  {" · "}
+                  <span style={{ color: statusColor("degraded") }}>
+                    {datasetHealthCounts.degraded} degraded
+                  </span>
+                  {" · "}
+                  <span style={{ color: statusColor("unavailable") }}>
+                    {datasetHealthCounts.unavailable} unavailable
+                  </span>
+                </div>
+              )}
+              {datasetHealthError && (
+                <div style={{ color: "#f88", marginTop: 4 }}>
+                  {datasetHealthError}
+                </div>
+              )}
+              {!datasetHealthLoading && !datasetHealthError && datasetHealthSnap.length === 0 && (
+                <div style={{ color: "#666", marginTop: 4 }}>
+                  No dataset health rows yet.
+                </div>
+              )}
+            </div>
+
+            {datasetHealthSnap.map((health) => {
+              const cache = health.source_cache ?? null;
+              const generated = health.generated_coarse;
+              return (
+                <div
+                  key={health.workspace_dataset_id}
+                  className="debug-section"
+                  style={{
+                    background: health.status === "unavailable"
+                      ? "#4a1111"
+                      : health.status === "degraded" ? "#3a2d12" : undefined,
+                  }}
+                >
+                  <div className="debug-title" style={{ color: statusColor(health.status) }}>
+                    {health.name}
+                  </div>
+                  <div style={{ color: "#888", fontSize: 10 }} title={health.workspace_dataset_id}>
+                    {shortId(health.workspace_dataset_id, 28)}
+                  </div>
+                  <div>
+                    status: <span style={{ color: statusColor(health.status) }}>{health.status}</span>
+                    {health.backend && <> · backend: {health.backend}</>}
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <button
+                      className="debug-config-toggle"
+                      onClick={() => {
+                        sessionRef?.current?.bridge.sendDatasetRetry(health.workspace_dataset_id);
+                        window.setTimeout(refreshDatasetHealth, 750);
+                      }}
+                      disabled={datasetHealthLoading}
+                    >
+                      Retry binding
+                    </button>
+                  </div>
+                  {health.source_url && (
+                    <div className="debug-break-anywhere" title={health.source_url}>
+                      source: {health.source_url}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 5 }}>
+                    binding:{" "}
+                    <span style={{ color: statusColor(health.binding.status) }}>
+                      {health.binding.status}
+                    </span>
+                    {health.binding.message && (
+                      <span style={{ color: "#888" }}> ({health.binding.message})</span>
+                    )}
+                  </div>
+
+                  {cache ? (
+                    <div style={{ marginTop: 5 }}>
+                      <div>
+                        source cache: {fmtBytes(cache.current_bytes)} / {fmtBytes(cache.max_bytes)}
+                        {" "}· {cache.used_percent}% · entries {cache.entry_count}
+                      </div>
+                      <div style={{ color: "#888" }}>
+                        hits {cache.hits} · misses {cache.misses} · evictions {cache.evictions}
+                        {cache.backend_errors > 0 && (
+                          <span style={{ color: "#f88" }}> · backend errors {cache.backend_errors}</span>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ color: "#888", marginTop: 5 }}>
+                      source cache: unavailable
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 5 }}>
+                    generated coarse:{" "}
+                    <span style={{ color: statusColor(generated.status) }}>
+                      {generated.status}
+                    </span>
+                    {" "}· levels {generated.level_count}
+                  </div>
+                  <div style={{ color: "#888" }}>
+                    chunks {generated.ready_chunks} ready · {generated.pending_chunks} pending ·{" "}
+                    {generated.failed_chunks} failed · {generated.unavailable_chunks} unavailable
+                  </div>
+                  {generated.message && (
+                    <div style={{ color: "#888" }}>{generated.message}</div>
+                  )}
+                  {generated.cache && (
+                    <div style={{ color: "#888", marginTop: 3 }}>
+                      generated cache: {generated.cache.storage} · {fmtBytes(generated.cache.current_bytes)}
+                      {generated.cache.max_bytes !== undefined && generated.cache.max_bytes !== null && (
+                        <> / {fmtBytes(generated.cache.max_bytes)}</>
+                      )}
+                      {generated.cache.used_percent !== undefined && generated.cache.used_percent !== null && (
+                        <> · {generated.cache.used_percent}%</>
+                      )}
+                      {" "}· evictions {generated.cache.evictions}
+                      {generated.cache.root && (
+                        <div className="debug-break-anywhere" title={generated.cache.root}>
+                          root: {generated.cache.root}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {(generated.recent_failures ?? []).length > 0 && (
+                    <div style={{ marginTop: 3 }}>
+                      {(generated.recent_failures ?? []).map((failure, index) => (
+                        <div key={index} style={{ color: "#f88" }} title={`${failure.image_id} ${failure.key}`}>
+                          generated failure: {failure.status} L{failure.level_index} {shortId(failure.image_id, 18)}
+                          {failure.message && <> · {failure.message}</>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {(health.messages ?? []).length > 0 && (
+                    <div style={{ marginTop: 5 }}>
+                      {(health.messages ?? []).map((message, index) => (
+                        <div key={index} style={{ color: "#fb4" }}>
+                          {message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </>
         )}
 

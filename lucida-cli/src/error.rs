@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[allow(dead_code)]
@@ -68,6 +69,7 @@ impl ErrorKind {
 pub struct CliError {
     pub kind: ErrorKind,
     pub message: String,
+    context: Map<String, Value>,
 }
 
 impl CliError {
@@ -75,6 +77,7 @@ impl CliError {
         Self {
             kind,
             message: message.into(),
+            context: Map::new(),
         }
     }
 
@@ -94,13 +97,21 @@ impl CliError {
         self.kind.exit_code()
     }
 
+    pub fn with_context<T: Serialize>(mut self, key: impl Into<String>, value: T) -> Self {
+        if let Ok(value) = serde_json::to_value(value) {
+            self.context.insert(key.into(), value);
+        }
+        self
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "error": {
-                "kind": self.kind,
-                "message": self.message,
-            }
-        })
+        let mut error = Map::new();
+        error.insert("kind".to_string(), serde_json::json!(self.kind));
+        error.insert("message".to_string(), serde_json::json!(self.message));
+        for (key, value) in &self.context {
+            error.insert(key.clone(), value.clone());
+        }
+        serde_json::json!({ "error": error })
     }
 }
 

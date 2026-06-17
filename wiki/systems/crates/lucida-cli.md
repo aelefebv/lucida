@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-06-07
+modified: 2026-06-10
 ---
 
 # lucida-cli
@@ -43,9 +43,11 @@ Current product commands:
 - `lucida workspace member set-role <email> <viewer|editor|owner> [id-or-name]` — update a member role.
 - `lucida workspace member remove <email> [id-or-name]` — remove an explicit member.
 - `lucida dataset browse [path]` — browse server-visible filesystem roots and directories.
-- `lucida dataset open <path-or-url>` — open a dataset in the selected workspace and wait for completion.
+- `lucida dataset open <path-or-url>` — open a dataset in the selected workspace, wait for completion, and report server-authored progress stages in structured output.
 - `lucida dataset list` — list loaded datasets in the selected workspace.
 - `lucida dataset info <dataset>` — show manifest/image/channel/layout summary for a loaded dataset.
+- `lucida dataset health [dataset]` — show server-authored binding/backend/source-cache pressure and generated-coarse cache/readiness health.
+- `lucida dataset retry <dataset>` — retry rebuilding a loaded workspace dataset's server binding from its persisted source.
 - `lucida dataset remove <dataset>` — remove a loaded workspace dataset.
 - `lucida view pan|zoom|set-zoom|center|slice|z-range|viewport-size` — update the selected durable viewer profile's 2D slice view.
 - `lucida camera mode|rotate|pan|zoom|fly-tick` — update slice/arcball/fly camera state.
@@ -80,13 +82,13 @@ Global visible flags:
 
 ## Browser verification flow
 
-Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for the request-correlated dataset-open result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
+Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for request-correlated dataset-open progress plus the final result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
 
 For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file. To capture a live browser peer instead of the durable profile, use `lucida peer list` to find its client id, then pass `--from-peer <client-id>` to `viewer state`, `viewer screenshot`, or `viewer overview`. Use `viewer adopt --from-peer <client-id>` when the peer's current view should become the durable headless profile state.
 
 ## Smoke workflows
 
-Run `scripts/smoke_lucida_cli.sh` from the repo root against an already-running `lucida-server` to exercise the common CLI client workflow. It uses a temp `LUCIDA_CONFIG_PATH`, creates a throwaway workspace, opens `LUCIDA_SMOKE_DATASET`, runs workspace/dataset/view/layer/channel/debug/plan commands, and validates screenshot/overview PNGs with `scripts/assert_png_nonblank.py`.
+Run `scripts/smoke_lucida_cli.sh` from the repo root against an already-running `lucida-server` to exercise the common CLI client workflow. It uses a temp `LUCIDA_CONFIG_PATH`, creates a throwaway workspace, opens `LUCIDA_SMOKE_DATASET`, checks `dataset health`, verifies structured JSON diagnostics for missing-path and malformed-metadata opens, runs workspace/dataset/view/layer/channel/debug/plan commands, and validates screenshot/overview PNGs with `scripts/assert_png_nonblank.py`.
 
 Required inputs:
 
@@ -99,7 +101,16 @@ Useful overrides:
 - `LUCIDA_SMOKE_OUTPUT_DIR=/path/to/artifacts` — keep JSON and PNG artifacts somewhere specific.
 - `LUCIDA_SMOKE_CAPTURE=0` — skip screenshot/overview when Chrome/Chromium is unavailable.
 
-The matching Python smoke entry point is `uv run --project lucida-py python scripts/smoke_python_client.py`. It creates a throwaway workspace, opens the same dataset, applies view/layer/channel changes through `LucidaClient`, and writes a structured summary artifact.
+The matching Python smoke entry point is `uv run --project lucida-py python scripts/smoke_python_client.py`. It creates a throwaway workspace, opens the same dataset, checks dataset health, asserts structured diagnostics for missing-path and malformed-metadata opens, applies view/layer/channel changes through `LucidaClient`, and writes a structured summary artifact.
+
+For fixture-backed dataset reliability coverage, run:
+
+```bash
+uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
+  --server http://127.0.0.1:9876
+```
+
+That smoke expects the server to see `/Users/austin/local_data/lucida_test_zarrs` by default. It opens every configured fixture present there, checks required dataset-open progress stages, compares CLI/Python health, and records negative diagnostics for missing and malformed sources.
 
 ## Interactions
 
@@ -125,7 +136,7 @@ The matching Python smoke entry point is `uv run --project lucida-py python scri
 ## Gotchas
 
 - **Keychain is opportunistic.** `lucida auth login` stores the approved token in macOS Keychain when available. If Keychain rejects the write or the platform has no supported keychain integration, the CLI falls back to the `0600` config file.
-- **No retry loop yet.** The foundation status/config commands make single HTTP requests. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
+- **No automatic retry loop yet.** The foundation status/config commands make single HTTP requests, and `dataset retry` is an explicit user action for one persisted workspace dataset binding. Later WebSocket session commands should keep failures explicit unless a long-lived session mode is designed.
 - **`peer list` creates a temporary peer.** Opening the diagnostic WebSocket gives the CLI its own client id, so the listing includes the CLI client alongside browser or other live clients.
 - **Admin workspace commands are id-based.** Search can discover ids, but `admin workspace info/archive/restore/owner` intentionally do not reuse member-scoped workspace name resolution.
 - **Negative numeric flags use clap's accepted forms.** The parser accepts `--flag=-2` and the relevant commands enable hyphen values where practical; scripts should prefer equals-style values for clarity.

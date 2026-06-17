@@ -246,8 +246,18 @@ struct DerivedChunkState {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DerivedCacheTelemetry {
+    pub storage: DerivedCacheStorage,
     pub bytes: u64,
+    pub budget_bytes: Option<u64>,
+    pub root_dir: Option<PathBuf>,
     pub evictions: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedCacheStorage {
+    #[default]
+    Memory,
+    Disk,
 }
 
 #[derive(Debug)]
@@ -588,7 +598,10 @@ impl DerivedChunkCache {
             .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
             .fold(0_u64, u64::saturating_add);
         DerivedCacheTelemetry {
+            storage: DerivedCacheStorage::Memory,
             bytes,
+            budget_bytes: None,
+            root_dir: None,
             evictions: 0,
         }
     }
@@ -965,7 +978,10 @@ impl DerivedDiskCache {
     fn telemetry(&self) -> io::Result<DerivedCacheTelemetry> {
         let (bytes, _) = dir_size_and_modified(&self.dataset_dir())?;
         Ok(DerivedCacheTelemetry {
+            storage: DerivedCacheStorage::Disk,
             bytes,
+            budget_bytes: self.disk_budget_bytes,
+            root_dir: Some(self.dataset_dir()),
             evictions: self.eviction_counter.load(Ordering::Relaxed),
         })
     }

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
 use lucida_protocol::{
-    AssetCatalogDelta, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot,
-    GeneratedChunkStatus,
+    AssetCatalogDelta, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
+    DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
 };
 
 use crate::camera::Camera;
@@ -57,6 +58,17 @@ pub enum ClientMessage {
     /// Request the server open a Dataset from a URL.
     /// The server reads metadata via a StorageBackend and broadcasts DatasetOpened.
     OpenRemoteDataset { request_id: String, url: String },
+    /// Request server-authored runtime health for loaded datasets.
+    DatasetHealth {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dataset_id: Option<DatasetId>,
+    },
+    /// Retry rebuilding a persisted workspace dataset's server binding.
+    DatasetRetry {
+        request_id: String,
+        dataset_id: DatasetId,
+    },
     /// Advisory, unsequenced scheduling hint for server-generated chunks.
     /// This is session/runtime state only; it is not a document command and
     /// must not be persisted in saved views.
@@ -173,18 +185,34 @@ pub enum ServerMessage {
         dataset_order: Vec<DatasetId>,
         dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     },
+    /// Sent to the requester while OpenRemoteDataset is moving through
+    /// coarse, stable server-authored stages.
+    DatasetOpenProgress {
+        request_id: String,
+        url: String,
+        diagnostic: DatasetOpenProgressDiagnostic,
+    },
     /// Sent to the requester when OpenRemoteDataset succeeds.
     OpenDatasetSucceeded {
         request_id: String,
         url: String,
         seq: u64,
         opened: lucida_protocol::DatasetOpened,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<DatasetOpenSuccessDiagnostic>,
     },
     /// Sent to the requester when OpenRemoteDataset cannot be fulfilled.
     OpenDatasetFailed {
         request_id: String,
         url: String,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<DatasetOpenFailureDiagnostic>,
+    },
+    /// Sent to the requester with server-authored runtime dataset health.
+    DatasetHealth {
+        request_id: String,
+        datasets: Vec<DatasetSourceHealth>,
     },
     /// Incremental update to a dataset's asset catalog.
     AssetCatalogUpdate {
@@ -594,26 +622,122 @@ mod tests {
     }
 
     #[test]
+    fn dataset_open_progress_round_trips() {
+        use lucida_protocol::{DatasetOpenProgressDiagnostic, DatasetOpenStage};
+
+        let msg = ServerMessage::DatasetOpenProgress {
+            request_id: "req-1".into(),
+            url: "/mnt/data/experiment.zarr".into(),
+            diagnostic: DatasetOpenProgressDiagnostic {
+                stage: DatasetOpenStage::GeneratedCoarsePlanning,
+                message: "planning generated coarse levels".into(),
+                workspace_dataset_id: Some(DatasetId("wds-1".into())),
+                dataset_source_id: Some("source-1".into()),
+                detail: Some("2 derived levels".into()),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"dataset_open_progress\""));
+        assert!(json.contains("\"stage\":\"generated_coarse_planning\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DatasetOpenProgress {
+                request_id,
+                url,
+                diagnostic,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(url, "/mnt/data/experiment.zarr");
+                assert_eq!(diagnostic.stage, DatasetOpenStage::GeneratedCoarsePlanning);
+                assert_eq!(
+                    diagnostic.workspace_dataset_id,
+                    Some(DatasetId("wds-1".into()))
+                );
+            }
+            _ => panic!("expected DatasetOpenProgress"),
+        }
+    }
+
+    #[test]
     fn open_dataset_failed_round_trips() {
+        use lucida_protocol::{
+            DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage,
+        };
+
         let msg = ServerMessage::OpenDatasetFailed {
             request_id: "req-1".into(),
             url: "gs://bucket/missing.zarr".into(),
             error: "not found".into(),
+            diagnostic: Some(DatasetOpenFailureDiagnostic {
+                stage: DatasetOpenStage::BackendOpen,
+                kind: DatasetOpenFailureKind::MissingObject,
+                retryable: false,
+                message: "not found".into(),
+                detail: None,
+            }),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"open_dataset_failed\""));
+        assert!(json.contains("\"kind\":\"missing_object\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::OpenDatasetFailed {
                 request_id,
                 url,
                 error,
+                diagnostic,
             } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(url, "gs://bucket/missing.zarr");
                 assert_eq!(error, "not found");
+                assert_eq!(
+                    diagnostic.unwrap().kind,
+                    DatasetOpenFailureKind::MissingObject
+                );
             }
             _ => panic!("expected OpenDatasetFailed"),
+        }
+    }
+
+    #[test]
+    fn dataset_health_request_round_trips() {
+        let msg = ClientMessage::DatasetHealth {
+            request_id: "health-1".into(),
+            dataset_id: Some(DatasetId("wds-1".into())),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"dataset_health\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::DatasetHealth {
+                request_id,
+                dataset_id,
+            } => {
+                assert_eq!(request_id, "health-1");
+                assert_eq!(dataset_id, Some(DatasetId("wds-1".into())));
+            }
+            _ => panic!("expected DatasetHealth"),
+        }
+    }
+
+    #[test]
+    fn dataset_retry_request_round_trips() {
+        let msg = ClientMessage::DatasetRetry {
+            request_id: "retry-1".into(),
+            dataset_id: DatasetId("wds-1".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"dataset_retry\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::DatasetRetry {
+                request_id,
+                dataset_id,
+            } => {
+                assert_eq!(request_id, "retry-1");
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+            }
+            _ => panic!("expected DatasetRetry"),
         }
     }
 

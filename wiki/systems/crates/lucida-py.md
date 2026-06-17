@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-06-07
+modified: 2026-06-10
 ---
 
 # lucida-py
@@ -45,7 +45,7 @@ Three concrete uses:
 - **Server config mirrors [[lucida-cli]] where practical.** `LUCIDA_CONFIG_PATH` wins, then `$XDG_CONFIG_HOME/lucida/config.json`, then `~/.config/lucida/config.json`; `LucidaClient(...).workspaces.use(...)` persists the default workspace id under the normalized server URL.
 - **Local bindings import** [[lucida-core]] and [[lucida-store]] directly. No FFI tricks — pyo3 handles the conversion.
 - **JSON is the lingua franca**: `apply_command(json)`, `presence_json()`, `chunk_plan()` all use serde JSON to cross the boundary. This avoids defining a parallel pyo3 type for every Rust struct.
-- **Workspace commands use the same protocol messages as browser/CLI sessions.** Dataset open sends `open_remote_dataset`; view commands send `presence`; layer/channel commands send `dataset_presence`.
+- **Workspace commands use the same protocol messages as browser/CLI sessions.** Dataset open sends `open_remote_dataset`; dataset-open progress uses `dataset_open_progress`; dataset diagnostics use `dataset_health` including source-cache pressure and generated-cache telemetry; dataset binding retry sends `dataset_retry`; view commands send `presence`; layer/channel commands send `dataset_presence`.
 
 ## Invariants
 
@@ -62,4 +62,5 @@ Three concrete uses:
 - **The crate is not part of `cargo test --workspace`** (it's excluded). To test changes, run `cd lucida-py && cargo test` or `pytest` against the built module.
 - **`chunk_plan_for(dataset_id)` requires a loaded document.** Call `load_document(json)` first or you'll get an empty plan.
 - **Live server-client smoke tests need a running `lucida-server`.** A quick check is `uv run python -c 'from lucida import LucidaClient; c=LucidaClient("http://127.0.0.1:9988"); print(c.workspaces.list()[0]["id"])'`.
+- **Use the smoke scripts for server-client regressions.** `uv run --project lucida-py python scripts/smoke_python_client.py` covers the common single-dataset workflow, dataset health, and structured missing/malformed open failures. `scripts/smoke_dataset_reliability.py` broadens that to the local CPPX, yeast, LIF, and CZI fixtures when they are present.
 - **Use the project environment for WebSocket operations in a source checkout.** Direct system `python3` can import HTTP-only parts if its path is pointed at `lucida-py/python`, but dataset open/view/layer/channel methods need `websockets`; run from `lucida-py` with `uv run python ...` or install dependencies with `uv sync`.

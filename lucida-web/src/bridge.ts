@@ -6,6 +6,91 @@ import type {
 
 export type ClientId = number;
 
+export type DatasetHealthStatus = "healthy" | "degraded" | "unavailable";
+
+export interface DatasetHealthComponent {
+  status: DatasetHealthStatus;
+  message?: string | null;
+}
+
+export interface DatasetSourceCacheStats {
+  max_bytes: number;
+  current_bytes: number;
+  used_percent: number;
+  entry_count: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  backend_errors: number;
+}
+
+export interface DatasetGeneratedCoarseCacheStats {
+  storage: string;
+  current_bytes: number;
+  max_bytes?: number | null;
+  used_percent?: number | null;
+  evictions: number;
+  root?: string | null;
+}
+
+export interface DatasetGeneratedCoarseFailure {
+  image_id: string;
+  level_index: number;
+  key: string;
+  status: GeneratedChunkStatus;
+  message?: string | null;
+}
+
+export interface DatasetGeneratedCoarseHealth {
+  status: DatasetHealthStatus;
+  level_count: number;
+  ready_chunks: number;
+  pending_chunks: number;
+  failed_chunks: number;
+  unavailable_chunks: number;
+  message?: string | null;
+  cache?: DatasetGeneratedCoarseCacheStats | null;
+  recent_failures?: DatasetGeneratedCoarseFailure[];
+}
+
+export interface DatasetSourceHealth {
+  workspace_dataset_id: string;
+  name: string;
+  status: DatasetHealthStatus;
+  source_url?: string | null;
+  backend?: string | null;
+  binding: DatasetHealthComponent;
+  source_cache?: DatasetSourceCacheStats | null;
+  generated_coarse: DatasetGeneratedCoarseHealth;
+  messages?: string[];
+}
+
+export type DatasetOpenStage =
+  | "request_received"
+  | "authorization"
+  | "source_lookup"
+  | "backend_open"
+  | "metadata_import"
+  | "binding_build"
+  | "generated_coarse_planning"
+  | "workspace_persist"
+  | "broadcast"
+  | "complete";
+
+export interface DatasetOpenProgressDiagnostic {
+  stage: DatasetOpenStage;
+  message: string;
+  workspace_dataset_id?: string | null;
+  dataset_source_id?: string | null;
+  detail?: string | null;
+}
+
+interface PendingDatasetHealthRequest {
+  resolve: (datasets: DatasetSourceHealth[]) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 /**
  * Gated debug logger for bridge events. Toggle via the DebugPanel "Logging"
  * tab or `localStorage.setItem("debug", "bridge")`. See
@@ -52,6 +137,11 @@ export interface BridgeHandlers {
   onCursorUpdate?: (clientId: ClientId, position: [number, number] | null) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
+  onDatasetOpenProgress?: (
+    requestId: string,
+    url: string,
+    diagnostic: DatasetOpenProgressDiagnostic,
+  ) => void;
   onOpenDatasetFailed?: (url: string, error: string) => void;
   /**
    * The server may emit an empty `delta.added` as a sanity check (no-op).
@@ -108,6 +198,7 @@ export class Bridge {
   private pendingDatasetPresence: string | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
+  private pendingDatasetHealth = new Map<string, PendingDatasetHealthRequest>();
   /** Bookmark-sidebar cross-peer subscribers. Owned on the bridge so
    *  feature code subscribes via a stable handle instead of wiring
    *  callbacks through React props. */
@@ -185,8 +276,14 @@ export class Bridge {
           case "dataset_presence_update":
             this.handlers.onDatasetPresenceUpdate?.(msg.client_id, msg.dataset_order, msg.dataset_settings);
             break;
+          case "dataset_open_progress":
+            this.handleDatasetOpenProgress(msg);
+            break;
           case "open_dataset_failed":
             this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
+            break;
+          case "dataset_health":
+            this.handleDatasetHealth(msg);
             break;
           case "asset_catalog_update":
             this.handlers.onAssetCatalogUpdate?.(
@@ -267,6 +364,46 @@ export class Bridge {
     this.handlers.onBinary?.(key, payload);
   }
 
+  private handleDatasetHealth(msg: unknown) {
+    const obj = msg as { request_id?: unknown; datasets?: unknown };
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    if (!requestId) return;
+
+    const pending = this.pendingDatasetHealth.get(requestId);
+    if (!pending) return;
+    this.pendingDatasetHealth.delete(requestId);
+    clearTimeout(pending.timer);
+
+    const datasets = Array.isArray(obj.datasets)
+      ? (obj.datasets as DatasetSourceHealth[])
+      : [];
+    bridgeLog("dataset_health.received", {
+      requestId,
+      datasetCount: datasets.length,
+    }, this.ws?.readyState);
+    pending.resolve(datasets);
+  }
+
+  private handleDatasetOpenProgress(msg: unknown) {
+    const obj = msg as {
+      request_id?: unknown;
+      url?: unknown;
+      diagnostic?: unknown;
+    };
+    const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
+    const url = typeof obj.url === "string" ? obj.url : "";
+    const diagnostic = obj.diagnostic as DatasetOpenProgressDiagnostic | undefined;
+    if (!requestId || !diagnostic || typeof diagnostic.message !== "string") return;
+    bridgeLog("open_remote_dataset.progress", {
+      requestId,
+      url,
+      stage: diagnostic.stage,
+      message: diagnostic.message,
+      datasetId: diagnostic.workspace_dataset_id ?? null,
+    }, this.ws?.readyState);
+    this.handlers.onDatasetOpenProgress?.(requestId, url, diagnostic);
+  }
+
   private scheduleReconnect() {
     if (this.destroyed) return;
     this.reconnectTimer = setTimeout(() => this.connect(), 2000);
@@ -329,6 +466,44 @@ export class Bridge {
     this.send(JSON.stringify({ type: "viewer_interest", interest }));
   }
 
+  requestDatasetHealth(datasetId?: string | null, timeoutMs = 5000): Promise<DatasetSourceHealth[]> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("WebSocket is not connected"));
+    }
+    const requestId = makeBridgeRequestId("web-health");
+    const payload: Record<string, unknown> = {
+      type: "dataset_health",
+      request_id: requestId,
+    };
+    if (datasetId) payload.dataset_id = datasetId;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingDatasetHealth.delete(requestId);
+        reject(new Error("Timed out waiting for dataset health"));
+      }, timeoutMs);
+      this.pendingDatasetHealth.set(requestId, { resolve, reject, timer });
+      bridgeLog("dataset_health.send", {
+        requestId,
+        datasetId: datasetId ?? null,
+      }, this.ws?.readyState);
+      this.send(JSON.stringify(payload));
+    });
+  }
+
+  sendDatasetRetry(datasetId: string) {
+    const requestId = makeBridgeRequestId("web-retry");
+    bridgeLog("dataset_retry.send", {
+      requestId,
+      datasetId,
+    }, this.ws?.readyState);
+    this.send(JSON.stringify({
+      type: "dataset_retry",
+      request_id: requestId,
+      dataset_id: datasetId,
+    }));
+  }
+
   sendFollow(target: ClientId | null) {
     this.send(JSON.stringify({ type: "follow", target }));
   }
@@ -388,14 +563,23 @@ export class Bridge {
     if (this.cursorTimer !== null) {
       clearTimeout(this.cursorTimer);
     }
+    for (const pending of this.pendingDatasetHealth.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Bridge destroyed"));
+    }
+    this.pendingDatasetHealth.clear();
     this.ws?.close();
     this.ws = null;
   }
 }
 
 function makeOpenDatasetRequestId(): string {
+  return makeBridgeRequestId("web");
+}
+
+function makeBridgeRequestId(prefix: string): string {
   if (globalThis.crypto?.randomUUID) {
-    return `web-${globalThis.crypto.randomUUID()}`;
+    return `${prefix}-${globalThis.crypto.randomUUID()}`;
   }
-  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

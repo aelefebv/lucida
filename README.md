@@ -133,7 +133,15 @@ scripts/smoke_lucida_cli.sh
 uv run --project lucida-py python scripts/smoke_python_client.py
 ```
 
-The CLI smoke script isolates `LUCIDA_CONFIG_PATH` in a temp directory, creates a throwaway workspace, opens the dataset, mutates view/layer/channel state, runs debug/plan diagnostics, and validates screenshot/overview PNGs. Set `LUCIDA_SMOKE_CAPTURE=0` to skip browser-rendered captures when Chrome/Chromium is unavailable.
+The CLI smoke script isolates `LUCIDA_CONFIG_PATH` in a temp directory, creates a throwaway workspace, opens the dataset, checks dataset health, verifies structured diagnostics for missing/malformed dataset opens, mutates view/layer/channel state, runs debug/plan diagnostics, and validates screenshot/overview PNGs. Set `LUCIDA_SMOKE_CAPTURE=0` to skip browser-rendered captures when Chrome/Chromium is unavailable.
+
+For a broader local fixture pass against Austin's test datasets, run a server
+whose `--data-dir` can see `/Users/austin/local_data/lucida_test_zarrs`, then:
+
+```bash
+uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
+  --server "$LUCIDA_SMOKE_SERVER"
+```
 
 ### Useful options
 
