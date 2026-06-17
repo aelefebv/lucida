@@ -150,15 +150,25 @@ impl Default for DisplayState {
     }
 }
 
-/// The shape of a collaborative annotation. Fixed at `Point` for this
-/// slice; the field exists so richer geometries (line, box, freehand) can
-/// be added later without a breaking wire change.
+/// The shape of a collaborative annotation.
+///
+/// - `Point` — a single pin at `position` (no second vertex). The `#[default]`,
+///   so a kind-less command/blob (slices 1..4) loads as a point.
+/// - `Line` — a segment from `position` to `end`.
+/// - `Box` — an axis-aligned rectangle whose opposite corners are `position`
+///   and `end`.
+///
+/// `Line`/`Box` carry their second vertex in [`Annotation::end`]; a `Point`
+/// leaves `end` `None`. Freehand (an N-point polyline) is intentionally not a
+/// variant here — it needs a `Vec` of vertices and is a later slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum AnnotationKind {
     #[default]
     Point,
+    Line,
+    Box,
 }
 
 /// A single text comment attached to an [`Annotation`], forming a flat
@@ -208,6 +218,17 @@ pub struct Annotation {
     pub author: String,
     #[serde(default)]
     pub kind: AnnotationKind,
+    /// The annotation's **second** in-plane world-space vertex: a line's far
+    /// endpoint, or a box's opposite corner (the first corner is `position`).
+    /// `None` for a `Point` (which has only one vertex).
+    ///
+    /// `#[serde(default)]` so this stays wire/blob compatible with slices 1..4:
+    /// a pin persisted (or broadcast) before this slice carries no `end` key and
+    /// deserializes as `None`, i.e. a plain point. A `Point` with `end == None`
+    /// serializes identically to a slice-1..4 pin. Depth (`z`) is shared by both
+    /// vertices — per-vertex depth is a later slice.
+    #[serde(default)]
+    pub end: Option<[f64; 2]>,
     /// Flat, ordered comment thread on this pin. Owns its dedup/order
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
@@ -215,6 +236,49 @@ pub struct Annotation {
 }
 
 impl Annotation {
+    /// The in-plane world-space vertices that make up this annotation's shape,
+    /// in draw order — the single source of geometry for every kind.
+    ///
+    /// This is the geometry helper the renderers iterate: each returned vertex
+    /// is projected to screen by the *same* per-vertex marker projection a point
+    /// pin already uses, and then connected by the shared draw path (a dot for
+    /// one vertex, a stroked polyline for an open run, a closed ring for a box).
+    /// Keeping the per-kind vertex layout here — rather than branching inside
+    /// each renderer — means the 2D and 3D overlays share one code path and a
+    /// future kind only has to extend this function.
+    ///
+    /// - **Point** → `[position]` (one vertex).
+    /// - **Line** → `[position, end]` (the two endpoints).
+    /// - **Box** → the four corners of the axis-aligned rectangle whose opposite
+    ///   corners are `position` and `end`, wound `position → (end.x, position.y)
+    ///   → end → (position.x, end.y)`. Returned as a 4-corner ring (not 2
+    ///   corners) so that in 3D each corner projects independently through the
+    ///   volume transform and the box tracks the data as the camera orbits — a
+    ///   screen-space rect built from two projected corners would shear.
+    ///
+    /// A `Line`/`Box` whose `end` is absent (a malformed or partially-applied
+    /// command) gracefully collapses to its single anchor `position`, so the
+    /// shape always has at least one vertex and never panics or vanishes.
+    pub fn vertices(&self) -> Vec<[f64; 2]> {
+        match (self.kind, self.end) {
+            (AnnotationKind::Line, Some(end)) => vec![self.position, end],
+            (AnnotationKind::Box, Some(end)) => {
+                let [x0, y0] = self.position;
+                let [x1, y1] = end;
+                vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            }
+            // Point, or a line/box missing its second vertex: just the anchor.
+            _ => vec![self.position],
+        }
+    }
+
+    /// Whether this annotation's drawn shape is a closed ring (a box) rather
+    /// than an open run (a point or a line). The shared draw path uses this to
+    /// decide whether to connect the last projected vertex back to the first.
+    pub fn is_closed(&self) -> bool {
+        matches!(self.kind, AnnotationKind::Box) && self.end.is_some()
+    }
+
     /// Append (or replace) a comment on this annotation's thread.
     ///
     /// Idempotent / last-write-wins on a repeated comment `id`: re-applying a
@@ -244,12 +308,14 @@ impl Annotation {
     }
 
     /// Reposition this pin: overwrite its in-plane `position` and depth `z` in
-    /// place. Every other field — `id`, `author`, `kind`, and the comment thread
-    /// — is left untouched: a move repositions the existing pin, it does not
-    /// replace it. This is the single owner of the reposition mutation, so it is
-    /// unit-testable on a bare `Annotation`; `DocumentState` only locates the pin
-    /// and delegates here. Idempotent by construction (an overwrite to the same
-    /// value is a no-op-equivalent).
+    /// place. Every other field — `id`, `author`, `kind`, the second vertex
+    /// `end`, and the comment thread — is left untouched: a move repositions the
+    /// existing pin's anchor, it does not replace it. (For a line/box this slides
+    /// the anchor vertex while preserving the far vertex; editing individual
+    /// vertices is a later slice.) This is the single owner of the reposition
+    /// mutation, so it is unit-testable on a bare `Annotation`; `DocumentState`
+    /// only locates the pin and delegates here. Idempotent by construction (an
+    /// overwrite to the same value is a no-op-equivalent).
     pub fn set_position(&mut self, position: [f64; 2], z: f64) {
         self.position = position;
         self.z = z;
@@ -513,6 +579,7 @@ impl DocumentState {
                 dataset_id,
                 id,
                 position,
+                end,
                 z,
                 author,
                 kind,
@@ -522,6 +589,10 @@ impl DocumentState {
                     Annotation {
                         id,
                         position,
+                        // Second vertex (line endpoint / box opposite corner).
+                        // `None` for a point, or for a slice-1..4 command with
+                        // no `end` field.
+                        end,
                         z,
                         author,
                         kind,

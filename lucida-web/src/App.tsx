@@ -70,6 +70,9 @@ function App({
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
   // Lifted state — shared across hooks that can't own it due to call ordering
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+  // Which annotation shape a shift-drag draws: a point pin (drop), a line
+  // (drag between two points), or a box (drag between opposite corners).
+  const [annotationKind, setAnnotationKind] = useState<"point" | "line" | "box">("point");
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
@@ -629,6 +632,7 @@ function App({
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
                 annotationDatasetId={selectedDatasetId}
+                annotationKind={annotationKind}
                 myId={bridge.myId}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
@@ -689,6 +693,7 @@ function App({
                 onLoopChange={render.setActiveLoop}
                 onCameraModeChange={handleCameraModeChange}
                 annotationDatasetId={selectedDatasetId}
+                annotationKind={annotationKind}
                 myId={bridge.myId}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
@@ -790,6 +795,22 @@ function App({
             Browse Local
           </button>
           <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
+          <label
+            title="Shape drawn by shift-drag on the canvas (point = click, line/box = drag)"
+            style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
+          >
+            Annotate
+            <select
+              aria-label="Annotation shape"
+              value={annotationKind}
+              onChange={(e) => setAnnotationKind(e.target.value as "point" | "line" | "box")}
+              style={{ padding: "0.25rem", fontSize: "0.875rem" }}
+            >
+              <option value="point">Point</option>
+              <option value="line">Line</option>
+              <option value="box">Box</option>
+            </select>
+          </label>
           <button
             onClick={() => setShowBookmarkSidebar((v) => !v)}
             title={showBookmarkSidebar ? "Hide saved views" : "Show saved views"}

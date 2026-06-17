@@ -27,6 +27,8 @@ interface Props {
   onCameraModeChange?: (mode: string) => void;
   /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
   annotationDatasetId: string | null;
+  /** Shape a shift-drag draws: a point pin, a line, or a box. */
+  annotationKind: "point" | "line" | "box";
   /** Local client id, recorded as the pin's author. */
   myId: number;
   /** Send a wire command (already wrapped by the bridge). */
@@ -44,7 +46,7 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, myId, sendCommand, onDocumentChanged }: Props) {
+export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
@@ -55,6 +57,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   // eslint-disable-next-line react-hooks/refs
   annotationDatasetIdRef.current = annotationDatasetId;
+  const annotationKindRef = useRef(annotationKind);
+  // eslint-disable-next-line react-hooks/refs
+  annotationKindRef.current = annotationKind;
   const myIdRef = useRef(myId);
   // eslint-disable-next-line react-hooks/refs
   myIdRef.current = myId;
@@ -213,61 +218,90 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const [dragging, setDragging] = useState(false);
   const shiftDragRef = useRef(false);
   const lastPos = useRef({ x: 0, y: 0 });
-  // Context for a shift press that may become a pin drop: where it started and
-  // whether it has since moved past the click slop (which turns it into a
-  // shift-pan, exactly as before). Drop fires on release only if it stayed put.
-  const pinPressRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  // Context for a shift press that may become a pin drop or a line/box draw:
+  // where it started, whether it has since moved past the click slop, and
+  // whether it is drawing a shape (kind line/box). For a point, crossing the
+  // slop turns it into a shift-pan exactly as before; for a shape, the drag
+  // draws (no pan) and the shape is emitted on release.
+  const pinPressRef = useRef<{ x: number; y: number; moved: boolean; shape: boolean } | null>(null);
 
-  /** Drop a pin at screen coords via a 3D depth pick. No-op (declines) when no
-   * dataset is selected or the ray misses the volume — a pin should anchor to
-   * data, never float in empty space. */
-  const dropPinAt = useCallback(
-    (clientX: number, clientY: number) => {
+  /** Ray-cast a client point into the volume, returning its in-plane-voxel +
+   * voxel-depth point `[x, y, z]`, or `null` if the ray missed. The same depth
+   * pick a pin drop uses, factored out so a line/box can pick both endpoints. */
+  const pickVoxel = useCallback(
+    (clientX: number, clientY: number): [number, number, number] | null => {
       const datasetId = annotationDatasetIdRef.current;
-      if (!datasetId) return;
+      if (!datasetId) return null;
       const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
-      // ray_pick / pick_annotation_voxel take physical-pixel screen coords
-      // (the same space the WASM viewport uses), matching project_to_screen.
+      // pick_annotation_voxel takes physical-pixel screen coords (the same space
+      // the WASM viewport uses), matching project_to_screen.
       const screenX = (clientX - rect.left) * dpr;
       const screenY = (clientY - rect.top) * dpr;
       const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
-      if (voxel.length < 3) return; // ray missed the volume → don't drop
+      return voxel.length < 3 ? null : [voxel[0], voxel[1], voxel[2]];
+    },
+    [canvas, scene],
+  );
+
+  /** Draw an annotation from a shift gesture. A point is a single depth-picked
+   * drop (drop-where-clicked); a line/box depth-picks both endpoints and stores
+   * the second as `end`. No-op (declines) when no dataset is selected or a
+   * required ray misses the volume — an annotation should anchor to data, never
+   * float in empty space. The picks are stored as in-plane voxel position +
+   * voxel depth (z), the same frame a 2D draw uses, so the shape round-trips and
+   * renders in both views. The shared `z` is the anchor vertex's depth. */
+  const drawAnnotation = useCallback(
+    (startX: number, startY: number, endX: number, endY: number, kind: "point" | "line" | "box") => {
+      const datasetId = annotationDatasetIdRef.current;
+      if (!datasetId) return;
+      const shape = kind === "line" || kind === "box";
+      const anchor = pickVoxel(shape ? startX : endX, shape ? startY : endY);
+      if (!anchor) return; // anchor ray missed → don't draw
+      let end: [number, number] | null = null;
+      if (shape) {
+        const far = pickVoxel(endX, endY);
+        if (!far) return; // far ray missed → decline rather than draw a half shape
+        end = [far[0], far[1]];
+      }
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      // Apply locally AND send (mirrors SliceViewer's drop and every other doc
+      // Apply locally AND send (mirrors SliceViewer's draw and every other doc
       // command): the sender is excluded from the server's rebroadcast, so the
-      // local apply is what shows the author their own pin. The client-supplied
+      // local apply is what shows the author their own shape. The client-supplied
       // id makes the local apply and the peers' broadcast converge.
-      // Store the pick as in-plane voxel position + voxel depth (z), the same
-      // frame a 2D drop uses, so the pin round-trips and renders in both views.
       applyDocumentCommand(
         scene,
         {
           type: "add_annotation",
           dataset_id: datasetId,
           id,
-          position: [voxel[0], voxel[1]],
-          z: voxel[2],
+          position: [anchor[0], anchor[1]],
+          end,
+          z: anchor[2],
           author: String(myIdRef.current),
-          kind: "point",
+          kind: shape ? kind : "point",
         },
         sendCommandRef.current,
       );
       onDocumentChangedRef.current();
       loopRef.current?.markInteractiveDirty();
     },
-    [canvas, scene],
+    [scene, pickVoxel],
   );
 
   const onArcballPointerDown = useCallback(
     (e: PointerEvent) => {
       setDragging(true);
       shiftDragRef.current = e.shiftKey;
-      // A shift press starts a candidate pin drop; it becomes a shift-pan if it
-      // moves past the slop before release.
-      pinPressRef.current = e.shiftKey ? { x: e.clientX, y: e.clientY, moved: false } : null;
+      // A shift press starts a candidate annotation. With kind=point it becomes
+      // a shift-pan if it moves past the slop; with kind=line/box the drag
+      // draws the shape (and never pans).
+      const kind = annotationKindRef.current;
+      pinPressRef.current = e.shiftKey
+        ? { x: e.clientX, y: e.clientY, moved: false, shape: kind === "line" || kind === "box" }
+        : null;
       lastPos.current = { x: e.clientX, y: e.clientY };
       canvas.setPointerCapture(e.pointerId);
       setLowRes();
@@ -285,10 +319,19 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
       if (!dragging) return;
 
+      const press = pinPressRef.current;
+      // A line/box draw owns the whole drag: track that it moved (so release
+      // knows it's a real two-vertex shape) but never pan/rotate the camera.
+      if (press?.shape) {
+        if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > PIN_CLICK_SLOP) {
+          press.moved = true;
+        }
+        return;
+      }
+
       // While a shift press is still within the click slop, hold off panning so
       // a tiny jitter still resolves to a pin drop on release. Once it crosses
       // the slop it's a deliberate shift-pan — mark it moved and pan as before.
-      const press = pinPressRef.current;
       if (press && !press.moved) {
         if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= PIN_CLICK_SLOP) {
           return;
@@ -319,14 +362,19 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     (e: PointerEvent) => {
       setDragging(false);
       scheduleFullRes();
-      // A shift press that never crossed the slop is a pin drop, not a pan.
       const press = pinPressRef.current;
       pinPressRef.current = null;
-      if (press && !press.moved) {
-        dropPinAt(e.clientX, e.clientY);
+      if (!press) return;
+      if (press.shape && press.moved) {
+        // A dragged line/box: draw from the press anchor to the release point.
+        drawAnnotation(press.x, press.y, e.clientX, e.clientY, annotationKindRef.current);
+      } else if (!press.moved) {
+        // A click (point kind, or a shape that never dragged) drops a point.
+        drawAnnotation(e.clientX, e.clientY, e.clientX, e.clientY, "point");
       }
+      // A point-kind shift-pan (moved, not a shape) draws nothing — unchanged.
     },
-    [scheduleFullRes, dropPinAt],
+    [scheduleFullRes, drawAnnotation],
   );
 
   // Fly input handling

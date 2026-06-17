@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 
 /** One comment in a pin's thread (as returned nested in `annotations()`). */
 export interface Comment {
@@ -35,9 +36,13 @@ export interface Comment {
 export interface Annotation {
   id: string;
   position: [number, number];
+  /** The second in-plane world vertex: a line's far endpoint or a box's
+   * opposite corner. Absent/`null` for a point (and for any slice-1..4 pin). */
+  end?: [number, number] | null;
   /** Additive depth. Absent on a slice-1/2 pin → defaulted to 0 on read. */
   z?: number;
   author: string;
+  /** "point" | "line" | "box". Absent on a slice-1 pin → treated as "point". */
   kind: string;
   /** Flat, insertion-ordered comment thread. Absent on a slice-1 pin →
    * defaulted to an empty array on read. */
@@ -80,6 +85,9 @@ function newId(prefix: string): string {
 
 export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, myId, sendCommand, onDocumentChanged }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // SVG geometry element per non-point pin (the line segment / box outline),
+  // re-projected each frame through the SAME world->screen math as the dot.
+  const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   // Which pin's thread popover is open (by pin id), or null when none.
   const [openPinId, setOpenPinId] = useState<string | null>(null);
@@ -128,15 +136,40 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
         const center = scene.center();
         const centerX = center[0];
         const centerY = center[1];
+        // world -> screen (inverse of SliceViewer's screen -> world); divide by
+        // dpr to land in CSS pixels. This is the single per-vertex projection
+        // every kind reuses — the dot, the line, and the box corners all go
+        // through it.
+        const project = (v: ScreenPoint): ScreenPoint => [
+          ((v[0] - centerX) * zoom + physW / 2) / dpr,
+          ((v[1] - centerY) * zoom + physH / 2) / dpr,
+        ];
 
         for (const pin of annotationsRef.current) {
+          // Anchor dot (the interaction target) sits at the first vertex.
           const el = dotRefs.current.get(pin.id);
-          if (!el) continue;
-          // world -> screen (inverse of SliceViewer's screen -> world);
-          // divide by dpr to land in CSS pixels.
-          const screenX = ((pin.position[0] - centerX) * zoom + physW / 2) / dpr;
-          const screenY = ((pin.position[1] - centerY) * zoom + physH / 2) / dpr;
-          el.style.transform = `translate(${screenX}px, ${screenY}px)`;
+          if (el) {
+            const [ax, ay] = project(pin.position);
+            el.style.transform = `translate(${ax}px, ${ay}px)`;
+          }
+          // Line/box geometry: project every vertex through the same `project`
+          // and rewrite the shared SVG element's coordinates in place.
+          const shape = shapeRefs.current.get(pin.id);
+          if (shape) {
+            const pts = annotationVertices(pin).map(project);
+            if (isClosedShape(pin)) {
+              (shape as SVGPolygonElement).setAttribute(
+                "points",
+                pts.map((p) => `${p[0]},${p[1]}`).join(" "),
+              );
+            } else if (pts.length >= 2) {
+              const line = shape as SVGLineElement;
+              line.setAttribute("x1", String(pts[0][0]));
+              line.setAttribute("y1", String(pts[0][1]));
+              line.setAttribute("x2", String(pts[1][0]));
+              line.setAttribute("y2", String(pts[1][1]));
+            }
+          }
         }
       }
       rafId = requestAnimationFrame(tick);
@@ -201,6 +234,54 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
         zIndex: 10,
       }}
     >
+      {/* Shape layer: one SVG element per line/box, drawn beneath the DOM
+          markers. Each shape's coordinates are rewritten every frame by the RAF
+          tick (projecting its vertices through the shared `project`), so it
+          stays glued to the data across pan/zoom — exactly like the dots. */}
+      <svg
+        width="100%"
+        height="100%"
+        style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}
+      >
+        {annotations.map((pin) => {
+          if (pin.kind !== "line" && pin.kind !== "box") return null;
+          if (!pin.end) return null;
+          const color = pin.author === String(myId) ? "#FF3B30" : "#FF9F0A";
+          if (isClosedShape(pin)) {
+            return (
+              <polygon
+                key={pin.id}
+                ref={(el) => {
+                  if (el) shapeRefs.current.set(pin.id, el);
+                  else shapeRefs.current.delete(pin.id);
+                }}
+                points=""
+                fill={color}
+                fillOpacity={0.12}
+                stroke={color}
+                strokeWidth={2.5}
+                strokeLinejoin="round"
+              />
+            );
+          }
+          return (
+            <line
+              key={pin.id}
+              ref={(el) => {
+                if (el) shapeRefs.current.set(pin.id, el);
+                else shapeRefs.current.delete(pin.id);
+              }}
+              x1={0}
+              y1={0}
+              x2={0}
+              y2={0}
+              stroke={color}
+              strokeWidth={2.5}
+              strokeLinecap="round"
+            />
+          );
+        })}
+      </svg>
       {annotations.map((pin) => {
         const mine = pin.author === String(myId);
         const comments = pin.comments ?? [];

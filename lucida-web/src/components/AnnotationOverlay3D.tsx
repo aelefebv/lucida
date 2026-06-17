@@ -25,6 +25,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { Annotation } from "./AnnotationOverlay.tsx";
+import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 
 interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
@@ -50,6 +51,10 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
 
 export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, myId }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // SVG geometry element per line/box, re-projected each frame through the SAME
+  // `project_annotation` call the dots use — so a line/box tracks the volume as
+  // the camera orbits, just like a point marker.
+  const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
 
   // Re-read the authoritative pin set from WASM whenever the document version
@@ -77,23 +82,55 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
       if (scene) {
         const dpr = devicePixelRatio;
         const ds = datasetIdRef.current;
+        // The single per-vertex projection every kind reuses: lift (x, y, z) to
+        // world and project via the renderer's camera. An empty result means the
+        // vertex is behind the camera (or the dataset has no anchorable member).
+        // project_annotation returns physical pixels; divide by DPR for CSS. The
+        // shared depth `z` applies to every vertex of a line/box.
+        const project = (v: ScreenPoint, z: number): ScreenPoint | null => {
+          const proj = scene.project_annotation(ds, v[0], v[1], z);
+          return proj.length < 2 ? null : [proj[0] / dpr, proj[1] / dpr];
+        };
         for (const pin of annotationsRef.current) {
+          const pinZ = pin.z ?? 0;
+          const verts = annotationVertices(pin);
+          const projected: (ScreenPoint | null)[] = verts.map((v) => project(v, pinZ));
+          // If ANY vertex is behind the camera, hide the whole shape + dot — a
+          // partially-projected line/box would streak across the screen.
+          const allVisible = projected.every((p) => p !== null);
+
           const el = dotRefs.current.get(pin.id);
-          if (!el) continue;
-          // Lift (x, y, z) to world and project via the renderer's camera.
-          // An empty result means the point is behind the camera (or the
-          // dataset has no anchorable member) → hide the marker. This is what
-          // makes a pin vanish as it orbits behind the volume.
-          const proj = scene.project_annotation(ds, pin.position[0], pin.position[1], pin.z ?? 0);
-          if (proj.length < 2) {
-            el.style.display = "none";
-            continue;
+          if (el) {
+            const anchor = projected[0];
+            if (!allVisible || !anchor) {
+              el.style.display = "none";
+            } else {
+              el.style.display = "";
+              el.style.transform = `translate(${anchor[0]}px, ${anchor[1]}px)`;
+            }
           }
-          // project_annotation returns physical pixels; divide by DPR for CSS.
-          const screenX = proj[0] / dpr;
-          const screenY = proj[1] / dpr;
-          el.style.display = "";
-          el.style.transform = `translate(${screenX}px, ${screenY}px)`;
+
+          const shape = shapeRefs.current.get(pin.id);
+          if (shape) {
+            if (!allVisible) {
+              shape.style.display = "none";
+            } else {
+              shape.style.display = "";
+              const pts = projected as ScreenPoint[];
+              if (isClosedShape(pin)) {
+                (shape as SVGPolygonElement).setAttribute(
+                  "points",
+                  pts.map((p) => `${p[0]},${p[1]}`).join(" "),
+                );
+              } else if (pts.length >= 2) {
+                const line = shape as SVGLineElement;
+                line.setAttribute("x1", String(pts[0][0]));
+                line.setAttribute("y1", String(pts[0][1]));
+                line.setAttribute("x2", String(pts[1][0]));
+                line.setAttribute("y2", String(pts[1][1]));
+              }
+            }
+          }
         }
       }
       rafId = requestAnimationFrame(tick);
@@ -117,6 +154,55 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
         zIndex: 10,
       }}
     >
+      {/* Line/box geometry, projected per-vertex through the volume transform
+          every frame (see the tick). Starts hidden so nothing flashes at the
+          origin before the first projection. */}
+      <svg
+        width="100%"
+        height="100%"
+        style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}
+      >
+        {annotations.map((pin) => {
+          if (pin.kind !== "line" && pin.kind !== "box") return null;
+          if (!pin.end) return null;
+          const color = pin.author === String(myId) ? "#FF3B30" : "#FF9F0A";
+          if (isClosedShape(pin)) {
+            return (
+              <polygon
+                key={pin.id}
+                ref={(el) => {
+                  if (el) shapeRefs.current.set(pin.id, el);
+                  else shapeRefs.current.delete(pin.id);
+                }}
+                points=""
+                fill={color}
+                fillOpacity={0.12}
+                stroke={color}
+                strokeWidth={2.5}
+                strokeLinejoin="round"
+                style={{ display: "none" }}
+              />
+            );
+          }
+          return (
+            <line
+              key={pin.id}
+              ref={(el) => {
+                if (el) shapeRefs.current.set(pin.id, el);
+                else shapeRefs.current.delete(pin.id);
+              }}
+              x1={0}
+              y1={0}
+              x2={0}
+              y2={0}
+              stroke={color}
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              style={{ display: "none" }}
+            />
+          );
+        })}
+      </svg>
       {annotations.map((pin) => {
         const mine = pin.author === String(myId);
         return (

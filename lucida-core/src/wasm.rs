@@ -1117,10 +1117,11 @@ impl WasmScene {
     }
 
     /// Collaborative annotations for `dataset_id` as JSON, in document order:
-    /// `[{"id","position":[x,y],"author","kind"}, ...]`. Returns `"[]"` when
-    /// the dataset has no pins. Positions are 2D world-space coordinates, so
-    /// the caller projects them to screen with the current camera each frame
-    /// (mirrors the peer-cursor overlay), keeping pins glued to the data.
+    /// `[{"id","position":[x,y],"end":[x,y]|null,"z","author","kind","comments"}, ...]`.
+    /// Returns `"[]"` when the dataset has no pins. `position` (and `end`, for a
+    /// line/box) are 2D world-space coordinates, so the caller projects each
+    /// vertex to screen with the current camera each frame (mirrors the
+    /// peer-cursor overlay), keeping every kind glued to the data.
     pub fn annotations(&self, dataset_id: &str) -> String {
         let key = DatasetId(dataset_id.to_string());
         match self.inner.document.annotations.get(&key) {

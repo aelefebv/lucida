@@ -44,10 +44,18 @@ pub enum DocumentCommand {
     /// 1/2: an `add_annotation` command with no `z` field (an older client, or
     /// a replayed older log entry) applies with `z = 0.0` rather than failing
     /// to parse. There is no `[2] -> [3]` break — `position` is unchanged.
+    ///
+    /// `end` is the **second** in-plane vertex — a line's far endpoint or a
+    /// box's opposite corner (for a `Point`, omit it / send `null`). Like `z`
+    /// and `kind`, it is `#[serde(default)]`, so a slice-1..4 `add_annotation`
+    /// (no `end` field) applies as `end: None`, i.e. a plain point — additive,
+    /// no wire break. The shared depth `z` applies to both vertices.
     AddAnnotation {
         dataset_id: DatasetId,
         id: String,
         position: [f64; 2],
+        #[serde(default)]
+        end: Option<[f64; 2]>,
         #[serde(default)]
         z: f64,
         author: String,
@@ -1848,6 +1856,7 @@ mod tests {
             dataset_id: DatasetId("wds-abc".into()),
             id: "11111111-2222-3333-4444-555555555555".into(),
             position: [12.5, -7.25],
+            end: None,
             z: 3.5,
             author: "biologist".into(),
             kind: crate::scene::AnnotationKind::Point,
@@ -1862,6 +1871,8 @@ mod tests {
         assert_eq!(v["z"], 3.5);
         assert_eq!(v["author"], "biologist");
         assert_eq!(v["kind"], "point");
+        // A point carries `end: null` on the wire.
+        assert!(v["end"].is_null());
 
         // And it parses back from exactly that shape.
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
@@ -1870,6 +1881,7 @@ mod tests {
                 dataset_id,
                 id,
                 position,
+                end,
                 z,
                 author,
                 kind,
@@ -1877,6 +1889,7 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
                 assert_eq!(id, "11111111-2222-3333-4444-555555555555");
                 assert_eq!(position, [12.5, -7.25]);
+                assert_eq!(end, None);
                 assert_eq!(z, 3.5);
                 assert_eq!(author, "biologist");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
@@ -1896,6 +1909,7 @@ mod tests {
                 dataset_id,
                 id,
                 position,
+                end,
                 z,
                 author,
                 kind,
@@ -1903,6 +1917,8 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
+                // No `end` in the slice-1..4 payload → a point.
+                assert_eq!(end, None);
                 assert_eq!(z, 5.0);
                 assert_eq!(author, "alice");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
@@ -1959,6 +1975,169 @@ mod tests {
         }
     }
 
+    // --- slice 005: line + box (kind + end) ---
+
+    #[test]
+    fn add_annotation_line_round_trips_kind_and_end() {
+        // A line carries kind:"line" and a second vertex `end`; both must
+        // survive serialize -> parse byte-for-byte (this is the per-peer
+        // broadcast path).
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "ln-1".into(),
+            position: [1.0, 2.0],
+            end: Some([5.5, -6.5]),
+            z: 3.0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Line,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["kind"], "line");
+        assert_eq!(v["position"][0], 1.0);
+        assert_eq!(v["position"][1], 2.0);
+        assert_eq!(v["end"][0], 5.5);
+        assert_eq!(v["end"][1], -6.5);
+
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation {
+                end,
+                kind,
+                position,
+                ..
+            } => {
+                assert_eq!(kind, crate::scene::AnnotationKind::Line);
+                assert_eq!(position, [1.0, 2.0]);
+                assert_eq!(end, Some([5.5, -6.5]));
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn add_annotation_box_round_trips_kind_and_end() {
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"bx-1","position":[0.0,0.0],"end":[10.0,4.0],"z":0.0,"author":"alice","kind":"box"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation {
+                end,
+                kind,
+                position,
+                ..
+            } => {
+                assert_eq!(kind, crate::scene::AnnotationKind::Box);
+                assert_eq!(position, [0.0, 0.0]);
+                assert_eq!(end, Some([10.0, 4.0]));
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn add_annotation_end_defaults_to_none_when_absent() {
+        // The backward-compat guarantee: a slice-1..4 command (no `end` key)
+        // parses as `end: None` — a plain point — rather than failing.
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"p","position":[3.0,4.0],"z":1.0,"author":"a","kind":"point"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation { end, .. } => assert_eq!(end, None),
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn document_state_add_line_and_box_store_kind_and_end() {
+        // Applying line/box commands lands kind + end on the stored pins, and a
+        // point still stores end: None — the state the WS harness reads back.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "ln",
+            [1.0, 2.0],
+            [3.0, 4.0],
+            crate::scene::AnnotationKind::Line,
+        ));
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [8.0, 6.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(add_annotation_cmd("wds-1", "pt", [9.0, 9.0], "alice"));
+
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 3);
+
+        let line = pins.iter().find(|p| p.id == "ln").unwrap();
+        assert_eq!(line.kind, crate::scene::AnnotationKind::Line);
+        assert_eq!(line.end, Some([3.0, 4.0]));
+
+        let r#box = pins.iter().find(|p| p.id == "bx").unwrap();
+        assert_eq!(r#box.kind, crate::scene::AnnotationKind::Box);
+        assert_eq!(r#box.end, Some([8.0, 6.0]));
+
+        let point = pins.iter().find(|p| p.id == "pt").unwrap();
+        assert_eq!(point.kind, crate::scene::AnnotationKind::Point);
+        assert_eq!(point.end, None);
+    }
+
+    #[test]
+    fn line_and_box_survive_document_round_trip() {
+        // Restart durability: a line and a box serialize into the document blob
+        // and restore with kind + end intact (acceptance behavior 3).
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "ln",
+            [1.5, 2.5],
+            [3.5, 4.5],
+            crate::scene::AnnotationKind::Line,
+        ));
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [-1.0, -2.0],
+            [7.0, 8.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pins = &restored.annotations[&DatasetId("wds-1".into())];
+        let line = pins.iter().find(|p| p.id == "ln").unwrap();
+        assert_eq!(line.kind, crate::scene::AnnotationKind::Line);
+        assert_eq!(line.end, Some([3.5, 4.5]));
+        let r#box = pins.iter().find(|p| p.id == "bx").unwrap();
+        assert_eq!(r#box.kind, crate::scene::AnnotationKind::Box);
+        assert_eq!(r#box.end, Some([7.0, 8.0]));
+    }
+
+    #[test]
+    fn move_annotation_preserves_a_lines_end_vertex() {
+        // MoveAnnotation slides the anchor (position/z) and must NOT clobber the
+        // far vertex `end` (or kind) — the wire carries only position + z.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "ln",
+            [0.0, 0.0],
+            [10.0, 10.0],
+            crate::scene::AnnotationKind::Line,
+        ));
+        doc.apply(DocumentCommand::MoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "ln".into(),
+            position: [2.0, 3.0],
+            z: 5.0,
+        });
+        let line = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(line.position, [2.0, 3.0]);
+        assert_eq!(line.z, 5.0);
+        assert_eq!(line.kind, crate::scene::AnnotationKind::Line);
+        assert_eq!(line.end, Some([10.0, 10.0]));
+    }
+
     fn add_annotation_cmd(ds: &str, id: &str, position: [f64; 2], author: &str) -> DocumentCommand {
         add_annotation_cmd_z(ds, id, position, 0.0, author)
     }
@@ -1974,9 +2153,29 @@ mod tests {
             dataset_id: DatasetId(ds.into()),
             id: id.into(),
             position,
+            end: None,
             z,
             author: author.into(),
             kind: crate::scene::AnnotationKind::Point,
+        }
+    }
+
+    /// Build an `add_annotation` for a non-point kind carrying a second vertex.
+    fn add_shape_cmd(
+        ds: &str,
+        id: &str,
+        position: [f64; 2],
+        end: [f64; 2],
+        kind: crate::scene::AnnotationKind,
+    ) -> DocumentCommand {
+        DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId(ds.into()),
+            id: id.into(),
+            position,
+            end: Some(end),
+            z: 0.0,
+            author: "alice".into(),
+            kind,
         }
     }
 
@@ -2589,11 +2788,80 @@ mod tests {
         crate::scene::Annotation {
             id: id.into(),
             position: [0.0, 0.0],
+            end: None,
             z: 0.0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),
         }
+    }
+
+    /// Bare line/box pin (no DocumentState) for geometry-helper tests.
+    fn shape_pin(
+        id: &str,
+        position: [f64; 2],
+        end: Option<[f64; 2]>,
+        kind: crate::scene::AnnotationKind,
+    ) -> crate::scene::Annotation {
+        crate::scene::Annotation {
+            id: id.into(),
+            position,
+            end,
+            z: 0.0,
+            author: "alice".into(),
+            kind,
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn vertices_point_is_single_anchor() {
+        let pin = point_pin("p");
+        assert_eq!(pin.vertices(), vec![[0.0, 0.0]]);
+        assert!(!pin.is_closed());
+    }
+
+    #[test]
+    fn vertices_line_is_two_endpoints_in_order() {
+        let line = shape_pin(
+            "ln",
+            [1.0, 2.0],
+            Some([5.0, 6.0]),
+            crate::scene::AnnotationKind::Line,
+        );
+        assert_eq!(line.vertices(), vec![[1.0, 2.0], [5.0, 6.0]]);
+        // A line is an open run, not a closed ring.
+        assert!(!line.is_closed());
+    }
+
+    #[test]
+    fn vertices_box_is_four_corner_ring() {
+        // Opposite corners (0,0) and (10,4) expand to the full axis-aligned
+        // rectangle, wound so consecutive corners share an edge — the shared
+        // draw path strokes them and closes back to the first.
+        let r#box = shape_pin(
+            "bx",
+            [0.0, 0.0],
+            Some([10.0, 4.0]),
+            crate::scene::AnnotationKind::Box,
+        );
+        assert_eq!(
+            r#box.vertices(),
+            vec![[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [0.0, 4.0]]
+        );
+        assert!(r#box.is_closed());
+    }
+
+    #[test]
+    fn vertices_line_or_box_without_end_collapses_to_anchor() {
+        // A malformed/partially-applied line/box (no `end`) must not panic or
+        // vanish: the geometry helper degrades to the single anchor point.
+        let line = shape_pin("ln", [3.0, 7.0], None, crate::scene::AnnotationKind::Line);
+        assert_eq!(line.vertices(), vec![[3.0, 7.0]]);
+        assert!(!line.is_closed());
+        let r#box = shape_pin("bx", [3.0, 7.0], None, crate::scene::AnnotationKind::Box);
+        assert_eq!(r#box.vertices(), vec![[3.0, 7.0]]);
+        assert!(!r#box.is_closed());
     }
 
     fn comment(id: &str, author: &str, text: &str) -> crate::scene::Comment {
