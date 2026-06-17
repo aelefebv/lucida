@@ -6,6 +6,7 @@ import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
+import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
@@ -687,6 +688,19 @@ function App({
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
                 onCameraModeChange={handleCameraModeChange}
+                annotationDatasetId={selectedDatasetId}
+                myId={bridge.myId}
+                sendCommand={bridge.sendCommand}
+                onDocumentChanged={bumpRemoteDocumentVersion}
+              />
+            )}
+            {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
+              <AnnotationOverlay3D
+                datasetId={selectedDatasetId}
+                wasmSceneRef={scene.wasmSceneRef}
+                canvas={render.canvasRef.current}
+                version={remoteDocumentVersion}
+                myId={bridge.myId}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (

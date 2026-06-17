@@ -33,15 +33,23 @@ pub enum DocumentCommand {
         dataset_id: DatasetId,
         delta: AssetCatalogDelta,
     },
-    /// Drop a collaborative annotation (point pin) onto `dataset_id` at a 2D
-    /// world-space `position`. The `id` is client-supplied (a uuid string)
-    /// so this command and its rebroadcast are byte-identical and apply
-    /// identically on every peer. Idempotent on a repeated `id` (last write
-    /// wins). Bumps `epochs.annotation`.
+    /// Drop a collaborative annotation (point pin) onto `dataset_id` at an
+    /// in-plane world-space `position` and additive depth `z` (the pin's world
+    /// point is `(position[0], position[1], z)`). The `id` is client-supplied
+    /// (a uuid string) so this command and its rebroadcast are byte-identical
+    /// and apply identically on every peer. Idempotent on a repeated `id` (last
+    /// write wins). Bumps `epochs.annotation`.
+    ///
+    /// `z` is `#[serde(default)]` so this stays wire-compatible with slices
+    /// 1/2: an `add_annotation` command with no `z` field (an older client, or
+    /// a replayed older log entry) applies with `z = 0.0` rather than failing
+    /// to parse. There is no `[2] -> [3]` break — `position` is unchanged.
     AddAnnotation {
         dataset_id: DatasetId,
         id: String,
         position: [f64; 2],
+        #[serde(default)]
+        z: f64,
         author: String,
         #[serde(default)]
         kind: crate::scene::AnnotationKind,
@@ -1807,6 +1815,7 @@ mod tests {
             dataset_id: DatasetId("wds-abc".into()),
             id: "11111111-2222-3333-4444-555555555555".into(),
             position: [12.5, -7.25],
+            z: 3.5,
             author: "biologist".into(),
             kind: crate::scene::AnnotationKind::Point,
         };
@@ -1817,6 +1826,7 @@ mod tests {
         assert_eq!(v["id"], "11111111-2222-3333-4444-555555555555");
         assert_eq!(v["position"][0], 12.5);
         assert_eq!(v["position"][1], -7.25);
+        assert_eq!(v["z"], 3.5);
         assert_eq!(v["author"], "biologist");
         assert_eq!(v["kind"], "point");
 
@@ -1827,12 +1837,14 @@ mod tests {
                 dataset_id,
                 id,
                 position,
+                z,
                 author,
                 kind,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
                 assert_eq!(id, "11111111-2222-3333-4444-555555555555");
                 assert_eq!(position, [12.5, -7.25]);
+                assert_eq!(z, 3.5);
                 assert_eq!(author, "biologist");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
             }
@@ -1842,22 +1854,41 @@ mod tests {
 
     #[test]
     fn add_annotation_parses_from_documented_client_payload() {
-        // Verbatim client->server payload from the slice wire contract.
-        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}"#;
+        // Verbatim client->server payload from the slice-3 wire contract,
+        // which now carries an additive `z` depth alongside `position`.
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0,"author":"alice","kind":"point"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
             DocumentCommand::AddAnnotation {
                 dataset_id,
                 id,
                 position,
+                z,
                 author,
                 kind,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(z, 5.0);
                 assert_eq!(author, "alice");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn add_annotation_z_defaults_to_zero_for_slice12_payload() {
+        // A slice-1/2 client (or a replayed older log entry) sends no `z`.
+        // #[serde(default)] must parse it as z = 0.0 rather than failing —
+        // this is the wire backward-compatibility guarantee, no [2]->[3] break.
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation { position, z, .. } => {
+                assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(z, 0.0);
             }
             _ => panic!("expected AddAnnotation"),
         }
@@ -1896,13 +1927,128 @@ mod tests {
     }
 
     fn add_annotation_cmd(ds: &str, id: &str, position: [f64; 2], author: &str) -> DocumentCommand {
+        add_annotation_cmd_z(ds, id, position, 0.0, author)
+    }
+
+    fn add_annotation_cmd_z(
+        ds: &str,
+        id: &str,
+        position: [f64; 2],
+        z: f64,
+        author: &str,
+    ) -> DocumentCommand {
         DocumentCommand::AddAnnotation {
             dataset_id: DatasetId(ds.into()),
             id: id.into(),
             position,
+            z,
             author: author.into(),
             kind: crate::scene::AnnotationKind::Point,
         }
+    }
+
+    #[test]
+    fn document_state_add_annotation_carries_z_into_stored_pin() {
+        // The depth from the command must land on the stored pin's `z`.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [1.0, 2.0],
+            7.5,
+            "alice",
+        ));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position, [1.0, 2.0]);
+        assert_eq!(pins[0].z, 7.5);
+    }
+
+    #[test]
+    fn document_state_add_annotation_default_z_is_zero() {
+        // A pin dropped without depth (the slice-1/2 path) stores z = 0.0.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
+        assert_eq!(doc.annotations[&DatasetId("wds-1".into())][0].z, 0.0);
+    }
+
+    #[test]
+    fn document_state_add_annotation_z_last_write_wins() {
+        // Re-applying the same pin id with a new depth replaces z in place.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [1.0, 2.0],
+            3.0,
+            "alice",
+        ));
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [1.0, 2.0],
+            9.0,
+            "alice",
+        ));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].z, 9.0);
+    }
+
+    #[test]
+    fn annotation_z_round_trips_with_full_float_precision() {
+        // The durability/broadcast path is serde of DocumentState. A non-round
+        // depth must survive byte-for-byte (no f32 narrowing, no truncation).
+        let depth = std::f64::consts::PI * 1_000.0; // 3141.592653589793...
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [1.5, 2.5],
+            depth,
+            "alice",
+        ));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pins = &restored.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins[0].z, depth);
+        assert_eq!(pins[0].z.to_bits(), depth.to_bits());
+    }
+
+    #[test]
+    fn annotation_negative_and_fractional_z_round_trip() {
+        // Depth is a signed world coordinate, not an index; negatives are valid.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [0.0, 0.0],
+            -42.25,
+            "alice",
+        ));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        assert_eq!(
+            restored.annotations[&DatasetId("wds-1".into())][0].z,
+            -42.25
+        );
+    }
+
+    #[test]
+    fn slice12_persisted_pin_without_z_loads_as_zero() {
+        // A pin blob written by slice 1/2 has no `z` key. #[serde(default)] on
+        // Annotation::z must load it as 0.0 (and the comment thread still works).
+        let json = r#"{"manifests":{},"annotations":{"wds-1":[
+            {"id":"p1","position":[10.0,20.0],"author":"alice","kind":"point",
+             "comments":[{"id":"c1","author":"bob","text":"hi"}]}
+        ]}}"#;
+        let doc: crate::scene::DocumentState = serde_json::from_str(json).unwrap();
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position, [10.0, 20.0]);
+        assert_eq!(pins[0].z, 0.0);
+        assert_eq!(pins[0].comments.len(), 1);
+        assert_eq!(pins[0].comments[0].text, "hi");
     }
 
     #[test]
@@ -2052,9 +2198,16 @@ mod tests {
     fn snapshot_document_annotations_shape_matches_wire_contract() {
         // The snapshot ships `DocumentState` whole under `document`, so its
         // serialized shape IS `snapshot.document.annotations`. Assert the
-        // documented nested shape: { "<dataset_id>": [ {id,position,author,kind} ] }.
+        // documented nested shape:
+        // { "<dataset_id>": [ {id,position,z,author,kind,comments} ] }.
         let mut doc = crate::scene::DocumentState::default();
-        doc.apply(add_annotation_cmd("wds-1", "p1", [10.0, 20.0], "alice"));
+        doc.apply(add_annotation_cmd_z(
+            "wds-1",
+            "p1",
+            [10.0, 20.0],
+            6.0,
+            "alice",
+        ));
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
         let arr = &v["annotations"]["wds-1"];
@@ -2062,6 +2215,7 @@ mod tests {
         assert_eq!(arr[0]["id"], "p1");
         assert_eq!(arr[0]["position"][0], 10.0);
         assert_eq!(arr[0]["position"][1], 20.0);
+        assert_eq!(arr[0]["z"], 6.0);
         assert_eq!(arr[0]["author"], "alice");
         assert_eq!(arr[0]["kind"], "point");
     }
@@ -2119,6 +2273,7 @@ mod tests {
         crate::scene::Annotation {
             id: id.into(),
             position: [0.0, 0.0],
+            z: 0.0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),

@@ -194,8 +194,17 @@ pub struct Comment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     pub id: String,
-    /// 2D world-space position `[x, y]`.
+    /// In-plane world-space position `[x, y]`.
     pub position: [f64; 2],
+    /// Additive depth (the third coordinate) in the same world frame as
+    /// `position`, so the pin's full world point is `(position[0],
+    /// position[1], z)`. Kept as a separate scalar — rather than widening
+    /// `position` to `[f64; 3]` — so the wire stays backward compatible with
+    /// slices 1/2: `#[serde(default)]` means pins (and persisted documents)
+    /// written before depth existed deserialize with `z = 0.0`, and a pin at
+    /// `z = 0.0` serializes identically whether or not it carries depth.
+    #[serde(default)]
+    pub z: f64,
     pub author: String,
     #[serde(default)]
     pub kind: AnnotationKind,
@@ -432,6 +441,7 @@ impl DocumentState {
                 dataset_id,
                 id,
                 position,
+                z,
                 author,
                 kind,
             } => {
@@ -440,6 +450,7 @@ impl DocumentState {
                     Annotation {
                         id,
                         position,
+                        z,
                         author,
                         kind,
                         // A freshly dropped pin starts with an empty thread.

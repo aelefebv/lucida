@@ -29,10 +29,14 @@ export interface Comment {
   text: string;
 }
 
-/** One pin, as returned by `WasmScene.annotations()` (2D world space). */
+/** One pin, as returned by `WasmScene.annotations()`. `position` is the
+ * in-plane world point; `z` is the additive depth, so the pin's full world
+ * point is `(position[0], position[1], z)`. */
 export interface Annotation {
   id: string;
   position: [number, number];
+  /** Additive depth. Absent on a slice-1/2 pin → defaulted to 0 on read. */
+  z?: number;
   author: string;
   kind: string;
   /** Flat, insertion-ordered comment thread. Absent on a slice-1 pin →

@@ -47,6 +47,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   // latest values without stale closures.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   annotationDatasetIdRef.current = annotationDatasetId;
+  // Mirror the current slice index so a dropped pin records its depth (z)
+  // without re-binding the pointer handlers on every slice change.
+  const zRef = useRef(z);
+  zRef.current = z;
   const myIdRef = useRef(myId);
   myIdRef.current = myId;
   const sendCommandRef = useRef(sendCommand);
@@ -168,6 +172,12 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
               dataset_id: datasetId,
               id,
               position: [worldX, worldY],
+              // Depth-from-click in 2D slice mode: the pin takes the current
+              // view's slice depth (the z index, in the same in-plane voxel
+              // frame `position` uses). This is what anchors the pin in 3D —
+              // the volume overlay lifts (x, y, z) to world via the renderer's
+              // transform. A slice-1/2 pin had no z and loads as 0.0.
+              z: zRef.current,
               author: String(myIdRef.current),
               kind: "point",
             },

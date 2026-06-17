@@ -799,6 +799,47 @@ impl WasmScene {
         }
     }
 
+    /// Project a pin's stored world point `(x, y, z)` — in-plane voxel position
+    /// plus additive voxel depth — to screen-space pixels `[sx, sy]` (physical,
+    /// pre-DPR-divide) through the active camera.
+    ///
+    /// This is the 3D analogue of `project_to_screen` for annotations: in slice
+    /// mode it is the same in-plane projection the 2D overlay uses (depth
+    /// ignored); in arcball/fly mode it lifts the point to world space via the
+    /// dataset's rendering transform first, so the marker tracks the volume as
+    /// the camera orbits. Returns an empty `Vec` (length 0) when the point is
+    /// behind the camera (3D) or the dataset has no anchorable member — the same
+    /// empty-vec-as-`Option` convention `project_to_screen` uses. The overlay
+    /// hides the marker on empty, which is what makes a pin disappear as it
+    /// swings behind the volume.
+    pub fn project_annotation(&self, dataset_id: &str, x: f64, y: f64, z: f64) -> Vec<f64> {
+        let id = DatasetId(dataset_id.into());
+        match self.inner.project_annotation(&id, x, y, z) {
+            Some([sx, sy]) => vec![sx, sy],
+            None => Vec::new(),
+        }
+    }
+
+    /// Depth pick for dropping a pin in a 3D view: ray-cast from screen
+    /// coordinates into `dataset_id`'s volume and return the hit as an
+    /// in-plane-voxel + voxel-depth point `[x, y, z]` — exactly the triple to
+    /// store as `position = [x, y]`, `z = z`. Returns an empty `Vec` (length 0)
+    /// if the ray misses the volume, so the caller can decline to drop a pin
+    /// into empty space. The returned point re-projects (via
+    /// `project_annotation`) back under the cursor that picked it.
+    pub fn pick_annotation_voxel(
+        &self,
+        dataset_id: &str,
+        screen_x: f64,
+        screen_y: f64,
+    ) -> Vec<f64> {
+        let id = DatasetId(dataset_id.into());
+        match self.inner.pick_annotation_voxel(&id, screen_x, screen_y) {
+            Some([x, y, z]) => vec![x, y, z],
+            None => Vec::new(),
+        }
+    }
+
     // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {

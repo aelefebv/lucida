@@ -579,6 +579,114 @@ impl Scene {
         closest
     }
 
+    // --- 3D annotation anchoring ---
+    //
+    // A pin's stored world point `(position[0], position[1], z)` lives in the
+    // SAME in-plane-voxel + voxel-depth frame the 2D pin position has always
+    // used (image convention: x right, y down, z = slice index). The helpers
+    // below convert that point to/from the arcball camera's world space by
+    // **reusing** `rendering_transform` (the exact model matrix the volume
+    // render pass uses — Y-flip, global normalization, top-alignment) and the
+    // camera's own `project_to_screen` / `ray_pick`. Nothing is re-derived, so
+    // a marker tracks the volume identically to how the volume itself renders,
+    // and a depth pick is the exact inverse of the projection used to draw it.
+
+    /// Resolve the first member of `dataset_id`, with its level-0 voxel shape
+    /// `[X, Y, Z]`. Pins are dataset-scoped and anchored against the dataset's
+    /// primary member (the same member `ray_pick`/`view_query` treat as the
+    /// volume), so depth is consistent between drop and render.
+    fn annotation_member(&self, dataset_id: &DatasetId) -> Option<(&MemberState, [f64; 3])> {
+        let derived = self.derived.get(dataset_id)?;
+        let member = derived.members.first()?;
+        let level0 = member.levels.first()?;
+        let shape = [
+            level0.shape[4] as f64, // X
+            level0.shape[3] as f64, // Y
+            level0.shape[2] as f64, // Z
+        ];
+        Some((member, shape))
+    }
+
+    /// Map an in-plane-voxel + voxel-depth pin point to arcball-world space
+    /// using the dataset's rendering transform. Image-convention Y (0 = top) is
+    /// flipped to the renderer's Y-up unit cube exactly like
+    /// `ray_hit_local_image` does in reverse, so a pin drawn here lands where
+    /// the matching voxel is drawn in the volume.
+    fn annotation_world_point(
+        &self,
+        member: &MemberState,
+        shape: [f64; 3],
+        point: [f64; 3],
+    ) -> [f64; 3] {
+        let (fwd, _) = self.rendering_transform(member);
+        let ux = if shape[0] > 0.0 {
+            point[0] / shape[0]
+        } else {
+            0.0
+        };
+        // Image y-down -> unit y-up.
+        let uy = if shape[1] > 0.0 {
+            1.0 - point[1] / shape[1]
+        } else {
+            0.0
+        };
+        let uz = if shape[2] > 0.0 {
+            point[2] / shape[2]
+        } else {
+            0.0
+        };
+        crate::ray::transform_point(&[ux, uy, uz], &fwd.model)
+    }
+
+    /// Project a pin's stored world point `(x, y, z)` (in-plane voxel + voxel
+    /// depth) to screen-space pixels through the active camera.
+    ///
+    /// In 2D slice mode this is just the in-plane projection the 2D overlay has
+    /// always used (depth ignored, matching `Camera::project_to_screen`). In a
+    /// 3D mode the point is first lifted to arcball-world via the rendering
+    /// transform, so the marker tracks the volume as the camera orbits.
+    /// Returns `None` when the point is behind the camera (3D only) or the
+    /// dataset has no anchorable member — the caller hides the marker, which is
+    /// also what makes a marker vanish as it swings behind the volume.
+    pub fn project_annotation(
+        &self,
+        dataset_id: &DatasetId,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Option<[f64; 2]> {
+        if matches!(self.camera, Camera::Slice(_)) {
+            // 2D: keep the long-standing in-plane behavior verbatim.
+            return self.camera.project_to_screen([x, y, z]);
+        }
+        let (member, shape) = self.annotation_member(dataset_id)?;
+        let world = self.annotation_world_point(member, shape, [x, y, z]);
+        self.camera.project_to_screen(world)
+    }
+
+    /// Depth pick for a pin dropped in a 3D view: ray-cast from screen into the
+    /// volume and return the hit as an in-plane-voxel + voxel-depth point
+    /// `[x, y, z]`, ready to store as `(position, z)`. This is the exact inverse
+    /// of [`Self::annotation_world_point`] (so the new marker re-projects to the
+    /// cursor), built on the shared `ray_pick`. Returns `None` if the ray misses
+    /// the volume; the caller then declines to drop a pin into empty space.
+    pub fn pick_annotation_voxel(
+        &self,
+        dataset_id: &DatasetId,
+        screen_x: f64,
+        screen_y: f64,
+    ) -> Option<[f64; 3]> {
+        let hit = self.ray_pick(dataset_id, screen_x, screen_y)?;
+        let (member, shape) = self.annotation_member(dataset_id)?;
+        let (_, inv) = self.rendering_transform(member);
+        // World -> unit cube, then unit -> image-convention voxel (un-flip Y).
+        let unit = crate::ray::transform_point(&hit.world_position, &inv.inv_model);
+        let vx = unit[0] * shape[0];
+        let vy = (1.0 - unit[1]) * shape[1];
+        let vz = unit[2] * shape[2];
+        Some([vx, vy, vz])
+    }
+
     /// Rebuild derived state from the document's dataset manifests.
     /// Call this after deserializing a Scene (since derived is not serialized).
     pub fn rebuild_derived(&mut self) {
@@ -1507,6 +1615,125 @@ mod tests {
         assert!(
             scene
                 .ray_pick(&DatasetId::from("nope"), 400.0, 300.0)
+                .is_none()
+        );
+    }
+
+    // --- 3D annotation anchoring ---
+
+    #[test]
+    fn project_annotation_2d_matches_in_plane_projection() {
+        // In slice mode the pin projection must be byte-for-byte the in-plane
+        // projection the 2D overlay already relied on (depth ignored), so the
+        // existing 2D overlay keeps working unchanged when a pin gains a z.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let id = DatasetId::from("ds1");
+        let with_z = scene.project_annotation(&id, 40.0, 30.0, 7.0).unwrap();
+        let without_z = scene.camera.project_to_screen([40.0, 30.0, 0.0]).unwrap();
+        assert_eq!(with_z, without_z);
+    }
+
+    #[test]
+    fn pick_annotation_voxel_round_trips_through_projection_in_3d() {
+        // The core of the 3D path: a depth pick at a screen point, stored as a
+        // voxel triple, must re-project to (essentially) that same screen point
+        // — i.e. the marker lands under the cursor that dropped it. This proves
+        // the drop math is the inverse of the render math (both reuse the
+        // rendering transform), independent of camera angle. A cubic volume is
+        // used so the viewport-center ray reliably strikes a face.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 64, 64, 64],
+            [1, 1, 64, 64, 64],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.set_mode_3d();
+        // Orbit a little so we're not in a degenerate head-on view.
+        scene.apply(
+            crate::command::ViewportCommand::Rotate3D {
+                d_theta: 0.5,
+                d_phi: 0.3,
+            }
+            .into(),
+        );
+        let id = DatasetId::from("ds1");
+        let (sx, sy) = (400.0, 300.0); // viewport center → hits the cube
+        let voxel = scene
+            .pick_annotation_voxel(&id, sx, sy)
+            .expect("center ray should hit the volume");
+        let screen = scene
+            .project_annotation(&id, voxel[0], voxel[1], voxel[2])
+            .expect("picked point should project in front of the camera");
+        assert!(
+            (screen[0] - sx).abs() < 1.0 && (screen[1] - sy).abs() < 1.0,
+            "re-projected pin {screen:?} should land at the pick point [{sx}, {sy}]",
+        );
+    }
+
+    #[test]
+    fn annotation_world_point_is_inside_volume_world_bounds() {
+        // A pin at the volume's voxel center must map to a world point inside
+        // the volume's world AABB — a sanity check that the voxel→world lift
+        // uses the same transform as the rendered volume (so the marker can't
+        // float off in space).
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256x10
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.set_mode_3d();
+        let id = DatasetId::from("ds1");
+        let (member, shape) = scene.annotation_member(&id).unwrap();
+        let center = [shape[0] / 2.0, shape[1] / 2.0, shape[2] / 2.0];
+        let world = scene.annotation_world_point(member, shape, center);
+        let (fwd, _) = scene.rendering_transform(member);
+        let corners = fwd.world_corners();
+        let mut lo = [f64::MAX; 3];
+        let mut hi = [f64::MIN; 3];
+        for corner in &corners {
+            for k in 0..3 {
+                lo[k] = lo[k].min(corner[k]);
+                hi[k] = hi[k].max(corner[k]);
+            }
+        }
+        for k in 0..3 {
+            assert!(
+                world[k] >= lo[k] - 1e-6 && world[k] <= hi[k] + 1e-6,
+                "axis {k}: {} not within [{}, {}]",
+                world[k],
+                lo[k],
+                hi[k],
+            );
+        }
+    }
+
+    #[test]
+    fn pick_annotation_voxel_misses_return_none() {
+        // A ray that misses the volume yields no depth, so the caller declines
+        // to drop a pin into empty space rather than anchoring it nowhere.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.set_mode_3d();
+        let id = DatasetId::from("ds1");
+        assert!(
+            scene
+                .pick_annotation_voxel(&id, -10_000.0, -10_000.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn project_annotation_unknown_dataset_is_none_in_3d() {
+        let mut scene = Scene::new([800, 600]);
+        scene.set_mode_3d();
+        assert!(
+            scene
+                .project_annotation(&DatasetId::from("nope"), 1.0, 2.0, 3.0)
                 .is_none()
         );
     }

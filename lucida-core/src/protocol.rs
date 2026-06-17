@@ -484,11 +484,13 @@ mod tests {
     #[test]
     fn add_annotation_broadcast_is_byte_identical_to_inbound_command() {
         // Client-supplied id means the inbound command and its rebroadcast
-        // carry the same command object byte-for-byte (only seq differs).
+        // carry the same command object byte-for-byte (only seq differs). The
+        // depth `z` rides along unchanged, so a peer receives the pin's z.
         let cmd = DocumentCommand::AddAnnotation {
             dataset_id: DatasetId("wds-1".into()),
             id: "pin-1".into(),
             position: [3.0, 4.0],
+            z: 8.5,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
         };
@@ -505,18 +507,21 @@ mod tests {
         let broadcast_v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&broadcast).unwrap()).unwrap();
         assert_eq!(inbound_v["command"], broadcast_v["command"]);
+        assert_eq!(broadcast_v["command"]["z"], 8.5);
         assert_eq!(broadcast_v["type"], "command_broadcast");
         assert_eq!(broadcast_v["seq"], 7);
     }
 
     #[test]
     fn snapshot_carries_annotations_under_document() {
-        // A late joiner loads pins from snapshot.document.annotations.
+        // A late joiner loads pins from snapshot.document.annotations,
+        // including each pin's depth `z`.
         let mut doc = DocumentState::default();
         doc.apply(DocumentCommand::AddAnnotation {
             dataset_id: DatasetId("wds-1".into()),
             id: "pin-1".into(),
             position: [10.0, 20.0],
+            z: 12.5,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
         });
@@ -534,15 +539,18 @@ mod tests {
         assert_eq!(pin["id"], "pin-1");
         assert_eq!(pin["position"][0], 10.0);
         assert_eq!(pin["position"][1], 20.0);
+        assert_eq!(pin["z"], 12.5);
         assert_eq!(pin["author"], "alice");
         assert_eq!(pin["kind"], "point");
 
-        // And it round-trips back into a usable DocumentState.
+        // And it round-trips back into a usable DocumentState with z intact.
         let parsed: ServerMessage =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         match parsed {
             ServerMessage::Snapshot { document, .. } => {
-                assert_eq!(document.annotations[&DatasetId("wds-1".into())].len(), 1);
+                let pins = &document.annotations[&DatasetId("wds-1".into())];
+                assert_eq!(pins.len(), 1);
+                assert_eq!(pins[0].z, 12.5);
             }
             _ => panic!("expected Snapshot"),
         }
