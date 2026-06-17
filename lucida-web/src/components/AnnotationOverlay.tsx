@@ -21,7 +21,16 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
-import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
+import {
+  annotationVertices,
+  isClosedShape,
+  BOX_HANDLES,
+  boxHandlePoint,
+  reshapeBox,
+  type BoxCorners,
+  type BoxHandle,
+  type ScreenPoint,
+} from "./annotationGeometry.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 
 /** One comment in a pin's thread (as returned nested in `annotations()`). */
@@ -78,6 +87,30 @@ interface Props {
  * share the same "did the pointer really travel?" threshold. */
 const PIN_CLICK_SLOP = 4;
 
+/** Side length (CSS px) of a square resize handle. Small, so the handles are a
+ * distinct, deliberate target that doesn't swallow the box body. */
+const HANDLE_SIZE = 10;
+
+/** How far (CSS px) to nudge each handle OUTWARD from the box center, so the
+ * handles straddle the stroke (the conventional look) and the `nw` handle clears
+ * the anchor dot that shares the `position` corner. Cosmetic only — the resize
+ * math always uses the cursor's world point, never this offset. */
+const HANDLE_OUTSET = 9;
+
+/** The directional resize cursor for each handle, so the affordance reads as
+ * "drag to resize from here" (a corner resizes both axes; an edge, one). Keyed
+ * by the handle's vertex-role name, mapped to the screen direction it grows. */
+const HANDLE_CURSOR: Record<BoxHandle, string> = {
+  nw: "nwse-resize",
+  se: "nwse-resize",
+  ne: "nesw-resize",
+  sw: "nesw-resize",
+  n: "ns-resize",
+  s: "ns-resize",
+  w: "ew-resize",
+  e: "ew-resize",
+};
+
 /** Live state for an in-progress pointer gesture that began on an own marker,
  * scoped to one captured pointer. The marker sits over the canvas and captures
  * the press, so it must drive BOTH gestures itself:
@@ -105,6 +138,47 @@ interface PinDrag {
   z: number;
   /** Flips true once travel passes the slop — the press becomes a real drag. */
   moved: boolean;
+}
+
+/** Live state for an in-progress RESIZE gesture that began on one of an own
+ * box's eight handles, scoped to one captured pointer. Distinct from
+ * {@link PinDrag} (the anchor-dot move/pan gesture): a handle never pans — it
+ * only reshapes the box, emitting one reshape `move_annotation` on release. */
+interface HandleDrag {
+  pinId: string;
+  pointerId: number;
+  /** Which handle is held (nw|ne|se|sw|n|e|s|w) — picks the recompute. */
+  handle: BoxHandle;
+  /** Press point in CSS px (clientX/Y), to measure travel against the slop. */
+  startX: number;
+  startY: number;
+  /** The box's two opposite corners at press, the fixed base every recompute
+   * builds on (so dragging one handle never drifts the others). */
+  base: BoxCorners;
+  /** The box's depth at press; preserved across a reshape (z is not edited by
+   * a 2D corner/edge drag). */
+  z: number;
+  /** Flips true once travel passes the slop — the press becomes a real drag. */
+  moved: boolean;
+  /** The live reshaped corners while dragging (null until the first move past
+   * the slop). The RAF tick reads this to preview the box + handles under the
+   * cursor; the authoritative reshape lands on release via apply_command. */
+  preview: BoxCorners | null;
+}
+
+/** Whether `pin` is an own box eligible for resize handles: kind "box", has a
+ * second vertex, and authored by me. A point/line, or any non-author shape,
+ * gets no handles. */
+function isOwnBox(pin: Annotation, myId: number): boolean {
+  return pin.kind === "box" && (pin.end ?? null) !== null && pin.author === String(myId);
+}
+
+/** The two opposite world corners of a box pin (anchor + opposite). Returns null
+ * if it has no second vertex (so a caller can skip a degenerate box). */
+function boxCorners(pin: Annotation): BoxCorners | null {
+  const end = pin.end ?? null;
+  if (!end) return null;
+  return { position: [pin.position[0], pin.position[1]], end: [end[0], end[1]] };
 }
 
 function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation[] {
@@ -139,6 +213,14 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
   // fires on pointerup so the thread popover doesn't toggle on drop. Keyed off
   // the pin id; cleared once the suppressed click is consumed.
   const suppressClickRef = useRef<string | null>(null);
+
+  // The live resize-handle drag, if any (a ref, not state, so handlers mutate it
+  // without re-rendering mid-drag; the RAF tick reads its `preview` to reproject
+  // the box + handles under the cursor). At most one handle drags at a time.
+  const handleDragRef = useRef<HandleDrag | null>(null);
+  // One DOM node per resize handle, keyed `${pinId}:${handle}`, so the tick can
+  // reproject each handle from world space every frame — exactly like the dots.
+  const handleRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   // Re-read the authoritative pin set (with threads) from WASM whenever the
   // document version changes (a pin/comment was added/removed locally or by a
@@ -208,6 +290,11 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
         const activeDrag = dragRef.current;
         const draggingId =
           activeDrag?.moved && activeDrag.mode === "move" ? activeDrag.pinId : null;
+        // A resize in flight (past the slop) previews the box from the dragged
+        // corners, so this pin's outline + handles track the cursor instead of
+        // its (still-old) stored geometry.
+        const resize = handleDragRef.current;
+        const resizingId = resize?.moved && resize.preview ? resize.pinId : null;
 
         for (const pin of annotationsRef.current) {
           // Anchor dot (the interaction target) sits at the first vertex.
@@ -216,11 +303,22 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
             const [ax, ay] = project(pin.position);
             el.style.transform = `translate(${ax}px, ${ay}px)`;
           }
+          // The box's effective corners this frame: the live resize preview if
+          // this pin is being resized, else its stored anchor/end. Drives both
+          // the SVG outline and the handle positions so they stay coincident.
+          const liveCorners: BoxCorners | null =
+            pin.id === resizingId && resize?.preview ? resize.preview : boxCorners(pin);
           // Line/box geometry: project every vertex through the same `project`
           // and rewrite the shared SVG element's coordinates in place.
           const shape = shapeRefs.current.get(pin.id);
           if (shape) {
-            const pts = annotationVertices(pin).map(project);
+            // While previewing a box resize, derive the outline from the live
+            // corners; otherwise use the pin's stored vertices.
+            const previewPin =
+              pin.id === resizingId && liveCorners
+                ? { ...pin, position: liveCorners.position, end: liveCorners.end }
+                : pin;
+            const pts = annotationVertices(previewPin).map(project);
             if (isClosedShape(pin)) {
               (shape as SVGPolygonElement).setAttribute(
                 "points",
@@ -232,6 +330,37 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
               line.setAttribute("y1", String(pts[0][1]));
               line.setAttribute("x2", String(pts[1][0]));
               line.setAttribute("y2", String(pts[1][1]));
+            }
+          }
+          // Resize handles (own boxes only): reproject each of the eight from
+          // the same `project`, off the live corners, so they ride the box
+          // across pan/zoom AND track the cursor during an in-flight resize.
+          //
+          // Each handle is nudged a few CSS px OUTWARD from the box center
+          // (along the projected center->handle direction). Purely cosmetic — it
+          // makes the handles straddle the stroke (the conventional look) and,
+          // crucially, lifts the `nw` handle off the anchor DOT that also sits at
+          // `position`, so a plain click / Shift+drag on the dot (open thread /
+          // move the whole box, #776) still lands on the dot, not the handle.
+          // The resize MATH is unaffected: release uses eventToWorld, never this
+          // visual offset.
+          if (liveCorners) {
+            const [cx, cy] = project([
+              (liveCorners.position[0] + liveCorners.end[0]) / 2,
+              (liveCorners.position[1] + liveCorners.end[1]) / 2,
+            ]);
+            for (const h of BOX_HANDLES) {
+              const handleEl = handleRefs.current.get(`${pin.id}:${h}`);
+              if (!handleEl) continue;
+              const [hx, hy] = project(boxHandlePoint(liveCorners, h));
+              const ox = hx - cx;
+              const oy = hy - cy;
+              const len = Math.hypot(ox, oy);
+              // Outset along the outward direction; for a degenerate (zero-size)
+              // box the direction is undefined, so fall back to no offset.
+              const nx = len > 0.001 ? (ox / len) * HANDLE_OUTSET : 0;
+              const ny = len > 0.001 ? (oy / len) * HANDLE_OUTSET : 0;
+              handleEl.style.transform = `translate(${hx + nx}px, ${hy + ny}px)`;
             }
           }
         }
@@ -427,6 +556,110 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     }
   };
 
+  // --- Box resize gesture (drag a corner/edge handle) ------------------------
+  // Each handle on an own box captures its own press (it sits over the canvas,
+  // above the box outline) and drives a self-contained reshape gesture using
+  // Pointer Events ON the handle — capture on down; move/up on the handle — so
+  // the pointer stays bound even as it slides far from the handle, exactly like
+  // the anchor-dot gesture. A handle NEVER pans and never moves the whole box:
+  // it only reshapes, emitting ONE reshape `move_annotation {position, end}` on
+  // release (author-only — non-author boxes render no handles at all).
+
+  const onHandlePointerDown =
+    (pin: Annotation, handle: BoxHandle) => (e: ReactPointerEvent) => {
+      // Belt-and-suspenders author gate (handles aren't rendered for peers).
+      if (!isOwnBox(pin, myId)) return;
+      if (e.button !== 0) return;
+      // Don't start a resize on top of an in-flight gesture (anchor drag or
+      // another handle): let the active one finish rather than racing it.
+      if (dragRef.current || handleDragRef.current) return;
+      const base = boxCorners(pin);
+      if (!base) return;
+      // A handle press must not also reach the anchor-dot gesture or the canvas
+      // beneath: it owns this pointer outright.
+      e.stopPropagation();
+      handleDragRef.current = {
+        pinId: pin.id,
+        pointerId: e.pointerId,
+        handle,
+        startX: e.clientX,
+        startY: e.clientY,
+        base,
+        z: pin.z ?? 0,
+        moved: false,
+        preview: null,
+      };
+      try {
+        (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      } catch {
+        // capture unsupported (e.g. test env) — moves/ups still arrive on target
+      }
+    };
+
+  const onHandlePointerMove =
+    (pin: Annotation, _handle: BoxHandle) => (e: ReactPointerEvent) => {
+      const drag = handleDragRef.current;
+      if (!drag || drag.pinId !== pin.id) return;
+      if (!drag.moved) {
+        const travel = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
+        if (travel <= PIN_CLICK_SLOP) return; // within click slop — not yet a drag
+        drag.moved = true;
+      }
+      // Recompute the two corners from the FIXED press-time base (never the
+      // running preview) so the held side stays anchored and there's no drift.
+      // The RAF tick reprojects the outline + handles from this preview.
+      const world = eventToWorld(e);
+      drag.preview = reshapeBox(drag.base, drag.handle, world);
+    };
+
+  const onHandlePointerUp =
+    (pin: Annotation, _handle: BoxHandle) => (e: ReactPointerEvent) => {
+      const drag = handleDragRef.current;
+      if (!drag || drag.pinId !== pin.id) return;
+      handleDragRef.current = null;
+      try {
+        (e.currentTarget as Element).releasePointerCapture?.(drag.pointerId);
+      } catch {
+        // ignore — capture may not have been taken
+      }
+      // A press that never crossed the slop is a no-op: no reshape (and there's
+      // no thread/click affordance on a handle to fall through to).
+      if (!drag.moved) return;
+      // Resolve the final corners at the release point in the existing world
+      // frame, and emit exactly one reshape move carrying BOTH opposite corners.
+      const corners = reshapeBox(drag.base, drag.handle, eventToWorld(e));
+      const scene = wasmSceneRef.current;
+      if (!scene) return;
+      applyDocumentCommand(
+        scene,
+        {
+          type: "move_annotation",
+          dataset_id: datasetId,
+          id: pin.id,
+          position: corners.position,
+          end: corners.end,
+          z: drag.z,
+        },
+        sendCommand,
+      );
+      onDocumentChanged();
+    };
+
+  const onHandlePointerCancel =
+    (pin: Annotation, _handle: BoxHandle) => (e: ReactPointerEvent) => {
+      const drag = handleDragRef.current;
+      if (!drag || drag.pinId !== pin.id) return;
+      const captured = drag.pointerId;
+      handleDragRef.current = null;
+      try {
+        (e.currentTarget as Element).releasePointerCapture?.(captured);
+      } catch {
+        // ignore
+      }
+      // Cancelled: never reshape; the RAF tick snaps the box + handles back to
+      // the stored geometry next frame.
+    };
+
   return (
     <div
       style={{
@@ -490,6 +723,57 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
           );
         })}
       </svg>
+      {/* Resize-handle layer: eight small draggable squares on each OWN box, at
+          its projected corners + edge midpoints. Author-only — a non-author box
+          (or a point/line) renders none, so a peer can't reshape my box and a
+          point/line has no resize affordance. Each handle is a DOM node (it
+          needs pointer capture) repositioned every frame by the RAF tick off the
+          live (or stored) corners, so it rides the box across pan/zoom and
+          tracks the cursor mid-resize. Dragging one emits ONE reshape
+          move_annotation carrying both opposite corners (see the handlers). */}
+      {annotations.map((pin) => {
+        if (!isOwnBox(pin, myId)) return null;
+        return BOX_HANDLES.map((h) => (
+          <div
+            key={`${pin.id}:${h}`}
+            data-testid={`annot-resize-${pin.id}-${h}`}
+            title={`Resize this box (${h})`}
+            ref={(el) => {
+              if (el) handleRefs.current.set(`${pin.id}:${h}`, el);
+              else handleRefs.current.delete(`${pin.id}:${h}`);
+            }}
+            onPointerDown={onHandlePointerDown(pin, h)}
+            onPointerMove={onHandlePointerMove(pin, h)}
+            onPointerUp={onHandlePointerUp(pin, h)}
+            onPointerCancel={onHandlePointerCancel(pin, h)}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              transform: "translate(0px, 0px)",
+              willChange: "transform",
+              // Centered on the handle's projected point.
+              width: HANDLE_SIZE,
+              height: HANDLE_SIZE,
+              marginLeft: -HANDLE_SIZE / 2,
+              marginTop: -HANDLE_SIZE / 2,
+              boxSizing: "border-box",
+              // A small white square with the box's accent border — the
+              // conventional resize grip, visually distinct from the round dot.
+              backgroundColor: "white",
+              border: "1.5px solid #FF3B30",
+              borderRadius: 2,
+              boxShadow: "0 1px 2px rgba(0,0,0,0.5)",
+              pointerEvents: "auto",
+              touchAction: "none",
+              // A directional resize cursor per handle, so the affordance reads
+              // as "drag to resize" rather than "move".
+              cursor: HANDLE_CURSOR[h],
+              zIndex: 3,
+            }}
+          />
+        ));
+      })}
       {annotations.map((pin) => {
         const mine = pin.author === String(myId);
         const comments = pin.comments ?? [];

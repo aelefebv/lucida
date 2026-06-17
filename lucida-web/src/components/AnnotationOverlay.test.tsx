@@ -26,11 +26,19 @@ function makeScene(initial: Annotation[]): {
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
       applied.push(cmd);
-      // Reflect the two commands this slice emits so a re-read shows the result.
+      // Reflect the commands this slice emits so a re-read shows the result. A
+      // move_annotation carries `position`/`z` always, and `end` too when it's a
+      // reshape (a corner/edge resize) — mirror both so a re-read sees the moved
+      // anchor AND the resized opposite corner.
       if (cmd.type === "move_annotation") {
         pins = pins.map((p) =>
           p.id === cmd.id
-            ? { ...p, position: cmd.position as [number, number], z: cmd.z as number }
+            ? {
+                ...p,
+                position: cmd.position as [number, number],
+                z: cmd.z as number,
+                ...(cmd.end !== undefined ? { end: cmd.end as [number, number] | null } : {}),
+              }
             : p,
         );
       } else if (cmd.type === "edit_comment") {
@@ -715,5 +723,232 @@ describe("AnnotationOverlay — open thread stacks above other pins (issue #772)
     const thread = screen.getByTestId("annot-thread-pin-a");
     expect(screen.getByTestId("pin-delete-pin-a")).toBeTruthy();
     expect(thread.querySelector('input[placeholder="Add a comment…"]')).toBeTruthy();
+  });
+});
+
+describe("AnnotationOverlay — resize a box from its handles (move_annotation reshape)", () => {
+  /** An own box pin with opposite corners `position` (anchor) and `end`. With
+   * the harness camera (zoom=1, center=(0,0), 800x600, dpr=1) world = screenPx −
+   * half (halfW=400, halfH=300), so a release at client (cx,cy) lands at world
+   * (cx−400, cy−300) — used to compute the exact expected reshape below. */
+  function boxPin(overrides: Partial<Annotation> = {}): Annotation {
+    return ownPin({
+      id: "box-1",
+      kind: "box",
+      position: [10, 20],
+      end: [60, 80],
+      ...overrides,
+    });
+  }
+
+  const ALL_HANDLES = ["nw", "ne", "se", "sw", "n", "e", "s", "w"] as const;
+
+  it("an own box renders all eight resize handles (corners + edges)", () => {
+    renderOverlay({ pins: [boxPin()] });
+    for (const h of ALL_HANDLES) {
+      expect(screen.getByTestId(`annot-resize-box-1-${h}`)).toBeTruthy();
+    }
+  });
+
+  it("a non-author box renders no resize handles", () => {
+    renderOverlay({ pins: [boxPin({ id: "box-peer", author: "999" })] });
+    for (const h of ALL_HANDLES) {
+      expect(screen.queryByTestId(`annot-resize-box-peer-${h}`)).toBeNull();
+    }
+    // The box itself still renders (its dot is present for everyone).
+    expect(screen.getByTestId("annot-pin-box-peer")).toBeTruthy();
+  });
+
+  it("an own point renders no resize handles", () => {
+    // A point (the default kind) is not resizable — no handles for any direction.
+    renderOverlay({ pins: [ownPin({ id: "pt-1" })] });
+    for (const h of ALL_HANDLES) {
+      expect(screen.queryByTestId(`annot-resize-pt-1-${h}`)).toBeNull();
+    }
+  });
+
+  it("an own line renders no resize handles (boxes only this slice)", () => {
+    renderOverlay({ pins: [ownPin({ id: "ln-1", kind: "line", end: [40, 50] })] });
+    for (const h of ALL_HANDLES) {
+      expect(screen.queryByTestId(`annot-resize-ln-1-${h}`)).toBeNull();
+    }
+  });
+
+  it("dragging the SE corner emits one reshape: end changes, position unchanged", () => {
+    const { sent, getChanged } = renderOverlay({ pins: [boxPin()] });
+    const se = screen.getByTestId("annot-resize-box-1-se");
+
+    // Press on the SE handle, travel past the 4px slop, release at client
+    // (500,400) → world (100,100). SE moves the opposite corner (end); the
+    // anchor (position) is held.
+    fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
+    fireEvent.pointerMove(se, { pointerId: 1, clientX: 400, clientY: 400 });
+    fireEvent.pointerUp(se, { pointerId: 1, clientX: 500, clientY: 400 });
+
+    const moves = sent.filter((c) => c.type === "move_annotation");
+    expect(moves).toHaveLength(1);
+    expect(moves[0]).toMatchObject({
+      type: "move_annotation",
+      dataset_id: "wds-1",
+      id: "box-1",
+      z: 3,
+    });
+    // A reshape carries BOTH a numeric position and a numeric end.
+    expect(moves[0].position).toEqual([10, 20]); // anchor unchanged
+    expect(moves[0].end).toEqual([100, 100]); // opposite corner moved to release
+    expect(getChanged()).toBe(1);
+  });
+
+  it("dragging the NW corner emits a reshape with position changed, end held", () => {
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    const nw = screen.getByTestId("annot-resize-box-1-nw");
+
+    // Release at client (350,250) → world (-50,-50). NW moves the anchor
+    // (position); the opposite corner (end) is held.
+    fireEvent.pointerDown(nw, { pointerId: 1, button: 0, clientX: 410, clientY: 320 });
+    fireEvent.pointerMove(nw, { pointerId: 1, clientX: 380, clientY: 290 });
+    fireEvent.pointerUp(nw, { pointerId: 1, clientX: 350, clientY: 250 });
+
+    const moves = sent.filter((c) => c.type === "move_annotation");
+    expect(moves).toHaveLength(1);
+    expect(moves[0].position).toEqual([-50, -50]); // anchor moved to release
+    expect(moves[0].end).toEqual([60, 80]); // opposite corner held
+  });
+
+  it("a corner reshape carries numeric position AND end arrays (both vertices)", () => {
+    // Guards the wire shape the contract names: a reshape is identified by a
+    // numeric `end` array alongside a numeric `position` array.
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    const se = screen.getByTestId("annot-resize-box-1-se");
+    fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
+    fireEvent.pointerMove(se, { pointerId: 1, clientX: 450, clientY: 450 });
+    fireEvent.pointerUp(se, { pointerId: 1, clientX: 520, clientY: 520 });
+
+    const move = sent.find((c) => c.type === "move_annotation")!;
+    const pos = move.position as unknown[];
+    const end = move.end as unknown[];
+    expect(Array.isArray(pos) && pos.length === 2).toBe(true);
+    expect(Array.isArray(end) && end.length === 2).toBe(true);
+    expect(typeof pos[0]).toBe("number");
+    expect(typeof end[0]).toBe("number");
+  });
+
+  it("dragging the E edge moves only the end.x coordinate (one coordinate)", () => {
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    const e = screen.getByTestId("annot-resize-box-1-e");
+
+    // Release at client (500,500) → world (100,200). The E edge owns end.x only,
+    // so end.x → 100 while end.y (80) and the whole anchor (10,20) are held.
+    fireEvent.pointerDown(e, { pointerId: 1, button: 0, clientX: 460, clientY: 350 });
+    fireEvent.pointerMove(e, { pointerId: 1, clientX: 480, clientY: 420 });
+    fireEvent.pointerUp(e, { pointerId: 1, clientX: 500, clientY: 500 });
+
+    const moves = sent.filter((c) => c.type === "move_annotation");
+    expect(moves).toHaveLength(1);
+    expect(moves[0].position).toEqual([10, 20]); // anchor fully held
+    expect(moves[0].end).toEqual([100, 80]); // only end.x moved; end.y held
+  });
+
+  it("dragging the N edge moves only the position.y coordinate", () => {
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    const n = screen.getByTestId("annot-resize-box-1-n");
+
+    // Release at client (450,350) → world (50,50). The N edge owns position.y
+    // only, so position.y → 50 while position.x (10) and end (60,80) are held.
+    fireEvent.pointerDown(n, { pointerId: 1, button: 0, clientX: 435, clientY: 320 });
+    fireEvent.pointerMove(n, { pointerId: 1, clientX: 440, clientY: 335 });
+    fireEvent.pointerUp(n, { pointerId: 1, clientX: 450, clientY: 350 });
+
+    const moves = sent.filter((c) => c.type === "move_annotation");
+    expect(moves).toHaveLength(1);
+    expect(moves[0].position).toEqual([10, 50]); // only position.y moved
+    expect(moves[0].end).toEqual([60, 80]); // opposite corner fully held
+  });
+
+  it("a handle press without travel (within slop) emits no reshape", () => {
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    const se = screen.getByTestId("annot-resize-box-1-se");
+    // Stay within the 4px click slop → not a drag → no reshape.
+    fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 300, clientY: 300 });
+    fireEvent.pointerMove(se, { pointerId: 1, clientX: 302, clientY: 301 });
+    fireEvent.pointerUp(se, { pointerId: 1, clientX: 302, clientY: 301 });
+    expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
+  });
+
+  it("a reshape is applied locally AND broadcast (goes through applyDocumentCommand)", () => {
+    const { applied, sent } = renderOverlay({ pins: [boxPin()] });
+    const se = screen.getByTestId("annot-resize-box-1-se");
+    fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
+    fireEvent.pointerMove(se, { pointerId: 1, clientX: 400, clientY: 400 });
+    fireEvent.pointerUp(se, { pointerId: 1, clientX: 500, clientY: 400 });
+
+    // applyDocumentCommand applies to the scene (optimistic) AND sends to peers.
+    expect(applied.filter((c) => c.type === "move_annotation")).toHaveLength(1);
+    expect(sent.filter((c) => c.type === "move_annotation")).toHaveLength(1);
+    expect(applied[0].end).toEqual([100, 100]);
+  });
+
+  it("dragging one handle does not move the other corner (held side stays put)", () => {
+    // Two moves before release: the recompute must always build off the fixed
+    // press-time base, so the SE drag's final end is the release point and the
+    // anchor never drifts regardless of the intermediate path.
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    const se = screen.getByTestId("annot-resize-box-1-se");
+    fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
+    fireEvent.pointerMove(se, { pointerId: 1, clientX: 700, clientY: 590 });
+    fireEvent.pointerMove(se, { pointerId: 1, clientX: 450, clientY: 450 });
+    fireEvent.pointerUp(se, { pointerId: 1, clientX: 500, clientY: 400 });
+
+    const move = sent.find((c) => c.type === "move_annotation")!;
+    expect(move.position).toEqual([10, 20]); // anchor never drifted
+    expect(move.end).toEqual([100, 100]); // end is the final release point
+  });
+
+  it("regression: a plain click on an own box's dot still opens its thread (handles present)", () => {
+    // The anchor dot remains the thread target even though resize handles now
+    // share the box. A pure click on the dot toggles the thread open.
+    renderOverlay({
+      pins: [boxPin({ comments: [{ id: "c1", author: String(MY_ID), text: "in the box" }] })],
+    });
+    // Handles exist for this own box…
+    expect(screen.getByTestId("annot-resize-box-1-nw")).toBeTruthy();
+    // …and a plain click on the dot still opens the thread.
+    const dot = screen.getByTestId("annot-pin-box-1");
+    fireEvent.pointerDown(dot, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(dot, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.click(dot, { clientX: 200, clientY: 200 });
+    expect(screen.getByText("in the box")).toBeTruthy();
+  });
+
+  it("regression: a plain drag on an own box's dot still pans (not a reshape)", () => {
+    // A plain (non-Shift) drag from the box's dot pans the view exactly like a
+    // point pin — it must not reshape the box or move it.
+    const { applied, sent } = renderOverlay({ pins: [boxPin()] });
+    const dot = screen.getByTestId("annot-pin-box-1");
+    fireEvent.pointerDown(dot, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(dot, { pointerId: 1, clientX: 280, clientY: 240 });
+    fireEvent.pointerUp(dot, { pointerId: 1, clientX: 280, clientY: 240 });
+
+    expect(sent.some((c) => c.type === "move_annotation")).toBe(false);
+    expect(applied.filter((c) => c.type === "pan").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("regression: a box still renders its outline (polygon) alongside the handles", () => {
+    // The resize affordance must not displace the box's existing rendering.
+    const { sent } = renderOverlay({ pins: [boxPin()] });
+    // The box outline (a polygon) and its dot both still exist…
+    expect(document.querySelector("polygon")).toBeTruthy();
+    expect(screen.getByTestId("annot-pin-box-1")).toBeTruthy();
+    // …and the anchor dot's Shift+drag still moves the WHOLE box (a rigid move:
+    // no `end` in the emitted command — the #776 path, not a reshape).
+    const dot = screen.getByTestId("annot-pin-box-1");
+    fireEvent.pointerDown(dot, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(dot, { pointerId: 1, shiftKey: true, clientX: 300, clientY: 300 });
+    fireEvent.pointerUp(dot, { pointerId: 1, shiftKey: true, clientX: 500, clientY: 400 });
+
+    const moves = sent.filter((c) => c.type === "move_annotation");
+    expect(moves).toHaveLength(1);
+    expect(moves[0].position).toEqual([100, 100]); // whole-box move to release
+    expect(moves[0].end).toBeUndefined(); // rigid move carries NO end (not a reshape)
   });
 });

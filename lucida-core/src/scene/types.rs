@@ -343,6 +343,42 @@ impl Annotation {
         }
     }
 
+    /// **Reshape** this annotation by placing its two opposite vertices
+    /// *explicitly* — the resize sibling of [`Self::set_position`].
+    ///
+    /// Where [`Self::set_position`] slides the *whole* shape rigidly (a box
+    /// keeps its size; the second vertex rides the anchor delta), this sets the
+    /// anchor (`position`) and the second vertex (`end`) to exactly the given
+    /// values with **no delta math**, so a box/line can grow, shrink, or flip
+    /// about a held corner/edge. That is precisely what a corner/edge resize
+    /// needs: the handle recomputes the two opposite corners and hands both
+    /// here, and the shape takes that geometry verbatim. Depth `z` is shared by
+    /// both vertices (per-vertex depth is a later slice), so it is a plain
+    /// overwrite.
+    ///
+    /// A `Point` has no second vertex, so a reshape of one is meaningless: this
+    /// repositions its anchor/`z` and leaves `end` `None` (it never *invents* a
+    /// second vertex on a point — that would silently turn a point into a
+    /// line/box). For a `Line`/`Box` the passed `end` becomes the new opposite
+    /// vertex. Every other field — `id`, `author`, `kind`, and the comment
+    /// thread — is preserved, exactly like [`Self::set_position`], so a reshape
+    /// edits the existing pin in place. Idempotent by construction (re-applying
+    /// the same vertices is a no-op), which keeps a replayed/twice-delivered
+    /// reshape convergent across peers. This is the single owner of the reshape
+    /// mutation, so it is unit-testable on a bare `Annotation`; `DocumentState`
+    /// only locates the pin and delegates here.
+    pub fn set_vertices(&mut self, position: [f64; 2], end: [f64; 2], z: f64) {
+        self.position = position;
+        self.z = z;
+        // Only a shape that already has a second vertex is reshaped to the new
+        // `end`. A point keeps `end == None` — a resize never mints a vertex on
+        // a shape that has none (that is `AddAnnotation`'s job, and would change
+        // the pin's kind out from under it).
+        if self.end.is_some() {
+            self.end = Some(end);
+        }
+    }
+
     /// Overwrite an existing comment's `text` by `id`. Returns `true` if a
     /// comment matched and was edited. No-op (returns `false`) if the id is
     /// unknown, so an edit targeting a comment that was never added (or has since
@@ -453,25 +489,37 @@ impl DocumentState {
             .find(|a| a.id == annotation_id)
     }
 
-    /// Reposition the pin `id` under `dataset_id` to anchor `position`/`z`,
-    /// moving the whole shape rigidly (a line/box keeps its length/angle and
-    /// size; see [`Annotation::set_position`]).
+    /// Move the pin `id` under `dataset_id`. The optional `end` picks the move
+    /// shape, so this one entry point serves both the whole-shape drag (#776)
+    /// and the corner/edge resize (this slice):
     ///
-    /// Pure delegation: locate the pin via the shared [`Self::annotation_mut`]
-    /// lookup, then hand the mutation to [`Annotation::set_position`] (the single
-    /// owner of the reposition geometry, so the same whole-shape move applies in
-    /// 2D and 3D). Moving a missing pin or dataset is a clean no-op — it must NOT
-    /// create a phantom pin (reposition acts on an existing pin, never a way to
-    /// mint one). The pin's author, kind, and comment thread are preserved.
+    /// - `end: None` → **rigid whole-shape translate**: the anchor goes to
+    ///   `position`/`z` and any second vertex rides the same in-plane delta, so
+    ///   a line/box keeps its length, angle, and size (see
+    ///   [`Annotation::set_position`]).
+    /// - `end: Some(end)` → **reshape**: `position`, `end`, and `z` are placed
+    ///   exactly — the two opposite corners are set independently, no rigid
+    ///   translate (see [`Annotation::set_vertices`]). This is the resize path.
+    ///
+    /// Pure delegation either way: locate the pin via the shared
+    /// [`Self::annotation_mut`] lookup, then hand the mutation to the matching
+    /// owner on `Annotation` (so the same geometry applies in 2D and 3D). Moving
+    /// a missing pin or dataset is a clean no-op — it must NOT create a phantom
+    /// pin (a move acts on an existing pin, never a way to mint one). The pin's
+    /// author, kind, and comment thread are preserved.
     pub fn move_annotation(
         &mut self,
         dataset_id: &DatasetId,
         id: &str,
         position: [f64; 2],
+        end: Option<[f64; 2]>,
         z: f64,
     ) {
         if let Some(annotation) = self.annotation_mut(dataset_id, id) {
-            annotation.set_position(position, z);
+            match end {
+                Some(end) => annotation.set_vertices(position, end, z),
+                None => annotation.set_position(position, z),
+            }
         }
     }
 
@@ -634,9 +682,10 @@ impl DocumentState {
                 dataset_id,
                 id,
                 position,
+                end,
                 z,
             } => {
-                self.move_annotation(&dataset_id, &id, position, z);
+                self.move_annotation(&dataset_id, &id, position, end, z);
             }
             DocumentCommand::AddComment {
                 dataset_id,

@@ -102,10 +102,29 @@ pub enum DocumentCommand {
     /// `z` is `#[serde(default)]`, mirroring [`Self::AddAnnotation`], so a move
     /// emitted by a depth-unaware client (or a replayed older log entry) applies
     /// with `z = 0.0` rather than failing to parse.
+    ///
+    /// `end` is the optional second in-plane vertex (a box's opposite corner /
+    /// a line's far endpoint). It distinguishes the two move shapes:
+    /// - `end: None` (the slice #776 default) → **rigid whole-shape translate**:
+    ///   the anchor goes to `position`/`z` and any second vertex rides along by
+    ///   the same in-plane delta, so a box/line keeps its size, length, and
+    ///   angle (see [`crate::scene::Annotation::set_position`]).
+    /// - `end: Some([x, y])` → **reshape**: `position`, `end`, and `z` are set
+    ///   to exactly the given values — the two opposite corners are placed
+    ///   independently, no rigid translate (see
+    ///   [`crate::scene::Annotation::set_vertices`]). This is how a corner/edge
+    ///   resize lands: the handle recomputes the two opposite corners and sends
+    ///   both. A `Point` has no second vertex and ignores `end`.
+    ///
+    /// `#[serde(default)]` keeps this additive — an existing `move_annotation`
+    /// with no `end` field (a slice-#776 client, or a replayed older log entry)
+    /// parses as `end: None`, i.e. the rigid translate. No wire break.
     MoveAnnotation {
         dataset_id: DatasetId,
         id: String,
         position: [f64; 2],
+        #[serde(default)]
+        end: Option<[f64; 2]>,
         #[serde(default)]
         z: f64,
     },
@@ -2132,6 +2151,8 @@ mod tests {
             dataset_id: DatasetId("wds-1".into()),
             id: "ln".into(),
             position: [2.0, 3.0],
+            // No `end` → the rigid #776 whole-shape translate.
+            end: None,
             z: 5.0,
         });
         let line = &doc.annotations[&DatasetId("wds-1".into())][0];
@@ -2486,11 +2507,32 @@ mod tests {
     // DocumentState arm only locates the pin (via the same find-by-id used by
     // add/remove) and delegates.
 
+    /// A whole-shape move (no `end`) — the rigid #776 translate path. The
+    /// existing move tests all exercise this shape.
     fn move_annotation_cmd(ds: &str, id: &str, position: [f64; 2], z: f64) -> DocumentCommand {
         DocumentCommand::MoveAnnotation {
             dataset_id: DatasetId(ds.into()),
             id: id.into(),
             position,
+            end: None,
+            z,
+        }
+    }
+
+    /// A reshape move (`end: Some`) — the resize path: the two opposite corners
+    /// are placed explicitly, no rigid translate.
+    fn reshape_annotation_cmd(
+        ds: &str,
+        id: &str,
+        position: [f64; 2],
+        end: [f64; 2],
+        z: f64,
+    ) -> DocumentCommand {
+        DocumentCommand::MoveAnnotation {
+            dataset_id: DatasetId(ds.into()),
+            id: id.into(),
+            position,
+            end: Some(end),
             z,
         }
     }
@@ -2510,6 +2552,9 @@ mod tests {
         // Move carries only dataset_id + id + position + z (no author/kind).
         assert!(v.get("author").is_none());
         assert!(v.get("kind").is_none());
+        // A whole-shape move serializes `end` as null (the field defaults to
+        // None; serde emits the key as null for an Option).
+        assert!(v["end"].is_null());
 
         // And it parses back from exactly that shape.
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
@@ -2518,11 +2563,13 @@ mod tests {
                 dataset_id,
                 id,
                 position,
+                end,
                 z,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [12.5, -7.25]);
+                assert_eq!(end, None);
                 assert_eq!(z, 3.5);
             }
             _ => panic!("expected MoveAnnotation"),
@@ -2539,11 +2586,14 @@ mod tests {
                 dataset_id,
                 id,
                 position,
+                end,
                 z,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
+                // A slice-#776 client payload carries no `end` → None.
+                assert_eq!(end, None);
                 assert_eq!(z, 5.0);
             }
             _ => panic!("expected MoveAnnotation"),
@@ -2878,6 +2928,247 @@ mod tests {
         assert_eq!(pin.position, [7.0, 8.0]);
         assert_eq!(pin.end, None);
         assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
+    }
+
+    // --- Reshape: MoveAnnotation with `end: Some` (the resize path) ----------
+    // A whole-shape move (`end: None`) rigidly translates both vertices (#776,
+    // covered above). A reshape (`end: Some`) sets the two opposite corners
+    // EXACTLY — that is how a corner/edge resize lands. These pin both shapes.
+
+    #[test]
+    fn annotation_set_vertices_places_both_corners_exactly() {
+        // The reshape owner on a bare pin: position AND end are set verbatim,
+        // with NO delta math — the box takes the passed geometry as-is.
+        let mut r#box = shape_pin(
+            "bx",
+            [0.0, 0.0],
+            Some([4.0, 4.0]),
+            crate::scene::AnnotationKind::Box,
+        );
+        r#box.set_vertices([1.0, 1.0], [9.0, 7.0], 2.5);
+        assert_eq!(r#box.position, [1.0, 1.0]);
+        assert_eq!(r#box.end, Some([9.0, 7.0]));
+        assert_eq!(r#box.z, 2.5);
+    }
+
+    #[test]
+    fn annotation_set_vertices_is_not_a_rigid_translate() {
+        // The crux of the slice: contrast with set_position. Moving the anchor
+        // 0,0 -> 1,1 via a RESHAPE that holds the opposite corner at 4,4 must
+        // leave end at 4,4 (the box shrinks). A rigid translate would have
+        // dragged end to 5,5 instead. This is what makes a corner resize work.
+        let mut r#box = shape_pin(
+            "bx",
+            [0.0, 0.0],
+            Some([4.0, 4.0]),
+            crate::scene::AnnotationKind::Box,
+        );
+        r#box.set_vertices([1.0, 1.0], [4.0, 4.0], 0.0);
+        assert_eq!(r#box.position, [1.0, 1.0]);
+        assert_eq!(
+            r#box.end,
+            Some([4.0, 4.0]),
+            "reshape holds the opposite corner; it does not ride the anchor delta"
+        );
+    }
+
+    #[test]
+    fn annotation_set_vertices_preserves_other_fields_including_thread() {
+        // A reshape edits the existing pin: id, author, kind, and the comment
+        // thread all survive — exactly like set_position.
+        let mut r#box = shape_pin(
+            "bx",
+            [0.0, 0.0],
+            Some([4.0, 4.0]),
+            crate::scene::AnnotationKind::Box,
+        );
+        r#box.author = "biologist".into();
+        r#box.add_comment(comment("c1", "alice", "this region"));
+        r#box.set_vertices([2.0, 2.0], [6.0, 5.0], 1.0);
+        assert_eq!(r#box.id, "bx");
+        assert_eq!(r#box.author, "biologist");
+        assert_eq!(r#box.kind, crate::scene::AnnotationKind::Box);
+        assert_eq!(r#box.comments.len(), 1);
+        assert_eq!(r#box.comments[0].text, "this region");
+    }
+
+    #[test]
+    fn annotation_set_vertices_on_point_keeps_end_none() {
+        // A point has no second vertex; a reshape of one repositions its anchor
+        // but must NOT invent an `end` (that would silently make it a line/box).
+        let mut pin = point_pin("p1");
+        pin.set_vertices([3.0, 4.0], [9.0, 9.0], 5.0);
+        assert_eq!(pin.position, [3.0, 4.0]);
+        assert_eq!(pin.z, 5.0);
+        assert_eq!(pin.end, None, "reshape must not mint a vertex on a point");
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
+    }
+
+    #[test]
+    fn document_state_move_with_end_reshapes_the_box() {
+        // The full apply path with `end: Some`: a box's two opposite corners are
+        // placed independently (a resize), not rigidly translated.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        // Drag the SE (opposite) corner out to 7,9: anchor held, end -> 7,9.
+        doc.apply(reshape_annotation_cmd("wds-1", "bx", [0.0, 0.0], [7.0, 9.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [0.0, 0.0], "se drag leaves the anchor put");
+        assert_eq!(pin.end, Some([7.0, 9.0]), "se drag moves the opposite corner");
+        assert_eq!(pin.kind, crate::scene::AnnotationKind::Box);
+    }
+
+    #[test]
+    fn document_state_move_with_end_can_move_the_anchor_corner() {
+        // The NW handle reshapes from the other side: the anchor (position)
+        // moves while the opposite corner is held — both placed explicitly.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(reshape_annotation_cmd("wds-1", "bx", [-2.0, -1.0], [4.0, 4.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [-2.0, -1.0], "nw drag moves the anchor corner");
+        assert_eq!(pin.end, Some([4.0, 4.0]), "nw drag holds the opposite corner");
+    }
+
+    #[test]
+    fn document_state_move_without_end_still_rigid_translates() {
+        // The #776 guarantee, asserted side-by-side with the reshape test: the
+        // SAME anchor move, but with NO `end`, carries the opposite corner along
+        // (a whole-shape slide), proving the two shapes are distinct paths.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(move_annotation_cmd("wds-1", "bx", [2.0, 3.0], 0.0));
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [2.0, 3.0]);
+        assert_eq!(
+            pin.end,
+            Some([6.0, 7.0]),
+            "no `end` → the opposite corner rides the +2,+3 anchor delta (rigid)"
+        );
+    }
+
+    #[test]
+    fn document_state_reshape_is_idempotent() {
+        // Re-applying the same reshape (a replayed/twice-delivered command)
+        // lands on the same geometry — peers stay convergent.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(reshape_annotation_cmd("wds-1", "bx", [1.0, 1.0], [8.0, 6.0], 2.0));
+        doc.apply(reshape_annotation_cmd("wds-1", "bx", [1.0, 1.0], [8.0, 6.0], 2.0));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position, [1.0, 1.0]);
+        assert_eq!(pins[0].end, Some([8.0, 6.0]));
+        assert_eq!(pins[0].z, 2.0);
+    }
+
+    #[test]
+    fn document_state_reshape_missing_pin_is_noop_no_phantom() {
+        // A reshape for an unknown pin/dataset is a clean no-op — it must never
+        // mint a phantom pin (same rule as a whole-shape move).
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(reshape_annotation_cmd("wds-1", "ghost", [1.0, 1.0], [2.0, 2.0], 0.0));
+        doc.apply(reshape_annotation_cmd("wds-missing", "bx", [1.0, 1.0], [2.0, 2.0], 0.0));
+        let pins = &doc.annotations[&DatasetId("wds-1".into())];
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].position, [0.0, 0.0], "real box untouched by a stray reshape");
+        assert_eq!(pins[0].end, Some([4.0, 4.0]));
+        assert!(!doc.annotations.contains_key(&DatasetId("wds-missing".into())));
+    }
+
+    #[test]
+    fn reshaped_box_survives_document_serde_round_trip() {
+        // Persistence: the reshaped corners persist via the document_json blob
+        // and restore after a (simulated) restart.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(add_shape_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [4.0, 4.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        doc.apply(reshape_annotation_cmd("wds-1", "bx", [-1.5, 2.0], [10.25, 6.5], 3.0));
+        let blob = serde_json::to_string(&doc).unwrap();
+        let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        let pin = &restored.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.position, [-1.5, 2.0]);
+        assert_eq!(pin.end, Some([10.25, 6.5]));
+        assert_eq!(pin.z, 3.0);
+    }
+
+    #[test]
+    fn reshape_move_command_round_trips_with_end() {
+        // The reshape wire shape: `end` rides as a 2-element array and parses
+        // back into Some. (The no-`end` shape is covered above as null/None.)
+        let cmd = reshape_annotation_cmd("wds-1", "bx", [1.0, 2.0], [7.0, 9.0], 4.0);
+        let json = serde_json::to_string(&cmd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "move_annotation");
+        assert_eq!(v["position"][0], 1.0);
+        assert_eq!(v["end"][0], 7.0);
+        assert_eq!(v["end"][1], 9.0);
+        assert_eq!(v["z"], 4.0);
+
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::MoveAnnotation {
+                position, end, z, ..
+            } => {
+                assert_eq!(position, [1.0, 2.0]);
+                assert_eq!(end, Some([7.0, 9.0]));
+                assert_eq!(z, 4.0);
+            }
+            _ => panic!("expected MoveAnnotation"),
+        }
+    }
+
+    #[test]
+    fn reshape_move_parses_from_documented_client_payload() {
+        // A verbatim resize payload the frontend emits: position + end + z.
+        let json = r#"{"type":"move_annotation","dataset_id":"wds-1","id":"bx","position":[1.0,2.0],"end":[7.0,9.0],"z":4.0}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::MoveAnnotation {
+                position, end, z, ..
+            } => {
+                assert_eq!(position, [1.0, 2.0]);
+                assert_eq!(end, Some([7.0, 9.0]));
+                assert_eq!(z, 4.0);
+            }
+            _ => panic!("expected MoveAnnotation"),
+        }
     }
 
     #[test]

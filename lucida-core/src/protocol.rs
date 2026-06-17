@@ -585,12 +585,15 @@ mod tests {
                         dataset_id,
                         id,
                         position,
+                        end,
                         z,
                     },
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
+                // No `end` in this slice-#776 wire payload → defaults to None.
+                assert_eq!(end, None);
                 assert_eq!(z, 5.0);
             }
             _ => panic!("expected Command(MoveAnnotation)"),
@@ -642,11 +645,12 @@ mod tests {
             author: "alice".into(),
             text: "before".into(),
         });
-        // Now update both.
+        // Now update both. A whole-shape move (no `end`) — the rigid #776 path.
         doc.apply(DocumentCommand::MoveAnnotation {
             dataset_id: DatasetId("wds-1".into()),
             id: "pin-1".into(),
             position: [55.0, 66.0],
+            end: None,
             z: 7.5,
         });
         doc.apply(DocumentCommand::EditComment {
