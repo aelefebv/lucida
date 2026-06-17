@@ -647,6 +647,7 @@ function App({
                 myId={bridge.myId}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
+                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
@@ -706,6 +707,8 @@ function App({
                 canvas={render.canvasRef.current}
                 version={remoteDocumentVersion}
                 myId={bridge.myId}
+                sendCommand={bridge.sendCommand}
+                onDocumentChanged={bumpRemoteDocumentVersion}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (

@@ -20,7 +20,7 @@
  */
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import { applyDocumentCommand } from "../applyAndSend.ts";
+import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 
 /** One comment in a pin's thread (as returned nested in `annotations()`). */
@@ -63,6 +63,13 @@ interface Props {
   /** Notify the parent that the document changed locally (a pin/comment was
    * added or removed) so this overlay re-reads via a fresh `version`. */
   onDocumentChanged: () => void;
+  /** Notify the parent that the *viewport* changed locally (a plain drag on an
+   * own pin panned the view). The parent marks the render loop dirty so the
+   * canvas actually repaints under the panned camera — the same thing
+   * `SliceViewer` does after its own pan. Optional + defaulted to a no-op so the
+   * gesture (and the move/click paths) work without it; a panned view simply
+   * wouldn't repaint until the next frame the loop already redraws. */
+  onViewportChanged?: () => void;
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click, not a
@@ -70,14 +77,30 @@ interface Props {
  * share the same "did the pointer really travel?" threshold. */
 const PIN_CLICK_SLOP = 4;
 
-/** Live state for an in-progress pin drag, scoped to one captured pointer. */
+/** Live state for an in-progress pointer gesture that began on an own marker,
+ * scoped to one captured pointer. The marker sits over the canvas and captures
+ * the press, so it must drive BOTH gestures itself:
+ *  - `mode: "move"` — a Shift+drag, which repositions the pin and emits one
+ *    `move_annotation` on release (the deliberate, gated move gesture).
+ *  - `mode: "pan"` — a plain (non-Shift) drag, which forwards the SAME viewport
+ *    pan the canvas uses (`applyViewportCommand({ type: "pan", … })`, dpr-aware
+ *    and negated) so dragging off a pin pans exactly like dragging empty canvas,
+ *    and never moves the pin. */
 interface PinDrag {
   pinId: string;
   pointerId: number;
+  /** What this gesture does once it passes the slop: move the pin (Shift) or
+   * pan the view (plain). Fixed at pointerdown from the Shift modifier. */
+  mode: "move" | "pan";
   /** Press point in CSS px (clientX/Y), to measure travel against the slop. */
   startX: number;
   startY: number;
-  /** The pin's depth at press; preserved across the move (z is not edited). */
+  /** Last pointer position in CSS px — the pan path consumes incremental deltas
+   * (cur − last) each move so it pans by exactly the travel since the last
+   * event, just like SliceViewer's frame-to-frame pan. */
+  lastX: number;
+  lastY: number;
+  /** The pin's depth at press; preserved across a move (z is not edited). */
   z: number;
   /** Flips true once travel passes the slop — the press becomes a real drag. */
   moved: boolean;
@@ -101,7 +124,7 @@ function newId(prefix: string): string {
     : `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, myId, sendCommand, onDocumentChanged }: Props) {
+export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, myId, sendCommand, onDocumentChanged, onViewportChanged }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -201,12 +224,17 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
           ((v[1] - centerY) * zoom + physH / 2) / dpr,
         ];
 
-        // The pin (if any) being actively dragged past the slop: its dot is
+        // The pin (if any) being actively MOVE-dragged past the slop: its dot is
         // positioned by the pointermove handler under the cursor, so the tick
         // must NOT reproject it from its (still-old) stored position — that would
         // fight the drag and snap the dot back every frame. On release the drag
-        // clears and the tick resumes from the freshly-applied position.
-        const draggingId = dragRef.current?.moved ? dragRef.current.pinId : null;
+        // clears and the tick resumes from the freshly-applied position. A PAN
+        // drag is deliberately excluded: it doesn't move the pin, so the dot must
+        // keep reprojecting from world space every frame to track the panning
+        // camera — exactly like every other (undragged) marker.
+        const activeDrag = dragRef.current;
+        const draggingId =
+          activeDrag?.moved && activeDrag.mode === "move" ? activeDrag.pinId : null;
 
         for (const pin of annotationsRef.current) {
           // Anchor dot (the interaction target) sits at the first vertex.
@@ -378,22 +406,35 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     return [(cursorX - halfW) / zoom + center[0], (cursorY - halfH) / zoom + center[1]];
   };
 
-  // --- Pin drag (move_annotation) ---------------------------------------------
-  // The author's own pin marker is the drag handle. We drive the whole gesture
-  // with Pointer Events ON the marker (capture on down; move/up on the marker),
-  // so the pointer stays bound to it even if it slides off — exactly the pattern
-  // the interaction contract asks for and the harness dispatches to.
+  // --- Pin gesture (Shift+drag moves; plain drag pans) -----------------------
+  // The author's own pin marker captures the press (it sits over the canvas), so
+  // it must drive BOTH gestures itself. We use Pointer Events ON the marker
+  // (capture on down; move/up on the marker) so the pointer stays bound to it
+  // even if it slides off — exactly the pattern the interaction contract asks
+  // for and the harness dispatches to.
+  //
+  // Moving a pin now requires Shift+click+drag (issue #778): a plain drag is far
+  // too easy to trigger by accident while trying to pan. So the modifier at
+  // pointerdown picks the gesture:
+  //  - Shift+press → a MOVE drag: past the slop, the dot previews under the
+  //    cursor and release emits one move_annotation (author-only).
+  //  - plain press → a PAN drag: past the slop, each move forwards the same
+  //    viewport pan the canvas uses, so a drag that happens to start on a pin
+  //    pans the view identically to a drag on empty canvas — and never moves the
+  //    pin. (Safe to gate move behind Shift now that #770 took delete off
+  //    shift-click, freeing Shift.)
+  // Either way a press that never passes the slop is a click: a plain click
+  // falls through to onClick and toggles the thread; a Shift-click that doesn't
+  // travel does nothing at all (no move, no toggle — see onPinPointerUp).
 
   const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
-    // Only the author drags, and only on a primary, non-shift press. A
-    // shift-press is left inert here: it no longer removes (that one-shot delete
-    // is gone) and we don't start a drag on it, so it falls through to the click
-    // handler — which just toggles the thread. Shift is otherwise free for a
-    // later slice. Anything else (other buttons) also falls through.
+    // Only the author gets a marker-driven gesture, and only on a primary press.
+    // (A non-author marker has no handlers wired at all — see the JSX — so a
+    // peer's pin only ever clicks.) Other buttons fall through to the click.
     if (pin.author !== String(myId)) return;
-    if (e.button !== 0 || e.shiftKey) return;
-    // A drag is already in flight (a second pointer pressed mid-drag): ignore it
-    // so the in-progress gesture completes rather than being silently reset.
+    if (e.button !== 0) return;
+    // A gesture is already in flight (a second pointer pressed mid-drag): ignore
+    // it so the in-progress gesture completes rather than being silently reset.
     if (dragRef.current) return;
     // Start each gesture with a clean slate: clear any stale click-suppression
     // from a prior drag that never received its trailing click, so it can never
@@ -402,8 +443,13 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     dragRef.current = {
       pinId: pin.id,
       pointerId: e.pointerId,
+      // Shift gates the move; a plain press pans. Fixed here at press time so a
+      // Shift release mid-drag can't silently flip a pan into a move.
+      mode: e.shiftKey ? "move" : "pan",
       startX: e.clientX,
       startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
       z: pin.z ?? 0,
       moved: false,
     };
@@ -429,10 +475,34 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
       if (travel <= PIN_CLICK_SLOP) return; // still within click slop — not yet a drag
       drag.moved = true;
     }
-    // Past the slop: preview the move by repositioning the dot live under the
-    // cursor (CSS px relative to the canvas). The RAF tick reprojects from world
-    // space every frame, so this transform only governs the in-flight frames;
-    // the authoritative position updates on release via apply_command.
+
+    if (drag.mode === "pan") {
+      // A plain drag pans the view — it never moves the pin. Forward the SAME
+      // viewport pan SliceViewer applies: incremental travel since the last
+      // event, scaled to physical pixels (dpr-aware) and negated (dragging the
+      // image right moves the camera left). Apply-locally only — a pan is
+      // viewport state, never a document command, so it is not sent to peers.
+      const dpr = devicePixelRatio;
+      const dx = (e.clientX - drag.lastX) * dpr;
+      const dy = (e.clientY - drag.lastY) * dpr;
+      drag.lastX = e.clientX;
+      drag.lastY = e.clientY;
+      const scene = wasmSceneRef.current;
+      if (scene) {
+        applyViewportCommand(scene, { type: "pan", dx: -dx, dy: -dy });
+        // Ask the parent to repaint under the panned camera (marks the render
+        // loop dirty), mirroring SliceViewer's markInteractiveDirty after a pan.
+        // No-op when unwired (e.g. the test harness) — the pan still applied.
+        onViewportChanged?.();
+      }
+      return;
+    }
+
+    // mode === "move": a Shift+drag. Past the slop, preview the move by
+    // repositioning the dot live under the cursor (CSS px relative to the
+    // canvas). The RAF tick reprojects from world space every frame, so this
+    // transform only governs the in-flight frames; the authoritative position
+    // updates on release via apply_command.
     const el = dotRefs.current.get(pin.id);
     if (el) {
       const rect = canvas.getBoundingClientRect();
@@ -450,10 +520,27 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
     } catch {
       // ignore — capture may not have been taken
     }
-    // A press that never passed the slop is a click, not a move: emit nothing and
-    // let the marker's onClick run (toggle thread). Only a real drag emits, and it
-    // suppresses the trailing click so the thread doesn't pop.
-    if (!drag.moved) return;
+
+    // A plain (pan) gesture never moves the pin. If it actually traveled, it was
+    // a real pan, so swallow the trailing click the browser fires on release —
+    // a drag must not also toggle the thread. If it never traveled, it's a plain
+    // click: emit nothing and let onClick toggle the thread (don't suppress).
+    if (drag.mode === "pan") {
+      if (drag.moved) suppressClickRef.current = pin.id;
+      return;
+    }
+
+    // mode === "move": a Shift gesture. A Shift-press that never passed the slop
+    // does NOTHING — no move and no thread toggle (per the contract, Shift is the
+    // move modifier, not a thread toggle). Suppress the trailing click so a
+    // stationary Shift-press can't open the thread.
+    if (!drag.moved) {
+      suppressClickRef.current = pin.id;
+      return;
+    }
+    // A real Shift+drag: emit exactly one move_annotation (release point in the
+    // existing world frame) and suppress the trailing click so the drop doesn't
+    // also pop the thread.
     suppressClickRef.current = pin.id;
     const scene = wasmSceneRef.current;
     if (!scene) return;
@@ -586,15 +673,17 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                 mirroring the peer-cursor dot, AND the thread-open click target
                 for every pin — so its testid is now on every dot regardless of
                 author. A plain click toggles the thread. For the author the dot
-                is also the drag handle (Pointer Events below) — a real drag
-                moves it; deletion now lives in the open thread as a deliberate,
-                confirmed Delete (no single-action shift-click delete). A peer's
-                pin only clicks (no drag handlers, no delete affordance). */}
+                also drives the pointer gestures (handlers below): a plain drag
+                pans the view (it never moves the pin), and a Shift+drag moves it
+                (issue #778 — moving now requires Shift so it can't fire by
+                accident while panning). Deletion lives in the open thread as a
+                deliberate, confirmed Delete. A peer's pin only clicks (no gesture
+                handlers, no delete affordance). */}
             <div
               data-testid={`annot-pin-${pin.id}`}
               title={
                 mine
-                  ? `Pin by you — click for thread, drag to move`
+                  ? `Pin by you — click for thread, Shift+drag to move`
                   : `Pin by ${pin.author} — click for thread`
               }
               onPointerDown={mine ? onPinPointerDown(pin) : undefined}
@@ -602,16 +691,17 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
               onPointerUp={mine ? onPinPointerUp(pin) : undefined}
               onPointerCancel={mine ? onPinPointerCancel(pin) : undefined}
               onClick={() => {
-                // A real drag just finished: swallow the trailing click so the
-                // drop doesn't also toggle the thread. Consume the flag once.
+                // A real drag (a pan, or a Shift+drag move) just finished, or a
+                // stationary Shift-press resolved: swallow the trailing click so
+                // it doesn't also toggle the thread. Consume the flag once.
                 if (suppressClickRef.current === pin.id) {
                   suppressClickRef.current = null;
                   return;
                 }
-                // A click on the dot only ever toggles the comment thread popover
-                // (for any modifier, including Shift — the old shift-click-to-
-                // remove one-shot delete is gone; deletion is now the deliberate,
-                // confirmed Delete control inside the open thread).
+                // A plain click on the dot toggles the comment thread popover.
+                // (A Shift gesture never reaches here un-suppressed — Shift is the
+                // move modifier now, and a stationary Shift-press is swallowed
+                // above so it neither moves nor toggles.)
                 setOpenPinId((cur) => (cur === pin.id ? null : pin.id));
               }}
               style={{
@@ -627,8 +717,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                 border: "2px solid white",
                 boxShadow: "0 1px 3px rgba(0,0,0,0.6)",
                 pointerEvents: "auto",
-                // Own pins advertise the move affordance with a move cursor; a
-                // peer's pin stays a plain pointer (click-only).
+                // Own pins show the same grab cursor the canvas uses (a plain
+                // drag from the pin pans, exactly like dragging the canvas;
+                // Shift+drag moves the pin). A peer's pin stays a plain pointer
+                // (click-only).
                 cursor: mine ? "grab" : "pointer",
                 touchAction: mine ? "none" : undefined,
               }}
