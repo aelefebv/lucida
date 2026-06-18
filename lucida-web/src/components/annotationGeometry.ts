@@ -59,6 +59,63 @@ export interface BoxCorners {
   end: [number, number];
 }
 
+/** A pair of in-plane world endpoints of a line: `position` (the anchor vertex)
+ * and `end` (the far vertex). The same shape as {@link BoxCorners} so the
+ * overlay can carry either through one reshape gesture; named separately for the
+ * line's two-vertex semantics (a segment, not a rectangle). */
+export interface LineEndpoints {
+  position: [number, number];
+  end: [number, number];
+}
+
+/** The two draggable endpoints of a line, in a stable order: the anchor
+ * (`position`) vertex then the far (`end`) vertex. The analog of
+ * {@link BOX_HANDLES} for a line — a line has exactly these two grips. */
+export const LINE_HANDLES = ["start", "end"] as const;
+export type LineHandle = (typeof LINE_HANDLES)[number];
+
+/**
+ * The in-plane world point a given line endpoint sits on. The line analog of
+ * {@link boxHandlePoint}: `start` rides the anchor vertex (`position`), `end`
+ * the far vertex (`end`). The overlay reprojects this every frame to place each
+ * endpoint grip, exactly as it does each box handle.
+ */
+export function lineHandlePoint(endpoints: LineEndpoints, handle: LineHandle): ScreenPoint {
+  return handle === "start"
+    ? [endpoints.position[0], endpoints.position[1]]
+    : [endpoints.end[0], endpoints.end[1]];
+}
+
+/**
+ * Recompute a line's two endpoints after dragging `handle` to the world point
+ * `world` — the geometry an endpoint drag emits as `move_annotation
+ * {position, end}` (a reshape; the backend takes both verbatim). The two-case
+ * analog of {@link reshapeBox}: the grabbed endpoint moves to `world`, the other
+ * endpoint stays exactly where it was, so dragging one end never disturbs the
+ * other.
+ *  - `start` → set `position` to `world`, hold `end`.
+ *  - `end`   → set `end` to `world`, hold `position`.
+ *
+ * The result is a pure value (the inputs are not mutated).
+ */
+export function reshapeLine(
+  endpoints: LineEndpoints,
+  handle: LineHandle,
+  world: [number, number],
+): LineEndpoints {
+  // Copy so the inputs stay immutable.
+  const position: [number, number] = [endpoints.position[0], endpoints.position[1]];
+  const end: [number, number] = [endpoints.end[0], endpoints.end[1]];
+  if (handle === "start") {
+    position[0] = world[0];
+    position[1] = world[1];
+  } else {
+    end[0] = world[0];
+    end[1] = world[1];
+  }
+  return { position, end };
+}
+
 /** The eight resize handles of a box, in a stable order: four corners then the
  * four edge midpoints. */
 export const BOX_HANDLES = ["nw", "ne", "se", "sw", "n", "e", "s", "w"] as const;

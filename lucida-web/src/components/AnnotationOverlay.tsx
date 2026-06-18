@@ -27,8 +27,13 @@ import {
   BOX_HANDLES,
   boxHandlePoint,
   reshapeBox,
+  LINE_HANDLES,
+  lineHandlePoint,
+  reshapeLine,
   type BoxCorners,
   type BoxHandle,
+  type LineEndpoints,
+  type LineHandle,
   type ScreenPoint,
 } from "./annotationGeometry.ts";
 import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
@@ -165,42 +170,89 @@ interface PinDrag {
   moved: boolean;
 }
 
-/** Live state for an in-progress RESIZE gesture that began on one of an own
- * box's eight handles, scoped to one captured pointer. Distinct from
- * {@link PinDrag} (the anchor-dot move/pan gesture): a handle never pans — it
- * only reshapes the box, emitting one reshape `move_annotation` on release. */
+/** A pair of opposite in-plane world vertices — a box's two corners OR a line's
+ * two endpoints (structurally identical: `{position, end}`). The reshape gesture
+ * carries either through one path, branching on the shape kind only where the
+ * per-vertex math differs (which handle owns which coordinate). */
+type ShapeVertices = BoxCorners & LineEndpoints;
+
+/** Live state for an in-progress RESHAPE gesture that began on one of an own
+ * shape's handles, scoped to one captured pointer. Covers BOTH a box (eight
+ * corner/edge handles) and a line (two endpoint handles): the gesture is the
+ * same — press, slop, preview, release emits one reshape — only the geometry
+ * differs, so a `kind` tag picks the recompute (`reshapeBox` vs `reshapeLine`).
+ * Distinct from {@link PinDrag} (the anchor-dot move/pan gesture): a handle
+ * never pans — it only reshapes, emitting one reshape `move_annotation` on
+ * release. */
 interface HandleDrag {
   pinId: string;
   pointerId: number;
-  /** Which handle is held (nw|ne|se|sw|n|e|s|w) — picks the recompute. */
-  handle: BoxHandle;
+  /** Which family of geometry this drag reshapes — picks the recompute helper
+   * and which handle-name set is valid. */
+  kind: "box" | "line";
+  /** Which handle is held: a box corner/edge (nw|ne|se|sw|n|e|s|w) or a line
+   * endpoint (start|end) — picks the per-vertex recompute. */
+  handle: BoxHandle | LineHandle;
   /** Press point in CSS px (clientX/Y), to measure travel against the slop. */
   startX: number;
   startY: number;
-  /** The box's two opposite corners at press, the fixed base every recompute
-   * builds on (so dragging one handle never drifts the others). */
-  base: BoxCorners;
-  /** The box's depth at press; preserved across a reshape (z is not edited by
-   * a 2D corner/edge drag). */
+  /** The shape's two vertices at press, the fixed base every recompute builds
+   * on (so dragging one handle never drifts the other). For a box these are its
+   * opposite corners; for a line, its two endpoints. */
+  base: ShapeVertices;
+  /** The shape's depth at press; preserved across a reshape (z is not edited by
+   * a 2D handle drag). */
   z: number;
   /** Flips true once travel passes the slop — the press becomes a real drag. */
   moved: boolean;
-  /** The live reshaped corners while dragging (null until the first move past
-   * the slop). The RAF tick reads this to preview the box + handles under the
+  /** The live reshaped vertices while dragging (null until the first move past
+   * the slop). The RAF tick reads this to preview the shape + handles under the
    * cursor; the authoritative reshape lands on release via apply_command. */
-  preview: BoxCorners | null;
+  preview: ShapeVertices | null;
+}
+
+/** Recompute a shape's two vertices after dragging `handle` to `world`, picking
+ * the per-vertex math by kind: a box moves the coordinates its corner/edge owns
+ * (`reshapeBox`); a line moves only the grabbed endpoint (`reshapeLine`). One
+ * call site for both so the press/slop/preview/release gesture stays shared. */
+function reshapeShape(
+  kind: "box" | "line",
+  base: ShapeVertices,
+  handle: BoxHandle | LineHandle,
+  world: [number, number],
+): ShapeVertices {
+  return kind === "box"
+    ? reshapeBox(base, handle as BoxHandle, world)
+    : reshapeLine(base, handle as LineHandle, world);
 }
 
 /** Whether `pin` is an own box eligible for resize handles: kind "box", has a
  * second vertex, and authored by me. A point/line, or any non-author shape,
- * gets no handles. */
+ * gets no box handles. */
 function isOwnBox(pin: Annotation, myId: string): boolean {
   return pin.kind === "box" && (pin.end ?? null) !== null && pin.author === String(myId);
 }
 
-/** The two opposite world corners of a box pin (anchor + opposite). Returns null
- * if it has no second vertex (so a caller can skip a degenerate box). */
-function boxCorners(pin: Annotation): BoxCorners | null {
+/** Whether `pin` is an own line eligible for endpoint handles: kind "line", has
+ * a far endpoint, and authored by me. A point/box, or any non-author shape, gets
+ * no endpoint handles. The line analog of {@link isOwnBox}. */
+function isOwnLine(pin: Annotation, myId: string): boolean {
+  return pin.kind === "line" && (pin.end ?? null) !== null && pin.author === String(myId);
+}
+
+/** Whether `pin` is an own shape that carries hover-revealed handles at all —
+ * a box (eight corner/edge handles) or a line (two endpoint handles). Used to
+ * gate the shared hover/hysteresis reveal and the hoverable-stroke styling, so
+ * one predicate drives "does hovering this shape reveal handles?" for both. */
+function isOwnHandledShape(pin: Annotation, myId: string): boolean {
+  return isOwnBox(pin, myId) || isOwnLine(pin, myId);
+}
+
+/** The two opposite world vertices of a non-point pin (anchor + opposite). For a
+ * box these are its corners; for a line, its endpoints — structurally the same
+ * `{position, end}`. Returns null if it has no second vertex (so a caller can
+ * skip a degenerate shape). */
+function shapeVertices(pin: Annotation): ShapeVertices | null {
   const end = pin.end ?? null;
   if (!end) return null;
   return { position: [pin.position[0], pin.position[1]], end: [end[0], end[1]] };
@@ -247,13 +299,15 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   // reproject each handle from world space every frame — exactly like the dots.
   const handleRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // Which own box is currently "active" (pointer over its shape or a handle), so
-  // its eight resize handles are revealed — null when none is hovered (issue
-  // #789). Handles are no longer always-on: this state, not the pin set, gates
-  // whether a box's `annot-resize-<id>-<h>` nodes exist in the DOM at all. At
-  // most one box is active at a time (you hover one shape), so a single id (not a
-  // set) is enough and keeps the reveal/hide reasoning simple.
-  const [activeBoxId, setActiveBoxId] = useState<string | null>(null);
+  // Which own SHAPE is currently "active" (pointer over its shape or a handle),
+  // so its handles are revealed — null when none is hovered (issue #789, #790).
+  // Covers BOTH a box (its eight corner/edge handles) and a line (its two
+  // endpoint handles): handles are no longer always-on for either, and this
+  // state, not the pin set, gates whether a shape's `annot-resize-<id>-<h>` nodes
+  // exist in the DOM at all. At most one shape is active at a time (you hover one
+  // shape), so a single id (not a set) is enough and keeps the reveal/hide
+  // reasoning simple.
+  const [activeShapeId, setActiveShapeId] = useState<string | null>(null);
   // A pending "hide the handles" timer (hysteresis). On pointer-leave we don't
   // hide immediately; we arm this timer so the handles linger briefly. Moving
   // back onto the box or a handle clears it (the hide is cancelled). A ref so
@@ -261,30 +315,31 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   // still-pending timer on unmount.
   const hideHandlesTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Reveal a box's handles now: cancel any pending hide and mark it active. Used
-  // by both the box shape's and each handle's pointer-enter, so crossing the gap
-  // from the shape to a handle keeps the set alive.
+  // Reveal a shape's handles now: cancel any pending hide and mark it active.
+  // Used by both the shape's and each handle's pointer-enter, so crossing the gap
+  // from the shape to a handle keeps the set alive. Shared verbatim by boxes and
+  // lines — the reveal logic is identical; only what each shape renders differs.
   const revealHandles = (pinId: string) => {
     if (hideHandlesTimer.current !== null) {
       clearTimeout(hideHandlesTimer.current);
       hideHandlesTimer.current = null;
     }
-    setActiveBoxId((cur) => (cur === pinId ? cur : pinId));
+    setActiveShapeId((cur) => (cur === pinId ? cur : pinId));
   };
 
-  // Begin hiding a box's handles after the linger grace period — but only if it's
-  // still the active box (a fast move onto another box already switched it). The
-  // delay is the hysteresis: a cursor that drifts just past an edge, or hops the
-  // small gap to a handle, re-enters and cancels this before it fires.
+  // Begin hiding a shape's handles after the linger grace period — but only if
+  // it's still the active shape (a fast move onto another shape already switched
+  // it). The delay is the hysteresis: a cursor that drifts just past an edge, or
+  // hops the small gap to a handle, re-enters and cancels this before it fires.
   const scheduleHideHandles = (pinId: string) => {
     if (hideHandlesTimer.current !== null) clearTimeout(hideHandlesTimer.current);
     hideHandlesTimer.current = setTimeout(() => {
       hideHandlesTimer.current = null;
-      // Never hide out from under an in-flight resize of this box: a captured
+      // Never hide out from under an in-flight reshape of this shape: a captured
       // handle drag fires leave events as the cursor travels, but the handle must
       // survive until the gesture ends (release re-evaluates the hover normally).
       if (handleDragRef.current?.pinId === pinId) return;
-      setActiveBoxId((cur) => (cur === pinId ? null : cur));
+      setActiveShapeId((cur) => (cur === pinId ? null : cur));
     }, HANDLE_HOVER_LINGER_MS);
   };
 
@@ -318,16 +373,16 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
     setOpenPinId(null);
   }, [datasetId]);
 
-  // If the active (hovered) box disappears — removed, or its dataset changed —
+  // If the active (hovered) shape disappears — removed, or its dataset changed —
   // drop the hover so its handles can't linger as orphans pointing at a pin that
   // no longer exists. Mirrors the open-thread cleanup above. The pointer-leave
-  // path handles the normal case; this only covers a box vanishing out from
-  // under the cursor.
+  // path handles the normal case; this only covers a shape vanishing out from
+  // under the cursor. Covers both a box and a line (same active-shape state).
   useEffect(() => {
-    if (activeBoxId !== null && !annotations.some((p) => p.id === activeBoxId)) {
-      setActiveBoxId(null);
+    if (activeShapeId !== null && !annotations.some((p) => p.id === activeShapeId)) {
+      setActiveShapeId(null);
     }
-  }, [annotations, activeBoxId]);
+  }, [annotations, activeShapeId]);
 
   // A pending delete confirm and an in-flight edit live INSIDE <ThreadPopover>,
   // which the host remounts (keyed by pin id) whenever the open pin changes — so
@@ -376,9 +431,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
         const activeDrag = dragRef.current;
         const draggingId =
           activeDrag?.moved && activeDrag.mode === "move" ? activeDrag.pinId : null;
-        // A resize in flight (past the slop) previews the box from the dragged
-        // corners, so this pin's outline + handles track the cursor instead of
-        // its (still-old) stored geometry.
+        // A reshape in flight (past the slop) previews the shape from the dragged
+        // vertices, so this pin's outline + handles track the cursor instead of
+        // its (still-old) stored geometry. One ref covers a box resize AND a line
+        // endpoint drag.
         const resize = handleDragRef.current;
         const resizingId = resize?.moved && resize.preview ? resize.pinId : null;
 
@@ -389,20 +445,22 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
             const [ax, ay] = project(pin.position);
             el.style.transform = `translate(${ax}px, ${ay}px)`;
           }
-          // The box's effective corners this frame: the live resize preview if
-          // this pin is being resized, else its stored anchor/end. Drives both
-          // the SVG outline and the handle positions so they stay coincident.
-          const liveCorners: BoxCorners | null =
-            pin.id === resizingId && resize?.preview ? resize.preview : boxCorners(pin);
+          // The shape's effective vertices this frame: the live reshape preview
+          // if this pin is being reshaped, else its stored anchor/end. For a box
+          // these are its opposite corners; for a line, its two endpoints. Drives
+          // both the SVG geometry and the handle positions so they stay
+          // coincident.
+          const liveVertices: ShapeVertices | null =
+            pin.id === resizingId && resize?.preview ? resize.preview : shapeVertices(pin);
           // Line/box geometry: project every vertex through the same `project`
           // and rewrite the shared SVG element's coordinates in place.
           const shape = shapeRefs.current.get(pin.id);
           if (shape) {
-            // While previewing a box resize, derive the outline from the live
-            // corners; otherwise use the pin's stored vertices.
+            // While previewing a reshape, derive the outline/segment from the
+            // live vertices; otherwise use the pin's stored vertices.
             const previewPin =
-              pin.id === resizingId && liveCorners
-                ? { ...pin, position: liveCorners.position, end: liveCorners.end }
+              pin.id === resizingId && liveVertices
+                ? { ...pin, position: liveVertices.position, end: liveVertices.end }
                 : pin;
             const pts = annotationVertices(previewPin).map(project);
             if (isClosedShape(pin)) {
@@ -418,27 +476,28 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
               line.setAttribute("y2", String(pts[1][1]));
             }
           }
-          // Resize handles (own boxes only): reproject each of the eight from
-          // the same `project`, off the live corners, so they ride the box
-          // across pan/zoom AND track the cursor during an in-flight resize.
-          //
-          // Each handle is nudged a few CSS px OUTWARD from the box center
-          // (along the projected center->handle direction). Purely cosmetic — it
-          // makes the handles straddle the stroke (the conventional look) and,
-          // crucially, lifts the `nw` handle off the anchor DOT that also sits at
-          // `position`, so a plain click / Shift+drag on the dot (open thread /
-          // move the whole box, #776) still lands on the dot, not the handle.
-          // The resize MATH is unaffected: release uses eventToWorld, never this
-          // visual offset.
-          if (liveCorners) {
+          if (!liveVertices) continue;
+          if (pin.kind === "box") {
+            // Box resize handles (own boxes only): reproject each of the eight
+            // from the same `project`, off the live corners, so they ride the box
+            // across pan/zoom AND track the cursor during an in-flight resize.
+            //
+            // Each handle is nudged a few CSS px OUTWARD from the box center
+            // (along the projected center->handle direction). Purely cosmetic —
+            // it makes the handles straddle the stroke (the conventional look)
+            // and, crucially, lifts the `nw` handle off the anchor DOT that also
+            // sits at `position`, so a plain click / Shift+drag on the dot (open
+            // thread / move the whole box, #776) still lands on the dot, not the
+            // handle. The resize MATH is unaffected: release uses eventToWorld,
+            // never this visual offset.
             const [cx, cy] = project([
-              (liveCorners.position[0] + liveCorners.end[0]) / 2,
-              (liveCorners.position[1] + liveCorners.end[1]) / 2,
+              (liveVertices.position[0] + liveVertices.end[0]) / 2,
+              (liveVertices.position[1] + liveVertices.end[1]) / 2,
             ]);
             for (const h of BOX_HANDLES) {
               const handleEl = handleRefs.current.get(`${pin.id}:${h}`);
               if (!handleEl) continue;
-              const [hx, hy] = project(boxHandlePoint(liveCorners, h));
+              const [hx, hy] = project(boxHandlePoint(liveVertices, h));
               const ox = hx - cx;
               const oy = hy - cy;
               const len = Math.hypot(ox, oy);
@@ -447,6 +506,43 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
               const nx = len > 0.001 ? (ox / len) * HANDLE_OUTSET : 0;
               const ny = len > 0.001 ? (oy / len) * HANDLE_OUTSET : 0;
               handleEl.style.transform = `translate(${hx + nx}px, ${hy + ny}px)`;
+            }
+          } else if (pin.kind === "line") {
+            // Line endpoint handles (own lines only): reproject the two endpoint
+            // grips from the same `project`, off the live endpoints, so they ride
+            // the line across pan/zoom AND track the cursor during an in-flight
+            // endpoint drag.
+            //
+            // Each grip is nudged a few CSS px OUTWARD along the line's own axis,
+            // AWAY from the opposite endpoint (the box-handle trick, #790): the
+            // `start` grip is pushed off `position` in the position->away-from-end
+            // direction, the `end` grip off `end` away from `start`. Purely
+            // cosmetic — it lifts the `start` grip off the anchor DOT that also
+            // sits at `position`, so a plain click / Shift+drag on the dot (open
+            // thread / rigid whole-line move, #776/#778) still lands on the dot,
+            // not the grip. The reshape MATH is unaffected: release uses
+            // eventToWorld, never this visual offset.
+            const [sx, sy] = project(liveVertices.position);
+            const [ex, ey] = project(liveVertices.end);
+            // The projected axis direction (start->end); its negation is the
+            // outward direction for `start`, itself the outward direction for
+            // `end`. For a degenerate (zero-length) line the axis is undefined, so
+            // fall back to no offset.
+            const ax = ex - sx;
+            const ay = ey - sy;
+            const len = Math.hypot(ax, ay);
+            const ux = len > 0.001 ? ax / len : 0;
+            const uy = len > 0.001 ? ay / len : 0;
+            for (const h of LINE_HANDLES) {
+              const handleEl = handleRefs.current.get(`${pin.id}:${h}`);
+              if (!handleEl) continue;
+              const [hx, hy] = project(lineHandlePoint(liveVertices, h));
+              // `start` outsets away from `end` (−axis); `end` away from `start`
+              // (+axis). Same HANDLE_OUTSET the box corners use.
+              const sign = h === "start" ? -1 : 1;
+              const ox = sign * ux * HANDLE_OUTSET;
+              const oy = sign * uy * HANDLE_OUTSET;
+              handleEl.style.transform = `translate(${hx + ox}px, ${hy + oy}px)`;
             }
           }
         }
@@ -642,35 +738,42 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
     }
   };
 
-  // --- Box resize gesture (drag a corner/edge handle) ------------------------
-  // Each handle on an own box captures its own press (it sits over the canvas,
-  // above the box outline) and drives a self-contained reshape gesture using
-  // Pointer Events ON the handle — capture on down; move/up on the handle — so
-  // the pointer stays bound even as it slides far from the handle, exactly like
-  // the anchor-dot gesture. A handle NEVER pans and never moves the whole box:
-  // it only reshapes, emitting ONE reshape `move_annotation {position, end}` on
-  // release (author-only — non-author boxes render no handles at all).
+  // --- Shape reshape gesture (drag a box corner/edge OR a line endpoint) ------
+  // Each handle on an own SHAPE captures its own press (it sits over the canvas,
+  // above the shape's outline/segment) and drives a self-contained reshape
+  // gesture using Pointer Events ON the handle — capture on down; move/up on the
+  // handle — so the pointer stays bound even as it slides far from the handle,
+  // exactly like the anchor-dot gesture. A handle NEVER pans and never moves the
+  // whole shape rigidly: it only reshapes, emitting ONE reshape
+  // `move_annotation {position, end}` on release (author-only — non-author
+  // shapes render no handles at all). The SAME four handlers serve a box
+  // (eight corner/edge handles) and a line (two endpoint handles): only the
+  // per-vertex recompute differs, chosen by the pin's kind via `reshapeShape`.
 
   const onHandlePointerDown =
-    (pin: Annotation, handle: BoxHandle) => (e: ReactPointerEvent) => {
+    (pin: Annotation, handle: BoxHandle | LineHandle) => (e: ReactPointerEvent) => {
       // Belt-and-suspenders author gate (handles aren't rendered for peers).
-      if (!isOwnBox(pin, myId)) return;
+      if (!isOwnHandledShape(pin, myId)) return;
       if (e.button !== 0) return;
-      // Don't start a resize on top of an in-flight gesture (anchor drag or
+      // Don't start a reshape on top of an in-flight gesture (anchor drag or
       // another handle): let the active one finish rather than racing it.
       if (dragRef.current || handleDragRef.current) return;
-      const base = boxCorners(pin);
+      const base = shapeVertices(pin);
       if (!base) return;
       // A handle press must not also reach the anchor-dot gesture or the canvas
       // beneath: it owns this pointer outright.
       e.stopPropagation();
-      // Pin the box active for the whole drag and cancel any pending hide, so a
-      // resize that drags the cursor far off the box (firing leave events) can
+      // Pin the shape active for the whole drag and cancel any pending hide, so a
+      // reshape that drags the cursor far off the shape (firing leave events) can
       // never unmount the handle the gesture is captured on mid-drag.
       revealHandles(pin.id);
       handleDragRef.current = {
         pinId: pin.id,
         pointerId: e.pointerId,
+        // The kind picks the recompute (box corners vs line endpoints) for the
+        // whole gesture; fixed here at press from the pin so a re-read mid-drag
+        // can't switch it.
+        kind: pin.kind === "line" ? "line" : "box",
         handle,
         startX: e.clientX,
         startY: e.clientY,
@@ -687,7 +790,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
     };
 
   const onHandlePointerMove =
-    (pin: Annotation, _handle: BoxHandle) => (e: ReactPointerEvent) => {
+    (pin: Annotation) => (e: ReactPointerEvent) => {
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       if (!drag.moved) {
@@ -695,15 +798,15 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
         if (travel <= PIN_CLICK_SLOP) return; // within click slop — not yet a drag
         drag.moved = true;
       }
-      // Recompute the two corners from the FIXED press-time base (never the
-      // running preview) so the held side stays anchored and there's no drift.
-      // The RAF tick reprojects the outline + handles from this preview.
+      // Recompute the two vertices from the FIXED press-time base (never the
+      // running preview) so the held vertex stays anchored and there's no drift.
+      // The RAF tick reprojects the outline/segment + handles from this preview.
       const world = eventToWorld(e);
-      drag.preview = reshapeBox(drag.base, drag.handle, world);
+      drag.preview = reshapeShape(drag.kind, drag.base, drag.handle, world);
     };
 
   const onHandlePointerUp =
-    (pin: Annotation, _handle: BoxHandle) => (e: ReactPointerEvent) => {
+    (pin: Annotation) => (e: ReactPointerEvent) => {
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       handleDragRef.current = null;
@@ -713,23 +816,26 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
         // ignore — capture may not have been taken
       }
       // Re-arm the hysteresis hide now the drag is over. While the handle was
-      // captured, every leave that crossed the box fired a hide that the
+      // captured, every leave that crossed the shape fired a hide that the
       // in-flight guard (scheduleHideHandles) correctly no-op'd — so at release
-      // NO hide is pending and `activeBoxId` is still set. Without this the
-      // handles would linger forever after a drag that releases OFF the box (no
+      // NO hide is pending and `activeShapeId` is still set. Without this the
+      // handles would linger forever after a drag that releases OFF the shape (no
       // leave/enter fires on a captured pointer to re-evaluate the hover). Arming
-      // it here makes an off-box release hide the handles after the linger delay;
-      // a release where the pointer is still over the box or a handle is harmless
-      // because the implicit capture-release fires `pointerenter` on that element,
-      // and revealHandles cancels this pending hide before it can run. Done before
-      // the slop check so even a tiny, no-reshape drag can't strand the handles.
+      // it here makes an off-shape release hide the handles after the linger
+      // delay; a release where the pointer is still over the shape or a handle is
+      // harmless because the implicit capture-release fires `pointerenter` on that
+      // element, and revealHandles cancels this pending hide before it can run.
+      // Done before the slop check so even a tiny, no-reshape drag can't strand
+      // the handles.
       scheduleHideHandles(pin.id);
       // A press that never crossed the slop is a no-op: no reshape (and there's
       // no thread/click affordance on a handle to fall through to).
       if (!drag.moved) return;
-      // Resolve the final corners at the release point in the existing world
-      // frame, and emit exactly one reshape move carrying BOTH opposite corners.
-      const corners = reshapeBox(drag.base, drag.handle, eventToWorld(e));
+      // Resolve the final vertices at the release point in the existing world
+      // frame, and emit exactly one reshape move carrying BOTH vertices. For a
+      // line endpoint drag this moves only the grabbed end (`reshapeLine` holds
+      // the other), so the far endpoint equals the line's original vertex.
+      const vertices = reshapeShape(drag.kind, drag.base, drag.handle, eventToWorld(e));
       const scene = wasmSceneRef.current;
       if (!scene) return;
       applyDocumentCommand(
@@ -738,8 +844,8 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
           type: "move_annotation",
           dataset_id: datasetId,
           id: pin.id,
-          position: corners.position,
-          end: corners.end,
+          position: vertices.position,
+          end: vertices.end,
           z: drag.z,
         },
         sendCommand,
@@ -748,7 +854,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
     };
 
   const onHandlePointerCancel =
-    (pin: Annotation, _handle: BoxHandle) => (e: ReactPointerEvent) => {
+    (pin: Annotation) => (e: ReactPointerEvent) => {
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       const captured = drag.pointerId;
@@ -758,7 +864,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
       } catch {
         // ignore
       }
-      // Cancelled: never reshape; the RAF tick snaps the box + handles back to
+      // Cancelled: never reshape; the RAF tick snaps the shape + handles back to
       // the stored geometry next frame. Re-arm the hysteresis hide for the same
       // reason as on a normal release (above): the in-flight guard swallowed
       // every hide during the captured drag, so without this the handles would
@@ -842,6 +948,11 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
               />
             );
           }
+          // Only an OWN line is hover-revealable (endpoint handles are
+          // author-only); a peer's line stays inert. The segment is the hover
+          // target that toggles its two endpoint handles' visibility — the line
+          // analog of the box's hoverable outline (issue #790).
+          const hoverable = isOwnLine(pin, myId);
           return (
             <line
               key={pin.id}
@@ -858,6 +969,25 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
               strokeWidth={2.5}
               strokeLinecap="round"
               opacity={shapeOpacity}
+              // Reveal this line's endpoint handles on enter; arm the
+              // linger-then-hide on leave (hysteresis) — the SAME machinery the
+              // box outline uses. Only own lines carry these.
+              onPointerEnter={hoverable ? () => revealHandles(pin.id) : undefined}
+              onPointerLeave={hoverable ? () => scheduleHideHandles(pin.id) : undefined}
+              style={
+                hoverable
+                  ? {
+                      // Hit-test only the painted STROKE, so hovering the line
+                      // reveals its endpoint handles but a press elsewhere still
+                      // falls through to the canvas for pan/zoom. We only track
+                      // enter/leave here — no pointerdown/move — so the segment
+                      // never starts a gesture or steals the canvas's drag.
+                      pointerEvents: "stroke",
+                      // The segment reads as the endpoint-adjust affordance.
+                      cursor: "pointer",
+                    }
+                  : undefined
+              }
             />
           );
         })}
@@ -880,7 +1010,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
       {annotations.map((pin) => {
         if (!isOwnBox(pin, myId)) return null;
         // Hover-gated reveal: only the actively-hovered box shows its handles…
-        if (activeBoxId !== pin.id) return null;
+        if (activeShapeId !== pin.id) return null;
         // …and never while this box's thread is open, so nothing resize-related
         // can draw over the open thread window.
         if (openPinId === pin.id) return null;
@@ -894,9 +1024,9 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
               else handleRefs.current.delete(`${pin.id}:${h}`);
             }}
             onPointerDown={onHandlePointerDown(pin, h)}
-            onPointerMove={onHandlePointerMove(pin, h)}
-            onPointerUp={onHandlePointerUp(pin, h)}
-            onPointerCancel={onHandlePointerCancel(pin, h)}
+            onPointerMove={onHandlePointerMove(pin)}
+            onPointerUp={onHandlePointerUp(pin)}
+            onPointerCancel={onHandlePointerCancel(pin)}
             // A handle is part of the box's active zone: entering one cancels a
             // pending hide (so hopping the small gap from the box's edge to a
             // handle never makes the set vanish), and leaving one arms the linger
@@ -927,6 +1057,79 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
               // A directional resize cursor per handle, so the affordance reads
               // as "drag to resize" rather than "move".
               cursor: HANDLE_CURSOR[h],
+              zIndex: 3,
+            }}
+          />
+        ));
+      })}
+      {/* Endpoint-handle layer: two small draggable squares on each OWN line,
+          just OFF its projected `position` (start) and `end` vertices — each
+          grip is outset along the line's axis away from the opposite end (see the
+          RAF tick) so the `start` grip clears the anchor dot that shares
+          `position`. Author-only — a non-author line (or a point/box) renders
+          none, so a peer can't adjust my line and a point has no endpoint
+          affordance. Each handle is a DOM node (it needs pointer capture)
+          repositioned every frame by the RAF tick off the live (or stored)
+          endpoints, so it rides the line across pan/zoom and tracks the cursor
+          mid-drag. Dragging one emits ONE reshape move_annotation that moves only
+          that endpoint (the other is held).
+
+          NOT ALWAYS-ON (issue #790): a line's endpoint handles render only while
+          it is the active (hovered) shape AND its thread is closed — so an idle
+          line has zero `annot-resize-<id>-start`/`-end` nodes, and an open thread
+          is never overlapped. The hover is revealed by the line segment's
+          pointer-enter and lingers briefly after leave (the SAME hysteresis the
+          box handles use); see revealHandles / scheduleHideHandles. */}
+      {annotations.map((pin) => {
+        if (!isOwnLine(pin, myId)) return null;
+        // Hover-gated reveal: only the actively-hovered line shows its endpoints…
+        if (activeShapeId !== pin.id) return null;
+        // …and never while this line's thread is open, so nothing endpoint-related
+        // can draw over the open thread window.
+        if (openPinId === pin.id) return null;
+        return LINE_HANDLES.map((h) => (
+          <div
+            key={`${pin.id}:${h}`}
+            data-testid={`annot-resize-${pin.id}-${h}`}
+            title={`Adjust this line's ${h === "start" ? "start" : "end"} point`}
+            ref={(el) => {
+              if (el) handleRefs.current.set(`${pin.id}:${h}`, el);
+              else handleRefs.current.delete(`${pin.id}:${h}`);
+            }}
+            onPointerDown={onHandlePointerDown(pin, h)}
+            onPointerMove={onHandlePointerMove(pin)}
+            onPointerUp={onHandlePointerUp(pin)}
+            onPointerCancel={onHandlePointerCancel(pin)}
+            // A handle is part of the line's active zone: entering one cancels a
+            // pending hide (so hopping the small gap from the segment to a handle
+            // never makes the pair vanish), and leaving one arms the linger again
+            // — together with the segment's enter/leave this keeps the whole
+            // line+handles cluster as one hover region with hysteresis.
+            onPointerEnter={() => revealHandles(pin.id)}
+            onPointerLeave={() => scheduleHideHandles(pin.id)}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              transform: "translate(0px, 0px)",
+              willChange: "transform",
+              // Centered on the endpoint's projected point.
+              width: HANDLE_SIZE,
+              height: HANDLE_SIZE,
+              marginLeft: -HANDLE_SIZE / 2,
+              marginTop: -HANDLE_SIZE / 2,
+              boxSizing: "border-box",
+              // A small white square with the line's accent border — the same
+              // grip look the box handles use, visually distinct from the dot.
+              backgroundColor: "white",
+              border: "1.5px solid #FF3B30",
+              borderRadius: 2,
+              boxShadow: "0 1px 2px rgba(0,0,0,0.5)",
+              pointerEvents: "auto",
+              touchAction: "none",
+              // An endpoint grip moves freely in both axes, so the omnidirectional
+              // move cursor reads as "drag this end anywhere".
+              cursor: "move",
               zIndex: 3,
             }}
           />
