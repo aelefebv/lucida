@@ -371,8 +371,15 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   // inert, so normal behavior is untouched.
   useEffect(() => {
     if (!visible) {
+      // Deliberate transient-UI reset on a prop (visibility) change: hiding the
+      // overlay drops the open thread and the hovered-shape handle reveal (and
+      // cancels a pending linger-hide) so a later re-show starts from a quiet
+      // baseline (no stale popover, no flashed handles). Syncing transient state
+      // to a changed prop — keep the effect.
+      /* eslint-disable react-hooks/set-state-in-effect */
       setOpenPinId(null);
       setActiveShapeId(null);
+      /* eslint-enable react-hooks/set-state-in-effect */
       if (hideHandlesTimer.current !== null) {
         clearTimeout(hideHandlesTimer.current);
         hideHandlesTimer.current = null;
@@ -393,11 +400,20 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   // peer, or its dataset changed), close the popover so it can't dangle.
   useEffect(() => {
     if (openPinId !== null && !annotations.some((p) => p.id === openPinId)) {
+      // Deliberate cleanup: the pin backing the open thread was removed (by its
+      // author or a peer, or the dataset changed), so the popover must close or
+      // it would dangle. External-data-driven reset, not avoidable derived render
+      // state — keep the effect.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setOpenPinId(null);
     }
   }, [annotations, openPinId]);
 
   useEffect(() => {
+    // Deliberate transient-UI reset on a prop (dataset) change: the open thread
+    // belongs to the previous dataset's pin, so switching datasets must close it.
+    // Syncing transient state to a changed prop — keep the effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpenPinId(null);
   }, [datasetId]);
 
@@ -408,6 +424,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   // under the cursor. Covers both a box and a line (same active-shape state).
   useEffect(() => {
     if (activeShapeId !== null && !annotations.some((p) => p.id === activeShapeId)) {
+      // Deliberate cleanup: the hovered shape was removed (or its dataset
+      // changed), so drop the hover or its handles would linger as orphans.
+      // External-data-driven reset, not avoidable derived render state — keep it.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveShapeId(null);
     }
   }, [annotations, activeShapeId]);

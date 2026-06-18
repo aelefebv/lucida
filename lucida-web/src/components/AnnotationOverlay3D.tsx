@@ -152,12 +152,22 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
   // close the popover so it can't dangle. Mirrors the 2D overlay's guard.
   useEffect(() => {
     if (openPinId !== null && !annotations.some((p) => p.id === openPinId)) {
+      // Deliberate cleanup: the pin backing the open thread was removed (by its
+      // author or a peer), so the popover must close or it would dangle. This is
+      // an external-data-driven reset, not avoidable derived render state — keep
+      // the effect.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setOpenPinId(null);
     }
   }, [annotations, openPinId]);
 
   // Switching datasets closes any open thread (the pin set is dataset-scoped).
   useEffect(() => {
+    // Deliberate transient-UI reset on a prop (dataset) change: the open thread
+    // belongs to the previous dataset's pin, so it must close when the dataset
+    // switches. This is exactly the "synchronize transient state to a changed
+    // prop" case, not derived render state — keep the effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpenPinId(null);
   }, [datasetId]);
 
@@ -168,6 +178,10 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
   // normal behavior is untouched. (Mirrors the 2D overlay; 3D has no hovered-
   // handle state to reset.)
   useEffect(() => {
+    // Deliberate transient-UI reset on a prop (visibility) change: hiding the
+    // overlay drops the open thread so a later re-show starts clean (no stale
+    // popover pops open). Syncing transient state to a changed prop — keep it.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!visible) setOpenPinId(null);
   }, [visible]);
 

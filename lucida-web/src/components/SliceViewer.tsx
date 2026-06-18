@@ -51,29 +51,33 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
 
   // Mirror placement props into refs so the pointer handlers (which depend on
   // `canvas` only, to avoid re-binding listeners on every doc change) read the
-  // latest values without stale closures.
+  // latest values without stale closures. `zRef`/`tRef`/`cRef` carry the current
+  // slice/timepoint/channel so a dropped pin records its Z/T/C (issue #779)
+  // without re-binding the handlers on every slice change.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
-  annotationDatasetIdRef.current = annotationDatasetId;
   const annotationKindRef = useRef(annotationKind);
-  annotationKindRef.current = annotationKind;
-  // Mirror the current slice index so a dropped pin records its depth (z)
-  // without re-binding the pointer handlers on every slice change.
   const zRef = useRef(z);
-  zRef.current = z;
-  // Mirror the current timepoint/channel too (issue #779) so a dropped pin
-  // records the view's T/C alongside Z — the slice context it belongs to — and
-  // the overlay can render it off-context when the view later differs. Mirrored
-  // (not closed over) for the same reason as zRef: the handlers bind on `canvas`.
   const tRef = useRef(t);
-  tRef.current = t;
   const cRef = useRef(c);
-  cRef.current = c;
   const myIdRef = useRef(myId);
-  myIdRef.current = myId;
   const sendCommandRef = useRef(sendCommand);
-  sendCommandRef.current = sendCommand;
   const onDocumentChangedRef = useRef(onDocumentChanged);
-  onDocumentChangedRef.current = onDocumentChanged;
+  // Keep every mirror current AFTER each commit rather than during render: the
+  // handlers (and the render loop) read these refs only in async contexts (a
+  // pointer event, a RAF tick), so refreshing them post-commit — with no
+  // dependency array, so it runs after every render — delivers the same latest
+  // value to those reads while keeping render itself a pure, side-effect-free
+  // pass (no ref writes during render).
+  useEffect(() => {
+    annotationDatasetIdRef.current = annotationDatasetId;
+    annotationKindRef.current = annotationKind;
+    zRef.current = z;
+    tRef.current = t;
+    cRef.current = c;
+    myIdRef.current = myId;
+    sendCommandRef.current = sendCommand;
+    onDocumentChangedRef.current = onDocumentChanged;
+  });
 
   // Create/start render loop. Deliberately omits `datasets` (live mutable
   // Map shared with the parent — RenderLoop reads it each frame),

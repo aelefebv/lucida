@@ -2061,7 +2061,8 @@ mod tests {
         // A persisted `Annotation` blob (a snapshot pin) from before this slice
         // has no t/c keys. It must deserialize with t = 0, c = 0 so an older
         // document loads without a wire break.
-        let json = r#"{"id":"pin-old","position":[3.0,4.0],"z":2.0,"author":"alice","kind":"point"}"#;
+        let json =
+            r#"{"id":"pin-old","position":[3.0,4.0],"z":2.0,"author":"alice","kind":"point"}"#;
         let pin: crate::scene::Annotation = serde_json::from_str(json).unwrap();
         assert_eq!(pin.t, 0);
         assert_eq!(pin.c, 0);
@@ -2362,9 +2363,20 @@ mod tests {
         use lucida_content::EntityId;
         let (mut doc, ds) = plate_with_two_layouts();
         doc.apply(add_annotation_cmd("plate", "near-w1", [5.0, 5.0], "alice"));
-        doc.apply(add_annotation_cmd("plate", "near-w2", [102.0, 1.0], "alice"));
-        assert_eq!(pin(&doc, &ds, "near-w1").anchor, Some(EntityId("w1".into())));
-        assert_eq!(pin(&doc, &ds, "near-w2").anchor, Some(EntityId("w2".into())));
+        doc.apply(add_annotation_cmd(
+            "plate",
+            "near-w2",
+            [102.0, 1.0],
+            "alice",
+        ));
+        assert_eq!(
+            pin(&doc, &ds, "near-w1").anchor,
+            Some(EntityId("w1".into()))
+        );
+        assert_eq!(
+            pin(&doc, &ds, "near-w2").anchor,
+            Some(EntityId("w2".into()))
+        );
     }
 
     #[test]
@@ -2372,9 +2384,9 @@ mod tests {
         // A single-image dataset has nothing to anchor to: the pin stays
         // unanchored and a (hypothetical) layout switch would never move it.
         let mut doc = crate::scene::DocumentState::default();
-        doc.apply(DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened(
-            "single", "single", 1,
-        )));
+        doc.apply(DocumentCommand::DatasetOpened(
+            test_helpers::make_dataset_opened("single", "single", 1),
+        ));
         doc.apply(add_annotation_cmd("single", "p", [3.0, 4.0], "alice"));
         assert_eq!(pin(&doc, &DatasetId("single".into()), "p").anchor, None);
     }
@@ -2389,7 +2401,11 @@ mod tests {
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 5.0]);
 
         switch_to(&mut doc, &ds, "moved");
-        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0], "rides w1 by +[0,50]");
+        assert_eq!(
+            pin(&doc, &ds, "p").position,
+            [5.0, 55.0],
+            "rides w1 by +[0,50]"
+        );
 
         switch_to(&mut doc, &ds, "default");
         assert_eq!(
@@ -2417,7 +2433,10 @@ mod tests {
         assert_eq!(ln.end, Some([8.0, 56.0]));
         // The anchor->end vector is invariant (it's a translate, not a stretch).
         let v_before = [8.0 - 2.0, 6.0 - 2.0];
-        let v_after = [ln.end.unwrap()[0] - ln.position[0], ln.end.unwrap()[1] - ln.position[1]];
+        let v_after = [
+            ln.end.unwrap()[0] - ln.position[0],
+            ln.end.unwrap()[1] - ln.position[1],
+        ];
         assert_eq!(v_before, v_after);
     }
 
@@ -2498,7 +2517,10 @@ mod tests {
             "author": "alice"
         }"#;
         let legacy: crate::scene::Annotation = serde_json::from_str(legacy_json).unwrap();
-        assert_eq!(legacy.anchor, None, "missing anchor key deserializes as None");
+        assert_eq!(
+            legacy.anchor, None,
+            "missing anchor key deserializes as None"
+        );
 
         let (mut doc, ds) = plate_with_two_layouts();
         doc.add_annotation(ds.clone(), legacy);
@@ -3500,10 +3522,20 @@ mod tests {
             crate::scene::AnnotationKind::Box,
         ));
         // Drag the SE (opposite) corner out to 7,9: anchor held, end -> 7,9.
-        doc.apply(reshape_annotation_cmd("wds-1", "bx", [0.0, 0.0], [7.0, 9.0], 0.0));
+        doc.apply(reshape_annotation_cmd(
+            "wds-1",
+            "bx",
+            [0.0, 0.0],
+            [7.0, 9.0],
+            0.0,
+        ));
         let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
         assert_eq!(pin.position, [0.0, 0.0], "se drag leaves the anchor put");
-        assert_eq!(pin.end, Some([7.0, 9.0]), "se drag moves the opposite corner");
+        assert_eq!(
+            pin.end,
+            Some([7.0, 9.0]),
+            "se drag moves the opposite corner"
+        );
         assert_eq!(pin.kind, crate::scene::AnnotationKind::Box);
     }
 
@@ -3519,10 +3551,24 @@ mod tests {
             [4.0, 4.0],
             crate::scene::AnnotationKind::Box,
         ));
-        doc.apply(reshape_annotation_cmd("wds-1", "bx", [-2.0, -1.0], [4.0, 4.0], 0.0));
+        doc.apply(reshape_annotation_cmd(
+            "wds-1",
+            "bx",
+            [-2.0, -1.0],
+            [4.0, 4.0],
+            0.0,
+        ));
         let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
-        assert_eq!(pin.position, [-2.0, -1.0], "nw drag moves the anchor corner");
-        assert_eq!(pin.end, Some([4.0, 4.0]), "nw drag holds the opposite corner");
+        assert_eq!(
+            pin.position,
+            [-2.0, -1.0],
+            "nw drag moves the anchor corner"
+        );
+        assert_eq!(
+            pin.end,
+            Some([4.0, 4.0]),
+            "nw drag holds the opposite corner"
+        );
     }
 
     #[test]
@@ -3560,8 +3606,20 @@ mod tests {
             [4.0, 4.0],
             crate::scene::AnnotationKind::Box,
         ));
-        doc.apply(reshape_annotation_cmd("wds-1", "bx", [1.0, 1.0], [8.0, 6.0], 2.0));
-        doc.apply(reshape_annotation_cmd("wds-1", "bx", [1.0, 1.0], [8.0, 6.0], 2.0));
+        doc.apply(reshape_annotation_cmd(
+            "wds-1",
+            "bx",
+            [1.0, 1.0],
+            [8.0, 6.0],
+            2.0,
+        ));
+        doc.apply(reshape_annotation_cmd(
+            "wds-1",
+            "bx",
+            [1.0, 1.0],
+            [8.0, 6.0],
+            2.0,
+        ));
         let pins = &doc.annotations[&DatasetId("wds-1".into())];
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].position, [1.0, 1.0]);
@@ -3581,13 +3639,32 @@ mod tests {
             [4.0, 4.0],
             crate::scene::AnnotationKind::Box,
         ));
-        doc.apply(reshape_annotation_cmd("wds-1", "ghost", [1.0, 1.0], [2.0, 2.0], 0.0));
-        doc.apply(reshape_annotation_cmd("wds-missing", "bx", [1.0, 1.0], [2.0, 2.0], 0.0));
+        doc.apply(reshape_annotation_cmd(
+            "wds-1",
+            "ghost",
+            [1.0, 1.0],
+            [2.0, 2.0],
+            0.0,
+        ));
+        doc.apply(reshape_annotation_cmd(
+            "wds-missing",
+            "bx",
+            [1.0, 1.0],
+            [2.0, 2.0],
+            0.0,
+        ));
         let pins = &doc.annotations[&DatasetId("wds-1".into())];
         assert_eq!(pins.len(), 1);
-        assert_eq!(pins[0].position, [0.0, 0.0], "real box untouched by a stray reshape");
+        assert_eq!(
+            pins[0].position,
+            [0.0, 0.0],
+            "real box untouched by a stray reshape"
+        );
         assert_eq!(pins[0].end, Some([4.0, 4.0]));
-        assert!(!doc.annotations.contains_key(&DatasetId("wds-missing".into())));
+        assert!(
+            !doc.annotations
+                .contains_key(&DatasetId("wds-missing".into()))
+        );
     }
 
     #[test]
@@ -3602,7 +3679,13 @@ mod tests {
             [4.0, 4.0],
             crate::scene::AnnotationKind::Box,
         ));
-        doc.apply(reshape_annotation_cmd("wds-1", "bx", [-1.5, 2.0], [10.25, 6.5], 3.0));
+        doc.apply(reshape_annotation_cmd(
+            "wds-1",
+            "bx",
+            [-1.5, 2.0],
+            [10.25, 6.5],
+            3.0,
+        ));
         let blob = serde_json::to_string(&doc).unwrap();
         let restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
         let pin = &restored.annotations[&DatasetId("wds-1".into())][0];

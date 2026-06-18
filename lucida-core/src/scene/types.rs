@@ -368,7 +368,10 @@ impl Annotation {
     /// same anchor/z — leaves the shape unchanged).
     pub fn set_position(&mut self, position: [f64; 2], z: f64) {
         // Delta of the anchor move, captured BEFORE overwriting `position`.
-        let [dx, dy] = [position[0] - self.position[0], position[1] - self.position[1]];
+        let [dx, dy] = [
+            position[0] - self.position[0],
+            position[1] - self.position[1],
+        ];
         self.position = position;
         self.z = z;
         // Carry the second vertex rigidly so the whole line/box translates
