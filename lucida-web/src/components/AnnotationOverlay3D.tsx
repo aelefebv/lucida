@@ -49,6 +49,7 @@ import { applyDocumentCommand } from "../applyAndSend.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
+import type { MentionCandidate } from "./annotationMentions.ts";
 
 interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
@@ -85,6 +86,14 @@ interface Props {
    * omitted) the overlay behaves exactly as before. Local only: no command, no
    * wire/document change, no peer effect (peer cursors are not annotations). */
   visible?: boolean;
+  /** People who can be @-mentioned in a comment (issue #526), threaded straight
+   * through to the shared {@link ThreadPopover} — the SAME prop the 2D overlay
+   * takes, so the mention behavior is identical in 2D and 3D. In production App
+   * derives these from a union of the workspace member roster and the document's
+   * participants (distinct `scene.annotations()` authors plus the current user),
+   * each carrying a stable @handle; a test injects them. Optional + defaulted to
+   * `[]`, so omitting it just means no mention picker. */
+  mentionCandidates?: MentionCandidate[];
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click rather
@@ -127,7 +136,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, visible = true }: Props) {
+export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, visible = true, mentionCandidates = [] }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per line/box, re-projected each frame through the SAME
   // `project_annotation` call the dots use — so a line/box tracks the volume as
@@ -670,6 +679,7 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
                 sendCommand={sendCommand}
                 onDocumentChanged={onDocumentChanged}
                 onClose={() => setOpenPinId(null)}
+                mentionCandidates={mentionCandidates}
               />
             )}
           </div>

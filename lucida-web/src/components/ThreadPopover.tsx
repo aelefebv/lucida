@@ -32,10 +32,17 @@
  * positioned child of the pin's marker wrapper in each overlay); this component
  * is purely the thread UI and is presentation-position-agnostic.
  */
-import { useState, type RefObject } from "react";
+import { useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import type { Annotation, Comment } from "./AnnotationOverlay.tsx";
+import {
+  activeMentionQuery,
+  applyMentionSelection,
+  matchMentionCandidates,
+  splitMentionTokens,
+  type MentionCandidate,
+} from "./annotationMentions.ts";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -59,6 +66,13 @@ interface Props {
   /** Ask the host to close this thread (the × control). The host owns which pin
    * is open, so closing is its decision to make. */
   onClose: () => void;
+  /** People who can be @-mentioned in this thread's composer (issue #526),
+   * threaded down from the host overlay (which in production derives them from
+   * the document's participants). A mention is inline `@name` text, so picking
+   * one only edits the draft — it rides the SAME `add_comment` as any comment.
+   * Optional + defaulted to `[]` so the thread works with no candidates (the
+   * picker simply never opens). */
+  mentionCandidates?: MentionCandidate[];
 }
 
 /** Stable client-supplied id so the local apply and peers' broadcast converge. */
@@ -76,9 +90,13 @@ export function ThreadPopover({
   sendCommand,
   onDocumentChanged,
   onClose,
+  mentionCandidates = [],
 }: Props) {
   // Draft text for a NEW comment in this thread.
   const [draft, setDraft] = useState("");
+  // The add-comment input element, so picking a mention can return focus to it
+  // (the contract: a pick keeps focus in the input so typing continues).
+  const addInputRef = useRef<HTMLInputElement>(null);
   // The comment currently being edited (by id), or null, plus its in-flight
   // text. Only one comment edits at a time — opening another (or saving/
   // cancelling) replaces it.
@@ -113,6 +131,32 @@ export function ThreadPopover({
     );
     setDraft("");
     onDocumentChanged();
+  };
+
+  // --- @-mention autocomplete (issue #526) ----------------------------------
+  // The picker is PURE state of the draft: the in-progress `@query` (run from the
+  // last token-opening `@` to the end, no whitespace) and the candidates whose
+  // label contains it. No separate open/closed flag — when there's no active
+  // query or nothing matches, `mentionMatches` is empty and we render no picker,
+  // so the picker can never get out of sync with what's typed (Enter sends only
+  // when it's closed; see the input's keydown). A mention is just text, so this
+  // only edits the draft — sending stays the unchanged `add_comment`.
+  const mentionQuery = activeMentionQuery(draft);
+  const mentionMatches =
+    mentionQuery !== null
+      ? matchMentionCandidates(mentionCandidates, mentionQuery.query)
+      : [];
+  const mentionPickerOpen = mentionMatches.length > 0;
+
+  // Pick a candidate: replace the active `@query` with `@<label> ` (one trailing
+  // space), then return focus to the input so typing continues. Replacing the
+  // draft re-derives the query — now closed by the trailing space — so the picker
+  // closes on its own without any extra flag.
+  const pickMention = (label: string) => {
+    setDraft((cur) => applyMentionSelection(cur, label));
+    // Restore focus after React applies the new value. The input never unmounts
+    // on a pick, so this is just re-focusing the live element.
+    addInputRef.current?.focus();
   };
 
   // --- Remove an own comment (remove_comment) — author-only -----------------
@@ -421,7 +465,35 @@ export function ThreadPopover({
                   </>
                 ) : (
                   <>
-                    <span style={{ wordBreak: "break-word", flex: 1 }}>{c.text}</span>
+                    {/* The comment text, with each `@mention` token highlighted
+                        as a distinct chip and every other character rendered
+                        verbatim. Both come from {@link splitMentionTokens}, which
+                        carries the raw source substring per segment — so the chip
+                        is pure styling and comment content is ALWAYS rendered as
+                        TEXT (React escapes it), never injected as HTML. A comment
+                        with no mention yields a single text segment, so it renders
+                        no mention-chip at all. */}
+                    <span style={{ wordBreak: "break-word", flex: 1 }}>
+                      {splitMentionTokens(c.text).map((seg, i) =>
+                        seg.kind === "mention" ? (
+                          <span
+                            key={i}
+                            data-testid="mention-chip"
+                            style={{
+                              color: "#58a6ff",
+                              backgroundColor: "rgba(56,139,253,0.15)",
+                              borderRadius: 4,
+                              padding: "0 3px",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {seg.text}
+                          </span>
+                        ) : (
+                          <span key={i}>{seg.text}</span>
+                        ),
+                      )}
+                    </span>
                     {mineComment && (
                       <>
                         <button
@@ -466,8 +538,74 @@ export function ThreadPopover({
           })
         )}
       </div>
-      <div style={{ display: "flex", gap: 4, padding: 6, borderTop: "1px solid #30363d" }}>
+      <div
+        style={{
+          position: "relative",
+          display: "flex",
+          gap: 4,
+          padding: 6,
+          borderTop: "1px solid #30363d",
+        }}
+      >
+        {/* @-mention picker (issue #526): rendered ONLY while a mention is being
+            typed AND at least one candidate matches (an empty/no-match query
+            renders nothing — the user can still send the raw text). It floats
+            just above the composer (the popover clips its own overflow, so the
+            picker escapes upward to stay readable). Each option inserts `@label `
+            into the draft; nothing here is a command — sending stays the
+            unchanged `add_comment`. */}
+        {mentionPickerOpen && (
+          <div
+            data-testid={`mention-picker-${pin.id}`}
+            role="listbox"
+            aria-label="Mention a collaborator"
+            style={{
+              position: "absolute",
+              left: 6,
+              right: 6,
+              bottom: "100%",
+              marginBottom: 4,
+              maxHeight: 132,
+              overflowY: "auto",
+              background: "#161b22",
+              border: "1px solid #30363d",
+              borderRadius: 6,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
+              zIndex: 1,
+            }}
+          >
+            {mentionMatches.map((candidate) => (
+              <button
+                key={candidate.id}
+                type="button"
+                role="option"
+                data-testid={`mention-option-${candidate.id}`}
+                // Keep focus on the input through the click: preventing the
+                // mousedown default stops the input's blur, so `pickMention`'s
+                // refocus lands on a still-focused field and the picker reopens
+                // cleanly for the next mention.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => pickMention(candidate.label)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "5px 8px",
+                  fontSize: 12,
+                  background: "none",
+                  border: "none",
+                  color: "#e6edf3",
+                  cursor: "pointer",
+                }}
+              >
+                <span style={{ color: "#58a6ff", fontWeight: 600 }}>@</span>
+                {candidate.label}
+              </button>
+            ))}
+          </div>
+        )}
         <input
+          ref={addInputRef}
           type="text"
           data-testid={`comment-add-input-${pin.id}`}
           value={draft}
@@ -476,8 +614,22 @@ export function ThreadPopover({
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
+              // While the picker is open, Enter belongs to the picker, not to
+              // sending: pick the first (top) match and keep typing. Only when
+              // the picker is CLOSED does Enter send the comment (per contract).
+              if (mentionPickerOpen) {
+                e.preventDefault();
+                pickMention(mentionMatches[0].label);
+                return;
+              }
               e.preventDefault();
               addComment();
+            } else if (e.key === "Escape" && mentionPickerOpen) {
+              // Escape dismisses the picker without sending or losing the draft:
+              // append a space to close the active token (the picker derives
+              // from the draft, so a trailing space ends the mention run).
+              e.preventDefault();
+              setDraft((cur) => `${cur} `);
             }
           }}
           style={{
