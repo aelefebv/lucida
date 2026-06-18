@@ -18,7 +18,7 @@
  * `version` (the remote-document version) changes whenever a pin or comment is
  * added/removed, which re-runs the snapshot read.
  */
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import {
@@ -70,6 +70,29 @@ export interface Annotation {
   /** Flat, insertion-ordered comment thread. Absent on a slice-1 pin →
    * defaulted to an empty array on read. */
   comments?: Comment[];
+}
+
+/**
+ * Imperative seam for opening a pin's thread FROM OUTSIDE the overlay (issue
+ * #526, "mentions of me"): `openPinId` is internal overlay state, so a host that
+ * wants to jump to a pin (e.g. clicking a "mentions of me" item) needs a clean
+ * handle to drive it. The host holds a ref to the overlay and calls
+ * `focusPin(pinId)`, which opens that pin's thread AND recenters the view on it.
+ *
+ * The SAME handle shape is exposed by both the 2D ({@link AnnotationOverlay}) and
+ * 3D ({@link AnnotationOverlay3D}) overlays, so the host wires navigation
+ * identically for either view — only the recenter MECHANICS differ inside: the
+ * 2D overlay moves the slice camera with `set_center`, while the 3D overlay
+ * issues `arcball_center_on_voxel` to make the pin's world point the arcball
+ * target (a `set_center` would be a no-op on the 3D camera). Either way the host
+ * brings the pin on-context first (its Z/T/C) and marks the loop dirty, so the
+ * pin is actually visible after the jump in BOTH views.
+ */
+export interface AnnotationOverlayHandle {
+  /** Open `pinId`'s comment thread and recenter the view on it. A no-op (but
+   * safe) if the pin isn't in the current set, the overlay is hidden, or the
+   * scene isn't ready — so a stale id can never throw or wedge the UI. */
+  focusPin: (pinId: string) => void;
 }
 
 interface Props {
@@ -286,7 +309,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [] }: Props) {
+export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [] }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -454,6 +477,38 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   const annotationsRef = useRef(annotations);
   // eslint-disable-next-line react-hooks/refs
   annotationsRef.current = annotations;
+
+  // Imperative navigation seam (issue #526): let a host jump to a pin from
+  // OUTSIDE the overlay (e.g. a "mentions of me" item) even though `openPinId` is
+  // internal state. `focusPin` opens the pin's thread AND recenters the view on
+  // the pin's in-plane world point via the SAME `set_center` viewport command the
+  // plate selector uses (apply-locally only — recentering is viewport state, not
+  // a document mutation, so peers are untouched). Reads the live pin set through
+  // a ref so a stale `focusPin` capture never matters; tolerates a missing pin /
+  // unready scene by simply doing nothing (it never throws). The RAF tick then
+  // reprojects the now-open pin's marker under the recentered camera as usual.
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusPin: (pinId: string) => {
+        const pin = annotationsRef.current.find((p) => p.id === pinId);
+        if (!pin) return;
+        setOpenPinId(pin.id);
+        const scene = wasmSceneRef.current;
+        if (scene) {
+          applyViewportCommand(scene, {
+            type: "set_center",
+            x: pin.position[0],
+            y: pin.position[1],
+          });
+          // Repaint under the recentered camera, mirroring the plate selector /
+          // pin-pan paths. No-op when unwired (e.g. a test harness).
+          onViewportChanged?.();
+        }
+      },
+    }),
+    [wasmSceneRef, onViewportChanged],
+  );
 
   useEffect(() => {
     let rafId: number;
@@ -1386,4 +1441,4 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
       })}
     </div>
   );
-}
+});
