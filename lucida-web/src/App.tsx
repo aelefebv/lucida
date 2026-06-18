@@ -5,6 +5,8 @@ import { DimensionControls } from "./components/DimensionControls.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
+import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
+import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
@@ -13,6 +15,7 @@ import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
+import { annotationAuthorId } from "./annotationIdentity.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
@@ -59,6 +62,16 @@ function App({
   // the "Mine only" filter.
   const authSession = useAuthSession();
 
+  // Stable, browser-persisted annotation author identity (issue #777). This is
+  // the identity used ONLY for the annotation `author:` field and the
+  // mine/ownership checks in the overlays/viewers — NOT the per-connection
+  // `bridge.myId`, which stays the presence/cursor/follow identity. Because it's
+  // persisted in localStorage it survives leaving + rejoining a workspace (and
+  // tab close/reopen), so a returning user keeps edit/move/delete on the pins
+  // and comments they authored. Resolved once per mount (the value is stable for
+  // the session) so the same string flows to every annotation consumer.
+  const annotationAuthor = useMemo(() => annotationAuthorId(), []);
+
   // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
@@ -68,6 +81,15 @@ function App({
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
   // Lifted state — shared across hooks that can't own it due to call ordering
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+  // Which annotation shape a shift-drag draws: a point pin (drop), a line
+  // (drag between two points), or a box (drag between opposite corners).
+  const [annotationKind, setAnnotationKind] = useState<"point" | "line" | "box">("point");
+  // Personal show/hide of ALL annotations (issue #792). A local view toggle —
+  // not a command, not synced to peers, not persisted across reloads — passed as
+  // `visible` to BOTH overlays so one toolbar button declutters every pin/line/
+  // box (and their threads) at once; flipping it back re-renders the untouched
+  // annotation set. Peer cursors are a separate overlay and stay visible.
+  const [annotationsVisible, setAnnotationsVisible] = useState(true);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
@@ -523,7 +545,16 @@ function App({
         debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
         layoutRegistry={layoutRegistry}
         sendCommand={bridge.sendCommand}
-        onLayoutChange={() => render.loopRef.current?.markInteractiveDirty()}
+        onLayoutChange={() => {
+          render.loopRef.current?.markInteractiveDirty();
+          // A local layout switch re-anchors plate annotations in core (issue
+          // #780), but — unlike an inbound peer switch (see useBridge) — it
+          // doesn't bump the remote document version on its own, so the overlay
+          // would keep showing pins at their pre-switch positions for the
+          // switcher. Bump it here so the overlay re-reads the re-anchored pins,
+          // exactly as it does after any other document change.
+          bumpRemoteDocumentVersion();
+        }}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
       />
       <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
@@ -626,6 +657,25 @@ function App({
                 sendCursor={bridge.sendCursor}
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
+                annotationDatasetId={selectedDatasetId}
+                annotationKind={annotationKind}
+                myId={annotationAuthor}
+                sendCommand={bridge.sendCommand}
+                onDocumentChanged={bumpRemoteDocumentVersion}
+              />
+            )}
+            {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
+              <AnnotationOverlay
+                datasetId={selectedDatasetId}
+                wasmSceneRef={scene.wasmSceneRef}
+                canvas={render.canvasRef.current}
+                version={remoteDocumentVersion}
+                viewContext={{ z: dims.z, t: dims.t, c: dims.c }}
+                myId={annotationAuthor}
+                sendCommand={bridge.sendCommand}
+                onDocumentChanged={bumpRemoteDocumentVersion}
+                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
+                visible={annotationsVisible}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
@@ -671,6 +721,24 @@ function App({
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
                 onCameraModeChange={handleCameraModeChange}
+                annotationDatasetId={selectedDatasetId}
+                annotationKind={annotationKind}
+                myId={annotationAuthor}
+                sendCommand={bridge.sendCommand}
+                onDocumentChanged={bumpRemoteDocumentVersion}
+              />
+            )}
+            {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
+              <AnnotationOverlay3D
+                datasetId={selectedDatasetId}
+                wasmSceneRef={scene.wasmSceneRef}
+                canvas={render.canvasRef.current}
+                version={remoteDocumentVersion}
+                viewContext={{ z: dims.z, t: dims.t, c: dims.c }}
+                myId={annotationAuthor}
+                sendCommand={bridge.sendCommand}
+                onDocumentChanged={bumpRemoteDocumentVersion}
+                visible={annotationsVisible}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
@@ -760,6 +828,47 @@ function App({
             Browse Local
           </button>
           <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
+          <label
+            title="Shape drawn by shift-drag on the canvas (point = click, line/box = drag)"
+            style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
+          >
+            Annotate
+            <select
+              aria-label="Annotation shape"
+              value={annotationKind}
+              onChange={(e) => setAnnotationKind(e.target.value as "point" | "line" | "box")}
+              style={{ padding: "0.25rem", fontSize: "0.875rem" }}
+            >
+              <option value="point">Point</option>
+              <option value="line">Line</option>
+              <option value="box">Box</option>
+            </select>
+          </label>
+          {/* One personal view toggle (issue #792): show/hide ALL annotations
+              (pins, lines, boxes — and their threads) at once. Flips local state
+              passed as `visible` to both overlays; it is not a command, not
+              synced to peers, and doesn't touch the document. The aria-label +
+              title reflect the NEXT action (what clicking will do), so the
+              control reads correctly to a screen reader in either state. */}
+          <button
+            data-testid="annot-visibility-toggle"
+            onClick={() => setAnnotationsVisible((v) => !v)}
+            aria-pressed={!annotationsVisible}
+            aria-label={annotationsVisible ? "Hide annotations" : "Show annotations"}
+            title={annotationsVisible ? "Hide annotations" : "Show annotations"}
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              // Reflect the hidden state with the same accent the other toolbar
+              // toggles use, so "annotations are currently hidden" reads at a
+              // glance.
+              background: !annotationsVisible ? "#646cff" : undefined,
+              color: !annotationsVisible ? "#fff" : undefined,
+            }}
+          >
+            {annotationsVisible ? "Hide Annotations" : "Show Annotations"}
+          </button>
           <button
             onClick={() => setShowBookmarkSidebar((v) => !v)}
             title={showBookmarkSidebar ? "Hide saved views" : "Show saved views"}

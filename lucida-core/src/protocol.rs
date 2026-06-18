@@ -457,6 +457,235 @@ mod tests {
     }
 
     #[test]
+    fn client_message_add_annotation_matches_wire_envelope() {
+        // The exact client->server envelope from the slice wire contract.
+        let json = r#"{"type":"command","command":{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::Command {
+                command:
+                    DocumentCommand::AddAnnotation {
+                        dataset_id,
+                        id,
+                        position,
+                        author,
+                        ..
+                    },
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(id, "pin-1");
+                assert_eq!(position, [3.0, 4.0]);
+                assert_eq!(author, "alice");
+            }
+            _ => panic!("expected Command(AddAnnotation)"),
+        }
+    }
+
+    #[test]
+    fn add_annotation_broadcast_is_byte_identical_to_inbound_command() {
+        // Client-supplied id means the inbound command and its rebroadcast
+        // carry the same command object byte-for-byte (only seq differs). The
+        // depth `z` rides along unchanged, so a peer receives the pin's z.
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [3.0, 4.0],
+            end: None,
+            z: 8.5,
+            t: 0,
+            c: 0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        };
+        let inbound = ClientMessage::Command {
+            command: cmd.clone(),
+        };
+        let broadcast = ServerMessage::CommandBroadcast {
+            seq: 7,
+            command: cmd,
+        };
+
+        let inbound_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&inbound).unwrap()).unwrap();
+        let broadcast_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&broadcast).unwrap()).unwrap();
+        assert_eq!(inbound_v["command"], broadcast_v["command"]);
+        assert_eq!(broadcast_v["command"]["z"], 8.5);
+        assert_eq!(broadcast_v["type"], "command_broadcast");
+        assert_eq!(broadcast_v["seq"], 7);
+    }
+
+    #[test]
+    fn snapshot_carries_annotations_under_document() {
+        // A late joiner loads pins from snapshot.document.annotations,
+        // including each pin's depth `z`.
+        let mut doc = DocumentState::default();
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [10.0, 20.0],
+            end: None,
+            z: 12.5,
+            t: 0,
+            c: 0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        });
+        let msg = ServerMessage::Snapshot {
+            seq: 3,
+            document: doc,
+            peers: Vec::new(),
+            your_id: 1,
+            generated_availability: HashMap::new(),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(v["type"], "snapshot");
+        let pin = &v["document"]["annotations"]["wds-1"][0];
+        assert_eq!(pin["id"], "pin-1");
+        assert_eq!(pin["position"][0], 10.0);
+        assert_eq!(pin["position"][1], 20.0);
+        assert_eq!(pin["z"], 12.5);
+        assert_eq!(pin["author"], "alice");
+        assert_eq!(pin["kind"], "point");
+
+        // And it round-trips back into a usable DocumentState with z intact.
+        let parsed: ServerMessage =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        match parsed {
+            ServerMessage::Snapshot { document, .. } => {
+                let pins = &document.annotations[&DatasetId("wds-1".into())];
+                assert_eq!(pins.len(), 1);
+                assert_eq!(pins[0].z, 12.5);
+            }
+            _ => panic!("expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn client_message_remove_annotation_matches_wire_envelope() {
+        let json = r#"{"type":"command","command":{"type":"remove_annotation","dataset_id":"wds-1","id":"pin-1"}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::Command {
+                command: DocumentCommand::RemoveAnnotation { dataset_id, id },
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(id, "pin-1");
+            }
+            _ => panic!("expected Command(RemoveAnnotation)"),
+        }
+    }
+
+    #[test]
+    fn client_message_move_annotation_matches_wire_envelope() {
+        // The exact client->server envelope from the slice wire contract.
+        let json = r#"{"type":"command","command":{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::Command {
+                command:
+                    DocumentCommand::MoveAnnotation {
+                        dataset_id,
+                        id,
+                        position,
+                        end,
+                        z,
+                    },
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(id, "pin-1");
+                assert_eq!(position, [3.0, 4.0]);
+                // No `end` in this slice-#776 wire payload → defaults to None.
+                assert_eq!(end, None);
+                assert_eq!(z, 5.0);
+            }
+            _ => panic!("expected Command(MoveAnnotation)"),
+        }
+    }
+
+    #[test]
+    fn client_message_edit_comment_matches_wire_envelope() {
+        // The exact client->server envelope from the slice wire contract.
+        let json = r#"{"type":"command","command":{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::Command {
+                command:
+                    DocumentCommand::EditComment {
+                        dataset_id,
+                        annotation_id,
+                        id,
+                        text,
+                    },
+            } => {
+                assert_eq!(dataset_id, DatasetId("wds-1".into()));
+                assert_eq!(annotation_id, "pin-1");
+                assert_eq!(id, "c-1");
+                assert_eq!(text, "edited");
+            }
+            _ => panic!("expected Command(EditComment)"),
+        }
+    }
+
+    #[test]
+    fn snapshot_reflects_moved_position_and_edited_text() {
+        // A late joiner loads the pin at its moved position/z and the comment at
+        // its edited text, straight from snapshot.document.annotations.
+        let mut doc = DocumentState::default();
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [10.0, 20.0],
+            end: None,
+            z: 1.0,
+            t: 0,
+            c: 0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        });
+        doc.apply(DocumentCommand::AddComment {
+            dataset_id: DatasetId("wds-1".into()),
+            annotation_id: "pin-1".into(),
+            id: "c-1".into(),
+            author: "alice".into(),
+            text: "before".into(),
+        });
+        // Now update both. A whole-shape move (no `end`) — the rigid #776 path.
+        doc.apply(DocumentCommand::MoveAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [55.0, 66.0],
+            end: None,
+            z: 7.5,
+        });
+        doc.apply(DocumentCommand::EditComment {
+            dataset_id: DatasetId("wds-1".into()),
+            annotation_id: "pin-1".into(),
+            id: "c-1".into(),
+            text: "after".into(),
+        });
+
+        let msg = ServerMessage::Snapshot {
+            seq: 5,
+            document: doc,
+            peers: Vec::new(),
+            your_id: 1,
+            generated_availability: HashMap::new(),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        let pin = &v["document"]["annotations"]["wds-1"][0];
+        assert_eq!(pin["position"][0], 55.0);
+        assert_eq!(pin["position"][1], 66.0);
+        assert_eq!(pin["z"], 7.5);
+        assert_eq!(pin["comments"][0]["id"], "c-1");
+        assert_eq!(pin["comments"][0]["text"], "after");
+        // Author is preserved across the edit.
+        assert_eq!(pin["comments"][0]["author"], "alice");
+    }
+
+    #[test]
     fn client_message_presence_round_trips() {
         let msg = ClientMessage::Presence {
             camera: Camera::new_2d([800, 600]),
