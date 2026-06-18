@@ -1009,6 +1009,25 @@ impl WasmScene {
         serde_json::to_string(&ids).unwrap()
     }
 
+    /// Dataset ids that currently have at least one annotation, in document
+    /// order. Mirrors [`Self::dataset_ids`] but reads `document.annotations`,
+    /// which is keyed **independently** of `manifests`: a peer's pin/comment can
+    /// land for a dataset this client hasn't opened (no manifest) yet. The
+    /// browser uses this to resolve a "current dataset" for the mentions-of-me
+    /// indicator when nothing is explicitly selected, so an inbound mention is
+    /// counted the moment it arrives rather than waiting on a dataset selection.
+    /// Read-only; no document/wire change.
+    pub fn annotation_dataset_ids(&self) -> String {
+        let ids: Vec<&str> = self
+            .inner
+            .document
+            .annotations
+            .keys()
+            .map(|id| id.0.as_str())
+            .collect();
+        serde_json::to_string(&ids).unwrap()
+    }
+
     pub fn dataset_name(&self, id: &str) -> String {
         let ds_id = DatasetId(id.to_string());
         self.inner
