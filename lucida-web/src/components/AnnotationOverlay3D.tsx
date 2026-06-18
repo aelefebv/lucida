@@ -20,9 +20,11 @@
  *    the moment a plain press crosses the click slop it HANDS the gesture to the
  *    canvas (transfers pointer capture + replays the pointerdown there), and the
  *    canvas runs its normal orbit/fly drag for the rest of the gesture;
- *  - a Shift+DRAG on an OWN pin moves it (the release point is depth-picked back
- *    into the volume via `pick_annotation_voxel`, declining on a ray miss). Move
- *    stays author-only.
+ *  - a Shift+DRAG on an OWN pin moves it IN-PLANE: the release point is depth-
+ *    picked back into the volume via `pick_annotation_voxel` for its in-plane
+ *    coords (declining on a ray miss), but the pin keeps its OWN slice depth so
+ *    a drag never re-slices it (issue #791) — mirroring the 2D drag. Move stays
+ *    author-only.
  * The forward-on-first-drag (rather than forward-on-press) is what lets a plain
  * press resolve into either a thread-opening click or an orbit, without the pin
  * ever moving on a plain gesture.
@@ -399,6 +401,14 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
     const screenY = (e.clientY - rect.top) * dpr;
     const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
     if (voxel.length < 3) return; // ray missed → don't move
+    // A move repositions the pin IN-PLANE only — it must not change which slice
+    // (Z) the pin belongs to (issue #791). So take the in-plane coords from the
+    // ray-picked voxel (`[voxel[0], voxel[1]]`), but PRESERVE the pin's own depth
+    // (`pin.z ?? 0`) rather than overwriting it with the picked voxel depth
+    // (`voxel[2]`). Otherwise a 3D drag silently re-slices the pin, leaving it
+    // stuck off-context on its original slice. This mirrors the 2D overlay's
+    // move, which sends the pin's existing depth (`z: drag.z`). (`move_annotation`
+    // carries no T/C, so timepoint/channel are preserved already.)
     applyDocumentCommand(
       scene,
       {
@@ -406,7 +416,7 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
         dataset_id: datasetId,
         id: pin.id,
         position: [voxel[0], voxel[1]],
-        z: voxel[2],
+        z: pin.z ?? 0,
       },
       sendCommand,
     );

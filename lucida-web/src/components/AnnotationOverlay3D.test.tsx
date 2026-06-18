@@ -172,8 +172,10 @@ afterEach(() => {
 });
 
 describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #778)", () => {
-  it("a Shift+drag on an own marker emits one move_annotation from the depth pick", () => {
-    // pick returns [50, 60, 7] → the move stores position [50,60], z 7.
+  it("a Shift+drag on an own marker emits one move_annotation that moves in-plane but preserves the pin's slice (z)", () => {
+    // pick returns [50, 60, 7]: the move takes the in-plane coords [50,60] from
+    // the pick, but PRESERVES the pin's own z (3), NOT the picked depth (7) — a
+    // 3D drag repositions a pin within its slice and never re-slices it (#791).
     const { sent, applied, getChanged } = renderOverlay({ pins: [ownPin()] });
     const marker = screen.getByTestId("annot-pin-pin-a");
 
@@ -183,8 +185,14 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
 
     const moves = sent.filter((c) => c.type === "move_annotation");
     expect(moves).toHaveLength(1);
-    expect(moves[0]).toMatchObject({ type: "move_annotation", dataset_id: "wds-1", id: "pin-a", z: 7 });
+    // z is the pin's own depth (3), not the ray-picked voxel depth (7).
+    expect(moves[0]).toMatchObject({ type: "move_annotation", dataset_id: "wds-1", id: "pin-a", z: 3 });
+    expect(moves[0].z).not.toBe(7);
+    // The pin still moves: in-plane position comes from the picked voxel.
     expect(moves[0].position).toEqual([50, 60]);
+    // A move carries no t/c (it leaves timepoint/channel untouched).
+    expect(moves[0]).not.toHaveProperty("t");
+    expect(moves[0]).not.toHaveProperty("c");
     // Applied locally too (apply-locally-and-send), and the doc-changed bump fired.
     expect(applied.some((c) => c.type === "move_annotation")).toBe(true);
     expect(getChanged()).toBe(1);
@@ -518,6 +526,37 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
     setViewContext({ z: 12, t: 3, c: 2 });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+  });
+
+  it("a 3D Shift+drag keeps an on-context pin on-context — it can't push the pin off its own slice (#791)", () => {
+    // The pin is on the current view's z/t/c, so it starts on-context (no
+    // off-context marker). A 3D Shift+drag picks a DIFFERENT voxel depth (the
+    // pick's z=99) — but the move preserves the pin's own z, so re-reading the
+    // moved pin against the unchanged view keeps it on-context (not dimmed).
+    // Before the fix the move stored z=99, re-slicing the pin so it read
+    // off-context (dimmed + stuck) on its own slice.
+    const { sent, bumpVersion } = renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 0, c: 0 })],
+      viewContext: { z: 5, t: 0, c: 0 },
+      pick: () => [42, 24, 99],
+    });
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
+
+    const marker = screen.getByTestId("annot-pin-pin-here");
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(marker, { pointerId: 1, shiftKey: true, clientX: 300, clientY: 300 });
+    fireEvent.pointerUp(marker, { pointerId: 1, shiftKey: true, clientX: 320, clientY: 280 });
+
+    // The move went out (the pin moved in-plane) preserving the pin's slice…
+    const moves = sent.filter((c) => c.type === "move_annotation");
+    expect(moves).toHaveLength(1);
+    expect(moves[0].z).toBe(5);
+    expect(moves[0].position).toEqual([42, 24]);
+
+    // …so after the host re-reads the moved pin, it is STILL on-context on the
+    // same view — the off-context indicator does not get stuck.
+    bumpVersion();
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
   });
 
   it("regression: an off-context pin still opens its thread on click", () => {
