@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use lucida_content::{DatasetId, LayoutId, LayoutSpec};
+use lucida_content::{DatasetId, DatasetKind, EntityId, LayoutId, LayoutSpec};
 use lucida_protocol::AssetCatalog;
 
 use crate::chunk::ChunkCoord;
@@ -252,6 +252,24 @@ pub struct Annotation {
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// The **plate entity (well/field) this pin is glued to** (issue #780). Set
+    /// once at creation, inside [`DocumentState::apply`] for `AddAnnotation`, to
+    /// the nearest placeable entity in the dataset's resolved active layout (see
+    /// [`DocumentState::nearest_anchor`]). `None` for a non-plate dataset, when no
+    /// entity position is resolvable, and for any pin created before this slice.
+    ///
+    /// When the active layout changes, an anchored pin's whole shape is translated
+    /// by the displacement of *this* entity between the old and new layouts (see
+    /// [`DocumentState::reanchor_for_layout`]), so the pin stays on the data it was
+    /// dropped on in every layout — synced and persisted, since this is a
+    /// deterministic effect of the canonical `apply` path.
+    ///
+    /// `#[serde(default)]` keeps this additive: a pin persisted (or broadcast)
+    /// before this slice carries no `anchor` key and deserializes as `None` (so it
+    /// is left in place by a layout switch), and an unanchored pin serializes
+    /// identically to a pre-slice one. No wire break.
+    #[serde(default)]
+    pub anchor: Option<EntityId>,
 }
 
 impl Annotation {
@@ -638,6 +656,132 @@ impl DocumentState {
         }
     }
 
+    /// Pick the plate entity a freshly-dropped pin should be glued to: the entity
+    /// **nearest** to `position` (Euclidean) in `dataset_id`'s currently-resolved
+    /// active layout (issue #780).
+    ///
+    /// Returns `None` — leaving the pin unanchored — when the dataset is not a
+    /// plate, is unknown, or has no entity with a resolvable position in the active
+    /// layout. Only entities that are actually placed (directly, or as a field via
+    /// a placed parent) are candidates; an unplaceable entity is never treated as
+    /// if it sat at the origin (that is the whole point of using
+    /// [`resolve_entity_position`] rather than the render-path fallback).
+    ///
+    /// Determinism: ties (equal distance) are broken by **manifest entity order** —
+    /// the iteration walks `entities()` in order and only adopts a strictly-closer
+    /// candidate, so the first-listed of any tie wins. Both the server and every
+    /// client derive the same anchor from the same synced state, so the choice is
+    /// convergent without traveling on the wire.
+    fn nearest_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
+        let manifest = self.manifests.get(dataset_id)?;
+        // Anchoring is plate-only (issue #780): a single-image dataset has no
+        // well/field to glue to, and its lone image doesn't move between layouts.
+        if !matches!(manifest.kind, DatasetKind::Plate { .. }) {
+            return None;
+        }
+
+        let layout = crate::scene::resolve_layout(
+            manifest,
+            self.registered_layouts.get(dataset_id),
+            self.active_layout_ids.get(dataset_id),
+        );
+
+        let mut best: Option<(EntityId, f64)> = None;
+        for entity in manifest.entities() {
+            let Some(pos) = crate::scene::resolve_entity_position(
+                &entity.id,
+                &layout,
+                manifest.entities(),
+                manifest.transforms(),
+            ) else {
+                continue;
+            };
+            let dx = pos[0] - position[0];
+            let dy = pos[1] - position[1];
+            let dist2 = dx * dx + dy * dy;
+            // Strictly-less keeps the FIRST entity (in manifest order) on a tie,
+            // making the tiebreak deterministic across server and all clients.
+            if best.as_ref().is_none_or(|(_, b)| dist2 < *b) {
+                best = Some((entity.id.clone(), dist2));
+            }
+        }
+
+        best.map(|(id, _)| id)
+    }
+
+    /// Re-anchor every anchored pin in `dataset_id` for a layout change from
+    /// `from_id` to `to_id` (issue #780).
+    ///
+    /// For each pin with an anchor `e`, the whole shape is translated rigidly by
+    /// `delta = pos(e, to) − pos(e, from)` — `position += delta` and, for a
+    /// line/box, `end += delta` too — exactly the rigid translate
+    /// [`Annotation::set_position`] performs for a drag. `z` is untouched (layouts
+    /// are 2-D in-plane). A pin whose anchor doesn't move has a zero delta and so
+    /// stays put; an unanchored pin (`anchor == None`) is left entirely alone, as
+    /// is one whose anchor isn't placed in *both* layouts (defensive — no phantom
+    /// `[0, 0]` jump).
+    ///
+    /// The caller MUST pass the **previous** active layout id as `from_id`, read
+    /// before `active_layout_ids` is overwritten, so the `from` positions are
+    /// correct.
+    fn reanchor_for_layout(
+        &mut self,
+        dataset_id: &DatasetId,
+        from_id: Option<&LayoutId>,
+        to_id: &LayoutId,
+    ) {
+        let Some(manifest) = self.manifests.get(dataset_id) else {
+            return;
+        };
+        // Nothing to do (and nothing changed) if the layout didn't actually move.
+        if from_id == Some(to_id) {
+            return;
+        }
+        let Some(pins) = self.annotations.get_mut(dataset_id) else {
+            return;
+        };
+        if pins.iter().all(|p| p.anchor.is_none()) {
+            return;
+        }
+
+        let registered = self.registered_layouts.get(dataset_id);
+        let from_layout = crate::scene::resolve_layout(manifest, registered, from_id);
+        let to_layout = crate::scene::resolve_layout(manifest, registered, Some(to_id));
+
+        for pin in pins.iter_mut() {
+            let Some(anchor) = pin.anchor.as_ref() else {
+                continue;
+            };
+            // Skip a pin whose anchor isn't placed in BOTH layouts — translating
+            // it would otherwise drag it toward a fallback origin in one of them.
+            let (Some(from_pos), Some(to_pos)) = (
+                crate::scene::resolve_entity_position(
+                    anchor,
+                    &from_layout,
+                    manifest.entities(),
+                    manifest.transforms(),
+                ),
+                crate::scene::resolve_entity_position(
+                    anchor,
+                    &to_layout,
+                    manifest.entities(),
+                    manifest.transforms(),
+                ),
+            ) else {
+                continue;
+            };
+            let delta = [to_pos[0] - from_pos[0], to_pos[1] - from_pos[1]];
+            // Whole-shape rigid translate (position + any second vertex); z is
+            // an in-plane-invariant, so it is never touched here.
+            pin.position[0] += delta[0];
+            pin.position[1] += delta[1];
+            if let Some(end) = pin.end.as_mut() {
+                end[0] += delta[0];
+                end[1] += delta[1];
+            }
+        }
+    }
+
     /// Apply a document command directly. Used by the server to avoid
     /// constructing a full Scene for document mutations.
     pub fn apply(&mut self, cmd: DocumentCommand) {
@@ -661,6 +805,14 @@ impl DocumentState {
                 dataset_id,
                 layout_id,
             } => {
+                // Read the PREVIOUS active layout before overwriting it, so the
+                // re-anchor's `from` positions are the layout being replaced. A
+                // dataset with no active id yet resolves via the manifest default.
+                let from_id = self.active_layout_ids.get(&dataset_id).cloned();
+                // Re-anchor every glued pin by the displacement of its anchor
+                // entity between the old and new layouts (issue #780). Done here in
+                // the canonical apply path so it persists and reaches every peer.
+                self.reanchor_for_layout(&dataset_id, from_id.as_ref(), &layout_id);
                 self.active_layout_ids.insert(dataset_id, layout_id);
             }
             DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
@@ -677,6 +829,13 @@ impl DocumentState {
                 author,
                 kind,
             } => {
+                // Glue the new pin to the nearest plate well/field in the resolved
+                // active layout (issue #780), so a later layout switch moves it
+                // with that entity. Computed here, inside the canonical apply, from
+                // synced state — so the server and every client derive the SAME
+                // anchor without it riding the `add_annotation` wire shape. `None`
+                // for a non-plate dataset or when nothing is placeable.
+                let anchor = self.nearest_anchor(&dataset_id, position);
                 self.add_annotation(
                     dataset_id,
                     Annotation {
@@ -698,6 +857,7 @@ impl DocumentState {
                         // On a re-applied (duplicate) pin id, add_annotation
                         // preserves any thread already accrued on that pin.
                         comments: Vec::new(),
+                        anchor,
                     },
                 );
             }

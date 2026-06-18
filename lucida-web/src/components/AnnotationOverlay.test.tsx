@@ -1115,3 +1115,128 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
     expect(screen.getByTestId("annot-offcontext-pin-off")).toBeTruthy();
   });
 });
+
+describe("AnnotationOverlay — reflects re-anchored positions after a layout switch (issue #780)", () => {
+  // The re-anchoring itself happens in core (DocumentState::apply on
+  // SetActiveLayout); the overlay's job is only to RE-READ the authoritative pin
+  // set when notified. It re-reads in an effect keyed on `version`, so a layout
+  // switch must bump that version — for a peer the bridge already does, and for
+  // the switcher App's onLayoutChange now does too. These tests pin that the
+  // overlay shows the post-switch positions once `version` bumps, and does NOT
+  // before (so the bump is genuinely load-bearing).
+
+  /** A scene whose authoritative `annotations()` output we can swap out, to
+   * stand in for core re-anchoring the pins on a layout switch. */
+  function makeReanchoringScene(initial: Annotation[]): {
+    scene: WasmScene;
+    setPins: (next: Annotation[]) => void;
+  } {
+    let pins = initial;
+    const scene = {
+      annotations: (_datasetId: string) => JSON.stringify(pins),
+      zoom: () => 1,
+      center: () => new Float64Array([0, 0]),
+      apply_command: () => {},
+    } as unknown as WasmScene;
+    return { scene, setPins: (next) => { pins = next; } };
+  }
+
+  // The overlay reprojects markers in a self-rescheduling RAF loop. To read the
+  // dot transform deterministically, install a CAPTURING stub before render so we
+  // hold every scheduled callback (including the one the mount effect schedules),
+  // then invoke the latest on demand via runFrame() instead of letting the loop
+  // run free. Restored after each test.
+  let scheduled: FrameRequestCallback[] = [];
+  let originalRaf: typeof globalThis.requestAnimationFrame;
+  beforeEach(() => {
+    scheduled = [];
+    originalRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      scheduled.push(cb);
+      return scheduled.length as unknown as number;
+    }) as typeof globalThis.requestAnimationFrame;
+  });
+  afterEach(() => {
+    globalThis.requestAnimationFrame = originalRaf;
+  });
+  /** Run the most recently scheduled RAF tick (the overlay reschedules at the end
+   * of each tick, so the latest is the live one). */
+  function runFrame() {
+    const cb = scheduled[scheduled.length - 1];
+    if (cb) cb(performance.now());
+  }
+
+  function dotTransform(id: string): string {
+    return (screen.getByTestId(`annot-pin-wrapper-${id}`) as HTMLElement).style.transform;
+  }
+
+  it("re-reads the pin set and renders it at the re-anchored position once version bumps", () => {
+    // zoom=1, center=(0,0), 800x600 → screen = world + half (400, 300).
+    const before: Annotation[] = [
+      { id: "p", position: [10, 20], z: 0, author: String(MY_ID), kind: "point", comments: [] },
+    ];
+    const { scene, setPins } = makeReanchoringScene(before);
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = scene;
+    const canvas = makeCanvas();
+    const props = (version: number) => ({
+      datasetId: "wds-1",
+      wasmSceneRef: sceneRef,
+      canvas,
+      version,
+      viewContext: { z: 0, t: 0, c: 0 },
+      myId: MY_ID,
+      sendCommand: () => {},
+      onDocumentChanged: () => {},
+    });
+    const { rerender } = render(<AnnotationOverlay {...props(0)} />);
+
+    // Pre-switch: the dot sits at world (10,20) → screen (410, 320).
+    runFrame();
+    expect(dotTransform("p")).toBe("translate(410px, 320px)");
+
+    // Core re-anchored the pin (e.g. its well moved by +[0,50]) → position now
+    // (10,70). A locally-initiated switch that did NOT bump version would leave
+    // the overlay stale: it still shows the old position.
+    setPins([{ ...before[0], position: [10, 70] }]);
+    rerender(<AnnotationOverlay {...props(0)} />); // same version
+    runFrame();
+    expect(dotTransform("p")).toBe("translate(410px, 320px)");
+
+    // Bumping version (what App.onLayoutChange / the bridge now do) makes the
+    // overlay re-read the authoritative set → the dot moves to the re-anchored
+    // world (10,70) → screen (410, 370).
+    rerender(<AnnotationOverlay {...props(1)} />);
+    runFrame();
+    expect(dotTransform("p")).toBe("translate(410px, 370px)");
+  });
+
+  it("reflects a pin on a non-moving well as unchanged after a version bump", () => {
+    // A pin whose anchor well didn't move: core leaves its position alone, so the
+    // overlay (after re-reading on the bump) shows it in exactly the same place.
+    const pins: Annotation[] = [
+      { id: "static", position: [100, 5], z: 0, author: String(MY_ID), kind: "point", comments: [] },
+    ];
+    const { scene } = makeReanchoringScene(pins);
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = scene;
+    const canvas = makeCanvas();
+    const props = (version: number) => ({
+      datasetId: "wds-1",
+      wasmSceneRef: sceneRef,
+      canvas,
+      version,
+      viewContext: { z: 0, t: 0, c: 0 },
+      myId: MY_ID,
+      sendCommand: () => {},
+      onDocumentChanged: () => {},
+    });
+    const { rerender } = render(<AnnotationOverlay {...props(0)} />);
+    runFrame();
+    const at = dotTransform("static"); // world (100,5) → screen (500, 305)
+    expect(at).toBe("translate(500px, 305px)");
+    rerender(<AnnotationOverlay {...props(1)} />);
+    runFrame();
+    expect(dotTransform("static")).toBe(at);
+  });
+});

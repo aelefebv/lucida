@@ -944,44 +944,69 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
 /// Find the position of an entity in the layout.
 /// For Image entities: look up directly in layout placements.
 /// For Field entities: look up parent well's placement + field->well transform translation.
-fn find_entity_position(
+///
+/// Returns `[0.0, 0.0]` as a last-resort fallback for an entity with no resolvable
+/// placement, so render-path callers always get *some* position. Annotation
+/// anchoring instead uses [`resolve_entity_position`] (this function's `Option`
+/// sibling) so it never mistakes that fallback for a real origin placement.
+///
+/// `pub(crate)` so `DocumentState::apply` (in `scene::types`) can reuse the exact
+/// same entity→position mapping the renderer uses when it re-anchors pins on a
+/// layout switch — the displacement a pin rides must match where the entity is
+/// actually drawn.
+pub(crate) fn find_entity_position(
     entity_id: &EntityId,
     layout: &LayoutSpec,
     entities: &[Entity],
     transforms: &[TransformEdge],
 ) -> [f64; 2] {
+    resolve_entity_position(entity_id, layout, entities, transforms).unwrap_or([0.0, 0.0])
+}
+
+/// Resolve an entity's `[x, y]` in `layout`, or `None` when it has no placement
+/// there (neither a direct placement nor a placed parent to compose against).
+///
+/// This is the strict, fallback-free sibling of [`find_entity_position`]: where
+/// that function collapses an unplaceable entity to `[0.0, 0.0]` for the render
+/// path, this distinguishes "genuinely placed at the origin" from "not placeable
+/// in this layout". Annotation anchoring depends on that distinction:
+///   - picking the nearest entity must not treat unplaceable entities as if they
+///     sat at the origin, and
+///   - re-anchoring on a layout switch must skip a pin whose anchor isn't placed
+///     in *both* layouts (leaving it untouched) rather than yanking it toward a
+///     phantom `[0, 0]`.
+pub(crate) fn resolve_entity_position(
+    entity_id: &EntityId,
+    layout: &LayoutSpec,
+    entities: &[Entity],
+    transforms: &[TransformEdge],
+) -> Option<[f64; 2]> {
     // Direct placement?
     if let Some(p) = layout.placements.iter().find(|p| &p.entity_id == entity_id) {
-        return p.position;
+        return Some(p.position);
     }
 
-    // Find parent and compose
-    let entity = entities.iter().find(|e| &e.id == entity_id);
-    if let Some(entity) = entity
-        && let Some(parent_id) = &entity.parent
-    {
-        // Get parent's position from layout
-        let parent_pos = layout
-            .placements
-            .iter()
-            .find(|p| &p.entity_id == parent_id)
-            .map(|p| p.position)
-            .unwrap_or([0.0, 0.0]);
+    // Otherwise, compose a field's position from its parent well's placement plus
+    // the field->well transform translation. Only resolvable if the parent is
+    // itself placed in this layout.
+    let entity = entities.iter().find(|e| &e.id == entity_id)?;
+    let parent_id = entity.parent.as_ref()?;
+    let parent_pos = layout
+        .placements
+        .iter()
+        .find(|p| &p.entity_id == parent_id)
+        .map(|p| p.position)?;
 
-        // Get field->parent transform
-        let transform_offset = transforms
-            .iter()
-            .find(|t| &t.from == entity_id && &t.to == parent_id)
-            .map(|t| [t.transform.matrix()[12], t.transform.matrix()[13]])
-            .unwrap_or([0.0, 0.0]);
+    let transform_offset = transforms
+        .iter()
+        .find(|t| &t.from == entity_id && &t.to == parent_id)
+        .map(|t| [t.transform.matrix()[12], t.transform.matrix()[13]])
+        .unwrap_or([0.0, 0.0]);
 
-        return [
-            parent_pos[0] + transform_offset[0],
-            parent_pos[1] + transform_offset[1],
-        ];
-    }
-
-    [0.0, 0.0]
+    Some([
+        parent_pos[0] + transform_offset[0],
+        parent_pos[1] + transform_offset[1],
+    ])
 }
 
 /// Test helpers for constructing dataset manifests and DatasetOpened events.

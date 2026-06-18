@@ -2085,6 +2085,7 @@ mod tests {
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),
+            anchor: None,
         };
         let json = serde_json::to_string(&pin).unwrap();
         let back: crate::scene::Annotation = serde_json::from_str(&json).unwrap();
@@ -2293,6 +2294,351 @@ mod tests {
         assert_eq!(line.z, 5.0);
         assert_eq!(line.kind, crate::scene::AnnotationKind::Line);
         assert_eq!(line.end, Some([12.0, 13.0]));
+    }
+
+    // --- Plate annotation anchoring (issue #780) ---
+
+    /// A two-well plate driven entirely through `DocumentState::apply` (the
+    /// server's canonical, persisted path), plus a second registered layout
+    /// "moved" in which well `w1` shifts by `+[0, 50]` and well `w2` stays put.
+    /// The base/source layout is "default" (from `make_plate_dataset_opened`),
+    /// placing `w1` at `[0, 0]` and `w2` at `[100, 0]`. Returns the populated
+    /// document and the dataset id.
+    fn plate_with_two_layouts() -> (crate::scene::DocumentState, DatasetId) {
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
+        let mut doc = crate::scene::DocumentState::default();
+        let reg = test_helpers::make_plate_dataset_opened(
+            "plate",
+            "plate",
+            vec![("w1", [0.0, 0.0]), ("w2", [100.0, 0.0])],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+        );
+        doc.apply(DocumentCommand::DatasetOpened(reg));
+        let ds = DatasetId("plate".into());
+
+        // A second layout: w1 slides by +[0, 50]; w2 unchanged at [100, 0].
+        let moved = LayoutSpec {
+            id: LayoutId("moved".into()),
+            name: "Moved".into(),
+            placements: vec![
+                EntityPlacement {
+                    entity_id: EntityId("w1".into()),
+                    position: [0.0, 50.0],
+                },
+                EntityPlacement {
+                    entity_id: EntityId("w2".into()),
+                    position: [100.0, 0.0],
+                },
+            ],
+        };
+        doc.apply(DocumentCommand::RegisterLayout {
+            dataset_id: ds.clone(),
+            layout: moved,
+        });
+        (doc, ds)
+    }
+
+    fn switch_to(doc: &mut crate::scene::DocumentState, ds: &DatasetId, layout: &str) {
+        use lucida_content::LayoutId;
+        doc.apply(DocumentCommand::SetActiveLayout {
+            dataset_id: ds.clone(),
+            layout_id: LayoutId(layout.into()),
+        });
+    }
+
+    fn pin<'a>(
+        doc: &'a crate::scene::DocumentState,
+        ds: &DatasetId,
+        id: &str,
+    ) -> &'a crate::scene::Annotation {
+        doc.annotations[ds].iter().find(|p| p.id == id).unwrap()
+    }
+
+    #[test]
+    fn add_annotation_on_plate_anchors_to_nearest_well() {
+        // A pin dropped near w1's active-layout position is glued to w1; one near
+        // w2 is glued to w2. The anchor is derived inside apply from synced state.
+        use lucida_content::EntityId;
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd("plate", "near-w1", [5.0, 5.0], "alice"));
+        doc.apply(add_annotation_cmd("plate", "near-w2", [102.0, 1.0], "alice"));
+        assert_eq!(pin(&doc, &ds, "near-w1").anchor, Some(EntityId("w1".into())));
+        assert_eq!(pin(&doc, &ds, "near-w2").anchor, Some(EntityId("w2".into())));
+    }
+
+    #[test]
+    fn add_annotation_on_non_plate_leaves_anchor_none() {
+        // A single-image dataset has nothing to anchor to: the pin stays
+        // unanchored and a (hypothetical) layout switch would never move it.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened(
+            "single", "single", 1,
+        )));
+        doc.apply(add_annotation_cmd("single", "p", [3.0, 4.0], "alice"));
+        assert_eq!(pin(&doc, &DatasetId("single".into()), "p").anchor, None);
+    }
+
+    #[test]
+    fn point_pin_reanchors_across_layout_switch_and_back_is_exact() {
+        // The crux (critical): a point glued to the MOVING well rides the well's
+        // +[0,50] delta on switch, and switching back restores the original
+        // position exactly.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 5.0]);
+
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0], "rides w1 by +[0,50]");
+
+        switch_to(&mut doc, &ds, "default");
+        assert_eq!(
+            pin(&doc, &ds, "p").position,
+            [5.0, 5.0],
+            "switching back is exact"
+        );
+    }
+
+    #[test]
+    fn line_reanchors_both_vertices_by_the_well_delta() {
+        // A line on the moving well: BOTH position and end shift by the same
+        // delta (rigid whole-shape translate), length/angle preserved.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_shape_cmd(
+            "plate",
+            "ln",
+            [2.0, 2.0],
+            [8.0, 6.0],
+            crate::scene::AnnotationKind::Line,
+        ));
+        switch_to(&mut doc, &ds, "moved");
+        let ln = pin(&doc, &ds, "ln");
+        assert_eq!(ln.position, [2.0, 52.0]);
+        assert_eq!(ln.end, Some([8.0, 56.0]));
+        // The anchor->end vector is invariant (it's a translate, not a stretch).
+        let v_before = [8.0 - 2.0, 6.0 - 2.0];
+        let v_after = [ln.end.unwrap()[0] - ln.position[0], ln.end.unwrap()[1] - ln.position[1]];
+        assert_eq!(v_before, v_after);
+    }
+
+    #[test]
+    fn box_reanchors_both_corners_by_the_well_delta() {
+        // A box on the moving well: both opposite corners shift by the delta, so
+        // the box keeps its size and slides with the well.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_shape_cmd(
+            "plate",
+            "bx",
+            [1.0, 1.0],
+            [9.0, 5.0],
+            crate::scene::AnnotationKind::Box,
+        ));
+        switch_to(&mut doc, &ds, "moved");
+        let bx = pin(&doc, &ds, "bx");
+        assert_eq!(bx.position, [1.0, 51.0]);
+        assert_eq!(bx.end, Some([9.0, 55.0]));
+    }
+
+    #[test]
+    fn pin_on_static_well_does_not_move_across_switch() {
+        // Per-entity (critical): a pin glued to w2 (which doesn't move between the
+        // two layouts) stays exactly where it was after the switch.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd("plate", "static", [101.0, 2.0], "alice"));
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "static").position, [101.0, 2.0]);
+    }
+
+    #[test]
+    fn two_pins_each_follow_their_own_well() {
+        // Per-entity (critical): in one switch, the w1 pin moves by the w1 delta
+        // and the w2 pin doesn't move — each tracks its own anchor independently.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd("plate", "on-w1", [5.0, 5.0], "alice"));
+        doc.apply(add_annotation_cmd("plate", "on-w2", [101.0, 2.0], "alice"));
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "on-w1").position, [5.0, 55.0]);
+        assert_eq!(pin(&doc, &ds, "on-w2").position, [101.0, 2.0]);
+    }
+
+    #[test]
+    fn pin_without_anchor_is_left_in_place_on_switch() {
+        // Backward-compat (critical): an annotation inserted with NO anchor (as a
+        // pre-slice pin would deserialize) is untouched by a layout switch.
+        let (mut doc, ds) = plate_with_two_layouts();
+        // Insert a pin directly with anchor == None (bypasses the auto-anchor at
+        // creation, mimicking a pin that predates this slice).
+        doc.add_annotation(
+            ds.clone(),
+            crate::scene::Annotation {
+                id: "legacy".into(),
+                position: [5.0, 5.0],
+                end: None,
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "alice".into(),
+                kind: crate::scene::AnnotationKind::Point,
+                comments: Vec::new(),
+                anchor: None,
+            },
+        );
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "legacy").position, [5.0, 5.0]);
+    }
+
+    #[test]
+    fn pre_slice_json_without_anchor_parses_and_is_not_moved() {
+        // The exact interaction contract: an Annotation deserialized from
+        // pre-slice JSON (no `anchor` key) must still parse (as None) and not be
+        // moved by a layout switch.
+        let legacy_json = r#"{
+            "id": "old",
+            "position": [5.0, 5.0],
+            "author": "alice"
+        }"#;
+        let legacy: crate::scene::Annotation = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.anchor, None, "missing anchor key deserializes as None");
+
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.add_annotation(ds.clone(), legacy);
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "old").position, [5.0, 5.0]);
+    }
+
+    #[test]
+    fn anchor_survives_document_state_serde_round_trip() {
+        // Critical: after serialize -> deserialize, the anchor is preserved and a
+        // SetActiveLayout still re-anchors correctly on the restored document.
+        use lucida_content::EntityId;
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+
+        let blob = serde_json::to_string(&doc).unwrap();
+        let mut restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
+        assert_eq!(
+            pin(&restored, &ds, "p").anchor,
+            Some(EntityId("w1".into())),
+            "anchor persists through the document blob"
+        );
+
+        switch_to(&mut restored, &ds, "moved");
+        assert_eq!(
+            pin(&restored, &ds, "p").position,
+            [5.0, 55.0],
+            "re-anchor still works after a round-trip"
+        );
+    }
+
+    #[test]
+    fn switch_between_three_positions_tracks_well_each_time() {
+        // Robustness beyond the two-layout contract: a third layout moves w1 to a
+        // different delta; the pin tracks w1 across default -> moved -> far ->
+        // default, each hop applying the displacement between just those two.
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(DocumentCommand::RegisterLayout {
+            dataset_id: ds.clone(),
+            layout: LayoutSpec {
+                id: LayoutId("far".into()),
+                name: "Far".into(),
+                placements: vec![
+                    EntityPlacement {
+                        entity_id: EntityId("w1".into()),
+                        position: [-30.0, 10.0],
+                    },
+                    EntityPlacement {
+                        entity_id: EntityId("w2".into()),
+                        position: [100.0, 0.0],
+                    },
+                ],
+            },
+        });
+        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+
+        switch_to(&mut doc, &ds, "moved"); // w1 [0,0]->[0,50], delta [0,50]
+        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
+        switch_to(&mut doc, &ds, "far"); // w1 [0,50]->[-30,10], delta [-30,-40]
+        assert_eq!(pin(&doc, &ds, "p").position, [-25.0, 15.0]);
+        switch_to(&mut doc, &ds, "default"); // w1 [-30,10]->[0,0], delta [30,-10]
+        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 5.0]);
+    }
+
+    #[test]
+    fn switching_to_the_already_active_layout_does_not_shift_pins() {
+        // Convergence/idempotency: a replayed or echoed `set_active_layout` to the
+        // layout that's already active must not translate pins a second time. The
+        // pin should sit where the first switch left it, not double-shifted.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
+        // Re-apply the SAME switch (as a duplicate/echo would): no further move.
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
+    }
+
+    #[test]
+    fn reanchor_leaves_z_unchanged() {
+        // Layouts are 2-D in-plane: the pin's depth must not be touched by a
+        // re-anchor, only its in-plane position.
+        let (mut doc, ds) = plate_with_two_layouts();
+        doc.apply(add_annotation_cmd_z("plate", "p", [5.0, 5.0], 7.5, "alice"));
+        switch_to(&mut doc, &ds, "moved");
+        let p = pin(&doc, &ds, "p");
+        assert_eq!(p.position, [5.0, 55.0]);
+        assert_eq!(p.z, 7.5, "z is in-plane-invariant across a layout switch");
+    }
+
+    #[test]
+    fn reanchor_runs_identically_through_scene_apply() {
+        // The re-anchor lives in DocumentState::apply, so it also fires when the
+        // command flows through the wasm Scene::apply wrapper (which delegates to
+        // document.apply) — same corrected position the server would persist.
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_plate_dataset_opened(
+            "plate",
+            "plate",
+            vec![("w1", [0.0, 0.0]), ("w2", [100.0, 0.0])],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId("plate".into());
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: ds.clone(),
+                layout: LayoutSpec {
+                    id: LayoutId("moved".into()),
+                    name: "Moved".into(),
+                    placements: vec![
+                        EntityPlacement {
+                            entity_id: EntityId("w1".into()),
+                            position: [0.0, 50.0],
+                        },
+                        EntityPlacement {
+                            entity_id: EntityId("w2".into()),
+                            position: [100.0, 0.0],
+                        },
+                    ],
+                },
+            }
+            .into(),
+        );
+        scene.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice").into());
+        assert_eq!(
+            scene.document.annotations[&ds][0].anchor,
+            Some(EntityId("w1".into()))
+        );
+        scene.apply(
+            DocumentCommand::SetActiveLayout {
+                dataset_id: ds.clone(),
+                layout_id: LayoutId("moved".into()),
+            }
+            .into(),
+        );
+        assert_eq!(scene.document.annotations[&ds][0].position, [5.0, 55.0]);
     }
 
     fn add_annotation_cmd(ds: &str, id: &str, position: [f64; 2], author: &str) -> DocumentCommand {
@@ -3380,6 +3726,7 @@ mod tests {
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),
+            anchor: None,
         }
     }
 
@@ -3400,6 +3747,7 @@ mod tests {
             author: "alice".into(),
             kind,
             comments: Vec::new(),
+            anchor: None,
         }
     }
 

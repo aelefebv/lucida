@@ -539,7 +539,16 @@ function App({
         debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
         layoutRegistry={layoutRegistry}
         sendCommand={bridge.sendCommand}
-        onLayoutChange={() => render.loopRef.current?.markInteractiveDirty()}
+        onLayoutChange={() => {
+          render.loopRef.current?.markInteractiveDirty();
+          // A local layout switch re-anchors plate annotations in core (issue
+          // #780), but — unlike an inbound peer switch (see useBridge) — it
+          // doesn't bump the remote document version on its own, so the overlay
+          // would keep showing pins at their pre-switch positions for the
+          // switcher. Bump it here so the overlay re-reads the re-anchored pins,
+          // exactly as it does after any other document change.
+          bumpRemoteDocumentVersion();
+        }}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
       />
       <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
