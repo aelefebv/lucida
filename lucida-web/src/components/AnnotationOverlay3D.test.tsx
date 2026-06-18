@@ -119,6 +119,9 @@ function renderOverlay(opts: {
   pins: Annotation[];
   myId?: string;
   pick?: (x: number, y: number) => number[];
+  /** The view's Z/T/C. Defaults to the on-context view for the standard test
+   * pins (z=3, t/c absent → 0); the off-context suite overrides it. */
+  viewContext?: { z: number; t: number; c: number };
 }) {
   const { scene, applied } = makeScene(opts.pins, opts.pick);
   const sent: Array<Record<string, unknown>> = [];
@@ -126,6 +129,7 @@ function renderOverlay(opts: {
   sceneRef.current = scene;
   let changed = 0;
   let version = 0;
+  let viewContext = opts.viewContext ?? { z: 3, t: 0, c: 0 };
   const { canvas, capturedPointers, forwardedDowns } = makeCanvas();
   const overlay = (v: number) => (
     <AnnotationOverlay3D
@@ -133,6 +137,7 @@ function renderOverlay(opts: {
       wasmSceneRef={sceneRef}
       canvas={canvas}
       version={v}
+      viewContext={viewContext}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
@@ -148,7 +153,14 @@ function renderOverlay(opts: {
     version += 1;
     rerender(overlay(version));
   };
-  return { applied, sent, getChanged: () => changed, capturedPointers, forwardedDowns, bumpVersion };
+  // Navigate the view: re-render with a new context (a pure input), so a test can
+  // assert the off-context status flips as the view moves to / from the pin's
+  // Z/T/C.
+  const setViewContext = (next: { z: number; t: number; c: number }) => {
+    viewContext = next;
+    rerender(overlay(version));
+  };
+  return { applied, sent, getChanged: () => changed, capturedPointers, forwardedDowns, bumpVersion, setViewContext };
 }
 
 beforeEach(() => {
@@ -465,5 +477,67 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", (
     // The open pin is lifted strictly above the closed one so its popover clears
     // the other marker, regardless of DOM order.
     expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
+  });
+});
+
+describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)", () => {
+  it("a pin matching the view is on-context (no off-context marker)", () => {
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
+      viewContext: { z: 5, t: 2, c: 1 },
+    });
+    expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
+  });
+
+  it("a pin on a different t renders off-context with helptext naming its z/t/c", () => {
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 9, c: 1 })],
+      viewContext: { z: 5, t: 0, c: 1 },
+    });
+    const marker = screen.getByTestId("annot-offcontext-pin-here");
+    // Same exact contract form as 2D (the shared helper).
+    expect(marker.textContent).toBe("slice 5 · t=9 · ch=1");
+    expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+  });
+
+  it("a pin on a different channel (c) renders off-context", () => {
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 7 })],
+      viewContext: { z: 5, t: 2, c: 0 },
+    });
+    expect(screen.getByTestId("annot-offcontext-pin-here").textContent).toBe("slice 5 · t=2 · ch=7");
+  });
+
+  it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
+    const { setViewContext } = renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 12, t: 3, c: 2 })],
+      viewContext: { z: 3, t: 0, c: 0 },
+    });
+    expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
+    setViewContext({ z: 12, t: 3, c: 2 });
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
+    expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+  });
+
+  it("regression: an off-context pin still opens its thread on click", () => {
+    renderOverlay({
+      pins: [
+        ownPin({
+          id: "pin-here",
+          z: 12,
+          t: 3,
+          c: 2,
+          comments: [{ id: "c1", author: String(MY_ID), text: "still works" }],
+        }),
+      ],
+      viewContext: { z: 4, t: 0, c: 0 },
+    });
+    expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
+    const marker = screen.getByTestId("annot-pin-pin-here");
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(marker, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.click(marker, { clientX: 200, clientY: 200 });
+    expect(screen.getByText("still works")).toBeTruthy();
   });
 });

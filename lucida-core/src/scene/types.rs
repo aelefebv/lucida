@@ -215,6 +215,25 @@ pub struct Annotation {
     /// `z = 0.0` serializes identically whether or not it carries depth.
     #[serde(default)]
     pub z: f64,
+    /// The **timepoint** (T) the pin was placed on — the view's `t` at creation,
+    /// an integer frame index. Unlike `z` (a world-space depth in the same
+    /// continuous frame as `position`), `t`/`c` are discrete view selectors: a
+    /// pin "belongs to" the slice/timepoint/channel it was dropped on, and the
+    /// overlay renders it off-context (dimmed + a "where it lives" helptext, like
+    /// an off-view peer cursor) when the current view differs.
+    ///
+    /// `#[serde(default)]` keeps this additive — a pin persisted (or broadcast)
+    /// before this slice carries no `t` key and deserializes as `t = 0`, and a
+    /// pin at `t = 0` serializes identically whether or not it predates the
+    /// field. No wire break.
+    #[serde(default)]
+    pub t: i64,
+    /// The **channel** (C) the pin was placed on — the view's `c` at creation,
+    /// an integer channel index. Like `t`, it is a discrete view selector that
+    /// drives off-context rendering, and is `#[serde(default)]` so an older pin
+    /// (no `c` key) deserializes as `c = 0` with no wire break.
+    #[serde(default)]
+    pub c: i64,
     pub author: String,
     #[serde(default)]
     pub kind: AnnotationKind,
@@ -653,6 +672,8 @@ impl DocumentState {
                 position,
                 end,
                 z,
+                t,
+                c,
                 author,
                 kind,
             } => {
@@ -666,6 +687,11 @@ impl DocumentState {
                         // no `end` field.
                         end,
                         z,
+                        // The view's timepoint/channel at creation (the slice
+                        // context the pin belongs to). Defaulted to 0 for an
+                        // older command with no t/c field.
+                        t,
+                        c,
                         author,
                         kind,
                         // A freshly dropped pin starts with an empty thread.

@@ -67,6 +67,16 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const myIdRef = useRef(myId);
   // eslint-disable-next-line react-hooks/refs
   myIdRef.current = myId;
+  // Mirror the current timepoint/channel (issue #779) so a 3D pin drop records
+  // the view's T/C alongside its picked voxel depth (z) — the slice context it
+  // belongs to. Mirrored (not closed over) like the other pin-drop props so the
+  // canvas-bound pointer handlers see the latest values without re-binding.
+  const tRef = useRef(t);
+  // eslint-disable-next-line react-hooks/refs
+  tRef.current = t;
+  const cRef = useRef(c);
+  // eslint-disable-next-line react-hooks/refs
+  cRef.current = c;
   const sendCommandRef = useRef(sendCommand);
   // eslint-disable-next-line react-hooks/refs
   sendCommandRef.current = sendCommand;
@@ -284,6 +294,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           position: [anchor[0], anchor[1]],
           end,
           z: anchor[2],
+          // Stamp the view's current T/C so the pin belongs to this timepoint/
+          // channel (issue #779). In 3D `z` is the picked voxel depth (the
+          // geometric anchor), while T/C are the discrete view selectors.
+          t: tRef.current,
+          c: cRef.current,
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
         },

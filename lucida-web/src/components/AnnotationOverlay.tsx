@@ -31,6 +31,7 @@ import {
   type BoxHandle,
   type ScreenPoint,
 } from "./annotationGeometry.ts";
+import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 
 /** One comment in a pin's thread (as returned nested in `annotations()`). */
@@ -51,6 +52,12 @@ export interface Annotation {
   end?: [number, number] | null;
   /** Additive depth. Absent on a slice-1/2 pin → defaulted to 0 on read. */
   z?: number;
+  /** The timepoint (T) the pin was placed on. Absent on a pre-slice-14 pin →
+   * defaulted to 0 on read. Drives off-context rendering vs the current view. */
+  t?: number;
+  /** The channel (C) the pin was placed on. Absent on a pre-slice-14 pin →
+   * defaulted to 0 on read. Drives off-context rendering vs the current view. */
+  c?: number;
   author: string;
   /** "point" | "line" | "box". Absent on a slice-1 pin → treated as "point". */
   kind: string;
@@ -66,6 +73,13 @@ interface Props {
   canvas: HTMLCanvasElement;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
+  /** The current view's Z/T/C selectors (issue #779) — App passes `{ z: dims.z,
+   * t: dims.t, c: dims.c }`. A pin whose own z/t/c all equal this renders
+   * on-context (today's look); a pin that differs in any axis renders
+   * off-context (dimmed + a helptext naming where it lives), mirroring an
+   * off-view peer cursor. Pure: as the view changes this recomputes, so
+   * navigating to the pin's slice flips it back to normal automatically. */
+  viewContext: ViewContext;
   /** Stable, browser-persisted annotation-author identity (issue #777): the pin
    * `author` to match against for the mine/ownership checks (move/delete + own-
    * pin controls). Sourced from `annotationAuthorId()`, not the per-connection
@@ -197,7 +211,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, myId, sendCommand, onDocumentChanged, onViewportChanged }: Props) {
+export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -693,6 +707,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
           if (pin.kind !== "line" && pin.kind !== "box") return null;
           if (!pin.end) return null;
           const color = pin.author === String(myId) ? "#FF3B30" : "#FF9F0A";
+          // Dim a line/box that lives off the current Z/T/C, matching the dot's
+          // off-context treatment so the whole shape reads as "anchored
+          // elsewhere".
+          const shapeOpacity = isOffContext(pin, viewContext) ? 0.5 : 1;
           if (isClosedShape(pin)) {
             return (
               <polygon
@@ -707,6 +725,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                 stroke={color}
                 strokeWidth={2.5}
                 strokeLinejoin="round"
+                opacity={shapeOpacity}
               />
             );
           }
@@ -724,6 +743,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
               stroke={color}
               strokeWidth={2.5}
               strokeLinecap="round"
+              opacity={shapeOpacity}
             />
           );
         })}
@@ -783,6 +803,12 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
         const mine = pin.author === String(myId);
         const comments = pin.comments ?? [];
         const isOpen = openPinId === pin.id;
+        // Off-context (issue #779): the pin lives on a different Z/T/C than the
+        // current view. Pure function of (pin vs viewContext), so navigating the
+        // view to match flips it back to on-context on the next render — no state
+        // to clear. Mirrors the off-view peer cursor: dimmed + a "where it lives"
+        // helptext. The marker still renders and stays clickable (thread opens).
+        const offCtx = isOffContext(pin, viewContext);
         return (
           <div
             key={pin.id}
@@ -800,6 +826,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
               transform: "translate(0px, 0px)",
               willChange: "transform",
               pointerEvents: "none",
+              // Dim the whole marker group when off-context, exactly like an
+              // off-view peer cursor (PeerCursors uses opacity 0.5). An open
+              // thread is never dimmed — you're actively reading it.
+              opacity: offCtx && !isOpen ? 0.5 : 1,
               // Every pin shares one overlay layer with no per-marker stacking,
               // so DOM order alone decides paint order — a *later* pin's dot
               // would paint over an *earlier* pin's open popover (issue #772).
@@ -857,7 +887,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                 marginTop: -6,
                 borderRadius: "50%",
                 backgroundColor: "#FF3B30",
-                border: "2px solid white",
+                // Off-context pins get a distinct dashed outline (on top of the
+                // group dimming above), so they read as "anchored elsewhere"
+                // even at a glance — the same intent as an off-view peer cursor.
+                border: offCtx ? "2px dashed white" : "2px solid white",
                 boxShadow: "0 1px 3px rgba(0,0,0,0.6)",
                 pointerEvents: "auto",
                 // Own pins show the same grab cursor the canvas uses (a plain
@@ -868,6 +901,35 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, my
                 touchAction: mine ? "none" : undefined,
               }}
             />
+            {/* Off-context helptext (issue #779): only when the pin lives on a
+                different Z/T/C than the current view. Names where the pin
+                actually lives in the exact contract form `slice <z> · t=<t> · ch
+                =<c>`, mirroring the off-view peer cursor's locator badge. The
+                marker above still renders + clicks (its thread still opens), so
+                this is purely an informative overlay. Absent entirely when the
+                pin is on-context — so an on-context pin carries NO
+                annot-offcontext-<id> testid. */}
+            {offCtx && (
+              <div
+                data-testid={`annot-offcontext-${pin.id}`}
+                title={`This pin lives on ${offContextLabel(pin)} — navigate there to edit it in place`}
+                style={{
+                  position: "absolute",
+                  left: 10,
+                  top: -10,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                  color: "white",
+                  backgroundColor: "rgba(0,0,0,0.7)",
+                  padding: "1px 4px",
+                  borderRadius: 3,
+                  whiteSpace: "nowrap",
+                  pointerEvents: "none",
+                }}
+              >
+                {offContextLabel(pin)}
+              </div>
+            )}
             {/* Comment-count badge: only when the pin has at least one comment.
                 A tiny pill at the pin's upper-right, like a notification count. */}
             {comments.length > 0 && (

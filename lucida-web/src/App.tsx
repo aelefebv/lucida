@@ -655,6 +655,7 @@ function App({
                 wasmSceneRef={scene.wasmSceneRef}
                 canvas={render.canvasRef.current}
                 version={remoteDocumentVersion}
+                viewContext={{ z: dims.z, t: dims.t, c: dims.c }}
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
@@ -717,6 +718,7 @@ function App({
                 wasmSceneRef={scene.wasmSceneRef}
                 canvas={render.canvasRef.current}
                 version={remoteDocumentVersion}
+                viewContext={{ z: dims.z, t: dims.t, c: dims.c }}
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}

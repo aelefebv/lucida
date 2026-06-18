@@ -45,6 +45,7 @@ import type { WasmScene } from "lucida-core";
 import type { Annotation } from "./AnnotationOverlay.tsx";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
+import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 
 interface Props {
@@ -54,6 +55,11 @@ interface Props {
   canvas: HTMLCanvasElement;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
+  /** The current view's Z/T/C selectors (issue #779) — App passes `{ z: dims.z,
+   * t: dims.t, c: dims.c }`. Drives the SAME on/off-context decision as the 2D
+   * overlay (shared {@link isOffContext}): a pin off the current Z/T/C renders
+   * dimmed with a helptext naming where it lives, like an off-view peer cursor. */
+  viewContext: ViewContext;
   /** Stable, browser-persisted annotation-author identity (issue #777): the
    * author's own pins are tinted distinctly, and only the author may
    * move/edit/delete their own pin (anyone may add a comment). Sourced from
@@ -111,7 +117,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, myId, sendCommand, onDocumentChanged }: Props) {
+export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per line/box, re-projected each frame through the SAME
   // `project_annotation` call the dots use — so a line/box tracks the volume as
@@ -490,6 +496,12 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
       {annotations.map((pin) => {
         const mine = pin.author === String(myId);
         const isOpen = openPinId === pin.id;
+        // Off-context (issue #779): same shared decision as the 2D overlay. In
+        // 3D the wrapper's display is governed by the RAF tick (hidden when the
+        // point projects behind the camera); off-context only adjusts the look
+        // (dim + dashed dot + helptext), never the visibility — a visible pin
+        // that lives elsewhere reads as off-view, like a peer cursor.
+        const offCtx = isOffContext(pin, viewContext);
         return (
           <div
             key={pin.id}
@@ -508,6 +520,10 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
               transform: "translate(0px, 0px)",
               willChange: "transform",
               pointerEvents: "none",
+              // Dim the whole marker group off-context, like an off-view peer
+              // cursor (the tick only writes display/transform, never opacity, so
+              // this persists). An open thread is never dimmed.
+              opacity: offCtx && !isOpen ? 0.5 : 1,
               // Like the 2D overlay (issue #772): every wrapper shares one layer
               // with no per-marker stacking, so a later pin's dot would paint over
               // an earlier pin's open popover. Lift only the open pin above the
@@ -553,7 +569,9 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
                 marginTop: -6,
                 borderRadius: "50%",
                 backgroundColor: "#FF3B30",
-                border: "2px solid white",
+                // Distinct dashed outline off-context (mirrors the 2D overlay),
+                // so it reads as "anchored on another Z/T/C" at a glance.
+                border: offCtx ? "2px dashed white" : "2px solid white",
                 boxShadow: "0 1px 3px rgba(0,0,0,0.6)",
                 // Every marker accepts the pointer: a plain click opens the
                 // thread, a plain drag is forwarded to the canvas to orbit.
@@ -562,6 +580,31 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
                 touchAction: "none",
               }}
             />
+            {/* Off-context helptext (issue #779): only when the pin lives on a
+                different Z/T/C than the current view. Names where it lives in the
+                exact contract form `slice <z> · t=<t> · ch=<c>`, the same as 2D.
+                The marker still renders + clicks (its thread still opens). */}
+            {offCtx && (
+              <div
+                data-testid={`annot-offcontext-${pin.id}`}
+                title={`This pin lives on ${offContextLabel(pin)} — navigate there to edit it in place`}
+                style={{
+                  position: "absolute",
+                  left: 10,
+                  top: -10,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                  color: "white",
+                  backgroundColor: "rgba(0,0,0,0.7)",
+                  padding: "1px 4px",
+                  borderRadius: 3,
+                  whiteSpace: "nowrap",
+                  pointerEvents: "none",
+                }}
+              >
+                {offContextLabel(pin)}
+              </div>
+            )}
             {/* Thread popover — the SAME shared component the 2D overlay renders,
                 so 3D threads match 2D exactly. Anchored just below-right of the
                 marker; lifting the open wrapper's z-index carries it above other

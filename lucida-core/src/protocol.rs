@@ -492,6 +492,8 @@ mod tests {
             position: [3.0, 4.0],
             end: None,
             z: 8.5,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
         };
@@ -524,6 +526,8 @@ mod tests {
             position: [10.0, 20.0],
             end: None,
             z: 12.5,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
         });
@@ -635,6 +639,8 @@ mod tests {
             position: [10.0, 20.0],
             end: None,
             z: 1.0,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
         });

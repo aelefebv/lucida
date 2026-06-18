@@ -60,6 +60,14 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   // without re-binding the pointer handlers on every slice change.
   const zRef = useRef(z);
   zRef.current = z;
+  // Mirror the current timepoint/channel too (issue #779) so a dropped pin
+  // records the view's T/C alongside Z — the slice context it belongs to — and
+  // the overlay can render it off-context when the view later differs. Mirrored
+  // (not closed over) for the same reason as zRef: the handlers bind on `canvas`.
+  const tRef = useRef(t);
+  tRef.current = t;
+  const cRef = useRef(c);
+  cRef.current = c;
   const myIdRef = useRef(myId);
   myIdRef.current = myId;
   const sendCommandRef = useRef(sendCommand);
@@ -202,6 +210,11 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
           position: drawShape ? press.world : end,
           end: drawShape ? end : null,
           z: zRef.current,
+          // Stamp the view's current T/C so the pin belongs to this slice/
+          // timepoint/channel (issue #779); the overlay shows it off-context
+          // when the view later differs.
+          t: tRef.current,
+          c: cRef.current,
           author: String(myIdRef.current),
           kind: drawShape ? kind : "point",
         },

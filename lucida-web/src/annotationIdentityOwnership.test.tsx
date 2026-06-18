@@ -53,6 +53,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={1}
+        viewContext={{ z: 0, t: 0, c: 0 }}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -94,6 +95,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={1}
+        viewContext={{ z: 0, t: 0, c: 0 }}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

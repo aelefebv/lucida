@@ -80,6 +80,10 @@ const MY_ID = "7";
 function renderOverlay(opts: {
   pins: Annotation[];
   myId?: string;
+  /** The view's Z/T/C. Defaults to the on-context view for the standard test
+   * pins (z=3, t/c absent → 0), so existing suites see today's look; the
+   * off-context suite overrides it (or the pins) to force a mismatch. */
+  viewContext?: { z: number; t: number; c: number };
 }) {
   const { scene, applied } = makeScene(opts.pins);
   const sent: Array<Record<string, unknown>> = [];
@@ -89,12 +93,13 @@ function renderOverlay(opts: {
   let changed = 0;
   let viewportChanged = 0;
   const canvas = makeCanvas();
-  render(
+  const { rerender } = render(
     <AnnotationOverlay
       datasetId="wds-1"
       wasmSceneRef={sceneRef}
       canvas={canvas}
       version={0}
+      viewContext={opts.viewContext ?? { z: 3, t: 0, c: 0 }}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
@@ -105,11 +110,34 @@ function renderOverlay(opts: {
       }}
     />,
   );
+  /** Re-render with a new view context (the rest of the props are fixed), so a
+   * test can navigate the view and assert the off-context status updates — it's a
+   * pure function of the view, so this is how "navigate to match" is exercised. */
+  const setViewContext = (viewContext: { z: number; t: number; c: number }) => {
+    rerender(
+      <AnnotationOverlay
+        datasetId="wds-1"
+        wasmSceneRef={sceneRef}
+        canvas={canvas}
+        version={0}
+        viewContext={viewContext}
+        myId={opts.myId ?? MY_ID}
+        sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
+        onDocumentChanged={() => {
+          changed += 1;
+        }}
+        onViewportChanged={() => {
+          viewportChanged += 1;
+        }}
+      />,
+    );
+  };
   return {
     applied,
     sent,
     getChanged: () => changed,
     getViewportChanged: () => viewportChanged,
+    setViewContext,
   };
 }
 
@@ -954,5 +982,136 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     expect(moves).toHaveLength(1);
     expect(moves[0].position).toEqual([100, 100]); // whole-box move to release
     expect(moves[0].end).toBeUndefined(); // rigid move carries NO end (not a reshape)
+  });
+});
+
+describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", () => {
+  // A pin placed on slice 12, timepoint 3, channel 2. The standard view context
+  // here is { z: 3, t: 0, c: 0 } (the renderOverlay default), so this pin is
+  // off-context by default unless the view is navigated to (12, 3, 2).
+  function elsewherePin(overrides: Partial<Annotation> = {}): Annotation {
+    return ownPin({ id: "pin-here", z: 12, t: 3, c: 2, ...overrides });
+  }
+
+  it("a pin whose z/t/c all match the view is on-context (no off-context marker)", () => {
+    // The pin lives exactly where we're looking → today's look, no marker.
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
+      viewContext: { z: 5, t: 2, c: 1 },
+    });
+    // The marker itself renders…
+    expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+    // …but it carries NO off-context marker (this is the on-context contract).
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
+  });
+
+  it("a pin on a different slice (z) renders off-context with helptext naming its z/t/c", () => {
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 12, t: 3, c: 2 })],
+      // Same t/c, different z → off-context purely on z.
+      viewContext: { z: 4, t: 3, c: 2 },
+    });
+    const marker = screen.getByTestId("annot-offcontext-pin-here");
+    // The helptext names the PIN's own z/t/c in the exact contract form.
+    expect(marker.textContent).toBe("slice 12 · t=3 · ch=2");
+    // The dot still renders alongside the off-context marker.
+    expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+  });
+
+  it("a pin on a different timepoint (t) renders off-context", () => {
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 9, c: 1 })],
+      // Same z/c, different t.
+      viewContext: { z: 5, t: 0, c: 1 },
+    });
+    const marker = screen.getByTestId("annot-offcontext-pin-here");
+    expect(marker.textContent).toBe("slice 5 · t=9 · ch=1");
+  });
+
+  it("a pin on a different channel (c) renders off-context", () => {
+    renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 7 })],
+      // Same z/t, different c.
+      viewContext: { z: 5, t: 2, c: 0 },
+    });
+    const marker = screen.getByTestId("annot-offcontext-pin-here");
+    expect(marker.textContent).toBe("slice 5 · t=2 · ch=7");
+  });
+
+  it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
+    // Start off-context, then navigate the view to the pin's exact slice → the
+    // off-context marker disappears (it's a pure function of the view).
+    const { setViewContext } = renderOverlay({
+      pins: [elsewherePin()],
+      viewContext: { z: 3, t: 0, c: 0 },
+    });
+    expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
+
+    // Navigate to (12, 3, 2) — exactly where the pin lives.
+    setViewContext({ z: 12, t: 3, c: 2 });
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
+    // The marker is still present (only its off-context decoration went away).
+    expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
+  });
+
+  it("navigating AWAY from a matching pin makes it off-context", () => {
+    // The reverse: on-context, then move the view off the pin's slice.
+    const { setViewContext } = renderOverlay({
+      pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
+      viewContext: { z: 5, t: 2, c: 1 },
+    });
+    expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
+
+    // Step to the next slice → now off-context, helptext names the pin's slice.
+    setViewContext({ z: 6, t: 2, c: 1 });
+    const marker = screen.getByTestId("annot-offcontext-pin-here");
+    expect(marker.textContent).toBe("slice 5 · t=2 · ch=1");
+  });
+
+  it("regression: an off-context pin's marker still renders and opens its thread on click", () => {
+    // Off-context is a look, not a lockout — the pin is still fully interactive.
+    renderOverlay({
+      pins: [
+        ownPin({
+          id: "pin-here",
+          z: 12,
+          t: 3,
+          c: 2,
+          comments: [{ id: "c1", author: String(MY_ID), text: "still works" }],
+        }),
+      ],
+      viewContext: { z: 4, t: 0, c: 0 },
+    });
+    // It IS off-context…
+    expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
+    // …and a plain click on its dot still opens the thread.
+    const dot = screen.getByTestId("annot-pin-pin-here");
+    fireEvent.pointerDown(dot, { pointerId: 1, button: 0, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(dot, { pointerId: 1, clientX: 200, clientY: 200 });
+    fireEvent.click(dot, { clientX: 200, clientY: 200 });
+    expect(screen.getByText("still works")).toBeTruthy();
+  });
+
+  it("a pre-slice-14 pin (no t/c) is on-context when the view is at its z and t=c=0", () => {
+    // An older pin carries no t/c → they read as 0. So at the view (z, 0, 0) it
+    // is on-context — older pins don't all spuriously show as off-context.
+    renderOverlay({
+      pins: [{ id: "old", position: [10, 20], z: 8, author: String(MY_ID), kind: "point" }],
+      viewContext: { z: 8, t: 0, c: 0 },
+    });
+    expect(screen.queryByTestId("annot-offcontext-old")).toBeNull();
+  });
+
+  it("only the off-context pin among several carries the marker", () => {
+    // Mixed set: one on-context, one off — exactly one off-context marker.
+    renderOverlay({
+      pins: [
+        ownPin({ id: "pin-on", z: 3, t: 0, c: 0 }),
+        ownPin({ id: "pin-off", z: 9, t: 0, c: 0 }),
+      ],
+      viewContext: { z: 3, t: 0, c: 0 },
+    });
+    expect(screen.queryByTestId("annot-offcontext-pin-on")).toBeNull();
+    expect(screen.getByTestId("annot-offcontext-pin-off")).toBeTruthy();
   });
 });

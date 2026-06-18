@@ -50,6 +50,14 @@ pub enum DocumentCommand {
     /// and `kind`, it is `#[serde(default)]`, so a slice-1..4 `add_annotation`
     /// (no `end` field) applies as `end: None`, i.e. a plain point — additive,
     /// no wire break. The shared depth `z` applies to both vertices.
+    ///
+    /// `t` (timepoint) and `c` (channel) record the **current view's** discrete
+    /// T/C selectors at creation, so a pin belongs to the slice/timepoint/channel
+    /// it was dropped on (issue #779) and the overlay can show it off-context when
+    /// the view differs. Both are `#[serde(default)]`, mirroring `z`/`end`/`kind`,
+    /// so an `add_annotation` from a client that predates this slice (or a
+    /// replayed older log entry) applies with `t = 0, c = 0` rather than failing
+    /// to parse — additive, no wire break.
     AddAnnotation {
         dataset_id: DatasetId,
         id: String,
@@ -58,6 +66,10 @@ pub enum DocumentCommand {
         end: Option<[f64; 2]>,
         #[serde(default)]
         z: f64,
+        #[serde(default)]
+        t: i64,
+        #[serde(default)]
+        c: i64,
         author: String,
         #[serde(default)]
         kind: crate::scene::AnnotationKind,
@@ -1877,6 +1889,8 @@ mod tests {
             position: [12.5, -7.25],
             end: None,
             z: 3.5,
+            t: 4,
+            c: 2,
             author: "biologist".into(),
             kind: crate::scene::AnnotationKind::Point,
         };
@@ -1888,6 +1902,9 @@ mod tests {
         assert_eq!(v["position"][0], 12.5);
         assert_eq!(v["position"][1], -7.25);
         assert_eq!(v["z"], 3.5);
+        // The view's timepoint/channel ride the wire alongside z.
+        assert_eq!(v["t"], 4);
+        assert_eq!(v["c"], 2);
         assert_eq!(v["author"], "biologist");
         assert_eq!(v["kind"], "point");
         // A point carries `end: null` on the wire.
@@ -1902,6 +1919,8 @@ mod tests {
                 position,
                 end,
                 z,
+                t,
+                c,
                 author,
                 kind,
             } => {
@@ -1910,6 +1929,8 @@ mod tests {
                 assert_eq!(position, [12.5, -7.25]);
                 assert_eq!(end, None);
                 assert_eq!(z, 3.5);
+                assert_eq!(t, 4);
+                assert_eq!(c, 2);
                 assert_eq!(author, "biologist");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
             }
@@ -1930,6 +1951,8 @@ mod tests {
                 position,
                 end,
                 z,
+                t,
+                c,
                 author,
                 kind,
             } => {
@@ -1939,6 +1962,9 @@ mod tests {
                 // No `end` in the slice-1..4 payload → a point.
                 assert_eq!(end, None);
                 assert_eq!(z, 5.0);
+                // This payload predates t/c → they default to 0 (no wire break).
+                assert_eq!(t, 0);
+                assert_eq!(c, 0);
                 assert_eq!(author, "alice");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
             }
@@ -1960,6 +1986,111 @@ mod tests {
             }
             _ => panic!("expected AddAnnotation"),
         }
+    }
+
+    // --- slice 014: a pin records its view T/C (issue #779) ---
+
+    #[test]
+    fn add_annotation_t_c_round_trip_through_command_wire() {
+        // The view's timepoint/channel must survive serialize -> parse
+        // byte-for-byte (the per-peer broadcast path), exactly like z.
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-tc".into(),
+            position: [1.0, 2.0],
+            end: None,
+            z: 0.0,
+            t: 7,
+            c: 3,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation { t, c, .. } => {
+                assert_eq!(t, 7);
+                assert_eq!(c, 3);
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn add_annotation_carries_t_c_into_stored_pin() {
+        // Applying the command must land t/c on the stored pin — the state the
+        // overlay reads back to decide on-context vs off-context.
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-tc".into(),
+            position: [1.0, 2.0],
+            end: None,
+            z: 4.0,
+            t: 9,
+            c: 5,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+        });
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.t, 9);
+        assert_eq!(pin.c, 5);
+        // z still rides through unchanged alongside the new t/c.
+        assert_eq!(pin.z, 4.0);
+    }
+
+    #[test]
+    fn add_annotation_t_c_default_to_zero_for_pre_slice14_payload() {
+        // A pin payload from before this slice carries neither `t` nor `c`.
+        // #[serde(default)] must parse them as 0 rather than failing — the wire
+        // backward-compatibility guarantee (additive, no break).
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-old","position":[3.0,4.0],"z":5.0,"author":"alice","kind":"point"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match parsed {
+            DocumentCommand::AddAnnotation { t, c, z, .. } => {
+                assert_eq!(t, 0);
+                assert_eq!(c, 0);
+                assert_eq!(z, 5.0);
+            }
+            _ => panic!("expected AddAnnotation"),
+        }
+    }
+
+    #[test]
+    fn old_pin_blob_without_t_c_deserializes_with_t0_c0() {
+        // A persisted `Annotation` blob (a snapshot pin) from before this slice
+        // has no t/c keys. It must deserialize with t = 0, c = 0 so an older
+        // document loads without a wire break.
+        let json = r#"{"id":"pin-old","position":[3.0,4.0],"z":2.0,"author":"alice","kind":"point"}"#;
+        let pin: crate::scene::Annotation = serde_json::from_str(json).unwrap();
+        assert_eq!(pin.t, 0);
+        assert_eq!(pin.c, 0);
+        // The pre-existing fields still load as before.
+        assert_eq!(pin.z, 2.0);
+        assert_eq!(pin.position, [3.0, 4.0]);
+        assert_eq!(pin.end, None);
+    }
+
+    #[test]
+    fn annotation_with_t_c_round_trips_through_blob() {
+        // A pin carrying t/c serializes and parses back identically — the
+        // snapshot/persistence path (document_json) preserves the view context.
+        let pin = crate::scene::Annotation {
+            id: "pin-tc".into(),
+            position: [10.0, 20.0],
+            end: None,
+            z: 1.0,
+            t: 12,
+            c: 2,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+            comments: Vec::new(),
+        };
+        let json = serde_json::to_string(&pin).unwrap();
+        let back: crate::scene::Annotation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, pin);
+        assert_eq!(back.t, 12);
+        assert_eq!(back.c, 2);
     }
 
     #[test]
@@ -2007,6 +2138,8 @@ mod tests {
             position: [1.0, 2.0],
             end: Some([5.5, -6.5]),
             z: 3.0,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Line,
         };
@@ -2179,6 +2312,8 @@ mod tests {
             position,
             end: None,
             z,
+            t: 0,
+            c: 0,
             author: author.into(),
             kind: crate::scene::AnnotationKind::Point,
         }
@@ -2198,6 +2333,8 @@ mod tests {
             position,
             end: Some(end),
             z: 0.0,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind,
         }
@@ -3238,6 +3375,8 @@ mod tests {
             position: [0.0, 0.0],
             end: None,
             z: 0.0,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),
@@ -3256,6 +3395,8 @@ mod tests {
             position,
             end,
             z: 0.0,
+            t: 0,
+            c: 0,
             author: "alice".into(),
             kind,
             comments: Vec::new(),
