@@ -77,6 +77,14 @@ interface Props {
    * added/edited/removed/moved) so dependent overlays re-read via a fresh
    * `version`. App.tsx already passes it. */
   onDocumentChanged: () => void;
+  /** Personal, view-only visibility for ALL annotations (issue #792) — the 3D
+   * twin of the 2D overlay's prop. When `false`, the overlay renders NOTHING (no
+   * pin markers, no line/box geometry, no open thread popover), so one toolbar
+   * toggle declutters the volume view; the annotation set is untouched (hidden,
+   * not deleted), so flipping back re-renders everything. When `true` (or
+   * omitted) the overlay behaves exactly as before. Local only: no command, no
+   * wire/document change, no peer effect (peer cursors are not annotations). */
+  visible?: boolean;
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click rather
@@ -119,7 +127,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged }: Props) {
+export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, visible = true }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per line/box, re-projected each frame through the SAME
   // `project_annotation` call the dots use — so a line/box tracks the volume as
@@ -152,6 +160,16 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
   useEffect(() => {
     setOpenPinId(null);
   }, [datasetId]);
+
+  // Hiding all annotations (issue #792) starts the next re-show CLEAN: when the
+  // overlay is hidden, drop any open thread so flipping back doesn't pop a stale
+  // popover open. The early `return null` below renders nothing while hidden;
+  // this only resets the transient open-thread state. Inert while visible, so
+  // normal behavior is untouched. (Mirrors the 2D overlay; 3D has no hovered-
+  // handle state to reset.)
+  useEffect(() => {
+    if (!visible) setOpenPinId(null);
+  }, [visible]);
 
   // Mirror the latest pins into a ref so the RAF loop reads them without
   // remounting when the set changes — the same render-phase, write-only mirror
@@ -436,6 +454,14 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
     // A cancelled gesture never moves the pin; the tick snaps the dot back to its
     // projected position next frame.
   };
+
+  // Personal show/hide of ALL annotations (issue #792): when hidden, render
+  // NOTHING — no markers, no line/box geometry, no open thread popover — so the
+  // volume view is unobstructed. Placed AFTER every hook above (rules of hooks:
+  // the read/RAF/cleanup effects must run on every render to keep a stable
+  // order), and the just-cleared open thread means a flip back to visible
+  // re-renders the (untouched) annotation set from a clean baseline.
+  if (!visible) return null;
 
   return (
     <div

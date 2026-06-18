@@ -84,6 +84,12 @@ function App({
   // Which annotation shape a shift-drag draws: a point pin (drop), a line
   // (drag between two points), or a box (drag between opposite corners).
   const [annotationKind, setAnnotationKind] = useState<"point" | "line" | "box">("point");
+  // Personal show/hide of ALL annotations (issue #792). A local view toggle —
+  // not a command, not synced to peers, not persisted across reloads — passed as
+  // `visible` to BOTH overlays so one toolbar button declutters every pin/line/
+  // box (and their threads) at once; flipping it back re-renders the untouched
+  // annotation set. Peer cursors are a separate overlay and stay visible.
+  const [annotationsVisible, setAnnotationsVisible] = useState(true);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
@@ -669,6 +675,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
+                visible={annotationsVisible}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
@@ -731,6 +738,7 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
+                visible={annotationsVisible}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
@@ -836,6 +844,31 @@ function App({
               <option value="box">Box</option>
             </select>
           </label>
+          {/* One personal view toggle (issue #792): show/hide ALL annotations
+              (pins, lines, boxes — and their threads) at once. Flips local state
+              passed as `visible` to both overlays; it is not a command, not
+              synced to peers, and doesn't touch the document. The aria-label +
+              title reflect the NEXT action (what clicking will do), so the
+              control reads correctly to a screen reader in either state. */}
+          <button
+            data-testid="annot-visibility-toggle"
+            onClick={() => setAnnotationsVisible((v) => !v)}
+            aria-pressed={!annotationsVisible}
+            aria-label={annotationsVisible ? "Hide annotations" : "Show annotations"}
+            title={annotationsVisible ? "Hide annotations" : "Show annotations"}
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              // Reflect the hidden state with the same accent the other toolbar
+              // toggles use, so "annotations are currently hidden" reads at a
+              // glance.
+              background: !annotationsVisible ? "#646cff" : undefined,
+              color: !annotationsVisible ? "#fff" : undefined,
+            }}
+          >
+            {annotationsVisible ? "Hide Annotations" : "Show Annotations"}
+          </button>
           <button
             onClick={() => setShowBookmarkSidebar((v) => !v)}
             title={showBookmarkSidebar ? "Hide saved views" : "Show saved views"}

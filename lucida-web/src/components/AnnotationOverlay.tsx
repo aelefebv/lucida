@@ -104,6 +104,15 @@ interface Props {
    * gesture (and the move/click paths) work without it; a panned view simply
    * wouldn't repaint until the next frame the loop already redraws. */
   onViewportChanged?: () => void;
+  /** Personal, view-only visibility for ALL annotations (issue #792). When
+   * `false`, the overlay renders NOTHING — no pins/lines/boxes, no resize/
+   * endpoint handles, no open thread popover — so the user can declutter the view
+   * with one toolbar toggle; the annotation set is untouched (hidden, not
+   * deleted), so flipping it back re-renders everything exactly as it was. When
+   * `true` (or omitted) the overlay behaves exactly as before. This is local: it
+   * is not a command, never touches the document/wire, and never affects peers
+   * (peer cursors are not annotations and stay visible). */
+  visible?: boolean;
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click, not a
@@ -269,7 +278,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged }: Props) {
+export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -351,6 +360,25 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
     },
     [],
   );
+
+  // Hiding all annotations (issue #792) starts the next re-show CLEAN: when the
+  // overlay is hidden, drop any open thread and any hovered-shape handle reveal
+  // (and cancel a pending linger-hide), so flipping back doesn't pop a stale
+  // popover open or flash handles on a shape the cursor is no longer over. The
+  // early `return null` below renders nothing while hidden; this only resets the
+  // transient view state so a re-show begins from a quiet baseline. Runs on the
+  // false→… transition (and harmlessly while staying hidden); when visible it's
+  // inert, so normal behavior is untouched.
+  useEffect(() => {
+    if (!visible) {
+      setOpenPinId(null);
+      setActiveShapeId(null);
+      if (hideHandlesTimer.current !== null) {
+        clearTimeout(hideHandlesTimer.current);
+        hideHandlesTimer.current = null;
+      }
+    }
+  }, [visible]);
 
   // Re-read the authoritative pin set (with threads) from WASM whenever the
   // document version changes (a pin/comment was added/removed locally or by a
@@ -872,6 +900,16 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
       // fire to cancel it — the handles correctly fade after the linger delay.
       scheduleHideHandles(pin.id);
     };
+
+  // Personal show/hide of ALL annotations (issue #792): when hidden, render
+  // NOTHING — no pins/lines/boxes, no resize/endpoint handles, no open thread
+  // popover — so the underlying data view is unobstructed. This early return is
+  // placed AFTER every hook above (the rules of hooks: hooks must run on every
+  // render, hidden or not, so the RAF/read/cleanup effects keep their stable
+  // order) and the just-cleared transient state means a flip back to visible
+  // re-renders the (untouched) annotation set from a clean baseline. Peer cursors
+  // are a separate overlay and are unaffected.
+  if (!visible) return null;
 
   return (
     <div
