@@ -97,7 +97,11 @@ function makeCanvas() {
   return { canvas, capturedPointers, forwardedDowns };
 }
 
-const MY_ID = 7;
+// The annotation-author identity is now a stable string (issue #777), not the
+// per-connection numeric client id. Authoring helpers use `String(MY_ID)`, so a
+// string literal here flows through every `author`/ownership comparison
+// unchanged while matching the overlay's `myId: string` prop type.
+const MY_ID = "7";
 
 function ownPin(overrides: Partial<Annotation> = {}): Annotation {
   return {
@@ -113,7 +117,7 @@ function ownPin(overrides: Partial<Annotation> = {}): Annotation {
 
 function renderOverlay(opts: {
   pins: Annotation[];
-  myId?: number;
+  myId?: string;
   pick?: (x: number, y: number) => number[];
 }) {
   const { scene, applied } = makeScene(opts.pins, opts.pick);

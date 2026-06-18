@@ -25,8 +25,12 @@ interface Props {
   annotationDatasetId: string | null;
   /** Shape a shift-drag draws: a point pin, a line, or a box. */
   annotationKind: "point" | "line" | "box";
-  /** Local client id, recorded as the pin's author. */
-  myId: number;
+  /** Stable, browser-persisted annotation-author identity (issue #777), recorded
+   * as a dropped pin's `author`. Sourced from `annotationAuthorId()`, not the
+   * per-connection `bridge.myId`, so pins this browser drops stay yours across
+   * leaving + rejoining a workspace. (Prop name kept as `myId`; its value/type is
+   * now the string identity.) */
+  myId: string;
   /** Send a wire command (already wrapped by the bridge). */
   sendCommand: (json: string) => void;
   /** Notify the parent that the document changed locally (a pin was dropped)

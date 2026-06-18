@@ -54,9 +54,13 @@ interface Props {
   canvas: HTMLCanvasElement;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
-  /** Local client id; the author's own pins are tinted distinctly, and only the
-   * author may move/edit/delete their own pin (anyone may add a comment). */
-  myId: number;
+  /** Stable, browser-persisted annotation-author identity (issue #777): the
+   * author's own pins are tinted distinctly, and only the author may
+   * move/edit/delete their own pin (anyone may add a comment). Sourced from
+   * `annotationAuthorId()`, not the per-connection `bridge.myId`, so ownership
+   * survives leaving + rejoining a workspace. (Prop name kept as `myId`; its
+   * value/type is now the string identity.) */
+  myId: string;
   /** Send a wire command (already wrapped by the bridge). Required for the thread
    * (add/edit/remove comment, delete pin) and a Shift+drag move; mirrors the 2D
    * overlay's apply-locally-and-send seam. App.tsx already passes it. */

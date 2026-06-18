@@ -66,8 +66,13 @@ interface Props {
   canvas: HTMLCanvasElement;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
-  /** Local client id; used to gate the remove affordance to the author. */
-  myId: number;
+  /** Stable, browser-persisted annotation-author identity (issue #777): the pin
+   * `author` to match against for the mine/ownership checks (move/delete + own-
+   * pin controls). Sourced from `annotationAuthorId()`, not the per-connection
+   * `bridge.myId`, so a pin authored by this browser stays mine across rejoin.
+   * (Prop name kept as `myId` for continuity; its value/type is now the string
+   * identity.) */
+  myId: string;
   /** Send a wire command (already wrapped by the bridge). */
   sendCommand: (json: string) => void;
   /** Notify the parent that the document changed locally (a pin/comment was
@@ -169,7 +174,7 @@ interface HandleDrag {
 /** Whether `pin` is an own box eligible for resize handles: kind "box", has a
  * second vertex, and authored by me. A point/line, or any non-author shape,
  * gets no handles. */
-function isOwnBox(pin: Annotation, myId: number): boolean {
+function isOwnBox(pin: Annotation, myId: string): boolean {
   return pin.kind === "box" && (pin.end ?? null) !== null && pin.author === String(myId);
 }
 

@@ -15,6 +15,7 @@ import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
+import { annotationAuthorId } from "./annotationIdentity.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
@@ -60,6 +61,16 @@ function App({
   // accessed unauthenticated. We forward the email to saved-view UI for
   // the "Mine only" filter.
   const authSession = useAuthSession();
+
+  // Stable, browser-persisted annotation author identity (issue #777). This is
+  // the identity used ONLY for the annotation `author:` field and the
+  // mine/ownership checks in the overlays/viewers — NOT the per-connection
+  // `bridge.myId`, which stays the presence/cursor/follow identity. Because it's
+  // persisted in localStorage it survives leaving + rejoining a workspace (and
+  // tab close/reopen), so a returning user keeps edit/move/delete on the pins
+  // and comments they authored. Resolved once per mount (the value is stable for
+  // the session) so the same string flows to every annotation consumer.
+  const annotationAuthor = useMemo(() => annotationAuthorId(), []);
 
   // Foundation hooks
   const scene = useWasmScene();
@@ -633,7 +644,7 @@ function App({
                 onLoopChange={render.setActiveLoop}
                 annotationDatasetId={selectedDatasetId}
                 annotationKind={annotationKind}
-                myId={bridge.myId}
+                myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
               />
@@ -644,7 +655,7 @@ function App({
                 wasmSceneRef={scene.wasmSceneRef}
                 canvas={render.canvasRef.current}
                 version={remoteDocumentVersion}
-                myId={bridge.myId}
+                myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
@@ -695,7 +706,7 @@ function App({
                 onCameraModeChange={handleCameraModeChange}
                 annotationDatasetId={selectedDatasetId}
                 annotationKind={annotationKind}
-                myId={bridge.myId}
+                myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
               />
@@ -706,7 +717,7 @@ function App({
                 wasmSceneRef={scene.wasmSceneRef}
                 canvas={render.canvasRef.current}
                 version={remoteDocumentVersion}
-                myId={bridge.myId}
+                myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
               />

@@ -42,8 +42,13 @@ interface Props {
   pin: Annotation;
   /** The dataset the pin belongs to (commands are scoped per dataset). */
   datasetId: string;
-  /** Local client id; gates the author-only affordances (edit/remove/delete). */
-  myId: number;
+  /** Stable, browser-persisted annotation-author identity (issue #777): gates the
+   * author-only affordances (edit/remove a comment, delete the pin) and is
+   * recorded as a new comment's `author`. Sourced from `annotationAuthorId()` via
+   * the host overlay, not the per-connection `bridge.myId`, so authorship
+   * survives leaving + rejoining a workspace. (Prop name kept as `myId`; its
+   * value/type is now the string identity.) */
+  myId: string;
   /** Live scene handle for the apply-locally half of the seam. */
   wasmSceneRef: RefObject<WasmScene | null>;
   /** Send a wire command (already wrapped by the bridge). */
