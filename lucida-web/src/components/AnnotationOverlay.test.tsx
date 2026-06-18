@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay, type Annotation } from "./AnnotationOverlay.tsx";
@@ -775,8 +775,28 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   const ALL_HANDLES = ["nw", "ne", "se", "sw", "n", "e", "s", "w"] as const;
 
-  it("an own box renders all eight resize handles (corners + edges)", () => {
+  // Mirror the component's HANDLE_HOVER_LINGER_MS (the hysteresis grace period).
+  // Kept in step here so the hide/keep regression tests advance fake timers past
+  // the same window the overlay uses; it's an internal constant, not exported, so
+  // we don't widen the component's surface just for a test.
+  const LINGER_MS = 300;
+
+  /** Reveal an own box's resize handles by hovering its shape (issue #789:
+   * handles are no longer always-on — they appear on `pointerEnter` over the
+   * `annot-shape-<id>` element). The drag tests below call this first, then query
+   * and drag a now-visible handle, exactly as a user would (hover, then grab). */
+  function hoverBox(id = "box-1") {
+    fireEvent.pointerEnter(screen.getByTestId(`annot-shape-${id}`));
+  }
+
+  it("an own box reveals all eight resize handles (corners + edges) on hover", () => {
     renderOverlay({ pins: [boxPin()] });
+    // No always-on handles: before any hover none of the eight exist.
+    for (const h of ALL_HANDLES) {
+      expect(screen.queryByTestId(`annot-resize-box-1-${h}`)).toBeNull();
+    }
+    // Hovering the box's shape reveals all eight.
+    hoverBox();
     for (const h of ALL_HANDLES) {
       expect(screen.getByTestId(`annot-resize-box-1-${h}`)).toBeTruthy();
     }
@@ -808,6 +828,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   it("dragging the SE corner emits one reshape: end changes, position unchanged", () => {
     const { sent, getChanged } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
 
     // Press on the SE handle, travel past the 4px slop, release at client
@@ -833,6 +854,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   it("dragging the NW corner emits a reshape with position changed, end held", () => {
     const { sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const nw = screen.getByTestId("annot-resize-box-1-nw");
 
     // Release at client (350,250) → world (-50,-50). NW moves the anchor
@@ -851,6 +873,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     // Guards the wire shape the contract names: a reshape is identified by a
     // numeric `end` array alongside a numeric `position` array.
     const { sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
     fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
     fireEvent.pointerMove(se, { pointerId: 1, clientX: 450, clientY: 450 });
@@ -867,6 +890,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   it("dragging the E edge moves only the end.x coordinate (one coordinate)", () => {
     const { sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const e = screen.getByTestId("annot-resize-box-1-e");
 
     // Release at client (500,500) → world (100,200). The E edge owns end.x only,
@@ -883,6 +907,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   it("dragging the N edge moves only the position.y coordinate", () => {
     const { sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const n = screen.getByTestId("annot-resize-box-1-n");
 
     // Release at client (450,350) → world (50,50). The N edge owns position.y
@@ -899,6 +924,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   it("a handle press without travel (within slop) emits no reshape", () => {
     const { sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
     // Stay within the 4px click slop → not a drag → no reshape.
     fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 300, clientY: 300 });
@@ -909,6 +935,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
 
   it("a reshape is applied locally AND broadcast (goes through applyDocumentCommand)", () => {
     const { applied, sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
     fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
     fireEvent.pointerMove(se, { pointerId: 1, clientX: 400, clientY: 400 });
@@ -925,6 +952,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     // press-time base, so the SE drag's final end is the release point and the
     // anchor never drifts regardless of the intermediate path.
     const { sent } = renderOverlay({ pins: [boxPin()] });
+    hoverBox();
     const se = screen.getByTestId("annot-resize-box-1-se");
     fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 260, clientY: 380 });
     fireEvent.pointerMove(se, { pointerId: 1, clientX: 700, clientY: 590 });
@@ -936,13 +964,14 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     expect(move.end).toEqual([100, 100]); // end is the final release point
   });
 
-  it("regression: a plain click on an own box's dot still opens its thread (handles present)", () => {
+  it("regression: a plain click on an own box's dot still opens its thread (handles revealed on hover)", () => {
     // The anchor dot remains the thread target even though resize handles now
     // share the box. A pure click on the dot toggles the thread open.
     renderOverlay({
       pins: [boxPin({ comments: [{ id: "c1", author: String(MY_ID), text: "in the box" }] })],
     });
-    // Handles exist for this own box…
+    // Handles can be revealed for this own box by hovering its shape…
+    hoverBox();
     expect(screen.getByTestId("annot-resize-box-1-nw")).toBeTruthy();
     // …and a plain click on the dot still opens the thread.
     const dot = screen.getByTestId("annot-pin-box-1");
@@ -982,6 +1011,82 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     expect(moves).toHaveLength(1);
     expect(moves[0].position).toEqual([100, 100]); // whole-box move to release
     expect(moves[0].end).toBeUndefined(); // rigid move carries NO end (not a reshape)
+  });
+
+  it("regression: a resize that releases OFF the box hides the handles after the linger (#789)", () => {
+    // The reviewer's bug: a captured handle drag fires no enter/leave on the box,
+    // so a NORMAL resize that drags outward and releases OUTSIDE the box left the
+    // handles stuck visible forever (defeating the anti-clutter goal). The fix
+    // re-arms the hysteresis hide on handle-up, so an off-box release schedules
+    // the handles to disappear. Fake only the linger timers so the rest of the
+    // overlay (RAF, etc.) is untouched.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      renderOverlay({ pins: [boxPin()] });
+      // Hover to reveal the handles (no longer always-on), then confirm one is up.
+      hoverBox();
+      const se = screen.getByTestId("annot-resize-box-1-se");
+      expect(se).toBeTruthy();
+
+      // Grab the SE corner and drag it OUTWARD past the box edge, taking longer
+      // than the hysteresis window mid-drag, then RELEASE well OUTSIDE the box.
+      // The box spans world (10,20)-(60,80) → screen (410,320)-(460,380); a
+      // release at client (700,590) → world (300,290) is far off the box.
+      fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 460, clientY: 380 });
+      fireEvent.pointerMove(se, { pointerId: 1, clientX: 600, clientY: 500 });
+      // Mid-drag, past the linger: the in-flight guard must keep the handle alive.
+      act(() => {
+        vi.advanceTimersByTime(400);
+      });
+      expect(screen.getByTestId("annot-resize-box-1-se")).toBeTruthy();
+      // Release OFF the box (a captured pointer fires no leave/enter on the box).
+      fireEvent.pointerUp(se, { pointerId: 1, clientX: 700, clientY: 590 });
+
+      // Immediately after release the handles still linger (hysteresis re-armed)…
+      expect(screen.getByTestId("annot-resize-box-1-se")).toBeTruthy();
+      // …and once the linger window elapses they are GONE — not stuck visible.
+      // (HANDLE_HOVER_LINGER_MS is 300; advance comfortably past it.)
+      act(() => {
+        vi.advanceTimersByTime(LINGER_MS + 1);
+      });
+      for (const h of ALL_HANDLES) {
+        expect(screen.queryByTestId(`annot-resize-box-1-${h}`)).toBeNull();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("regression: a resize that releases back ON the box keeps the handles revealed (#789)", () => {
+    // The complement the fix must not break: re-arming the hide on handle-up must
+    // not hide the handles out from under a cursor that's still over the box. On a
+    // real on-box release the implicit capture-release fires pointerenter on the
+    // box/handle, cancelling the pending hide — simulated here by a pointerEnter
+    // after release. The handles must survive past the linger window.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      renderOverlay({ pins: [boxPin()] });
+      hoverBox();
+      const se = screen.getByTestId("annot-resize-box-1-se");
+
+      // A small resize that stays near the box and releases ON it.
+      fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 460, clientY: 380 });
+      fireEvent.pointerMove(se, { pointerId: 1, clientX: 470, clientY: 385 });
+      fireEvent.pointerUp(se, { pointerId: 1, clientX: 470, clientY: 385 });
+      // The browser's capture-release fires enter on the element under the cursor;
+      // mirror it so revealHandles cancels the just-armed hide.
+      fireEvent.pointerEnter(screen.getByTestId("annot-resize-box-1-se"));
+
+      // Past the linger the handles are STILL present (the on-box release kept them).
+      act(() => {
+        vi.advanceTimersByTime(LINGER_MS + 1);
+      });
+      for (const h of ALL_HANDLES) {
+        expect(screen.getByTestId(`annot-resize-box-1-${h}`)).toBeTruthy();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

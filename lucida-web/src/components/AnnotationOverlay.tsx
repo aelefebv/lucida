@@ -116,6 +116,12 @@ const HANDLE_SIZE = 10;
  * math always uses the cursor's world point, never this offset. */
 const HANDLE_OUTSET = 9;
 
+/** Grace period (ms) the resize handles linger after the pointer leaves the box
+ * (and isn't over a handle), so they don't flicker off when the cursor drifts
+ * just past an edge or crosses the small gap between the box and a handle.
+ * Re-entering the box or a handle inside this window cancels the pending hide. */
+const HANDLE_HOVER_LINGER_MS = 300;
+
 /** The directional resize cursor for each handle, so the affordance reads as
  * "drag to resize from here" (a corner resizes both axes; an edge, one). Keyed
  * by the handle's vertex-role name, mapped to the screen direction it grows. */
@@ -241,6 +247,56 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   // reproject each handle from world space every frame — exactly like the dots.
   const handleRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
+  // Which own box is currently "active" (pointer over its shape or a handle), so
+  // its eight resize handles are revealed — null when none is hovered (issue
+  // #789). Handles are no longer always-on: this state, not the pin set, gates
+  // whether a box's `annot-resize-<id>-<h>` nodes exist in the DOM at all. At
+  // most one box is active at a time (you hover one shape), so a single id (not a
+  // set) is enough and keeps the reveal/hide reasoning simple.
+  const [activeBoxId, setActiveBoxId] = useState<string | null>(null);
+  // A pending "hide the handles" timer (hysteresis). On pointer-leave we don't
+  // hide immediately; we arm this timer so the handles linger briefly. Moving
+  // back onto the box or a handle clears it (the hide is cancelled). A ref so
+  // arming/cancelling never re-renders, and so the cleanup effect can clear a
+  // still-pending timer on unmount.
+  const hideHandlesTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reveal a box's handles now: cancel any pending hide and mark it active. Used
+  // by both the box shape's and each handle's pointer-enter, so crossing the gap
+  // from the shape to a handle keeps the set alive.
+  const revealHandles = (pinId: string) => {
+    if (hideHandlesTimer.current !== null) {
+      clearTimeout(hideHandlesTimer.current);
+      hideHandlesTimer.current = null;
+    }
+    setActiveBoxId((cur) => (cur === pinId ? cur : pinId));
+  };
+
+  // Begin hiding a box's handles after the linger grace period — but only if it's
+  // still the active box (a fast move onto another box already switched it). The
+  // delay is the hysteresis: a cursor that drifts just past an edge, or hops the
+  // small gap to a handle, re-enters and cancels this before it fires.
+  const scheduleHideHandles = (pinId: string) => {
+    if (hideHandlesTimer.current !== null) clearTimeout(hideHandlesTimer.current);
+    hideHandlesTimer.current = setTimeout(() => {
+      hideHandlesTimer.current = null;
+      // Never hide out from under an in-flight resize of this box: a captured
+      // handle drag fires leave events as the cursor travels, but the handle must
+      // survive until the gesture ends (release re-evaluates the hover normally).
+      if (handleDragRef.current?.pinId === pinId) return;
+      setActiveBoxId((cur) => (cur === pinId ? null : cur));
+    }, HANDLE_HOVER_LINGER_MS);
+  };
+
+  // Clear any pending hide timer on unmount so a fired callback can't touch a
+  // torn-down component.
+  useEffect(
+    () => () => {
+      if (hideHandlesTimer.current !== null) clearTimeout(hideHandlesTimer.current);
+    },
+    [],
+  );
+
   // Re-read the authoritative pin set (with threads) from WASM whenever the
   // document version changes (a pin/comment was added/removed locally or by a
   // peer) or the scoped dataset changes. Reading happens in an effect (not
@@ -261,6 +317,17 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
   useEffect(() => {
     setOpenPinId(null);
   }, [datasetId]);
+
+  // If the active (hovered) box disappears — removed, or its dataset changed —
+  // drop the hover so its handles can't linger as orphans pointing at a pin that
+  // no longer exists. Mirrors the open-thread cleanup above. The pointer-leave
+  // path handles the normal case; this only covers a box vanishing out from
+  // under the cursor.
+  useEffect(() => {
+    if (activeBoxId !== null && !annotations.some((p) => p.id === activeBoxId)) {
+      setActiveBoxId(null);
+    }
+  }, [annotations, activeBoxId]);
 
   // A pending delete confirm and an in-flight edit live INSIDE <ThreadPopover>,
   // which the host remounts (keyed by pin id) whenever the open pin changes — so
@@ -597,6 +664,10 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
       // A handle press must not also reach the anchor-dot gesture or the canvas
       // beneath: it owns this pointer outright.
       e.stopPropagation();
+      // Pin the box active for the whole drag and cancel any pending hide, so a
+      // resize that drags the cursor far off the box (firing leave events) can
+      // never unmount the handle the gesture is captured on mid-drag.
+      revealHandles(pin.id);
       handleDragRef.current = {
         pinId: pin.id,
         pointerId: e.pointerId,
@@ -641,6 +712,18 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
       } catch {
         // ignore — capture may not have been taken
       }
+      // Re-arm the hysteresis hide now the drag is over. While the handle was
+      // captured, every leave that crossed the box fired a hide that the
+      // in-flight guard (scheduleHideHandles) correctly no-op'd — so at release
+      // NO hide is pending and `activeBoxId` is still set. Without this the
+      // handles would linger forever after a drag that releases OFF the box (no
+      // leave/enter fires on a captured pointer to re-evaluate the hover). Arming
+      // it here makes an off-box release hide the handles after the linger delay;
+      // a release where the pointer is still over the box or a handle is harmless
+      // because the implicit capture-release fires `pointerenter` on that element,
+      // and revealHandles cancels this pending hide before it can run. Done before
+      // the slop check so even a tiny, no-reshape drag can't strand the handles.
+      scheduleHideHandles(pin.id);
       // A press that never crossed the slop is a no-op: no reshape (and there's
       // no thread/click affordance on a handle to fall through to).
       if (!drag.moved) return;
@@ -676,7 +759,12 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
         // ignore
       }
       // Cancelled: never reshape; the RAF tick snaps the box + handles back to
-      // the stored geometry next frame.
+      // the stored geometry next frame. Re-arm the hysteresis hide for the same
+      // reason as on a normal release (above): the in-flight guard swallowed
+      // every hide during the captured drag, so without this the handles would
+      // stay stuck visible. A cancel means the pointer was lost, so no enter will
+      // fire to cancel it — the handles correctly fade after the linger delay.
+      scheduleHideHandles(pin.id);
     };
 
   return (
@@ -712,9 +800,14 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
           // elsewhere".
           const shapeOpacity = isOffContext(pin, viewContext) ? 0.5 : 1;
           if (isClosedShape(pin)) {
+            // Only an OWN box is hover-revealable (handles are author-only); a
+            // peer's box stays inert. The shape is the hover target that toggles
+            // its handles' visibility (issue #789).
+            const hoverable = isOwnBox(pin, myId);
             return (
               <polygon
                 key={pin.id}
+                data-testid={`annot-shape-${pin.id}`}
                 ref={(el) => {
                   if (el) shapeRefs.current.set(pin.id, el);
                   else shapeRefs.current.delete(pin.id);
@@ -726,12 +819,33 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
                 strokeWidth={2.5}
                 strokeLinejoin="round"
                 opacity={shapeOpacity}
+                // Reveal this box's handles on enter; arm the linger-then-hide on
+                // leave (hysteresis). Only own boxes carry these — a peer box has
+                // no handles to reveal.
+                onPointerEnter={hoverable ? () => revealHandles(pin.id) : undefined}
+                onPointerLeave={hoverable ? () => scheduleHideHandles(pin.id) : undefined}
+                style={
+                  hoverable
+                    ? {
+                        // Limit hit-testing to the painted STROKE, not the filled
+                        // interior: hovering the outline reveals the handles, but
+                        // a press inside the box still falls through to the canvas
+                        // for pan/zoom. We only ever track enter/leave here — no
+                        // pointerdown/move handler — so the shape never starts a
+                        // gesture or steals the canvas's drag.
+                        pointerEvents: "stroke",
+                        // The outline reads as the resize affordance's edge.
+                        cursor: "pointer",
+                      }
+                    : undefined
+                }
               />
             );
           }
           return (
             <line
               key={pin.id}
+              data-testid={`annot-shape-${pin.id}`}
               ref={(el) => {
                 if (el) shapeRefs.current.set(pin.id, el);
                 else shapeRefs.current.delete(pin.id);
@@ -755,9 +869,21 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
           needs pointer capture) repositioned every frame by the RAF tick off the
           live (or stored) corners, so it rides the box across pan/zoom and
           tracks the cursor mid-resize. Dragging one emits ONE reshape
-          move_annotation carrying both opposite corners (see the handlers). */}
+          move_annotation carrying both opposite corners (see the handlers).
+
+          NO LONGER ALWAYS-ON (issue #789): a box's handles render only while it
+          is the active (hovered) box AND its thread is closed — so an idle box
+          has zero `annot-resize-<id>-<h>` nodes in the DOM (no clutter), and an
+          open thread is never overlapped by resize handles. The hover is revealed
+          by the box shape's pointer-enter and lingers briefly after leave
+          (hysteresis); see revealHandles / scheduleHideHandles. */}
       {annotations.map((pin) => {
         if (!isOwnBox(pin, myId)) return null;
+        // Hover-gated reveal: only the actively-hovered box shows its handles…
+        if (activeBoxId !== pin.id) return null;
+        // …and never while this box's thread is open, so nothing resize-related
+        // can draw over the open thread window.
+        if (openPinId === pin.id) return null;
         return BOX_HANDLES.map((h) => (
           <div
             key={`${pin.id}:${h}`}
@@ -771,6 +897,13 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
             onPointerMove={onHandlePointerMove(pin, h)}
             onPointerUp={onHandlePointerUp(pin, h)}
             onPointerCancel={onHandlePointerCancel(pin, h)}
+            // A handle is part of the box's active zone: entering one cancels a
+            // pending hide (so hopping the small gap from the box's edge to a
+            // handle never makes the set vanish), and leaving one arms the linger
+            // again — together with the shape's enter/leave this keeps the whole
+            // box+handles cluster as one hover region with hysteresis.
+            onPointerEnter={() => revealHandles(pin.id)}
+            onPointerLeave={() => scheduleHideHandles(pin.id)}
             style={{
               position: "absolute",
               top: 0,
