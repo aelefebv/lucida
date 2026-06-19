@@ -201,6 +201,24 @@ pub enum ViewportCommand {
         dx: f64,
         dy: f64,
     },
+    /// Recenter the 3D arcball camera on an annotation's voxel point so the pin
+    /// comes into view (issue #526, "jump to a mention" in 3D). The 2D
+    /// `SetCenter` only moves the slice camera, so it is a no-op in arcball/fly
+    /// mode; this variant moves the camera the 3D view actually uses. The voxel
+    /// point `(x, y, z)` (in-plane voxel + voxel depth, the same frame a pin's
+    /// `position`/`z` are stored in) is lifted to arcball-WORLD space via the
+    /// dataset's rendering transform — the exact lift `project_annotation` uses
+    /// to draw the marker — and assigned to the arcball `target`, so projecting
+    /// that same world point lands at the viewport center. A purely ephemeral
+    /// camera op (like the other 3D variants): NOT a document mutation, never
+    /// persisted or broadcast as a doc command.
+    #[serde(rename = "arcball_center_on_voxel")]
+    CenterOnVoxel3D {
+        dataset_id: String,
+        x: f64,
+        y: f64,
+        z: f64,
+    },
     // Fly camera
     FlyTick {
         dt: f64,
@@ -518,6 +536,28 @@ impl Scene {
             ViewportCommand::Pan3D { dx, dy } => {
                 if let Camera::Arcball(ref mut v) = self.camera {
                     v.pan(dx, dy);
+                }
+                self.epochs.view += 1;
+            }
+            ViewportCommand::CenterOnVoxel3D {
+                dataset_id,
+                x,
+                y,
+                z,
+            } => {
+                // Lift the pin's voxel point to arcball-WORLD space first (an
+                // immutable borrow that ends before we touch the camera), then
+                // make that world point the arcball target. Setting `target`
+                // means the look-at axis passes through the point, so it
+                // projects to the viewport center — the 3D analogue of the 2D
+                // `SetCenter`. A missing/unanchorable dataset yields no world
+                // point and is a safe no-op (mirrors `project_annotation`),
+                // matching how the other camera ops do nothing off their mode.
+                if let Some(world) =
+                    self.annotation_world_point_for(&DatasetId(dataset_id), [x, y, z])
+                    && let Camera::Arcball(ref mut v) = self.camera
+                {
+                    v.target = world;
                 }
                 self.epochs.view += 1;
             }
@@ -1261,6 +1301,43 @@ mod tests {
                 assert!(!visible);
             }
             _ => panic!("expected SetChannelVisible"),
+        }
+    }
+
+    #[test]
+    fn center_on_voxel_3d_round_trips_and_parses_as_viewport_command() {
+        // Guards the TS<->Rust wire for "jump to a mention" in 3D: the overlay
+        // sends exactly this object through `apply_command(json)`, so it MUST
+        // deserialize into the viewport variant (a presence-only camera op), not
+        // a DocumentCommand. The field names match what `focusPin` emits.
+        let cmd = ViewportCommand::CenterOnVoxel3D {
+            dataset_id: "ds1".into(),
+            x: 12.0,
+            y: 34.0,
+            z: 5.0,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"arcball_center_on_voxel\""));
+
+        // The literal the 3D overlay's focusPin sends.
+        let wire =
+            r#"{"type":"arcball_center_on_voxel","dataset_id":"ds1","x":12.0,"y":34.0,"z":5.0}"#;
+        assert!(
+            serde_json::from_str::<DocumentCommand>(wire).is_err(),
+            "must NOT parse as a DocumentCommand (it is a viewport-only op)",
+        );
+        let parsed: ViewportCommand = serde_json::from_str(wire).unwrap();
+        match parsed {
+            ViewportCommand::CenterOnVoxel3D {
+                dataset_id,
+                x,
+                y,
+                z,
+            } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!((x, y, z), (12.0, 34.0, 5.0));
+            }
+            _ => panic!("expected CenterOnVoxel3D"),
         }
     }
 

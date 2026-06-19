@@ -2997,6 +2997,7 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::Pan { .. } => "view pan",
         ViewportCommand::ZoomBy { .. } => "view zoom",
         ViewportCommand::SetCenter { .. } => "view center",
+        ViewportCommand::CenterOnVoxel3D { .. } => "view center-3d",
         ViewportCommand::SetZoom { .. } => "view set-zoom",
         ViewportCommand::Rotate3D { .. } => "camera rotate",
         ViewportCommand::Zoom3D { .. } => "camera zoom",
