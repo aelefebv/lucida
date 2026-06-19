@@ -38,6 +38,7 @@ import {
 } from "./annotationGeometry.ts";
 import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
+import type { MentionCandidate } from "./annotationMentions.ts";
 
 /** One comment in a pin's thread (as returned nested in `annotations()`). */
 export interface Comment {
@@ -113,6 +114,13 @@ interface Props {
    * is not a command, never touches the document/wire, and never affects peers
    * (peer cursors are not annotations and stay visible). */
   visible?: boolean;
+  /** People who can be @-mentioned in a comment (issue #526), threaded straight
+   * through to the shared {@link ThreadPopover}'s composer. In production App
+   * derives these from a union of the workspace member roster and the document's
+   * participants (distinct `scene.annotations()` authors plus the current user),
+   * each carrying a stable @handle; a test injects them. Optional + defaulted to
+   * `[]`, so omitting it just means no mention picker. */
+  mentionCandidates?: MentionCandidate[];
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click, not a
@@ -278,7 +286,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true }: Props) {
+export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [] }: Props) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -1370,6 +1378,7 @@ export function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, vi
                 sendCommand={sendCommand}
                 onDocumentChanged={onDocumentChanged}
                 onClose={() => setOpenPinId(null)}
+                mentionCandidates={mentionCandidates}
               />
             )}
           </div>

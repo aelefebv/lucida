@@ -16,6 +16,7 @@ import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSide
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
+import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
@@ -32,8 +33,8 @@ import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import type { SavedView } from "./savedView/types.ts";
-import { getWorkspaceSavedView, getWorkspaceViewerProfile } from "./workspaceApi.ts";
-import type { WorkspaceRole } from "./workspaceApi.ts";
+import { getWorkspaceSavedView, getWorkspaceViewerProfile, getWorkspaceSharing } from "./workspaceApi.ts";
+import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import "./App.css";
 
 interface AppProps {
@@ -92,6 +93,13 @@ function App({
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
+  // Workspace member roster for @-mention candidates (issue #526). Best-effort:
+  // `getWorkspaceSharing` is owner-only server-side (403 for editors/viewers) and
+  // unavailable offline, so a failure leaves this `[]` and the picker falls back
+  // to the document's participants. Fetched once per workspace (the roster is
+  // small and changes rarely); members supply REAL display-name handles so you
+  // can @-mention a collaborator before they've touched the document.
+  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
   const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
     source: workspaceName,
@@ -271,6 +279,59 @@ function App({
     bridge.emitDatasetPresence();
     savedViewSync.notifyChange();
   }, [bridge, savedViewSync]);
+
+  // Fetch the workspace member roster for @-mention handles (issue #526) once per
+  // workspace. Best-effort: `getWorkspaceSharing` is owner-only and unavailable
+  // offline, so any failure just leaves `workspaceMembers` empty and the picker
+  // falls back to document participants — the feature degrades, never throws.
+  useEffect(() => {
+    let cancelled = false;
+    getWorkspaceSharing(workspaceId)
+      .then((sharing) => {
+        if (!cancelled) setWorkspaceMembers(sharing.members);
+      })
+      .catch(() => {
+        // Forbidden (non-owner), offline, or any error: no roster, just
+        // participants. Reset so a previous workspace's roster never leaks in.
+        if (!cancelled) setWorkspaceMembers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // @-mention candidates for annotation comments (issue #526), threaded to both
+  // overlays' shared ThreadPopover. SOURCE = a graceful UNION of the workspace
+  // members (real display-name handles, when the roster fetch succeeded) and the
+  // document's PARTICIPANTS — the distinct authors already in
+  // `scene.annotations(selectedDataset)` (pin AND comment authors) plus the
+  // current user. Re-derived whenever the document changes (remoteDocumentVersion)
+  // or the scoped dataset switches, so the picker tracks who's in the conversation
+  // as pins/comments arrive. Reading the scene in a memo is the same JSON read the
+  // overlays do; a parse failure degrades to participants + you rather than
+  // throwing. Each candidate carries a STABLE, viewer-independent @handle, so a
+  // mention means the same person to everyone (see annotationParticipants.ts).
+  const mentionCandidates = useMemo(() => {
+    const ws = scene.wasmSceneRef.current;
+    let annotations: { author?: string | null; comments?: { author?: string | null }[] | null }[] = [];
+    if (ws && selectedDatasetId) {
+      try {
+        const parsed = JSON.parse(ws.annotations(selectedDatasetId));
+        if (Array.isArray(parsed)) annotations = parsed;
+      } catch {
+        // Malformed/empty snapshot: fall back to participants + you below so the
+        // composer still lets you mention yourself.
+        annotations = [];
+      }
+    }
+    return deriveMentionCandidates({
+      annotations,
+      currentUserId: annotationAuthor,
+      members: workspaceMembers,
+      currentUserEmail: authSession.principal.email,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on doc/dataset change; the scene is a stable ref.
+  }, [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion, annotationAuthor, workspaceMembers, authSession.principal.email]);
 
   // Populate callback refs — runs during render, before effects fire.
   // See the comment block above (savedViewHooksRef) for the rationale.
@@ -676,6 +737,7 @@ function App({
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
                 visible={annotationsVisible}
+                mentionCandidates={mentionCandidates}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
@@ -739,6 +801,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 visible={annotationsVisible}
+                mentionCandidates={mentionCandidates}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
