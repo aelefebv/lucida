@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..errors import TryoutError
+from . import SurfaceResult
+from ._subproc import run_group, shquote
 
 
 # Per-command wall-clock ceiling. The viewer/state commands open a WS and wait
@@ -76,12 +78,17 @@ class CliCommandResult:
 
 
 @dataclass
-class CliSurfaceResult:
-    ran: bool
-    ok: bool
-    log_dir: str
+class CliSurfaceResult(SurfaceResult):
+    """The CLI surface's result. Subclasses the shared :class:`SurfaceResult` so
+    the registry/report can read ``ran``/``ok``/``passed``/``total``/``error``
+    uniformly; :meth:`payload` preserves the exact keys this surface has always
+    emitted (``ran``, ``ok``, ``log_dir``, ``passed``, ``total``, ``commands``).
+    """
+
+    log_dir: str = ""
     commands: list[CliCommandResult] = field(default_factory=list)
-    error: dict[str, Any] | None = None
+
+    name: str = "cli"
 
     @property
     def passed(self) -> int:
@@ -91,7 +98,7 @@ class CliSurfaceResult:
     def total(self) -> int:
         return len(self.commands)
 
-    def to_dict(self) -> dict[str, Any]:
+    def payload(self) -> dict[str, Any]:
         record: dict[str, Any] = {
             "ran": self.ran,
             "ok": self.ok,
@@ -248,8 +255,7 @@ def run_cli_surface(
     log_dir = out_dir / "cli"
     # Start clean so reusing --out across runs can't mix stale per-command logs
     # (different fixtures/plans renumber commands); drive.json stays authoritative.
-    import shutil as _shutil
-    _shutil.rmtree(log_dir, ignore_errors=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -349,7 +355,10 @@ def _run_one(
     started = time.monotonic()
     timed_out = False
     try:
-        completed = subprocess.run(
+        # Spawn via the shared run_group so the command (and anything it forks —
+        # e.g. a `cargo run` build child) gets its own process group and is
+        # group-killed on timeout/signal: no orphans, same reap as every surface.
+        completed = run_group(
             argv,
             cwd=str(cwd),
             env=env,
@@ -426,7 +435,7 @@ def _write_command_log(
     lines = [
         "# lucida CLI tryout capture",
         "# " + json.dumps(header),
-        "$ " + " ".join(_shquote(part) for part in argv),
+        "$ " + " ".join(shquote(part) for part in argv),
         f"# exit_code: {exit_code}" + ("  (timed out)" if timed_out else ""),
         f"# duration_s: {duration_s}",
         "",
@@ -444,10 +453,34 @@ def _write_command_log(
         pass
 
 
-def _shquote(value: str) -> str:
-    """Minimal shell-quoting for the human ``$ ...`` line (display only)."""
-    if value and all(
-        char.isalnum() or char in "@%+=:,./-_" for char in value
-    ):
-        return value
-    return "'" + value.replace("'", "'\\''") + "'"
+# --------------------------------------------------------------------------- #
+# Registry adapter: how `drive` runs this surface generically.
+# --------------------------------------------------------------------------- #
+
+def _run(ctx) -> CliSurfaceResult:
+    """Run the CLI surface from a :class:`tryout.drive.SurfaceContext`.
+
+    The drive loop calls this without knowing the CLI surface's specific inputs;
+    we pull what we need off the shared context. The CLI uses the CLI-scoped
+    throwaway config (shared with the web surface).
+    """
+    return run_cli_surface(
+        base_url=ctx.base_url,
+        workspace_id=ctx.workspace_id,
+        dataset_id=ctx.dataset_id,
+        dataset_name=ctx.dataset_name,
+        out_dir=ctx.out_dir,
+        config_path=ctx.cli_config_path,
+        log=ctx.log,
+    )
+
+
+from . import Surface, register  # noqa: E402  (registry is defined in the package init)
+
+register(
+    Surface(
+        name="cli",
+        run=_run,
+        description="drive the real lucida CLI through an agent-style tour",
+    )
+)

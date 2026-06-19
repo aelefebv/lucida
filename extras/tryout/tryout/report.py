@@ -45,8 +45,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import capture
 from .drive import DriveOutcome, drive
 from .server import repo_root
+from .surfaces import registered_names
 
 
 @dataclass(frozen=True)
@@ -121,8 +123,9 @@ def run_report(
 
     html_text = render_html(drive_record, summary=summary, versions=versions, out_dir=chosen_out)
     md_text = render_markdown(drive_record, summary=summary, versions=versions, out_dir=chosen_out)
-    html_written = _safe_write(html_path, html_text, log)
-    md_written = _safe_write(md_path, md_text, log)
+    # Route the artifact writes through the one text-artifact writer (capture).
+    html_written = capture.safe_write_text(html_path, html_text, log)
+    md_written = capture.safe_write_text(md_path, md_text, log)
 
     overall_ok = bool(drive_record.get("ok"))
     record = _build_report_record(
@@ -203,46 +206,71 @@ def _git_commit() -> str | None:
 # Summarize the drive record into a small, render-friendly shape.
 # --------------------------------------------------------------------------- #
 
+def _error_message(surface: dict[str, Any]) -> str | None:
+    return (surface.get("error") or {}).get("message") if surface.get("error") else None
+
+
+def _summary_cli(cli: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ran": bool(cli.get("ran")),
+        "ok": bool(cli.get("ok")),
+        "passed": cli.get("passed"),
+        "total": cli.get("total"),
+        "error": _error_message(cli),
+    }
+
+
+def _summary_python(py: dict[str, Any]) -> dict[str, Any]:
+    steps = py.get("steps") or []
+    return {
+        "ran": bool(py.get("ran")),
+        "ok": bool(py.get("ok")),
+        "passed": sum(1 for s in steps if s.get("ok")),
+        "total": len(steps),
+        "error": _error_message(py),
+    }
+
+
+def _summary_web(web: dict[str, Any]) -> dict[str, Any]:
+    real_spa = web.get("real_spa") or {}
+    return {
+        "ran": bool(web.get("ran")),
+        "ok": bool(web.get("ok")),
+        "viewer_png_nonblank": web.get("viewer_png_nonblank"),
+        "real_spa_captured": bool(real_spa.get("captured")),
+        "error": _error_message(web),
+    }
+
+
+# Per-surface summarizers, keyed by surface name. The web summary is shaped
+# differently (a render is non-blank/blank, not passed/total) — that asymmetry is
+# intentional, and isolating it here is what lets the report-side logic dispatch
+# by name instead of branching on ``if name == "web"`` in three places. The
+# *driving* of surfaces lives in the surface REGISTRY; this is the matching
+# presentation table, kept in the report layer so surface drivers stay free of
+# report concerns.
+_SURFACE_SUMMARIZERS = {
+    "cli": _summary_cli,
+    "python": _summary_python,
+    "web": _summary_web,
+}
+
+
 def _summarize(drive_record: dict[str, Any]) -> dict[str, Any]:
     """Boil the drive record down to the per-surface facts the report shows.
 
-    Centralizing this keeps ``report.html``, ``report.md``, and the JSON object
-    perfectly consistent — three views of one summary, not three re-derivations.
+    Iterates the known surfaces (in registry order) and dispatches to each one's
+    summarizer, so ``report.html``, ``report.md``, and the JSON object are three
+    views of one summary — not three re-derivations, and no ``if name == ...``
+    ladder.
     """
     surfaces = drive_record.get("surfaces") or {}
     out: dict[str, Any] = {}
-
-    cli = surfaces.get("cli")
-    if cli is not None:
-        out["cli"] = {
-            "ran": bool(cli.get("ran")),
-            "ok": bool(cli.get("ok")),
-            "passed": cli.get("passed"),
-            "total": cli.get("total"),
-            "error": (cli.get("error") or {}).get("message") if cli.get("error") else None,
-        }
-
-    py = surfaces.get("python")
-    if py is not None:
-        steps = py.get("steps") or []
-        out["python"] = {
-            "ran": bool(py.get("ran")),
-            "ok": bool(py.get("ok")),
-            "passed": sum(1 for s in steps if s.get("ok")),
-            "total": len(steps),
-            "error": (py.get("error") or {}).get("message") if py.get("error") else None,
-        }
-
-    web = surfaces.get("web")
-    if web is not None:
-        real_spa = web.get("real_spa") or {}
-        out["web"] = {
-            "ran": bool(web.get("ran")),
-            "ok": bool(web.get("ok")),
-            "viewer_png_nonblank": web.get("viewer_png_nonblank"),
-            "real_spa_captured": bool(real_spa.get("captured")),
-            "error": (web.get("error") or {}).get("message") if web.get("error") else None,
-        }
+    for name in registered_names():
+        record = surfaces.get(name)
+        summarizer = _SURFACE_SUMMARIZERS.get(name)
+        if record is not None and summarizer is not None:
+            out[name] = summarizer(record)
     return out
 
 
@@ -288,16 +316,6 @@ def _build_report_record(
 # --------------------------------------------------------------------------- #
 # Shared small helpers (artifacts on disk; image embedding).
 # --------------------------------------------------------------------------- #
-
-def _safe_write(path: Path, text: str, log) -> bool:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return True
-    except OSError as error:
-        log(f"[tryout] WARNING: could not write {path.name}: {error}")
-        return False
-
 
 def _data_uri(path: Path) -> str | None:
     """A ``data:image/png;base64,...`` URI for ``path``, or None if unreadable.
@@ -483,7 +501,7 @@ def render_html(
 
 def _headline_sub(drive_record: dict[str, Any], summary: dict[str, Any]) -> str:
     bits = []
-    for name in ("cli", "python", "web"):
+    for name in registered_names():
         surf = summary.get(name)
         if surf is None:
             continue

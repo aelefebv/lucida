@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -49,45 +48,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..errors import TryoutError
-
-
-def _run_group(argv, *, cwd=None, env=None, capture_output=False, text=False,
-               timeout=None, input=None):
-    """``subprocess.run`` but the child gets its OWN process group, and on a timeout
-    OR an interrupting signal the WHOLE group is SIGKILLed — so a spawned browser
-    (Chrome grandchildren of node / the product CLI) is never orphaned. Mirrors the
-    server spine's reap (server.py). Re-raises ``TimeoutExpired`` with captured
-    output exactly like ``subprocess.run`` so existing handlers keep working.
-    """
-    stdout = subprocess.PIPE if capture_output else None
-    stderr = subprocess.PIPE if capture_output else None
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=stdout, stderr=stderr,
-                            text=text, start_new_session=True)
-
-    def _kill_group():
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-    try:
-        out, err = proc.communicate(input=input, timeout=timeout)
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
-    except subprocess.TimeoutExpired:
-        _kill_group()
-        try:
-            out, err = proc.communicate(timeout=5)
-        except Exception:
-            out, err = (None, None)
-        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
-    except BaseException:
-        # An interrupting signal (SIGINT/SIGTERM) unwinds through here; reap the
-        # whole group before propagating so no browser child is left behind.
-        _kill_group()
-        raise
+from . import SurfaceResult
+from ._subproc import run_group, scan_json_line, shquote
 from .cli_surface import resolve_cli_invocation
 
 
@@ -179,10 +141,16 @@ class RealSpaResult:
 
 
 @dataclass
-class WebSurfaceResult:
-    ran: bool
-    ok: bool
-    out_dir: str
+class WebSurfaceResult(SurfaceResult):
+    """The web surface's result. Subclasses :class:`SurfaceResult` for the uniform
+    spine; :meth:`payload` preserves every key this surface has always emitted
+    (``ran``, ``ok``, ``out_dir``, ``dataset_id``, ``viewer_png``,
+    ``viewer_png_nonblank``, ``viewer_url``, ``captures``, ``real_spa``, plus the
+    data-dependent ``web_dist``/``web_dist_source``/``spa_png``/``console_log``/
+    ``error``).
+    """
+
+    out_dir: str = ""
     web_dist: str | None = None
     web_dist_source: str | None = None
     dataset_id: str | None = None
@@ -191,9 +159,19 @@ class WebSurfaceResult:
     viewer_url: str | None = None
     captures: list[WebCaptureResult] = field(default_factory=list)
     real_spa: RealSpaResult | None = None
-    error: dict[str, Any] | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    name: str = "web"
+
+    @property
+    def passed(self) -> int:
+        # For the registry/report: how many captures produced a non-blank PNG.
+        return sum(1 for capture in self.captures if capture.ok)
+
+    @property
+    def total(self) -> int:
+        return len(self.captures)
+
+    def payload(self) -> dict[str, Any]:
         record: dict[str, Any] = {
             "ran": self.ran,
             "ok": self.ok,
@@ -469,7 +447,7 @@ def _run_capture(
     started = time.monotonic()
     timed_out = False
     try:
-        completed = _run_group(
+        completed = run_group(
             argv,
             cwd=str(cwd),
             env=env,
@@ -557,24 +535,22 @@ def _extract_url(stdout: str) -> str | None:
     """Pull the captured workspace ``url`` from the CLI's ``--json`` output.
 
     ``viewer screenshot --json`` prints one JSON object carrying ``url``. uv/cli
-    chatter never lands on stdout under --json, but we scan whole lines bottom-up
-    and accept the first object that has a ``url`` key, to be robust.
+    chatter never lands on stdout under --json, but we use the shared
+    :func:`tryout.surfaces.scan_json_line` (whole-line, bottom-up) accepting the
+    first object with a string ``url``. A pretty-printed (multi-line) object would
+    not match line-by-line, so we keep a single-pass full-stdout parse as a
+    fallback.
     """
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("url"), str):
-            return obj["url"]
+    obj = scan_json_line(
+        stdout, accept=lambda candidate: isinstance(candidate.get("url"), str)
+    )
+    if obj is not None:
+        return obj["url"]
     # Fall back to a single-pass parse of the whole stdout (handles pretty JSON).
     try:
-        obj = json.loads(stdout)
-        if isinstance(obj, dict) and isinstance(obj.get("url"), str):
-            return obj["url"]
+        whole = json.loads(stdout)
+        if isinstance(whole, dict) and isinstance(whole.get("url"), str):
+            return whole["url"]
     except json.JSONDecodeError:
         pass
     return None
@@ -608,7 +584,7 @@ def _write_capture_log(
     lines = [
         "# lucida web (viewer capture) tryout log",
         "# " + json.dumps(header),
-        "$ " + " ".join(_shquote(part) for part in argv),
+        "$ " + " ".join(shquote(part) for part in argv),
         f"# exit_code: {exit_code}" + ("  (timed out)" if timed_out else ""),
         f"# png: {png} (exists={png_exists}, nonblank={nonblank})",
         f"# url: {url}",
@@ -624,12 +600,6 @@ def _write_capture_log(
         path.write_text("\n".join(lines), encoding="utf-8")
     except OSError:
         pass
-
-
-def _shquote(value: str) -> str:
-    if value and all(char.isalnum() or char in "@%+=:,./-_" for char in value):
-        return value
-    return "'" + value.replace("'", "'\\''") + "'"
 
 
 # --------------------------------------------------------------------------- #
@@ -815,7 +785,7 @@ def capture_real_spa(
     argv = [node, str(driver_path), request]
     started = time.monotonic()
     try:
-        completed = _run_group(
+        completed = run_group(
             argv,
             cwd=str(web_out),
             env=env,
@@ -834,8 +804,8 @@ def capture_real_spa(
         )
         returncode = None
         _write_text(driver_log, _spa_driver_log(argv, stdout, stderr, returncode))
-        # The subprocess (and its browser child) is reaped by subprocess.run's
-        # own kill on timeout; record a clean skip.
+        # run_group SIGKILLs the whole process group on timeout, so the node
+        # driver and its browser child are reaped together; record a clean skip.
         return RealSpaResult(
             captured=False,
             reason=f"real-SPA capture timed out after {spa_timeout_s:g}s",
@@ -848,7 +818,8 @@ def capture_real_spa(
     duration = round(time.monotonic() - started, 3)
     _write_text(driver_log, _spa_driver_log(argv, stdout, stderr, returncode))
 
-    payload = _extract_json_line(stdout)
+    # The SPA driver prints exactly one result object carrying a ``captured`` key.
+    payload = scan_json_line(stdout, accept=lambda candidate: "captured" in candidate)
     if payload is None:
         reason = (
             f"real-SPA driver produced no result (exit {returncode}); "
@@ -999,7 +970,7 @@ def _ensure_playwright(*, log=print, install_timeout_s: float = 300.0) -> Path:
     # Don't download browser binaries; the ceiling reuses the system Chrome.
     env["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
     try:
-        result = _run_group(
+        result = run_group(
             [npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "playwright"],
             cwd=str(cache_dir),
             env=env,
@@ -1027,21 +998,6 @@ def _ensure_playwright(*, log=print, install_timeout_s: float = 300.0) -> Path:
     return modules
 
 
-def _extract_json_line(text: str) -> dict[str, Any] | None:
-    """Return the driver's single JSON result object from its stdout."""
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and "captured" in obj:
-            return obj
-    return None
-
-
 def _spa_driver_log(argv: Sequence[str], stdout: str, stderr: str, returncode: int | None) -> str:
     return "\n".join(
         [
@@ -1065,3 +1021,51 @@ def _write_text(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Registry adapter: how `drive` runs this surface generically.
+# --------------------------------------------------------------------------- #
+
+def _run(ctx) -> WebSurfaceResult:
+    """Run the web surface from a :class:`tryout.drive.SurfaceContext`.
+
+    The SPA bundle is resolved (or built) *before* boot by ``drive`` — the server
+    must be booted with ``LUCIDA_WEB_DIST`` pointed at it. If that resolution
+    failed, we record a clean ``ran=False`` skip here (the same skip ``drive``
+    used to build inline) rather than running against a server with no viewer.
+    """
+    web_dist = ctx.web_dist
+    if web_dist is None:
+        error = (
+            ctx.web_dist_error.to_error()
+            if ctx.web_dist_error is not None
+            else {"stage": "config", "message": "SPA bundle unavailable"}
+        )
+        return WebSurfaceResult(
+            ran=False,
+            ok=False,
+            out_dir=str(ctx.out_dir / "web"),
+            error=error,
+        )
+    return run_web_surface(
+        base_url=ctx.base_url,
+        workspace_id=ctx.workspace_id,
+        dataset_id=ctx.dataset_id,
+        out_dir=ctx.out_dir,
+        config_path=ctx.cli_config_path,
+        web_dist=web_dist.path,
+        web_dist_source=web_dist.source,
+        log=ctx.log,
+    )
+
+
+from . import Surface, register  # noqa: E402  (registry is defined in the package init)
+
+register(
+    Surface(
+        name="web",
+        run=_run,
+        description="capture the rendered viewer (product CLI) + best-effort real-SPA",
+    )
+)

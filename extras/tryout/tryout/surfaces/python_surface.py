@@ -34,7 +34,13 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import TryoutError
-from .python_client import _driver_invocation, _extract_json_object, _lucida_py_source
+from . import SurfaceResult
+from ._subproc import run_group
+from .python_client import (
+    driver_invocation,
+    extract_result_object,
+    lucida_py_source,
+)
 
 
 # Wall-clock backstop for the whole driver subprocess. Each step has its own
@@ -264,14 +270,28 @@ class PythonStepResult:
 
 
 @dataclass
-class PythonSurfaceResult:
-    ran: bool
-    ok: bool
-    log: str
-    steps: list[PythonStepResult] = field(default_factory=list)
-    error: dict[str, Any] | None = None
+class PythonSurfaceResult(SurfaceResult):
+    """The Python surface's result. Subclasses :class:`SurfaceResult` for the
+    uniform spine; :meth:`payload` preserves the exact keys this surface has
+    always emitted (``ran``, ``ok``, ``log``, ``steps``). Note ``passed``/
+    ``total`` are computed (for the registry/report) but intentionally NOT added
+    to the JSON body — the historical Python payload never carried them.
+    """
 
-    def to_dict(self) -> dict[str, Any]:
+    log: str = ""
+    steps: list[PythonStepResult] = field(default_factory=list)
+
+    name: str = "python"
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for step in self.steps if step.ok)
+
+    @property
+    def total(self) -> int:
+        return len(self.steps)
+
+    def payload(self) -> dict[str, Any]:
         record: dict[str, Any] = {
             "ran": self.ran,
             "ok": self.ok,
@@ -306,8 +326,8 @@ def run_python_surface(
     session_log = log_dir / "session.log"
 
     try:
-        source = _lucida_py_source()
-        prefix, extra_env = _driver_invocation(source)
+        source = lucida_py_source()
+        prefix, extra_env = driver_invocation(source)
     except TryoutError as error:
         _write_session_log(session_log, header_lines=_header(base_url, workspace_id, dataset_id),
                             stdout="", stderr=f"[tryout] could not prepare driver: {error.message}")
@@ -332,7 +352,9 @@ def run_python_surface(
     )
 
     try:
-        completed = subprocess.run(
+        # Shared run_group: own process group + group-kill on timeout/signal so
+        # the uv-launched interpreter is never orphaned.
+        completed = run_group(
             argv,
             cwd=str(out_dir),
             env=env,
@@ -375,7 +397,7 @@ def run_python_surface(
         stderr=stderr,
     )
 
-    payload = _extract_json_object(stdout)
+    payload = extract_result_object(stdout)
     if payload is None:
         stderr_tail = "\n".join(stderr.splitlines()[-30:])
         return PythonSurfaceResult(
@@ -437,3 +459,35 @@ def _write_session_log(path: Path, *, header_lines: list[str], stdout: str, stde
         path.write_text("\n".join(body), encoding="utf-8")
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Registry adapter: how `drive` runs this surface generically.
+# --------------------------------------------------------------------------- #
+
+def _run(ctx) -> PythonSurfaceResult:
+    """Run the Python surface from a :class:`tryout.drive.SurfaceContext`.
+
+    The per-step client timeout is bounded (as before) so a slow read can't
+    stretch out the whole tour; the subprocess backstop still guarantees no hang.
+    """
+    return run_python_surface(
+        base_url=ctx.base_url,
+        workspace_id=ctx.workspace_id,
+        dataset_id=ctx.dataset_id,
+        out_dir=ctx.out_dir,
+        config_path=ctx.py_config_path,
+        timeout=min(ctx.open_timeout_s, 60.0),
+        log=ctx.log,
+    )
+
+
+from . import Surface, register  # noqa: E402  (registry is defined in the package init)
+
+register(
+    Surface(
+        name="python",
+        run=_run,
+        description="a broad LucidaClient read/mutate tour against the workspace",
+    )
+)

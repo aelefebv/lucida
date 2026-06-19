@@ -37,6 +37,7 @@ from typing import Any
 
 from ..errors import TryoutError
 from ..server import repo_root
+from ._subproc import run_group, scan_json_line
 
 
 # The driver runs under uv with `websockets` available (required for dataset
@@ -130,8 +131,12 @@ class WorkspaceResult:
     dataset: dict[str, Any] | None
 
 
-def _lucida_py_source() -> Path:
-    """Path to the pure-Python ``lucida`` package source in the working tree."""
+def lucida_py_source() -> Path:
+    """Path to the pure-Python ``lucida`` package source in the working tree.
+
+    Public because the Python *surface* (:mod:`tryout.surfaces.python_surface`)
+    drives the same client the same way and reuses this resolution.
+    """
     source = repo_root() / "lucida-py" / "python"
     if not (source / "lucida" / "client.py").is_file():
         raise TryoutError(
@@ -157,7 +162,7 @@ def _uv_binary() -> str:
     return uv
 
 
-def _driver_invocation(source: Path) -> tuple[list[str], dict[str, str]]:
+def driver_invocation(source: Path) -> tuple[list[str], dict[str, str]]:
     """Build the (argv-prefix, extra-env) that runs python with the client importable.
 
     Default: ``uv run --no-project --with websockets python`` with
@@ -166,6 +171,8 @@ def _driver_invocation(source: Path) -> tuple[list[str], dict[str, str]]:
     ``LUCIDA_TRYOUT_PY`` (whitespace-split, e.g.
     ``"uv run --project lucida-py python"``), in which case we still prepend the
     source to ``PYTHONPATH`` so the working-tree client wins.
+
+    Public because the Python *surface* reuses the same proven invocation.
     """
     env = {"PYTHONPATH": _pythonpath_with(source)}
     override = os.environ.get("LUCIDA_TRYOUT_PY")
@@ -183,27 +190,18 @@ def _pythonpath_with(source: Path) -> str:
     return str(source)
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    """Return the driver's result object from ``text``.
+def extract_result_object(text: str) -> dict[str, Any] | None:
+    """Return the client driver's result object from ``text``.
 
     The driver prints its result as a single ``json.dumps`` line (no indent) as
-    the final stdout line, but uv/websockets may emit chatter before it. We scan
-    *whole lines* from the bottom up and take the first that parses to a dict
-    carrying the top-level ``"ok"`` key. Line-oriented matching (rather than
-    scanning every ``{``) avoids latching onto a *nested* object like
-    ``status_checks.healthz`` that also contains ``"ok"``.
+    the final stdout line, but uv/websockets may emit chatter before it. We use
+    the shared :func:`tryout.surfaces.scan_json_line`, accepting the first
+    whole-line object that carries a top-level ``"ok"`` key — line-oriented so it
+    never latches onto a *nested* object like ``status_checks.healthz`` that also
+    contains ``"ok"``. Public + shared by both the bring-up surface and the Python
+    surface (one scanner, not three copies).
     """
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
-        try:
-            candidate = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict) and "ok" in candidate:
-            return candidate
-    return None
+    return scan_json_line(text, accept=lambda candidate: "ok" in candidate)
 
 
 def create_workspace_and_open(
@@ -223,8 +221,8 @@ def create_workspace_and_open(
     precise stage tag on any failure so the caller's teardown + JSON-error path
     stays uniform.
     """
-    source = _lucida_py_source()
-    prefix, extra_env = _driver_invocation(source)
+    source = lucida_py_source()
+    prefix, extra_env = driver_invocation(source)
     request = json.dumps(
         {
             "base_url": base_url,
@@ -243,7 +241,9 @@ def create_workspace_and_open(
         + " via lucida Python client (uv run, client source from working tree)"
     )
     try:
-        completed = subprocess.run(
+        # Shared run_group: own process group + group-kill on timeout/signal, so
+        # the uv child (and any interpreter it spawns) is never orphaned.
+        completed = run_group(
             argv,
             # Run from the source dir's *parent*-neutral cwd: the harness out
             # dir, so uv doesn't auto-discover a project pyproject.toml.
@@ -259,7 +259,7 @@ def create_workspace_and_open(
             f"python client driver timed out after {subprocess_timeout:g}s",
         ) from error
 
-    payload = _extract_json_object(completed.stdout)
+    payload = extract_result_object(completed.stdout)
     if payload is None:
         # No parseable result: surface what we can so the failure is debuggable.
         stderr_tail = "\n".join((completed.stderr or "").splitlines()[-30:])

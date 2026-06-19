@@ -263,23 +263,31 @@ extras/tryout/
     server.py          # boot / health-gate / reap the throwaway server (the spine)
     web.py             # resolve (or build) the SPA bundle the server serves (web)
     surfaces/
+      __init__.py      # the SurfaceResult contract + the Surface REGISTRY
+      _subproc.py      # one subprocess spine: run_group, scan_json_line, shquote
       python_client.py # workspace create + dataset open via LucidaClient (bring-up)
       cli_surface.py   # drive the real `lucida` CLI tour, capture each command
       python_surface.py# broad LucidaClient read/mutate tour, capture transcript
       web_surface.py   # non-blank viewer screenshot (CLI) + real-SPA Playwright capture
-    capture.py         # shared record shape + on-disk artifacts (up.json/drive.json)
+    capture.py         # the one writer: record shape + on-disk artifacts (up.json/drive.json/report.*)
     netutil.py         # free-port allocation, /healthz polling
     errors.py          # staged TryoutError
 ```
 
 The `surfaces/` package is where each way of driving the server lives, each a
-thin adapter over the same booted server. `drive` reuses the `server.py` spine
-and the `python_client.py` bring-up wholesale rather than re-implementing the
-lifecycle; the web surface additionally points the server at a SPA bundle
-(`web.py`) before boot so the real viewer can be rendered. `report.py` reuses
-`drive` wholesale and only adds the consolidation step (the portable
-`report.html` + `report.md`) on top of the raw artifacts `drive` already writes —
-so the run logic lives in exactly one place.
+thin adapter over the same booted server. Every drive surface returns a
+`SurfaceResult` (a uniform `name`/`ran`/`ok`/`passed`/`total`/`error` spine plus
+the surface's own payload) and registers itself in the `REGISTRY`, so `drive` and
+`report` iterate over surfaces generically rather than branching per surface, and
+all three share one subprocess helper (`_subproc.run_group` — own process group +
+group-kill, so no spawned CLI/browser child is ever orphaned). `drive` reuses the
+`server.py` spine and the `python_client.py` bring-up wholesale rather than
+re-implementing the lifecycle; the web surface additionally points the server at
+a SPA bundle (`web.py`) before boot so the real viewer can be rendered.
+`report.py` reuses `drive` wholesale and only adds the consolidation step (the
+portable `report.html` + `report.md`) on top of the raw artifacts `drive` already
+writes — so the run logic lives in exactly one place. All record/artifact writes
+go through `capture` (the one writer).
 
 ## Fast self-test
 

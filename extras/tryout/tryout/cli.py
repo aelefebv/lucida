@@ -22,10 +22,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import capture
 from .bringup import bring_up
 from .drive import drive as run_drive, parse_surfaces
 from .errors import TryoutError
 from .report import run_report
+from .surfaces import registered_names
 
 
 PROG = "tryout.py"
@@ -331,25 +333,28 @@ def _cmd_up(args: argparse.Namespace) -> int:
         )
     except _Interrupted as interrupted:
         # The server has already been reaped by bring_up's finally. Emit a clean
-        # failure record so even an interrupt yields a usable artifact.
-        record = {
-            "ok": False,
-            "base_url": None,
-            "ws_url": None,
-            "workspace_id": None,
-            "out_dir": str(out_dir),
-            "server_log": None,
-            "db_path": None,
-            "pid": None,
-            "fixture": fixture,
-            "dataset_id": None,
-            "healthz": False,
-            "teardown": "clean",
-            "error": {
-                "stage": "signal",
-                "message": f"interrupted by signal {interrupted.signum}",
+        # failure record (same contract shape, via the one record builder) so even
+        # an interrupt yields a usable artifact.
+        record = capture.build_record(
+            ok=False,
+            base_url=None,
+            ws_url=None,
+            workspace_id=None,
+            out_dir=out_dir,
+            server_log=None,
+            db_path=None,
+            pid=None,
+            fixture=fixture,
+            dataset_id=None,
+            healthz=False,
+            teardown="clean",
+            extra={
+                "error": {
+                    "stage": "signal",
+                    "message": f"interrupted by signal {interrupted.signum}",
+                }
             },
-        }
+        )
         _emit(record, as_json=args.json, log=log)
         return 130
     finally:
@@ -564,6 +569,25 @@ def _emit_report(record: dict[str, Any], *, as_json: bool, log: _Stderr) -> None
     _emit_report_human(record)
 
 
+def _web_summary_detail(surf: dict[str, Any]) -> str:
+    return "viewer non-blank" if surf.get("viewer_png_nonblank") else "viewer BLANK/missing"
+
+
+def _count_summary_detail(surf: dict[str, Any]) -> str:
+    return f"{surf.get('passed')}/{surf.get('total')} ok"
+
+
+# Per-surface "extra detail" for the human report line, keyed by surface name —
+# the web surface reports a render verdict, the others a pass count. Dispatching
+# by name (matching the surface registry order) keeps this free of an
+# `if name == "web"` branch.
+_REPORT_SUMMARY_DETAIL = {
+    "cli": _count_summary_detail,
+    "python": _count_summary_detail,
+    "web": _web_summary_detail,
+}
+
+
 def _emit_report_human(record: dict[str, Any]) -> None:
     ok = record.get("ok")
     surfaces = record.get("surfaces") or {}
@@ -577,7 +601,7 @@ def _emit_report_human(record: dict[str, Any]) -> None:
         f"  base_url    : {record.get('base_url')}",
         f"  teardown    : {record.get('teardown')}",
     ]
-    for name in ("cli", "python", "web"):
+    for name in registered_names():
         surf = surfaces.get(name)
         if surf is None:
             continue
@@ -586,12 +610,8 @@ def _emit_report_human(record: dict[str, Any]) -> None:
             lines.append(f"  {name:<11} : DID NOT RUN ({err})")
             continue
         verdict = "PASS" if surf.get("ok") else "FAIL"
-        if name == "web":
-            nb = surf.get("viewer_png_nonblank")
-            extra = "viewer non-blank" if nb else "viewer BLANK/missing"
-        else:
-            extra = f"{surf.get('passed')}/{surf.get('total')} ok"
-        lines.append(f"  {name:<11} : {verdict} ({extra})")
+        detail = _REPORT_SUMMARY_DETAIL.get(name, _count_summary_detail)
+        lines.append(f"  {name:<11} : {verdict} ({detail(surf)})")
     error = record.get("error")
     if error:
         lines.append(f"  error       : [{error.get('stage')}] {error.get('message')}")

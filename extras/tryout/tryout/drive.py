@@ -10,10 +10,10 @@ re-implementing any lifecycle:
   * :func:`tryout.surfaces.create_workspace_and_open` — the same client-driven
     bring-up that creates the workspace and opens the fixture read-only.
 
-On top of that it runs the requested surfaces (:mod:`tryout.surfaces.cli_surface`,
-:mod:`tryout.surfaces.python_surface`) against the *one* opened workspace +
-dataset, writes ``DIR/drive.json`` (mirroring stdout), and returns a uniform
-record + exit code.
+On top of that it runs the requested surfaces (CLI, Python, web — discovered from
+the surface :data:`tryout.surfaces.REGISTRY`, not a hand-maintained ladder)
+against the *one* opened workspace + dataset, writes ``DIR/drive.json`` (mirroring
+stdout), and returns a uniform record + exit code.
 
 Invariants (mirroring slice 1):
   * The server is reaped on every path — the ``with ServerProcess(...)`` block
@@ -27,27 +27,25 @@ Invariants (mirroring slice 1):
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import capture
-from .bringup import _validate_fixture
+from .bringup import validate_fixture
 from .errors import TryoutError
 from .server import ServerProcess
-from .surfaces import create_workspace_and_open
-from .surfaces.cli_surface import run_cli_surface
-from .surfaces.python_surface import run_python_surface
-from .surfaces.web_surface import WebSurfaceResult, run_web_surface
+from .surfaces import REGISTRY, SurfaceResult, create_workspace_and_open, registered_names
 from .web import WebDist, resolve_web_dist
 
 
-# The surfaces this command knows how to drive, in a stable tour order. The web
-# surface comes last so the CLI/Python tours (which can mutate view state) run
-# first and a maintainer's screenshot reflects the post-tour state too.
-ALL_SURFACES = ("cli", "python", "web")
+# The surfaces this command knows how to drive come from the surface REGISTRY, in
+# its canonical tour order (the web surface registers last so the CLI/Python tours
+# — which can mutate view state — run first and a maintainer's screenshot reflects
+# the post-tour state too). Adding a surface is one registration, not an edit here.
+def all_surfaces() -> tuple[str, ...]:
+    return tuple(registered_names())
 
 
 @dataclass(frozen=True)
@@ -57,6 +55,31 @@ class DriveOutcome:
     exit_code: int
 
 
+@dataclass
+class SurfaceContext:
+    """Everything a registered surface's ``run`` needs from one live drive cycle.
+
+    The drive loop builds this once the server is up and the fixture is open, then
+    hands it to each :class:`tryout.surfaces.Surface`'s ``run`` — so the loop never
+    branches per surface, and a surface reads exactly the fields it cares about
+    (the CLI/web use ``cli_config_path``; the Python surface uses
+    ``py_config_path`` + ``open_timeout_s``; the web surface uses the pre-resolved
+    ``web_dist`` / ``web_dist_error``).
+    """
+
+    base_url: str
+    workspace_id: str
+    dataset_id: str | None
+    dataset_name: str | None
+    out_dir: Path
+    py_config_path: Path
+    cli_config_path: Path
+    open_timeout_s: float
+    web_dist: WebDist | None = None
+    web_dist_error: TryoutError | None = None
+    log: Any = print
+
+
 def parse_surfaces(raw: str | None) -> list[str]:
     """Parse the ``--surface`` value into an ordered, de-duplicated list.
 
@@ -64,28 +87,29 @@ def parse_surfaces(raw: str | None) -> list[str]:
     (``cli``, ``python``). Order is normalized to the canonical tour order so the
     output is stable regardless of how the caller spelled it. Unknown tokens
     raise a ``config`` ``TryoutError`` so a typo fails clearly rather than
-    silently running nothing.
+    silently running nothing. The known surfaces come from the registry.
     """
+    known = all_surfaces()
     if raw is None or raw.strip() == "" or raw.strip().lower() == "all":
-        return list(ALL_SURFACES)
+        return list(known)
     requested: list[str] = []
     for token in raw.split(","):
         name = token.strip().lower()
         if not name:
             continue
         if name == "all":
-            return list(ALL_SURFACES)
-        if name not in ALL_SURFACES:
+            return list(known)
+        if name not in known:
             raise TryoutError(
                 "config",
-                f"unknown surface {name!r}; choose from {', '.join(ALL_SURFACES)} or 'all'",
+                f"unknown surface {name!r}; choose from {', '.join(known)} or 'all'",
             )
         if name not in requested:
             requested.append(name)
     if not requested:
         raise TryoutError("config", "no surfaces selected")
     # Normalize to canonical order.
-    return [surface for surface in ALL_SURFACES if surface in requested]
+    return [surface for surface in known if surface in requested]
 
 
 def drive(
@@ -122,7 +146,7 @@ def drive(
 
     started = time.monotonic()
     try:
-        fixture_path = _validate_fixture(fixture)
+        fixture_path = validate_fixture(fixture)
     except TryoutError as error:
         # Pre-boot bad fixture: nothing to tear down, but still write drive.json.
         return _failure(
@@ -217,57 +241,28 @@ def drive(
                 f"{workspace_id} (dataset {dataset_id})"
             )
 
-            if "cli" in surfaces:
-                cli_result = run_cli_surface(
-                    base_url=base_url,
-                    workspace_id=workspace_id,
-                    dataset_id=dataset_id,
-                    dataset_name=dataset_name,
-                    out_dir=out_dir,
-                    config_path=cli_config_path,
-                    log=log,
-                )
-                surface_results["cli"] = cli_result.to_dict()
-                if not cli_result.ran:
-                    any_surface_failed = True
-
-            if "python" in surfaces:
-                py_result = run_python_surface(
-                    base_url=base_url,
-                    workspace_id=workspace_id,
-                    dataset_id=dataset_id,
-                    out_dir=out_dir,
-                    config_path=py_config_path,
-                    timeout=min(open_timeout_s, 60.0),
-                    log=log,
-                )
-                surface_results["python"] = py_result.to_dict()
-                if not py_result.ran:
-                    any_surface_failed = True
-
-            if "web" in surfaces:
-                if web_dist is None:
-                    # Bundle couldn't be resolved pre-boot: record a clean skip.
-                    web_result = WebSurfaceResult(
-                        ran=False,
-                        ok=False,
-                        out_dir=str(out_dir / "web"),
-                        error=(web_dist_error.to_error() if web_dist_error is not None
-                               else {"stage": "config", "message": "SPA bundle unavailable"}),
-                    )
-                else:
-                    web_result = run_web_surface(
-                        base_url=base_url,
-                        workspace_id=workspace_id,
-                        dataset_id=dataset_id,
-                        out_dir=out_dir,
-                        config_path=cli_config_path,
-                        web_dist=web_dist.path,
-                        web_dist_source=web_dist.source,
-                        log=log,
-                    )
-                surface_results["web"] = web_result.to_dict()
-                if not web_result.ran:
+            # One context, then iterate the registry generically: no per-surface
+            # ladder. Each surface's registered ``run`` pulls what it needs.
+            ctx = SurfaceContext(
+                base_url=base_url,
+                workspace_id=workspace_id,
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                out_dir=out_dir,
+                py_config_path=py_config_path,
+                cli_config_path=cli_config_path,
+                open_timeout_s=open_timeout_s,
+                web_dist=web_dist,
+                web_dist_error=web_dist_error,
+                log=log,
+            )
+            for name in surfaces:
+                surface = REGISTRY[name]
+                result: SurfaceResult = surface.run(ctx)
+                surface_results[name] = result.to_dict()
+                # A surface that could not be exercised at all (ran=False) flips
+                # the run not-ok; per-command/per-step failures do not.
+                if not result.ran:
                     any_surface_failed = True
     finally:
         # Defensive: guarantee the server is down even on an unexpected escape.
@@ -390,11 +385,10 @@ def _failure(
 
 
 def _safe_write_drive_json(out_dir: Path, record: dict[str, Any], log) -> Path | None:
+    # Route through the one record writer (capture) so drive.json's on-disk JSON
+    # formatting matches up.json and the stdout object exactly.
     try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / "drive.json"
-        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return path
+        return capture.write_record(out_dir, "drive.json", record)
     except OSError as error:
         log(f"[tryout] WARNING: could not write drive.json: {error}")
         return None

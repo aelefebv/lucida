@@ -34,7 +34,7 @@ class BringUpOutcome:
     exit_code: int
 
 
-def _validate_fixture(fixture: str | None) -> str | None:
+def validate_fixture(fixture: str | None) -> str | None:
     """Resolve + sanity-check the fixture path. Returns the absolute path or None.
 
     We fail *before* boot on an obviously bad fixture (missing path) so we don't
@@ -42,6 +42,9 @@ def _validate_fixture(fixture: str | None) -> str | None:
     light (existence + directory-ish) and let the server be the authority on
     whether it's a valid OME-Zarr, since that's its job and its diagnostics are
     richer than ours.
+
+    Public because ``drive`` (a sibling lifecycle) validates the fixture the same
+    way before boot; one shared check, not two.
     """
     if not fixture:
         return None
@@ -101,7 +104,7 @@ def bring_up(
 
     started = time.monotonic()
     try:
-        fixture_path = _validate_fixture(fixture)
+        fixture_path = validate_fixture(fixture)
     except TryoutError as error:
         # Pre-boot failure: nothing to tear down, but still write up.json.
         return _failure_outcome(
@@ -254,7 +257,7 @@ def _failure_outcome(
 
 def _safe_write_up_json(out_dir: Path, record: dict[str, Any], log) -> Path | None:
     try:
-        return capture.write_up_json(out_dir, record)
+        return capture.write_record(out_dir, "up.json", record)
     except OSError as error:
         log(f"[tryout] WARNING: could not write up.json: {error}")
         return None
