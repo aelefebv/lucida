@@ -35,5 +35,7 @@ Python surfaces spawning via plain `subprocess.run` — an orphan risk on timeou
   `report-after-refactor.html`, no orphans.
 
 ## Artifacts
-- `report-after-refactor.html` — a full verification report produced by the **refactored**
-  harness (proves behavior end-to-end). Paths sanitized.
+- `report-after-refactor.md` — the text mirror of a full verification report produced by
+  the **refactored** harness (proves behavior end-to-end), sanitized. (The self-contained
+  HTML version, ~270KB of base64, is produced live into the gitignored `.tmp/tryout/` —
+  run `report` to see it.)

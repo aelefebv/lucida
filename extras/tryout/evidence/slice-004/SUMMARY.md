@@ -7,11 +7,13 @@ lucida works end-to-end — **without re-running anything**. With no `--out`, ev
 lands in a gitignored, timestamped `.tmp/tryout/<ts>/`.
 
 ## The headline artifact (open this)
-- **`report.html`** — self-contained: the web screenshots are **embedded as base64**, so
-  the file opens/shares standalone. It shows a PASS/FAIL banner, the CLI command table
-  (with exit codes), the Python steps, the inline viewer/SPA screenshots, run metadata
-  (commit, base_url, workspace, dataset), and a `server.log` excerpt. (Committed here as
-  the slice's key shot; paths sanitized.)
+- **`report.html`** — the live artifact `report` writes: self-contained, web screenshots
+  **embedded as base64**, opens/shares standalone, with a PASS/FAIL banner, the CLI
+  command table (exit codes), the Python steps, inline viewer/SPA screenshots, and run
+  metadata. It's ~270KB (base64), so rather than commit it, it's produced live into the
+  gitignored `.tmp/tryout/<ts>/` — **run `report` yourself to see it**.
+- `report.md` — the committed text mirror of that report (PASS/FAIL + per-surface
+  results), sanitized; the lean, diffable evidence.
 - `sample-report.json` — the machine-readable `report` result (sanitized).
 
 ## User stories satisfied
