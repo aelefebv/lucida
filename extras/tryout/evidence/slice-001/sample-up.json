@@ -1,0 +1,24 @@
+{
+  "base_url": "http://127.0.0.1:51737",
+  "dataset": {
+    "entity_count": 1,
+    "image_count": 1,
+    "name": "lif_test.ome.zarr",
+    "source": "~/local_data/lucida_test_zarrs/lif_test.ome.zarr",
+    "workspace_dataset_id": "wds-6e7b23de2acd447ea8159df71736e05b"
+  },
+  "dataset_id": "wds-6e7b23de2acd447ea8159df71736e05b",
+  "db_path": "<tmp>",
+  "elapsed_s": 0.281,
+  "fixture": "~/local_data/lucida_test_zarrs/lif_test.ome.zarr",
+  "health_elapsed_s": 0.116,
+  "healthz": true,
+  "ok": true,
+  "out_dir": "~/code/lucida/extras/tryout/evidence/slice-001/sample",
+  "pid": 43774,
+  "server_log": "~/code/lucida/extras/tryout/evidence/slice-001/sample/server.log",
+  "teardown": "clean",
+  "web_url": "http://127.0.0.1:51737/w/54554e8e-b660-4556-9fdd-6ece1eb33fca",
+  "workspace_id": "54554e8e-b660-4556-9fdd-6ece1eb33fca",
+  "ws_url": "ws://127.0.0.1:51737/ws/workspaces/54554e8e-b660-4556-9fdd-6ece1eb33fca"
+}

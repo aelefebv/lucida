@@ -1,0 +1,25 @@
+# lucida Python (LucidaClient) tryout session
+# base_url:     http://127.0.0.1:56010
+# workspace_id: e7d08932-5a73-4013-aef0-34ba958ddccc
+# dataset_id:   wds-b0b4d80db4c64691a7395f2e42e6171e
+# driver: `from lucida import LucidaClient` (working-tree source via uv)
+
+=== session transcript (stderr) ===
+# LucidaClient(base_url='http://127.0.0.1:56010')
+
+>>> status
+    -> {"server": "http://127.0.0.1:56010", "checks": {"healthz": true, "readyz": true, "version": true}, "auth": "authenticated"}
+
+>>> workspaces.list
+    -> {"count": 1}
+
+>>> workspaces.get
+    -> {"id": "e7d08932-5a73-4013-aef0-34ba958ddccc", "name": "lucida-tryout-20260619-004443"}
+
+>>> workspace.open
+    -> {"id": "e7d08932-5a73-4013-aef0-34ba958ddccc"}
+
+>>> datasets.list
+    -> {"count": 1, "ids": ["wds-b0b4d80db4c64691a7395f2e42e6171e"]}
+
+>>> datasets.info

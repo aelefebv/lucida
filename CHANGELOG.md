@@ -117,3 +117,8 @@
 ### Features
 
 * **server:** support --version on the CLI ([#511](https://github.com/aelefebv/lucida/issues/511)) ([94b522a](https://github.com/aelefebv/lucida/commit/94b522a4d57f8836bf2d5cf521a14975ed2aee35))
+- feat(tryout): one-command lucida env bring-up for agents (slice 1) (slipway, reversible: git-revert)
+- feat(tryout): drive + capture the CLI and Python surfaces (slice 2) (slipway, reversible: git-revert)
+- feat(tryout): web client surface — headless + real-SPA screenshots (slice 3) (slipway, reversible: git-revert)
+- feat(tryout): unified cross-surface verification report + discoverability (slice 4) (slipway, reversible: git-revert)
+- refactor(tryout): unify the surface contract behind one registry + subprocess spine (slipway, reversible: git-revert)

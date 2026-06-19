@@ -1,0 +1,40 @@
+{
+  "base_url": "http://127.0.0.1:62653",
+  "dataset_id": "wds-6e88d894cebb4923bd30becaedfe6e75",
+  "drive_json": "~/code/lucida/.tmp/tryout/slice-004/drive.json",
+  "fixture": "~/local_data/lucida_test_zarrs/lif_test.ome.zarr",
+  "ok": true,
+  "out_dir": "~/code/lucida/.tmp/tryout/slice-004",
+  "report_html": "~/code/lucida/.tmp/tryout/slice-004/report.html",
+  "report_md": "~/code/lucida/.tmp/tryout/slice-004/report.md",
+  "surfaces": {
+    "cli": {
+      "error": null,
+      "ok": true,
+      "passed": 16,
+      "ran": true,
+      "total": 16
+    },
+    "python": {
+      "error": null,
+      "ok": true,
+      "passed": 12,
+      "ran": true,
+      "total": 12
+    },
+    "web": {
+      "error": null,
+      "ok": true,
+      "ran": true,
+      "real_spa_captured": true,
+      "viewer_png_nonblank": true
+    }
+  },
+  "teardown": "clean",
+  "versions": {
+    "cli": "lucida 0.2.0",
+    "commit": "d33b713",
+    "server": "lucida-server 0.2.0"
+  },
+  "workspace_id": "adea9ca0-8825-47fa-b8a7-38a14f4c2f4e"
+}
