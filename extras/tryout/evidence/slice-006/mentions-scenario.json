@@ -1,0 +1,115 @@
+{
+  "extra": {
+    "ui": {
+      "console_log": "~/code/lucida/.tmp/tryout/slice-006/mentions/ui-console.log",
+      "console_messages": 0,
+      "driver_log": "~/code/lucida/.tmp/tryout/slice-006/mentions/ui-driver.log",
+      "ran": true,
+      "reason": "completed",
+      "shots_taken": [
+        "mentions-badge",
+        "mentions-panel",
+        "thread-chips",
+        "autocomplete"
+      ],
+      "steps": [
+        {
+          "action": "wait_testid",
+          "detail": "visible: mentions-of-me-badge",
+          "ok": true
+        },
+        {
+          "action": "shot",
+          "detail": "shot -> mentions-badge.png",
+          "name": "mentions-badge",
+          "ok": true
+        },
+        {
+          "action": "click_testid",
+          "detail": "clicked: mentions-of-me-badge",
+          "ok": true
+        },
+        {
+          "action": "wait_testid",
+          "detail": "visible: mentions-of-me-panel",
+          "ok": true
+        },
+        {
+          "action": "shot",
+          "detail": "shot -> mentions-panel.png",
+          "name": "mentions-panel",
+          "ok": true
+        },
+        {
+          "action": "click_row_with_text",
+          "detail": "clicked row[0] ([data-testid^=\"mention-of-me-item-\"]) containing: can you confirm these are mitochondria?",
+          "ok": true
+        },
+        {
+          "action": "wait_testid",
+          "detail": "visible: mention-chip",
+          "ok": true
+        },
+        {
+          "action": "shot",
+          "detail": "shot -> thread-chips.png",
+          "name": "thread-chips",
+          "ok": true
+        },
+        {
+          "action": "focus_placeholder",
+          "detail": "focused placeholder ~ comment",
+          "ok": true
+        },
+        {
+          "action": "type",
+          "detail": "typed: \"@\"",
+          "ok": true
+        },
+        {
+          "action": "wait_testid_prefix",
+          "detail": "visible prefix: mention-option-",
+          "ok": true
+        },
+        {
+          "action": "shot",
+          "detail": "shot -> autocomplete.png",
+          "name": "autocomplete",
+          "ok": true
+        }
+      ]
+    }
+  },
+  "name": "mentions",
+  "notes": [
+    "seeded 3 document command(s)",
+    "UI program: completed"
+  ],
+  "ok": true,
+  "shots": [
+    {
+      "exists": true,
+      "name": "mentions-badge",
+      "nonblank": true,
+      "path": "~/code/lucida/.tmp/tryout/slice-006/mentions/mentions-badge.png"
+    },
+    {
+      "exists": true,
+      "name": "mentions-panel",
+      "nonblank": true,
+      "path": "~/code/lucida/.tmp/tryout/slice-006/mentions/mentions-panel.png"
+    },
+    {
+      "exists": true,
+      "name": "thread-chips",
+      "nonblank": true,
+      "path": "~/code/lucida/.tmp/tryout/slice-006/mentions/thread-chips.png"
+    },
+    {
+      "exists": true,
+      "name": "autocomplete",
+      "nonblank": true,
+      "path": "~/code/lucida/.tmp/tryout/slice-006/mentions/autocomplete.png"
+    }
+  ]
+}

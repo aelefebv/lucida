@@ -140,9 +140,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     drive.add_argument(
         "--out",
-        required=True,
+        required=False,
+        default=None,
         metavar="DIR",
-        help="output directory for drive.json, server.log, cli/*.log, python/session.log, web/*.png",
+        help=(
+            "output directory for drive.json, server.log, cli/*.log, "
+            "python/session.log, web/*.png (required except for "
+            "`--scenario list`)"
+        ),
     )
     drive.add_argument(
         "--fixture",
@@ -155,6 +160,29 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SURFACES",
         default="all",
         help="comma-separated surfaces to exercise: cli, python, web, or all (default: all)",
+    )
+    drive.add_argument(
+        "--scenario",
+        metavar="NAME",
+        default=None,
+        help=(
+            "instead of surfaces, run a named end-to-end scenario (seed -> drive the "
+            "real UI by data-testid -> capture named shots). Use 'list' to print "
+            "the available scenarios."
+        ),
+    )
+    drive.add_argument(
+        "--email",
+        action="store_true",
+        help=(
+            "with --scenario: bundle the captured shots + a summary and hand them to "
+            "courier. DRY-RUN by default (preview only, sends nothing)."
+        ),
+    )
+    drive.add_argument(
+        "--email-send",
+        action="store_true",
+        help="with --email: actually send the email (default is dry-run preview only)",
     )
     drive.add_argument(
         "--json",
@@ -366,9 +394,23 @@ def _cmd_up(args: argparse.Namespace) -> int:
 
 def _cmd_drive(args: argparse.Namespace) -> int:
     log = _Stderr(enabled=True)
-    out_dir = Path(args.out)
     fixture = args.fixture or os.environ.get("LUCIDA_TRYOUT_FIXTURE")
     workspace_name = args.workspace_name or _default_workspace_name()
+
+    # --scenario takes a different path: run ONE named end-to-end scenario
+    # (seed -> drive the real UI by testid -> capture) instead of the surface
+    # tour. It owns its own bring-up/teardown + JSON shape. `--scenario list`
+    # needs no --out; everything else does.
+    if args.scenario is not None:
+        if args.scenario.strip().lower() != "list" and not args.out:
+            return _missing_out(args, log)
+        out_dir = Path(args.out) if args.out else None
+        return _cmd_drive_scenario(args, log=log, out_dir=out_dir, fixture=fixture,
+                                   workspace_name=workspace_name)
+
+    if not args.out:
+        return _missing_out(args, log)
+    out_dir = Path(args.out)
 
     # Parse --surface up front so a typo fails clearly (and, under --json, as a
     # uniform error envelope) before we boot anything.
@@ -495,6 +537,189 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
             err = (web.get("error") or {}).get("message")
             lines.append(f"  web         : DID NOT RUN ({err})")
     error = record.get("error")
+    if error:
+        lines.append(f"  error       : [{error.get('stage')}] {error.get('message')}")
+    print("\n".join(lines))
+
+
+def _missing_out(args: argparse.Namespace, log: "_Stderr") -> int:
+    """Uniform error when ``drive`` was invoked without the required ``--out``."""
+    message = "drive requires --out DIR (except for `--scenario list`)"
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {"ok": False, "error": {"stage": "config", "message": message}, "teardown": "n/a"},
+            indent=2, sort_keys=True,
+        ))
+    else:
+        print(f"lucida tryout drive: FAILED (config): {message}", file=sys.stderr)
+    return 2
+
+
+# --------------------------------------------------------------------------- #
+# drive --scenario: run ONE named end-to-end scenario.
+# --------------------------------------------------------------------------- #
+
+def _cmd_drive_scenario(
+    args: argparse.Namespace,
+    *,
+    log: "_Stderr",
+    out_dir: Path,
+    fixture: str | None,
+    workspace_name: str,
+) -> int:
+    # Imported here (not at module top) so the scenario package — which imports
+    # Playwright/courier helpers — is only loaded when actually running a
+    # scenario, keeping `up`/`drive --surface` startup lean.
+    from .scenarios import get as get_scenario, registered_names as scenario_names
+    from .scenarios._runner import drive_scenario
+    from .bringup import validate_fixture
+
+    name = args.scenario.strip()
+
+    # `--scenario list` prints the available scenarios and exits cleanly.
+    if name.lower() == "list":
+        return _emit_scenario_list(as_json=args.json)
+
+    scenario = get_scenario(name)
+    if scenario is None:
+        known = scenario_names()
+        message = (
+            f"unknown scenario {name!r}; choose from {', '.join(known) or '(none)'} "
+            f"or 'list'"
+        )
+        if args.json:
+            print(json.dumps(
+                {"ok": False, "mode": "scenario", "scenario": {"name": name, "ok": False},
+                 "error": {"stage": "config", "message": message}},
+                indent=2, sort_keys=True,
+            ))
+        else:
+            print(f"lucida tryout drive --scenario: FAILED (config): {message}", file=sys.stderr)
+        return 1
+
+    # --email-send implies --email (you can't send without bundling). Be lenient.
+    email = bool(args.email or args.email_send)
+
+    # Validate the fixture before booting so a bad path fails clearly.
+    try:
+        fixture_path_str = validate_fixture(fixture)
+    except TryoutError as error:
+        record = {
+            "ok": False,
+            "mode": "scenario",
+            "out_dir": str(out_dir),
+            "scenario": {"name": name, "ok": False},
+            "email": {"attempted": False, "dry_run": True, "sent": False, "attachments": []},
+            "error": error.to_error(),
+        }
+        _emit_scenario(record, as_json=args.json, log=log)
+        return 1
+    fixture_path = Path(fixture_path_str) if fixture_path_str else None
+
+    def _on_signal(signum, _frame):
+        raise _Interrupted(signum)
+
+    previous_handlers = _install_signal_handlers(_on_signal)
+    try:
+        outcome = drive_scenario(
+            spec=_spec_for(scenario),
+            out_dir=out_dir,
+            fixture_path=fixture_path,
+            workspace_name=workspace_name,
+            health_timeout_s=args.health_timeout,
+            open_timeout_s=args.open_timeout,
+            email=email,
+            email_send=bool(args.email_send),
+            log=log,
+        )
+    except _Interrupted as interrupted:
+        record = {
+            "ok": False,
+            "mode": "scenario",
+            "out_dir": str(out_dir),
+            "scenario": {"name": name, "ok": False},
+            "email": {"attempted": False, "dry_run": True, "sent": False, "attachments": []},
+            "error": {"stage": "signal", "message": f"interrupted by signal {interrupted.signum}"},
+        }
+        _emit_scenario(record, as_json=args.json, log=log)
+        return 130
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+    _emit_scenario(outcome.record, as_json=args.json, log=log)
+    return outcome.exit_code
+
+
+def _spec_for(scenario):
+    """Resolve the :class:`ScenarioSpec` a registered scenario drives.
+
+    The registry stores ``Scenario(name, run, description)`` to mirror the surface
+    registry; the framework's :func:`drive_scenario` wants the pure-steps spec. We
+    look it up from the scenario's own module (each module exposes ``SPEC``).
+    """
+    import importlib
+
+    module = importlib.import_module(scenario.run.__module__)
+    spec = getattr(module, "SPEC", None)
+    if spec is None:
+        raise TryoutError("config", f"scenario {scenario.name!r} has no SPEC to drive")
+    return spec
+
+
+def _emit_scenario_list(*, as_json: bool) -> int:
+    from .scenarios import REGISTRY, registered_names as scenario_names
+
+    names = scenario_names()
+    if as_json:
+        print(json.dumps(
+            {
+                "ok": True,
+                "mode": "scenario",
+                "scenarios": [
+                    {"name": n, "description": REGISTRY[n].description} for n in names
+                ],
+            },
+            indent=2, sort_keys=True,
+        ))
+        return 0
+    if not names:
+        print("lucida tryout: no scenarios registered")
+        return 0
+    print("lucida tryout scenarios:")
+    for n in names:
+        print(f"  {n:<14} {REGISTRY[n].description}")
+    return 0
+
+
+def _emit_scenario(record: dict[str, Any], *, as_json: bool, log: "_Stderr") -> None:
+    if as_json:
+        print(json.dumps(record, indent=2, sort_keys=True))
+        return
+    _emit_scenario_human(record)
+
+
+def _emit_scenario_human(record: dict[str, Any]) -> None:
+    ok = record.get("ok")
+    scenario = record.get("scenario") or {}
+    email = record.get("email") or {}
+    lines = [
+        f"lucida tryout scenario '{scenario.get('name')}': {'OK' if ok else 'FAILED'}",
+        f"  out_dir     : {record.get('out_dir')}",
+        f"  workspace   : {record.get('workspace_id')}",
+        f"  dataset     : {record.get('dataset_id')}",
+        f"  scenario_dir: {record.get('scenario_dir')}",
+        f"  server_log  : {record.get('server_log')}",
+        f"  teardown    : {record.get('teardown')}",
+    ]
+    for shot in scenario.get("shots", []):
+        mark = "non-blank" if shot.get("nonblank") else ("blank" if shot.get("exists") else "missing")
+        lines.append(f"      - {shot.get('name'):<16} {mark}")
+    if email.get("attempted"):
+        mode = "dry-run (nothing sent)" if email.get("dry_run") else ("SENT" if email.get("sent") else "send FAILED")
+        lines.append(f"  email       : {mode} ({len(email.get('attachments', []))} attachment(s))")
+        if email.get("reason"):
+            lines.append(f"                {email.get('reason')}")
+    error = record.get("error") or (scenario.get("error") if isinstance(scenario, dict) else None)
     if error:
         lines.append(f"  error       : [{error.get('stage')}] {error.get('message')}")
     print("\n".join(lines))
