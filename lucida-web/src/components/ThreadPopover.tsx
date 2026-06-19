@@ -41,6 +41,7 @@ import {
   type MentionCandidate,
 } from "./annotationMentions.ts";
 import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
+import { deriveHandle } from "./annotationParticipants.ts";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -396,8 +397,23 @@ export function ThreadPopover({
                   alignItems: "baseline",
                 }}
               >
-                <span style={{ color: "#58a6ff", fontWeight: 600, whiteSpace: "nowrap" }}>
-                  {mineComment ? "you" : c.author}
+                {/* gh #801: a comment author is an opaque per-browser id (#777). Show
+                    the SAME short, readable handle they're @-mentioned by
+                    (deriveHandle) — never the raw UUID — and cap the width with an
+                    ellipsis so a long name can never overflow the thread panel. Self
+                    stays "you". `title` keeps the full handle on hover. */}
+                <span
+                  title={mineComment ? "you" : deriveHandle(c.author)}
+                  style={{
+                    color: "#58a6ff",
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                    maxWidth: 120,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {mineComment ? "you" : deriveHandle(c.author)}
                 </span>
                 {isEditing ? (
                   // Edit mode: a field seeded with the current text, with the
