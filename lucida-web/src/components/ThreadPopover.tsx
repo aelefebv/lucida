@@ -37,12 +37,10 @@ import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import type { Annotation, Comment } from "./AnnotationOverlay.tsx";
 import {
-  activeMentionQuery,
-  applyMentionSelection,
-  matchMentionCandidates,
   splitMentionTokens,
   type MentionCandidate,
 } from "./annotationMentions.ts";
+import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -102,6 +100,11 @@ export function ThreadPopover({
   // cancelling) replaces it.
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  // The edit input element, so picking a mention while editing returns focus to
+  // it (same contract as the add box). Only one edit field is mounted at a time
+  // (one comment edits at a time), so a single shared ref always points at the
+  // live edit input.
+  const editInputRef = useRef<HTMLInputElement>(null);
   // Whether this pin's delete is armed (two-step confirm). A small piece of
   // local UI state — NOT a modal — that turns the Delete trigger into a
   // Confirm/Cancel. Nothing is emitted until Confirm, so a pin and its whole
@@ -134,30 +137,27 @@ export function ThreadPopover({
   };
 
   // --- @-mention autocomplete (issue #526) ----------------------------------
-  // The picker is PURE state of the draft: the in-progress `@query` (run from the
-  // last token-opening `@` to the end, no whitespace) and the candidates whose
-  // label contains it. No separate open/closed flag — when there's no active
-  // query or nothing matches, `mentionMatches` is empty and we render no picker,
-  // so the picker can never get out of sync with what's typed (Enter sends only
-  // when it's closed; see the input's keydown). A mention is just text, so this
-  // only edits the draft — sending stays the unchanged `add_comment`.
-  const mentionQuery = activeMentionQuery(draft);
-  const mentionMatches =
-    mentionQuery !== null
-      ? matchMentionCandidates(mentionCandidates, mentionQuery.query)
-      : [];
-  const mentionPickerOpen = mentionMatches.length > 0;
-
-  // Pick a candidate: replace the active `@query` with `@<label> ` (one trailing
-  // space), then return focus to the input so typing continues. Replacing the
-  // draft re-derives the query — now closed by the trailing space — so the picker
-  // closes on its own without any extra flag.
-  const pickMention = (label: string) => {
-    setDraft((cur) => applyMentionSelection(cur, label));
-    // Restore focus after React applies the new value. The input never unmounts
-    // on a pick, so this is just re-focusing the live element.
-    addInputRef.current?.focus();
-  };
+  // BOTH composers — the add box and the inline edit field — get identical
+  // mention autocomplete from the SAME hook (see useMentionAutocomplete): it
+  // derives the in-progress `@query` and matching candidates PURELY from the
+  // draft (no open/closed flag, so the picker can't drift from what's typed) and
+  // exposes a `pick` that rewrites the draft to `@<label> ` and refocuses the
+  // input. A mention is just text, so picking only edits the draft — sending
+  // stays the unchanged `add_comment` / `edit_comment`. Only one picker is ever
+  // open: the edit composer mounts only while editing, and within it the picker
+  // shows only for the comment being edited.
+  const addMention = useMentionAutocomplete(
+    draft,
+    setDraft,
+    mentionCandidates,
+    addInputRef,
+  );
+  const editMention = useMentionAutocomplete(
+    editDraft,
+    setEditDraft,
+    mentionCandidates,
+    editInputRef,
+  );
 
   // --- Remove an own comment (remove_comment) — author-only -----------------
   const removeComment = (commentId: string) => {
@@ -400,46 +400,134 @@ export function ThreadPopover({
                   {mineComment ? "you" : c.author}
                 </span>
                 {isEditing ? (
-                  // Edit mode: a field seeded with the current text. Enter saves
-                  // (trimmed; empty rejected); Escape and blur cancel.
+                  // Edit mode: a field seeded with the current text, with the
+                  // SAME @-mention autocomplete as the add box (driven by the
+                  // shared `editMention` hook above). Enter saves when the picker
+                  // is closed (trimmed; empty rejected); Escape and blur cancel.
                   <>
-                    <input
-                      type="text"
-                      data-testid={`comment-edit-input-${c.id}`}
-                      value={editDraft}
-                      autoFocus
-                      aria-label="Edit comment"
-                      onChange={(e) => setEditDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          saveEdit(c.id);
-                        } else if (e.key === "Escape") {
-                          e.preventDefault();
+                    {/* The edit input + its mention picker share this relatively
+                        positioned wrapper so the picker floats just above the
+                        field (mirroring the add composer). It flexes to fill the
+                        comment row where the bare input used to. */}
+                    <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+                      {/* Edit mention picker (issue #526): only ever open while
+                          THIS comment is the one being edited AND a mention is in
+                          progress with matches, so only one picker shows at a
+                          time. Each option inserts `@label ` into the edit draft;
+                          nothing here is a command — saving stays the unchanged
+                          edit_comment. */}
+                      {editMention.open && (
+                        <div
+                          data-testid={`mention-picker-edit-${c.id}`}
+                          role="listbox"
+                          aria-label="Mention a collaborator"
+                          style={{
+                            position: "absolute",
+                            left: 0,
+                            right: 0,
+                            bottom: "100%",
+                            marginBottom: 4,
+                            maxHeight: 132,
+                            overflowY: "auto",
+                            background: "#161b22",
+                            border: "1px solid #30363d",
+                            borderRadius: 6,
+                            boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
+                            zIndex: 1,
+                          }}
+                        >
+                          {editMention.matches.map((candidate) => (
+                            <button
+                              key={candidate.id}
+                              type="button"
+                              role="option"
+                              data-testid={`mention-option-${candidate.id}`}
+                              // preventDefault on mousedown keeps focus on the
+                              // edit input through the click, so its onBlur cancel
+                              // doesn't fire and `pick`'s refocus lands on a live
+                              // field — the picker reopens cleanly for the next
+                              // mention.
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => editMention.pick(candidate.label)}
+                              style={{
+                                display: "block",
+                                width: "100%",
+                                textAlign: "left",
+                                padding: "5px 8px",
+                                fontSize: 12,
+                                background: "none",
+                                border: "none",
+                                color: "#e6edf3",
+                                cursor: "pointer",
+                              }}
+                            >
+                              <span style={{ color: "#58a6ff", fontWeight: 600 }}>
+                                @
+                              </span>
+                              {candidate.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <input
+                        ref={editInputRef}
+                        type="text"
+                        data-testid={`comment-edit-input-${c.id}`}
+                        value={editDraft}
+                        autoFocus
+                        aria-label="Edit comment"
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            // While the picker is open, Enter picks the top match
+                            // and keeps editing; only with the picker CLOSED does
+                            // Enter save (per contract, matching the add box).
+                            if (editMention.open) {
+                              e.preventDefault();
+                              editMention.pick(editMention.matches[0].label);
+                              return;
+                            }
+                            e.preventDefault();
+                            saveEdit(c.id);
+                          } else if (e.key === "Escape") {
+                            if (editMention.open) {
+                              // Escape first dismisses the picker (close the token
+                              // with a trailing space) without cancelling the edit
+                              // or losing the draft.
+                              e.preventDefault();
+                              setEditDraft((cur) => `${cur} `);
+                              return;
+                            }
+                            e.preventDefault();
+                            cancelEdit();
+                          }
+                        }}
+                        onBlur={(e) => {
+                          // Blur cancels the edit — UNLESS focus is moving to this
+                          // comment's save control, in which case let the save's
+                          // click commit it. (Picking a mention preventDefaults
+                          // the option's mousedown, so blur never fires for it.)
+                          const next = e.relatedTarget as HTMLElement | null;
+                          if (
+                            next?.dataset?.testid === `comment-edit-save-${c.id}`
+                          ) {
+                            return;
+                          }
                           cancelEdit();
-                        }
-                      }}
-                      onBlur={(e) => {
-                        // Blur cancels the edit — UNLESS focus is moving to this
-                        // comment's save control, in which case let the save's
-                        // click commit it.
-                        const next = e.relatedTarget as HTMLElement | null;
-                        if (next?.dataset?.testid === `comment-edit-save-${c.id}`) {
-                          return;
-                        }
-                        cancelEdit();
-                      }}
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        padding: "2px 4px",
-                        fontSize: 12,
-                        background: "#0d1117",
-                        color: "#e6edf3",
-                        border: "1px solid #30363d",
-                        borderRadius: 4,
-                      }}
-                    />
+                        }}
+                        style={{
+                          width: "100%",
+                          minWidth: 0,
+                          padding: "2px 4px",
+                          fontSize: 12,
+                          background: "#0d1117",
+                          color: "#e6edf3",
+                          border: "1px solid #30363d",
+                          borderRadius: 4,
+                          boxSizing: "border-box",
+                        }}
+                      />
+                    </div>
                     <button
                       data-testid={`comment-edit-save-${c.id}`}
                       // preventDefault on mousedown keeps focus on the input so
@@ -554,7 +642,7 @@ export function ThreadPopover({
             picker escapes upward to stay readable). Each option inserts `@label `
             into the draft; nothing here is a command — sending stays the
             unchanged `add_comment`. */}
-        {mentionPickerOpen && (
+        {addMention.open && (
           <div
             data-testid={`mention-picker-${pin.id}`}
             role="listbox"
@@ -574,18 +662,18 @@ export function ThreadPopover({
               zIndex: 1,
             }}
           >
-            {mentionMatches.map((candidate) => (
+            {addMention.matches.map((candidate) => (
               <button
                 key={candidate.id}
                 type="button"
                 role="option"
                 data-testid={`mention-option-${candidate.id}`}
                 // Keep focus on the input through the click: preventing the
-                // mousedown default stops the input's blur, so `pickMention`'s
-                // refocus lands on a still-focused field and the picker reopens
-                // cleanly for the next mention.
+                // mousedown default stops the input's blur, so `pick`'s refocus
+                // lands on a still-focused field and the picker reopens cleanly
+                // for the next mention.
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => pickMention(candidate.label)}
+                onClick={() => addMention.pick(candidate.label)}
                 style={{
                   display: "block",
                   width: "100%",
@@ -617,14 +705,14 @@ export function ThreadPopover({
               // While the picker is open, Enter belongs to the picker, not to
               // sending: pick the first (top) match and keep typing. Only when
               // the picker is CLOSED does Enter send the comment (per contract).
-              if (mentionPickerOpen) {
+              if (addMention.open) {
                 e.preventDefault();
-                pickMention(mentionMatches[0].label);
+                addMention.pick(addMention.matches[0].label);
                 return;
               }
               e.preventDefault();
               addComment();
-            } else if (e.key === "Escape" && mentionPickerOpen) {
+            } else if (e.key === "Escape" && addMention.open) {
               // Escape dismisses the picker without sending or losing the draft:
               // append a space to close the active token (the picker derives
               // from the draft, so a trailing space ends the mention run).
