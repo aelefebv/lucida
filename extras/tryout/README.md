@@ -1,6 +1,6 @@
 # lucida agent tryout harness
 
-Two commands, both real and end-to-end against a live `lucida-server` brought up
+Three commands, all real and end-to-end against a live `lucida-server` brought up
 **from the current working tree** (not a mock):
 
 - **`up`** — bring up a live server, report how to reach it as machine-readable
@@ -10,9 +10,32 @@ Two commands, both real and end-to-end against a live `lucida-server` brought up
   **web** surface (a non-blank screenshot of the real rendered viewer, plus a
   best-effort real-SPA full-page capture + browser console) — capturing every
   step's output, then tear it down.
+- **`report`** — the capstone: run **every** surface (it reuses `drive --surface
+  all`) and emit a single, **self-contained `report.html`** (plus a `report.md`
+  mirror) that a human opens to verify lucida works — screenshots embedded inline,
+  a CLI command table with exit codes, the Python steps, run metadata, and an
+  obvious overall **PASS/FAIL**. With no `--out`, the evidence lands in a
+  gitignored, timestamped `<repo>/.tmp/tryout/<ts>/`.
 
 `up` is the spine; `drive` builds on it and adds the CLI / Python / web surfaces,
-each a thin, separable adapter over the same booted server.
+each a thin, separable adapter over the same booted server; `report` builds on
+`drive` and consolidates one full cross-surface run into a portable report.
+
+## TL;DR for an agent
+
+```bash
+# One command, full verification. With prebuilt artifacts (fast, no rebuild):
+LUCIDA_TRYOUT_SERVER_BIN=target/debug/lucida-server \
+LUCIDA_TRYOUT_CLI=target/debug/lucida \
+LUCIDA_TRYOUT_WEB_DIST=lucida-web/dist \
+  python3 extras/tryout/tryout.py report --json --fixture /path/to/dataset.ome.zarr
+```
+
+Read the printed JSON's `report_html` and open it: a PASS/FAIL banner, the three
+surfaces, and the rendered-viewer screenshots inline. With no `--out` the report
++ raw artifacts land under a gitignored `<repo>/.tmp/tryout/<ts>/` (the JSON's
+`out_dir`). `--help`, `up --help`, `drive --help`, and `report --help` describe
+every flag.
 
 ## `up`: bring up + tear down
 
@@ -131,6 +154,68 @@ floor); a failed `overview` or a skipped real-SPA ceiling is captured but never
 flips `ok`. `real_spa.captured: false` carries a `reason` (e.g. Playwright/Chrome
 not provisionable) — the floor still stands.
 
+## `report`: one run, one portable verification report
+
+```bash
+python3 extras/tryout/tryout.py report [--json] [--out DIR] [--fixture PATH] \
+  [--surface all]
+```
+
+The capstone. It runs the **full cross-surface session** (it *reuses* `drive
+--surface all` — CLI + Python + web, same hermetic spine, same raw artifacts:
+`server.log`, `cli/*.log`, `python/session.log`, `web/viewer.png` (+ `spa.png`),
+`drive.json`) and then consolidates that one run into two artifacts a human opens
+to verify lucida works **without re-running**:
+
+- **`report.html`** — a *truly* self-contained single file: the web screenshots
+  are **embedded inline as base64 data-URIs**, so you can email/attach/open it
+  anywhere with the renders still showing — no sibling files needed. It has a
+  clear **PASS/FAIL** banner, run metadata (lucida version + git commit,
+  `base_url`, workspace/dataset ids), a per-surface section each (the CLI command
+  **table** with exit codes, the Python **steps**, the web **screenshots inline**
+  with the re-openable viewer URL), and a `server.log` excerpt. Each embedded shot
+  is still captioned with its `web/*.png` filename so the on-disk artifact is
+  named, not hidden.
+- **`report.md`** — a Markdown mirror of the same facts (relative image links,
+  since the raw PNGs sit alongside), for terminals / PR comments / diffs.
+
+- **Default output is gitignored.** With **no `--out`**, the report and raw
+  artifacts are written to a timestamped `<repo>/.tmp/tryout/<ts>/` (`.tmp/` is
+  gitignored). The chosen path is reported as `out_dir`, so an agent can just run
+  `report` and know where the evidence landed.
+- **The report is written on a failed run too** (a bad fixture, a surface
+  that errored) — it *shows* what failed (the failing rows/steps, a blank/missing
+  screenshot placeholder, the error envelope). (An operator `Ctrl-C` mid-run still
+  reaps the server cleanly but may skip the report write.) Exit is non-zero iff the run
+  wasn't fully ok.
+- **Hermetic + always-reaped**, because the run *is* `drive`: free port,
+  throwaway DB, `LUCIDA_AUTH=disabled`, fixture opened read-only, prebuilt
+  artifacts reused when offered, server reaped on every path.
+
+### Result object (`report`)
+
+One JSON object with at least: `ok`, `out_dir`, `report_html` (path), `report_md`
+(path), a `surfaces` summary (`cli`/`python`/`web`, each with `ran`/`ok` and a
+pass count or `viewer_png_nonblank`), `workspace_id`, `dataset_id`, plus
+`base_url`, `versions`, and `drive_json` (a pointer to the full raw detail).
+
+```jsonc
+{
+  "ok": true,
+  "out_dir": ".../.tmp/tryout/20260101-120000",
+  "report_html": ".../report.html", "report_md": ".../report.md",
+  "workspace_id": "…", "dataset_id": "wds-…",
+  "base_url": "http://127.0.0.1:PORT", "teardown": "clean",
+  "versions": { "server": "lucida-server 0.2.0", "cli": "lucida 0.2.0", "commit": "abc1234" },
+  "surfaces": {
+    "cli":    { "ran": true, "ok": true, "passed": 16, "total": 16 },
+    "python": { "ran": true, "ok": true, "passed": 12, "total": 12 },
+    "web":    { "ran": true, "ok": true, "viewer_png_nonblank": true, "real_spa_captured": true }
+  },
+  "drive_json": ".../drive.json"
+}
+```
+
 ## What it does, and the guarantees it keeps
 
 Lifecycle: **build (or reuse) → boot → health-gate → create workspace / open
@@ -171,9 +256,10 @@ fixture → report → teardown.**
 extras/tryout/
   tryout.py            # thin entrypoint (path shim -> tryout.cli)
   tryout/
-    cli.py             # argv, output, exit codes, signal handling (up + drive)
+    cli.py             # argv, output, exit codes, signal handling (up + drive + report)
     bringup.py         # `up`: bring-up -> report -> teardown lifecycle
     drive.py           # `drive`: bring-up -> exercise surfaces -> capture -> teardown
+    report.py          # `report`: reuse `drive --surface all` -> consolidate report.html + report.md
     server.py          # boot / health-gate / reap the throwaway server (the spine)
     web.py             # resolve (or build) the SPA bundle the server serves (web)
     surfaces/
@@ -190,7 +276,10 @@ The `surfaces/` package is where each way of driving the server lives, each a
 thin adapter over the same booted server. `drive` reuses the `server.py` spine
 and the `python_client.py` bring-up wholesale rather than re-implementing the
 lifecycle; the web surface additionally points the server at a SPA bundle
-(`web.py`) before boot so the real viewer can be rendered.
+(`web.py`) before boot so the real viewer can be rendered. `report.py` reuses
+`drive` wholesale and only adds the consolidation step (the portable
+`report.html` + `report.md`) on top of the raw artifacts `drive` already writes —
+so the run logic lives in exactly one place.
 
 ## Fast self-test
 
@@ -209,6 +298,14 @@ LUCIDA_TRYOUT_WEB_DIST=lucida-web/dist \
 
 # verify the web screenshot is a real, content-bearing render:
 python3 scripts/assert_png_nonblank.py /tmp/tryout-drive/web/viewer.png
+
+# report: run every surface and emit the consolidated, portable report
+LUCIDA_TRYOUT_SERVER_BIN=target/debug/lucida-server \
+LUCIDA_TRYOUT_CLI=target/debug/lucida \
+LUCIDA_TRYOUT_WEB_DIST=lucida-web/dist \
+  python3 extras/tryout/tryout.py report --json \
+  --out /tmp/tryout-report --fixture /path/to/dataset.ome.zarr
+open /tmp/tryout-report/report.html   # macOS; or xdg-open on Linux
 ```
 
 For `up`: expect exit 0, a JSON object on stdout with a `127.0.0.1:PORT` base URL
@@ -222,3 +319,12 @@ a **non-blank** `/tmp/tryout-drive/web/viewer.png` and a recorded `viewer_url`
 non-empty `/tmp/tryout-drive/cli/*.log` and `/tmp/tryout-drive/python/session.log`,
 `/tmp/tryout-drive/drive.json`, `teardown: "clean"`, and no orphaned
 `lucida-server` (or headless browser).
+
+For `report`: expect exit 0, a JSON object with `ok: true`, a `report_html` +
+`report_md` path, and `surfaces.{cli,python,web}` all `ok`. The
+`/tmp/tryout-report/report.html` is non-empty and **self-contained** — it opens
+standalone with the screenshots showing inline (the bytes are embedded as base64
+`data:` URIs) and an obvious PASS/FAIL banner. Run with **no `--out`** to confirm
+the report lands under a gitignored `<repo>/.tmp/tryout/<ts>/` (reported as
+`out_dir`); run with `--fixture /nonexistent.ome.zarr` to confirm the report is
+**still written** (showing the failure) while the process exits non-zero.

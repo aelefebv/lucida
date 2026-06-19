@@ -25,6 +25,7 @@ from typing import Any
 from .bringup import bring_up
 from .drive import drive as run_drive, parse_surfaces
 from .errors import TryoutError
+from .report import run_report
 
 
 PROG = "tryout.py"
@@ -179,6 +180,75 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"seconds to wait for dataset open (default: {DEFAULT_OPEN_TIMEOUT_S:g})",
     )
     drive.set_defaults(func=_cmd_drive)
+
+    report = subparsers.add_parser(
+        "report",
+        help="run every surface and emit a self-contained PASS/FAIL report.html (+ report.md)",
+        description=(
+            "The capstone: exercise every surface (reuse `drive --surface all`: "
+            "CLI + Python + web) against the opened fixture, then consolidate the "
+            "run into a single, self-contained report a human opens to verify "
+            "lucida works. Writes report.html (web screenshots EMBEDDED inline as "
+            "base64 data-URIs so the file opens/shares standalone, a CLI command "
+            "table with exit codes, the Python steps, run metadata, and an obvious "
+            "overall PASS/FAIL) plus a report.md mirror, alongside the raw "
+            "artifacts (server.log, cli/*.log, python/session.log, web/*.png, "
+            "drive.json). With no --out, evidence lands in a gitignored, "
+            "timestamped <repo>/.tmp/tryout/<ts>/. The report is written on a failed "
+            "run too (a bad fixture or a surface that errored — it shows what failed); "
+            "exit is non-zero if the run wasn't fully ok. (An operator interrupt with "
+            "Ctrl-C still reaps the server cleanly but may skip the report write.) "
+            "Hermetic + always-reaped, reusing prebuilt artifacts."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    report.add_argument(
+        "--out",
+        metavar="DIR",
+        default=None,
+        help=(
+            "output directory for report.html/report.md + raw artifacts "
+            "(default: gitignored <repo>/.tmp/tryout/<timestamp>/)"
+        ),
+    )
+    report.add_argument(
+        "--fixture",
+        metavar="PATH",
+        default=None,
+        help="OME-Zarr dataset to open read-only (default: $LUCIDA_TRYOUT_FIXTURE)",
+    )
+    report.add_argument(
+        "--surface",
+        metavar="SURFACES",
+        default="all",
+        help="comma-separated surfaces to exercise: cli, python, web, or all (default: all)",
+    )
+    report.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON object to stdout (else a human-readable summary)",
+    )
+    report.add_argument(
+        "--workspace-name",
+        default=None,
+        metavar="NAME",
+        help="name for the created workspace (default: auto-generated)",
+    )
+    report.add_argument(
+        "--health-timeout",
+        type=float,
+        default=DEFAULT_HEALTH_TIMEOUT_S,
+        metavar="SECONDS",
+        help=f"seconds to wait for /healthz (default: {DEFAULT_HEALTH_TIMEOUT_S:g})",
+    )
+    report.add_argument(
+        "--open-timeout",
+        type=float,
+        default=DEFAULT_OPEN_TIMEOUT_S,
+        metavar="SECONDS",
+        help=f"seconds to wait for dataset open (default: {DEFAULT_OPEN_TIMEOUT_S:g})",
+    )
+    report.set_defaults(func=_cmd_report)
     return parser
 
 
@@ -419,6 +489,109 @@ def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
         else:
             err = (web.get("error") or {}).get("message")
             lines.append(f"  web         : DID NOT RUN ({err})")
+    error = record.get("error")
+    if error:
+        lines.append(f"  error       : [{error.get('stage')}] {error.get('message')}")
+    print("\n".join(lines))
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    log = _Stderr(enabled=True)
+    # --out is OPTIONAL for report: when omitted we write to a gitignored,
+    # timestamped <repo>/.tmp/tryout/<ts>/ (the run_report layer picks it).
+    out_dir = Path(args.out) if args.out else None
+    fixture = args.fixture or os.environ.get("LUCIDA_TRYOUT_FIXTURE")
+    workspace_name = args.workspace_name or _default_workspace_name()
+
+    # Parse --surface up front so a typo fails clearly before we boot anything.
+    try:
+        surfaces = parse_surfaces(args.surface)
+    except TryoutError as error:
+        record = {
+            "ok": False,
+            "out_dir": str(out_dir) if out_dir is not None else None,
+            "report_html": None,
+            "report_md": None,
+            "surfaces": {},
+            "error": error.to_error(),
+        }
+        _emit_report(record, as_json=args.json, log=log)
+        return 1
+
+    def _on_signal(signum, _frame):
+        raise _Interrupted(signum)
+
+    previous_handlers = _install_signal_handlers(_on_signal)
+    try:
+        outcome = run_report(
+            out_dir=out_dir,
+            fixture=fixture,
+            workspace_name=workspace_name,
+            surfaces=surfaces,
+            health_timeout_s=args.health_timeout,
+            open_timeout_s=args.open_timeout,
+            log=log,
+        )
+    except _Interrupted as interrupted:
+        # The server was reaped by run_report -> drive()'s finally. Emit a clean
+        # failure record so even an interrupt yields a usable result.
+        record = {
+            "ok": False,
+            "out_dir": str(out_dir) if out_dir is not None else None,
+            "report_html": None,
+            "report_md": None,
+            "surfaces": {},
+            "workspace_id": None,
+            "dataset_id": None,
+            "error": {
+                "stage": "signal",
+                "message": f"interrupted by signal {interrupted.signum}",
+            },
+        }
+        _emit_report(record, as_json=args.json, log=log)
+        return 130
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+    _emit_report(outcome.record, as_json=args.json, log=log)
+    return outcome.exit_code
+
+
+def _emit_report(record: dict[str, Any], *, as_json: bool, log: _Stderr) -> None:
+    if as_json:
+        print(json.dumps(record, indent=2, sort_keys=True))
+        return
+    _emit_report_human(record)
+
+
+def _emit_report_human(record: dict[str, Any]) -> None:
+    ok = record.get("ok")
+    surfaces = record.get("surfaces") or {}
+    lines = [
+        f"lucida tryout report: {'PASS' if ok else 'FAIL'}",
+        f"  out_dir     : {record.get('out_dir')}",
+        f"  report.html : {record.get('report_html')}",
+        f"  report.md   : {record.get('report_md')}",
+        f"  workspace   : {record.get('workspace_id')}",
+        f"  dataset     : {record.get('dataset_id')}",
+        f"  base_url    : {record.get('base_url')}",
+        f"  teardown    : {record.get('teardown')}",
+    ]
+    for name in ("cli", "python", "web"):
+        surf = surfaces.get(name)
+        if surf is None:
+            continue
+        if not surf.get("ran"):
+            err = surf.get("error") or "did not run"
+            lines.append(f"  {name:<11} : DID NOT RUN ({err})")
+            continue
+        verdict = "PASS" if surf.get("ok") else "FAIL"
+        if name == "web":
+            nb = surf.get("viewer_png_nonblank")
+            extra = "viewer non-blank" if nb else "viewer BLANK/missing"
+        else:
+            extra = f"{surf.get('passed')}/{surf.get('total')} ok"
+        lines.append(f"  {name:<11} : {verdict} ({extra})")
     error = record.get("error")
     if error:
         lines.append(f"  error       : [{error.get('stage')}] {error.get('message')}")
