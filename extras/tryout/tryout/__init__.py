@@ -4,12 +4,13 @@ A small toolkit that brings up a live ``lucida-server`` from the current working
 tree, reports how to reach it in machine-readable form, captures a server log,
 and tears the server down cleanly.
 
-Layering (so later CLI / Python / web surfaces slot in cleanly):
+Layering (so later web surfaces slot in cleanly):
   * :mod:`tryout.cli`       — argv parsing, output, exit codes, signal handling
-  * :mod:`tryout.bringup`   — the bring-up -> report -> teardown lifecycle
+  * :mod:`tryout.bringup`   — ``up``: the bring-up -> report -> teardown lifecycle
+  * :mod:`tryout.drive`     — ``drive``: bring-up -> exercise surfaces -> capture
   * :mod:`tryout.server`    — boot / health-gate / reap the throwaway server
-  * :mod:`tryout.surfaces`  — ways to drive the live server (python client today)
-  * :mod:`tryout.capture`   — report record + on-disk artifacts (up.json)
+  * :mod:`tryout.surfaces`  — ways to drive the live server (python client, CLI, python tour)
+  * :mod:`tryout.capture`   — report record + on-disk artifacts (up.json / drive.json)
   * :mod:`tryout.netutil`   — free-port allocation, /healthz polling
   * :mod:`tryout.errors`    — staged TryoutError
 """

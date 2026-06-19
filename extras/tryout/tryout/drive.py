@@ -1,0 +1,355 @@
+"""The ``drive`` orchestration: bring up, exercise surfaces, capture, tear down.
+
+This is slice 2's counterpart to :mod:`tryout.bringup`. Where ``up`` boots and
+immediately tears down, ``drive`` keeps the server *alive* across a tour of one
+or more surfaces, then reaps it. It reuses slice 1's spine wholesale rather than
+re-implementing any lifecycle:
+
+  * :class:`tryout.server.ServerProcess` — the same context-managed boot /
+    health-gate / always-reap server (free port, temp DB, ``LUCIDA_AUTH=disabled``).
+  * :func:`tryout.surfaces.create_workspace_and_open` — the same client-driven
+    bring-up that creates the workspace and opens the fixture read-only.
+
+On top of that it runs the requested surfaces (:mod:`tryout.surfaces.cli_surface`,
+:mod:`tryout.surfaces.python_surface`) against the *one* opened workspace +
+dataset, writes ``DIR/drive.json`` (mirroring stdout), and returns a uniform
+record + exit code.
+
+Invariants (mirroring slice 1):
+  * The server is reaped on every path — the ``with ServerProcess(...)`` block
+    plus a defensive ``stop()`` in ``finally`` guarantee it.
+  * ``drive.json`` is written on success *and* failure, so the human verifier
+    always has an artifact.
+  * A per-command / per-step failure inside a surface is captured, not fatal.
+  * Exit is non-zero only if bring-up failed or a *requested* surface could not
+    be exercised at all (e.g. CLI binary missing, Python driver unrunnable).
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from . import capture
+from .bringup import _validate_fixture
+from .errors import TryoutError
+from .server import ServerProcess
+from .surfaces import create_workspace_and_open
+from .surfaces.cli_surface import run_cli_surface
+from .surfaces.python_surface import run_python_surface
+
+
+# The surfaces this command knows how to drive, in a stable tour order.
+ALL_SURFACES = ("cli", "python")
+
+
+@dataclass(frozen=True)
+class DriveOutcome:
+    record: dict[str, Any]
+    drive_json_path: Path | None
+    exit_code: int
+
+
+def parse_surfaces(raw: str | None) -> list[str]:
+    """Parse the ``--surface`` value into an ordered, de-duplicated list.
+
+    Accepts ``all`` (expands to every known surface) or a comma-separated subset
+    (``cli``, ``python``). Order is normalized to the canonical tour order so the
+    output is stable regardless of how the caller spelled it. Unknown tokens
+    raise a ``config`` ``TryoutError`` so a typo fails clearly rather than
+    silently running nothing.
+    """
+    if raw is None or raw.strip() == "" or raw.strip().lower() == "all":
+        return list(ALL_SURFACES)
+    requested: list[str] = []
+    for token in raw.split(","):
+        name = token.strip().lower()
+        if not name:
+            continue
+        if name == "all":
+            return list(ALL_SURFACES)
+        if name not in ALL_SURFACES:
+            raise TryoutError(
+                "config",
+                f"unknown surface {name!r}; choose from {', '.join(ALL_SURFACES)} or 'all'",
+            )
+        if name not in requested:
+            requested.append(name)
+    if not requested:
+        raise TryoutError("config", "no surfaces selected")
+    # Normalize to canonical order.
+    return [surface for surface in ALL_SURFACES if surface in requested]
+
+
+def drive(
+    *,
+    out_dir: Path,
+    fixture: str | None,
+    workspace_name: str,
+    surfaces: list[str],
+    health_timeout_s: float,
+    open_timeout_s: float,
+    server_binary: Path | None = None,
+    log=print,
+) -> DriveOutcome:
+    """Run one full drive cycle and return the record + exit code.
+
+    Never raises ``TryoutError`` outward: every failure is caught, recorded into
+    ``drive.json``, and turned into a non-zero exit code so the caller's behavior
+    is uniform.
+    """
+    out_dir = out_dir.expanduser()
+    if out_dir.exists() and not out_dir.is_dir():
+        return _failure(
+            out_dir=out_dir,
+            error=TryoutError("config", f"--out path exists and is not a directory: {out_dir}"),
+            surfaces=surfaces,
+            fixture=fixture,
+            log=log,
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-run client config, isolated from the user's real ~/.config/lucida.
+    py_config_path = out_dir / "client-config.json"
+    cli_config_path = out_dir / "cli-config.json"
+
+    started = time.monotonic()
+    try:
+        fixture_path = _validate_fixture(fixture)
+    except TryoutError as error:
+        # Pre-boot bad fixture: nothing to tear down, but still write drive.json.
+        return _failure(
+            out_dir=out_dir, error=error, surfaces=surfaces, fixture=fixture, log=log
+        )
+
+    server = ServerProcess(
+        out_dir=out_dir,
+        binary=server_binary,
+        health_timeout_s=health_timeout_s,
+        log=log,
+    )
+
+    base_url: str | None = None
+    ws_url: str | None = None
+    server_log: Path | None = None
+    db_path: Path | None = None
+    pid: int | None = None
+    workspace_id: str | None = None
+    dataset_id: str | None = None
+    dataset_name: str | None = None
+    surface_results: dict[str, dict[str, Any]] = {}
+    any_surface_failed = False
+    teardown_state = "pending"
+
+    try:
+        with server:
+            try:
+                handle = server.start()
+                base_url = handle.base_url
+                ws_url = handle.ws_url
+                server_log = handle.server_log
+                db_path = handle.db_path
+                pid = handle.pid
+
+                # Reuse slice 1's bring-up surface: create the workspace and open
+                # the fixture read-only via the maintained Python client.
+                opened = create_workspace_and_open(
+                    base_url=base_url,
+                    workspace_name=workspace_name,
+                    fixture=fixture_path,
+                    config_path=py_config_path,
+                    open_timeout=open_timeout_s,
+                    log=log,
+                )
+                workspace_id = opened.workspace_id
+                dataset_id = opened.dataset_id
+                if opened.ws_url:
+                    ws_url = opened.ws_url
+                if opened.dataset:
+                    dataset_name = opened.dataset.get("name")
+            except TryoutError as error:
+                # Bring-up failed -> no surface can be exercised. Reap now so the
+                # record can report teardown, and return a non-zero failure.
+                teardown_state = server.stop()
+                eff_server_log = server_log or server.server_log_path
+                return _failure(
+                    out_dir=out_dir,
+                    error=error,
+                    surfaces=surfaces,
+                    fixture=fixture_path if fixture_path is not None else fixture,
+                    base_url=base_url,
+                    ws_url=ws_url,
+                    server_log=eff_server_log,
+                    db_path=db_path or server.db_path,
+                    pid=pid or server.pid,
+                    workspace_id=workspace_id,
+                    dataset_id=dataset_id,
+                    teardown=teardown_state,
+                    log=log,
+                )
+
+            # ---- the server is live and the fixture is open: run surfaces ----
+            log(
+                f"[tryout] driving surfaces {surfaces} against workspace "
+                f"{workspace_id} (dataset {dataset_id})"
+            )
+
+            if "cli" in surfaces:
+                cli_result = run_cli_surface(
+                    base_url=base_url,
+                    workspace_id=workspace_id,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    out_dir=out_dir,
+                    config_path=cli_config_path,
+                    log=log,
+                )
+                surface_results["cli"] = cli_result.to_dict()
+                if not cli_result.ran:
+                    any_surface_failed = True
+
+            if "python" in surfaces:
+                py_result = run_python_surface(
+                    base_url=base_url,
+                    workspace_id=workspace_id,
+                    dataset_id=dataset_id,
+                    out_dir=out_dir,
+                    config_path=py_config_path,
+                    timeout=min(open_timeout_s, 60.0),
+                    log=log,
+                )
+                surface_results["python"] = py_result.to_dict()
+                if not py_result.ran:
+                    any_surface_failed = True
+    finally:
+        # Defensive: guarantee the server is down even on an unexpected escape.
+        teardown_state = server.stop()
+
+    extra: dict[str, Any] = {
+        "out_dir": str(out_dir),
+        "surfaces": surface_results,
+        "requested_surfaces": list(surfaces),
+        "dataset_name": dataset_name,
+        "elapsed_s": round(time.monotonic() - started, 3),
+    }
+
+    # ok iff bring-up succeeded (we got here) AND every requested surface ran
+    # without a harness-level error. Per-command/per-step failures inside a
+    # surface are captured and do NOT flip ok to false — but they ARE visible in
+    # each surface's passed/total and ok fields.
+    ok = not any_surface_failed
+    record = _build_record(
+        ok=ok,
+        base_url=base_url,
+        ws_url=ws_url,
+        workspace_id=workspace_id,
+        out_dir=out_dir,
+        server_log=server_log,
+        db_path=db_path,
+        pid=pid,
+        fixture=fixture_path if fixture_path is not None else fixture,
+        dataset_id=dataset_id,
+        teardown=teardown_state,
+        extra=extra,
+    )
+    drive_json_path = _safe_write_drive_json(out_dir, record, log)
+    if drive_json_path is not None:
+        record.setdefault("drive_json", str(drive_json_path))
+    exit_code = 0 if ok else 1
+    return DriveOutcome(record=record, drive_json_path=drive_json_path, exit_code=exit_code)
+
+
+def _build_record(
+    *,
+    ok: bool,
+    base_url: str | None,
+    ws_url: str | None,
+    workspace_id: str | None,
+    out_dir: Path,
+    server_log: Path | None,
+    db_path: Path | None,
+    pid: int | None,
+    fixture: str | None,
+    dataset_id: str | None,
+    teardown: str,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    """Assemble the drive record. Reuses slice 1's record shape for the shared
+    keys (so a reader who knows ``up.json`` already knows most of ``drive.json``)
+    and layers the drive-specific keys (``surfaces``, ...) on top via ``extra``.
+    """
+    return capture.build_record(
+        ok=ok,
+        base_url=base_url,
+        ws_url=ws_url,
+        workspace_id=workspace_id,
+        out_dir=out_dir,
+        server_log=server_log,
+        db_path=db_path,
+        pid=pid,
+        fixture=fixture,
+        dataset_id=dataset_id,
+        # healthz is implied by a successful bring-up; keep the key for parity
+        # with up.json so the shapes line up.
+        healthz=base_url is not None and workspace_id is not None,
+        teardown=teardown,
+        extra=extra,
+    )
+
+
+def _failure(
+    *,
+    out_dir: Path,
+    error: TryoutError,
+    surfaces: list[str],
+    fixture: str | None,
+    base_url: str | None = None,
+    ws_url: str | None = None,
+    server_log: Path | None = None,
+    db_path: Path | None = None,
+    pid: int | None = None,
+    workspace_id: str | None = None,
+    dataset_id: str | None = None,
+    teardown: str | None = None,
+    log=print,
+) -> DriveOutcome:
+    """Build + persist a uniform failure record (bring-up or pre-boot failure)."""
+    extra: dict[str, Any] = {
+        "out_dir": str(out_dir),
+        "surfaces": {},
+        "requested_surfaces": list(surfaces),
+        "error": error.to_error(),
+    }
+    record = capture.build_record(
+        ok=False,
+        base_url=base_url,
+        ws_url=ws_url,
+        workspace_id=workspace_id,
+        out_dir=out_dir,
+        server_log=server_log,
+        db_path=db_path,
+        pid=pid,
+        fixture=fixture,
+        dataset_id=dataset_id,
+        healthz=False,
+        teardown=teardown if teardown is not None else ("clean" if pid is not None else "n/a"),
+        extra=extra,
+    )
+    drive_json_path = _safe_write_drive_json(out_dir, record, log)
+    if drive_json_path is not None:
+        record.setdefault("drive_json", str(drive_json_path))
+    return DriveOutcome(record=record, drive_json_path=drive_json_path, exit_code=1)
+
+
+def _safe_write_drive_json(out_dir: Path, record: dict[str, Any], log) -> Path | None:
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "drive.json"
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+    except OSError as error:
+        log(f"[tryout] WARNING: could not write drive.json: {error}")
+        return None

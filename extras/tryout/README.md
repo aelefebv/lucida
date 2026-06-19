@@ -1,14 +1,18 @@
 # lucida agent tryout harness
 
-One command that brings up a live `lucida-server` **from the current working
-tree**, reports how to reach it as machine-readable JSON, captures a server log
-for human verification, then tears the server down cleanly. It is the spine the
-later CLI / Python / web tryout surfaces build on.
+Two commands, both real and end-to-end against a live `lucida-server` brought up
+**from the current working tree** (not a mock):
 
-This is real and end-to-end: it boots an actual server and talks to it through
-the maintained Python client. It is not a mock.
+- **`up`** — bring up a live server, report how to reach it as machine-readable
+  JSON, capture a server log, then tear it down cleanly.
+- **`drive`** — bring up a live server, then **exercise lucida's non-visual
+  surfaces the way an agent would** (the `lucida` CLI and the `LucidaClient`
+  Python client), capturing every step's output + exit code, then tear it down.
 
-## Usage
+`up` is the spine; `drive` builds on it and adds the CLI / Python surfaces. The
+web surface comes next and plugs in alongside them.
+
+## `up`: bring up + tear down
 
 ```bash
 python3 extras/tryout/tryout.py up --once --json --out DIR [--fixture PATH]
@@ -33,6 +37,63 @@ One JSON object with at least: `ok`, `base_url` (`http://127.0.0.1:PORT`),
 `DIR/up.json`. On failure, `ok` is `false` and an `error` object carries a
 `stage` tag and message (plus the server's structured diagnostic when a dataset
 open fails), and the process exits non-zero.
+
+## `drive`: exercise the surfaces + capture
+
+```bash
+python3 extras/tryout/tryout.py drive --json --out DIR --fixture PATH \
+  [--surface cli,python,all]
+```
+
+Brings the env up (same hermetic spine as `up` — free port, throwaway DB, auth
+disabled, fixture opened **read-only**), then runs a representative agent tour of
+the requested surface(s) **against the real opened dataset** and captures
+everything, then always tears the server down.
+
+- `--surface` — `cli`, `python`, or `all` (default), comma-separated. Only the
+  requested surfaces appear in the result.
+- **CLI surface** — a broad tour of the actual `lucida` binary
+  (`LUCIDA_TRYOUT_CLI`, else `cargo run -p lucida-cli --`): status/identity,
+  workspace list + info, dataset list + info + health, viewer state, a real view
+  mutation (`view set-zoom`) and a layer mutation, in **both** human and `--json`
+  form. Each command is captured to `DIR/cli/NN-<name>.log` (argv + exit code +
+  stdout + stderr).
+- **Python surface** — a broad `LucidaClient` session (`from lucida import
+  LucidaClient`, driven against the working-tree `lucida-py` source via `uv` — no
+  native build): connect, status, select the workspace, list datasets, dataset
+  info + health, layer/debug reads, a view mutation and a layer mutation. The
+  transcript is captured to `DIR/python/session.log`.
+- The full result is written to `DIR/drive.json` and printed (one JSON object
+  under `--json`). `DIR/server.log` is captured too.
+
+A single CLI command (or Python step) returning non-zero is **captured, not
+fatal** — the tour continues and records it, because an agent wants to see *what*
+failed. The run exits non-zero only if bring-up failed or a *requested surface
+could not be exercised at all* (e.g. the CLI binary is missing).
+
+### Result object (`drive`)
+
+One JSON object with at least: `ok` (true iff bring-up succeeded and each
+requested surface ran without a harness-level error), `out_dir`, `workspace_id`,
+`dataset_id`, `teardown`, and `surfaces`:
+
+```jsonc
+{
+  "ok": true,
+  "workspace_id": "…", "dataset_id": "wds-…", "teardown": "clean",
+  "surfaces": {
+    "cli": {
+      "ran": true, "ok": true, "passed": 16, "total": 16,
+      "log_dir": "DIR/cli",
+      "commands": [{ "name": "status", "argv": ["…"], "exit_code": 0, "ok": true }, …]
+    },
+    "python": {
+      "ran": true, "ok": true, "log": "DIR/python/session.log",
+      "steps": [{ "name": "status", "ok": true, "summary": { … } }, …]
+    }
+  }
+}
+```
 
 ## What it does, and the guarantees it keeps
 
@@ -71,27 +132,45 @@ fixture → report → teardown.**
 extras/tryout/
   tryout.py            # thin entrypoint (path shim -> tryout.cli)
   tryout/
-    cli.py             # argv, output, exit codes, signal handling
-    bringup.py         # bring-up -> report -> teardown lifecycle
-    server.py          # boot / health-gate / reap the throwaway server
+    cli.py             # argv, output, exit codes, signal handling (up + drive)
+    bringup.py         # `up`: bring-up -> report -> teardown lifecycle
+    drive.py           # `drive`: bring-up -> exercise surfaces -> capture -> teardown
+    server.py          # boot / health-gate / reap the throwaway server (the spine)
     surfaces/
-      python_client.py # workspace create + dataset open via LucidaClient
-    capture.py         # up.json record + artifacts
+      python_client.py # workspace create + dataset open via LucidaClient (bring-up)
+      cli_surface.py   # drive the real `lucida` CLI tour, capture each command
+      python_surface.py# broad LucidaClient read/mutate tour, capture transcript
+    capture.py         # shared record shape + on-disk artifacts (up.json/drive.json)
     netutil.py         # free-port allocation, /healthz polling
     errors.py          # staged TryoutError
 ```
 
-The `surfaces/` package is where later CLI and web surfaces slot in alongside
-the Python one; each is a thin adapter over the same booted server.
+The `surfaces/` package is where each way of driving the server lives; the web
+surface slots in alongside these, each a thin adapter over the same booted
+server. `drive` reuses the `server.py` spine and the `python_client.py` bring-up
+wholesale rather than re-implementing the lifecycle.
 
 ## Fast self-test
 
 ```bash
+# up: bring up + tear down
 LUCIDA_TRYOUT_SERVER_BIN=target/debug/lucida-server \
   python3 extras/tryout/tryout.py up --once --json \
   --out /tmp/tryout-check --fixture /path/to/dataset.ome.zarr
+
+# drive: bring up, exercise BOTH surfaces, capture, tear down
+LUCIDA_TRYOUT_SERVER_BIN=target/debug/lucida-server \
+LUCIDA_TRYOUT_CLI=target/debug/lucida \
+  python3 extras/tryout/tryout.py drive --surface all --json \
+  --out /tmp/tryout-drive --fixture /path/to/dataset.ome.zarr
 ```
 
-Expect exit 0, a JSON object on stdout with a `127.0.0.1:PORT` base URL (not
-9876) and real `workspace_id` / `dataset_id`, a non-empty `/tmp/tryout-check/server.log`,
-and `/tmp/tryout-check/up.json`.
+For `up`: expect exit 0, a JSON object on stdout with a `127.0.0.1:PORT` base URL
+(not 9876) and real `workspace_id` / `dataset_id`, a non-empty
+`/tmp/tryout-check/server.log`, and `/tmp/tryout-check/up.json`.
+
+For `drive`: expect exit 0, `surfaces.cli` with several captured commands (each
+with an `exit_code`) and `surfaces.python.ran` true, non-empty
+`/tmp/tryout-drive/cli/*.log` and `/tmp/tryout-drive/python/session.log`,
+`/tmp/tryout-drive/drive.json`, `teardown: "clean"`, and no orphaned
+`lucida-server`.

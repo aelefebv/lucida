@@ -1,0 +1,422 @@
+{
+  "base_url": "http://127.0.0.1:56010",
+  "dataset_id": "wds-b0b4d80db4c64691a7395f2e42e6171e",
+  "dataset_name": "lif_test.ome.zarr",
+  "db_path": "<tmp>",
+  "elapsed_s": 0.701,
+  "fixture": "~/local_data/lucida_test_zarrs/lif_test.ome.zarr",
+  "healthz": true,
+  "ok": true,
+  "out_dir": "~/code/lucida/.tmp/tryout/slice-002",
+  "pid": 86747,
+  "requested_surfaces": [
+    "cli",
+    "python"
+  ],
+  "server_log": "~/code/lucida/.tmp/tryout/slice-002/server.log",
+  "surfaces": {
+    "cli": {
+      "commands": [
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "status"
+          ],
+          "duration_s": 0.027,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/01-status.log",
+          "name": "status",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "status"
+          ],
+          "duration_s": 0.026,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/02-status-json.log",
+          "name": "status-json",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "server",
+            "status"
+          ],
+          "duration_s": 0.024,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/03-server-status-json.log",
+          "name": "server-status-json",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "workspace",
+            "list"
+          ],
+          "duration_s": 0.02,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/04-workspace-list.log",
+          "name": "workspace-list",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "workspace",
+            "info",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc"
+          ],
+          "duration_s": 0.024,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/05-workspace-info.log",
+          "name": "workspace-info",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "dataset",
+            "list"
+          ],
+          "duration_s": 0.022,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/06-dataset-list.log",
+          "name": "dataset-list",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "dataset",
+            "list"
+          ],
+          "duration_s": 0.024,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/07-dataset-list-human.log",
+          "name": "dataset-list-human",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "dataset",
+            "info",
+            "wds-b0b4d80db4c64691a7395f2e42e6171e"
+          ],
+          "duration_s": 0.026,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/08-dataset-info.log",
+          "name": "dataset-info",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "dataset",
+            "health",
+            "wds-b0b4d80db4c64691a7395f2e42e6171e"
+          ],
+          "duration_s": 0.026,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/09-dataset-health.log",
+          "name": "dataset-health",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "viewer",
+            "state"
+          ],
+          "duration_s": 0.028,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/10-viewer-state.log",
+          "name": "viewer-state",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "layout",
+            "list"
+          ],
+          "duration_s": 0.024,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/11-layout-list.log",
+          "name": "layout-list",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "saved-view",
+            "list"
+          ],
+          "duration_s": 0.023,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/12-saved-view-list.log",
+          "name": "saved-view-list",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "view",
+            "set-zoom",
+            "--value",
+            "2.0"
+          ],
+          "duration_s": 0.025,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/13-view-set-zoom.log",
+          "name": "view-set-zoom",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "layer",
+            "list"
+          ],
+          "duration_s": 0.025,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/14-layer-list.log",
+          "name": "layer-list",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "viewer",
+            "state"
+          ],
+          "duration_s": 0.023,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/15-viewer-state-after.log",
+          "name": "viewer-state-after",
+          "ok": true
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:56010",
+            "--workspace",
+            "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "--json",
+            "layer",
+            "opacity",
+            "wds-b0b4d80db4c64691a7395f2e42e6171e",
+            "0.8"
+          ],
+          "duration_s": 0.025,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-002/cli/16-layer-opacity.log",
+          "name": "layer-opacity",
+          "ok": true
+        }
+      ],
+      "log_dir": "~/code/lucida/.tmp/tryout/slice-002/cli",
+      "ok": true,
+      "passed": 16,
+      "ran": true,
+      "total": 16
+    },
+    "python": {
+      "log": "~/code/lucida/.tmp/tryout/slice-002/python/session.log",
+      "ok": true,
+      "ran": true,
+      "steps": [
+        {
+          "name": "status",
+          "ok": true,
+          "summary": {
+            "auth": "authenticated",
+            "checks": {
+              "healthz": true,
+              "readyz": true,
+              "version": true
+            },
+            "server": "http://127.0.0.1:56010"
+          }
+        },
+        {
+          "name": "workspaces.list",
+          "ok": true,
+          "summary": {
+            "count": 1
+          }
+        },
+        {
+          "name": "workspaces.get",
+          "ok": true,
+          "summary": {
+            "id": "e7d08932-5a73-4013-aef0-34ba958ddccc",
+            "name": "lucida-tryout-20260619-004443"
+          }
+        },
+        {
+          "name": "workspace.open",
+          "ok": true,
+          "summary": {
+            "id": "e7d08932-5a73-4013-aef0-34ba958ddccc"
+          }
+        },
+        {
+          "name": "datasets.list",
+          "ok": true,
+          "summary": {
+            "count": 1,
+            "ids": [
+              "wds-b0b4d80db4c64691a7395f2e42e6171e"
+            ]
+          }
+        },
+        {
+          "name": "datasets.info",
+          "ok": true,
+          "summary": {
+            "entity_count": 1,
+            "image_count": 1,
+            "name": "lif_test.ome.zarr",
+            "workspace_dataset_id": "wds-b0b4d80db4c64691a7395f2e42e6171e"
+          }
+        },
+        {
+          "name": "datasets.health",
+          "ok": true,
+          "summary": {
+            "entries": 1,
+            "status": [
+              "healthy"
+            ]
+          }
+        },
+        {
+          "name": "layer.list",
+          "ok": true,
+          "summary": {
+            "count": 1
+          }
+        },
+        {
+          "name": "debug.state",
+          "ok": true,
+          "summary": {
+            "keys": [
+              "datasets",
+              "document",
+              "generated_availability",
+              "own_client_id",
+              "peers",
+              "snapshot_seq",
+              "workspace"
+            ]
+          }
+        },
+        {
+          "name": "view.set_zoom",
+          "ok": true,
+          "summary": {
+            "own_client_id": 16,
+            "zoom": 2.0
+          }
+        },
+        {
+          "name": "layer.opacity",
+          "ok": true,
+          "summary": {
+            "ok": true
+          }
+        },
+        {
+          "name": "layer.list.after",
+          "ok": true,
+          "summary": {
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "teardown": "clean",
+  "workspace_id": "e7d08932-5a73-4013-aef0-34ba958ddccc",
+  "ws_url": "ws://127.0.0.1:56010/ws/workspaces/e7d08932-5a73-4013-aef0-34ba958ddccc"
+}

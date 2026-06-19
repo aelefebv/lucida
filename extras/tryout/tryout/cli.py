@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .bringup import bring_up
+from .drive import drive as run_drive, parse_surfaces
 from .errors import TryoutError
 
 
@@ -115,6 +116,66 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"seconds to wait for dataset open (default: {DEFAULT_OPEN_TIMEOUT_S:g})",
     )
     up.set_defaults(func=_cmd_up)
+
+    drive = subparsers.add_parser(
+        "drive",
+        help="bring up a live lucida, exercise its CLI and Python surfaces, capture, tear down",
+        description=(
+            "Bring up a live lucida (free port, throwaway DB, auth disabled, "
+            "fixture opened read-only), then drive a representative agent tour of "
+            "the requested surface(s) against the real opened dataset: a sequence "
+            "of `lucida` CLI commands and/or a `LucidaClient` Python session. Each "
+            "CLI command is captured to DIR/cli/NN-<name>.log and the Python "
+            "session to DIR/python/session.log; the full result is written to "
+            "DIR/drive.json and printed. A failing CLI command is captured, not "
+            "fatal. The server is always reaped."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    drive.add_argument(
+        "--out",
+        required=True,
+        metavar="DIR",
+        help="output directory for drive.json, server.log, cli/*.log, python/session.log",
+    )
+    drive.add_argument(
+        "--fixture",
+        metavar="PATH",
+        default=None,
+        help="OME-Zarr dataset to open read-only (default: $LUCIDA_TRYOUT_FIXTURE)",
+    )
+    drive.add_argument(
+        "--surface",
+        metavar="SURFACES",
+        default="all",
+        help="comma-separated surfaces to exercise: cli, python, or all (default: all)",
+    )
+    drive.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON object to stdout (else a human-readable summary)",
+    )
+    drive.add_argument(
+        "--workspace-name",
+        default=None,
+        metavar="NAME",
+        help="name for the created workspace (default: auto-generated)",
+    )
+    drive.add_argument(
+        "--health-timeout",
+        type=float,
+        default=DEFAULT_HEALTH_TIMEOUT_S,
+        metavar="SECONDS",
+        help=f"seconds to wait for /healthz (default: {DEFAULT_HEALTH_TIMEOUT_S:g})",
+    )
+    drive.add_argument(
+        "--open-timeout",
+        type=float,
+        default=DEFAULT_OPEN_TIMEOUT_S,
+        metavar="SECONDS",
+        help=f"seconds to wait for dataset open (default: {DEFAULT_OPEN_TIMEOUT_S:g})",
+    )
+    drive.set_defaults(func=_cmd_drive)
     return parser
 
 
@@ -223,6 +284,116 @@ def _cmd_up(args: argparse.Namespace) -> int:
 
     _emit(outcome.record, as_json=args.json, log=log)
     return outcome.exit_code
+
+
+def _cmd_drive(args: argparse.Namespace) -> int:
+    log = _Stderr(enabled=True)
+    out_dir = Path(args.out)
+    fixture = args.fixture or os.environ.get("LUCIDA_TRYOUT_FIXTURE")
+    workspace_name = args.workspace_name or _default_workspace_name()
+
+    # Parse --surface up front so a typo fails clearly (and, under --json, as a
+    # uniform error envelope) before we boot anything.
+    try:
+        surfaces = parse_surfaces(args.surface)
+    except TryoutError as error:
+        record = {
+            "ok": False,
+            "out_dir": str(out_dir),
+            "surfaces": {},
+            "teardown": "n/a",
+            "error": error.to_error(),
+        }
+        _emit_drive(record, as_json=args.json, log=log)
+        return 1
+
+    def _on_signal(signum, _frame):
+        raise _Interrupted(signum)
+
+    previous_handlers = _install_signal_handlers(_on_signal)
+    try:
+        outcome = run_drive(
+            out_dir=out_dir,
+            fixture=fixture,
+            workspace_name=workspace_name,
+            surfaces=surfaces,
+            health_timeout_s=args.health_timeout,
+            open_timeout_s=args.open_timeout,
+            log=log,
+        )
+    except _Interrupted as interrupted:
+        # The server has already been reaped by drive()'s finally. Emit a clean
+        # failure record so even an interrupt yields a usable artifact.
+        record = {
+            "ok": False,
+            "out_dir": str(out_dir),
+            "workspace_id": None,
+            "dataset_id": None,
+            "surfaces": {},
+            "teardown": "clean",
+            "error": {
+                "stage": "signal",
+                "message": f"interrupted by signal {interrupted.signum}",
+            },
+        }
+        _emit_drive(record, as_json=args.json, log=log)
+        return 130
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+    _emit_drive(outcome.record, as_json=args.json, log=log)
+    return outcome.exit_code
+
+
+def _emit_drive(record: dict[str, Any], *, as_json: bool, log: _Stderr) -> None:
+    if as_json:
+        print(json.dumps(record, indent=2, sort_keys=True))
+        return
+    _emit_drive_human(record, log)
+
+
+def _emit_drive_human(record: dict[str, Any], log: _Stderr) -> None:
+    ok = record.get("ok")
+    surfaces = record.get("surfaces") or {}
+    lines = [
+        f"lucida tryout drive: {'OK' if ok else 'FAILED'}",
+        f"  out_dir     : {record.get('out_dir')}",
+        f"  workspace   : {record.get('workspace_id')}",
+        f"  dataset     : {record.get('dataset_id')}",
+        f"  server_log  : {record.get('server_log')}",
+        f"  teardown    : {record.get('teardown')}",
+    ]
+    cli = surfaces.get("cli")
+    if cli is not None:
+        if cli.get("ran"):
+            lines.append(
+                f"  cli         : {cli.get('passed')}/{cli.get('total')} ok"
+                f" -> {cli.get('log_dir')}"
+            )
+            for command in cli.get("commands", []):
+                mark = "ok" if command.get("ok") else f"exit {command.get('exit_code')}"
+                lines.append(f"      - {command.get('name'):<20} {mark}")
+        else:
+            err = (cli.get("error") or {}).get("message")
+            lines.append(f"  cli         : DID NOT RUN ({err})")
+    py = surfaces.get("python")
+    if py is not None:
+        if py.get("ran"):
+            steps = py.get("steps", [])
+            passed = sum(1 for step in steps if step.get("ok"))
+            lines.append(
+                f"  python      : {passed}/{len(steps)} steps ok -> {py.get('log')}"
+            )
+            for step in steps:
+                mark = "ok" if step.get("ok") else "ERR"
+                lines.append(f"      - {step.get('name'):<20} {mark}")
+        else:
+            err = (py.get("error") or {}).get("message")
+            lines.append(f"  python      : DID NOT RUN ({err})")
+    error = record.get("error")
+    if error:
+        lines.append(f"  error       : [{error.get('stage')}] {error.get('message')}")
+    print("\n".join(lines))
 
 
 class _Interrupted(BaseException):
