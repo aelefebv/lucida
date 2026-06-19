@@ -8,6 +8,7 @@ import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { AnnotationOverlay, type Annotation, type AnnotationOverlayHandle } from "./components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { MentionsOfMe } from "./components/MentionsOfMe.tsx";
+import { currentDatasetAnnotations } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
@@ -327,14 +328,13 @@ function App({
   // than throwing. Scoped to `selectedDatasetId` so everything downstream is
   // CURRENT-dataset only (cross-dataset aggregation is out of scope).
   const currentAnnotations = useMemo<Annotation[]>(() => {
-    const ws = scene.wasmSceneRef.current;
-    if (!ws || !selectedDatasetId) return [];
-    try {
-      const parsed = JSON.parse(ws.annotations(selectedDatasetId));
-      return Array.isArray(parsed) ? (parsed as Annotation[]) : [];
-    } catch {
-      return [];
-    }
+    // Read the CURRENT dataset's pins+comments for the mention machinery (the
+    // "mentions of me" badge + the candidate builder). The resolver scopes to
+    // `selectedDatasetId` when one is selected, and otherwise falls back to the
+    // first dataset that actually has annotations — so a peer's mention that
+    // lands before any dataset is selected is still counted live (bug #802).
+    // See currentDatasetAnnotations.ts.
+    return currentDatasetAnnotations(scene.wasmSceneRef.current, selectedDatasetId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on doc/dataset change; the scene is a stable ref.
   }, [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion]);
 
