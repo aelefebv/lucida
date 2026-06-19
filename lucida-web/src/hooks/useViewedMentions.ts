@@ -23,7 +23,7 @@
  * The hook owns the Set; {@link MentionsOfMe} stays PURE and receives the id
  * list + a `markViewed` callback as props.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 /** Prefix for the per-dataset localStorage key. The exact string is part of the
  * contract: a returning browser reuses whatever is stored under it, so this
@@ -91,35 +91,37 @@ export function useViewedMentions(selectedDatasetId: string | null): {
   viewedCommentIds: string[];
   markViewed: (commentId: string) => void;
 } {
-  // The viewed set for the CURRENT dataset, seeded from storage. Re-seeded when
-  // the dataset changes (the effect below) so we show that dataset's reads.
+  // The viewed set for the CURRENT dataset, seeded from storage.
   const [viewed, setViewed] = useState<Set<string>>(() => readViewed(selectedDatasetId));
 
-  // Keep the active dataset id in a ref so `markViewed` persists under the right
-  // key without being re-created (and without re-running effects) on each change.
-  const datasetRef = useRef(selectedDatasetId);
-
-  // On dataset change, swap in that dataset's persisted set. Reading in the
-  // effect (not just lazy init) keeps the in-memory set aligned with whichever
-  // dataset is selected for the lifetime of the mount.
-  useEffect(() => {
-    datasetRef.current = selectedDatasetId;
+  // Re-seed when the dataset changes using React's "adjust state during render"
+  // pattern (https://react.dev/learn/you-might-not-need-an-effect) instead of a
+  // setState-in-an-effect: the strict react-hooks lint (set-state-in-effect)
+  // rejects the effect form, and the render-time form also avoids an extra
+  // effect-driven re-render. When `selectedDatasetId` differs from the dataset we
+  // last seeded from, swap in that dataset's persisted set during render, so
+  // read-state never bleeds across datasets.
+  const [seededDataset, setSeededDataset] = useState(selectedDatasetId);
+  if (seededDataset !== selectedDatasetId) {
+    setSeededDataset(selectedDatasetId);
     setViewed(readViewed(selectedDatasetId));
-  }, [selectedDatasetId]);
+  }
 
-  const markViewed = useCallback((commentId: string) => {
-    setViewed((prev) => {
-      // Idempotent: already viewed → return the SAME set so React skips the
-      // re-render and we don't rewrite identical storage.
-      if (prev.has(commentId)) return prev;
-      const next = new Set(prev);
-      next.add(commentId);
-      // Persist under the dataset active at click time (ref, not closure) so a
-      // mark always lands in the correct per-dataset key.
-      writeViewed(datasetRef.current, next);
-      return next;
-    });
-  }, []);
+  const markViewed = useCallback(
+    (commentId: string) => {
+      setViewed((prev) => {
+        // Idempotent: already viewed → return the SAME set so React skips the
+        // re-render and we don't rewrite identical storage.
+        if (prev.has(commentId)) return prev;
+        const next = new Set(prev);
+        next.add(commentId);
+        // Persist under the currently-selected dataset's key.
+        writeViewed(selectedDatasetId, next);
+        return next;
+      });
+    },
+    [selectedDatasetId],
+  );
 
   // A stable array view of the set for the pure child; recomputed only when the
   // set identity changes.
