@@ -1819,8 +1819,7 @@ mod tests {
         let before = scene
             .project_annotation(&id, pin[0], pin[1], pin[2])
             .expect("corner pin should project in front of the camera");
-        let off_center =
-            ((before[0] - center[0]).powi(2) + (before[1] - center[1]).powi(2)).sqrt();
+        let off_center = ((before[0] - center[0]).powi(2) + (before[1] - center[1]).powi(2)).sqrt();
         assert!(
             off_center > 50.0,
             "precondition: the pin should start off-center, was {before:?} ({off_center} px from center)",

@@ -553,7 +553,8 @@ impl Scene {
                 // `SetCenter`. A missing/unanchorable dataset yields no world
                 // point and is a safe no-op (mirrors `project_annotation`),
                 // matching how the other camera ops do nothing off their mode.
-                if let Some(world) = self.annotation_world_point_for(&DatasetId(dataset_id), [x, y, z])
+                if let Some(world) =
+                    self.annotation_world_point_for(&DatasetId(dataset_id), [x, y, z])
                     && let Camera::Arcball(ref mut v) = self.camera
                 {
                     v.target = world;
@@ -1319,7 +1320,8 @@ mod tests {
         assert!(json.contains("\"type\":\"arcball_center_on_voxel\""));
 
         // The literal the 3D overlay's focusPin sends.
-        let wire = r#"{"type":"arcball_center_on_voxel","dataset_id":"ds1","x":12.0,"y":34.0,"z":5.0}"#;
+        let wire =
+            r#"{"type":"arcball_center_on_voxel","dataset_id":"ds1","x":12.0,"y":34.0,"z":5.0}"#;
         assert!(
             serde_json::from_str::<DocumentCommand>(wire).is_err(),
             "must NOT parse as a DocumentCommand (it is a viewport-only op)",
