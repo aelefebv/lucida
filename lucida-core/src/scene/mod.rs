@@ -664,6 +664,24 @@ impl Scene {
         self.camera.project_to_screen(world)
     }
 
+    /// Lift a pin's stored voxel point `(x, y, z)` (in-plane voxel + voxel depth)
+    /// to arcball-WORLD space via the dataset's rendering transform — the SAME
+    /// lift [`Self::project_annotation`] does before projecting, so a point fed
+    /// here lands where its marker is drawn. Returns `None` for an
+    /// unknown/unanchorable dataset (caller treats it as a no-op).
+    ///
+    /// This is the world point the 3D "center on a pin" viewport command
+    /// (`CenterOnVoxel3D`) makes the arcball target, so the recenter and the
+    /// marker projection share one definition of the pin's world position.
+    pub(crate) fn annotation_world_point_for(
+        &self,
+        dataset_id: &DatasetId,
+        point: [f64; 3],
+    ) -> Option<[f64; 3]> {
+        let (member, shape) = self.annotation_member(dataset_id)?;
+        Some(self.annotation_world_point(member, shape, point))
+    }
+
     /// Depth pick for a pin dropped in a 3D view: ray-cast from screen into the
     /// volume and return the hit as an in-plane-voxel + voxel-depth point
     /// `[x, y, z]`, ready to store as `(position, z)`. This is the exact inverse
@@ -1761,6 +1779,112 @@ mod tests {
                 .project_annotation(&DatasetId::from("nope"), 1.0, 2.0, 3.0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn center_on_voxel_3d_brings_an_off_center_pin_to_the_viewport_center() {
+        // The 3D "jump to a mention" mechanism (issue #526): in arcball mode the
+        // 2D `SetCenter` is a no-op (it only moves the slice camera), so a pin
+        // off-center stays off-center. `CenterOnVoxel3D` must actually MOVE the
+        // 3D projection — proving it, since happy-dom can't see the camera math:
+        // project an off-center pin BEFORE and AFTER the op and assert (a) the
+        // screen point moved, and (b) it lands at the viewport center, mirroring
+        // how the 2D `SetCenter` centers its own camera.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 64, 64, 64],
+            [1, 1, 64, 64, 64],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.set_mode_3d();
+        // Orbit off head-on so the view is a generic 3D pose, not a degenerate
+        // axis-aligned one (matches the sibling pick round-trip test).
+        scene.apply(
+            crate::command::ViewportCommand::Rotate3D {
+                d_theta: 0.5,
+                d_phi: 0.3,
+            }
+            .into(),
+        );
+        let id = DatasetId::from("ds1");
+        let center = [400.0, 300.0]; // viewport center in pixels (800x600)
+
+        // A pin near a corner of the volume — deliberately NOT the voxel center —
+        // so its marker starts well away from the viewport center.
+        let pin = [8.0, 8.0, 8.0];
+        let before = scene
+            .project_annotation(&id, pin[0], pin[1], pin[2])
+            .expect("corner pin should project in front of the camera");
+        let off_center = ((before[0] - center[0]).powi(2) + (before[1] - center[1]).powi(2)).sqrt();
+        assert!(
+            off_center > 50.0,
+            "precondition: the pin should start off-center, was {before:?} ({off_center} px from center)",
+        );
+
+        scene.apply(
+            crate::command::ViewportCommand::CenterOnVoxel3D {
+                dataset_id: "ds1".to_string(),
+                x: pin[0],
+                y: pin[1],
+                z: pin[2],
+            }
+            .into(),
+        );
+
+        let after = scene
+            .project_annotation(&id, pin[0], pin[1], pin[2])
+            .expect("pin should still project in front of the camera after centering");
+
+        // (a) The op actually moved the 3D projection (the no-op bug would leave
+        // `after == before`).
+        let moved = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
+        assert!(
+            moved > 1.0,
+            "CenterOnVoxel3D should move the projection: before {before:?}, after {after:?}",
+        );
+
+        // (b) The pin now sits at the viewport center — setting the arcball
+        // target puts the look-at axis through the pin's world point, so it
+        // projects to screen center (the 3D analogue of `SetCenter`).
+        assert!(
+            (after[0] - center[0]).abs() < 1.0 && (after[1] - center[1]).abs() < 1.0,
+            "after centering the pin {after:?} should land at the viewport center {center:?}",
+        );
+    }
+
+    #[test]
+    fn center_on_voxel_3d_is_a_noop_for_unknown_dataset() {
+        // An unanchorable/unknown dataset yields no world point, so the camera is
+        // left untouched (a stale pin id can never wedge the view). The arcball
+        // target is unchanged and the same point projects to the same place.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 64, 64, 64],
+            [1, 1, 64, 64, 64],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.set_mode_3d();
+        let id = DatasetId::from("ds1");
+        let before = scene.project_annotation(&id, 8.0, 8.0, 8.0).unwrap();
+        scene.apply(
+            crate::command::ViewportCommand::CenterOnVoxel3D {
+                dataset_id: "does-not-exist".to_string(),
+                x: 8.0,
+                y: 8.0,
+                z: 8.0,
+            }
+            .into(),
+        );
+        let after = scene.project_annotation(&id, 8.0, 8.0, 8.0).unwrap();
+        assert_eq!(before, after, "unknown dataset must not move the camera");
     }
 
     #[test]

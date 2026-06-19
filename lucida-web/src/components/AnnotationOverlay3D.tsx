@@ -42,13 +42,14 @@
  * owns a parallel copy. `version` (the remote-document version) bumps whenever a
  * pin or comment is added/removed/edited, re-running the read.
  */
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Annotation } from "./AnnotationOverlay.tsx";
-import { applyDocumentCommand } from "../applyAndSend.ts";
+import type { Annotation, AnnotationOverlayHandle } from "./AnnotationOverlay.tsx";
+import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
+import type { MentionCandidate } from "./annotationMentions.ts";
 
 interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
@@ -77,6 +78,14 @@ interface Props {
    * added/edited/removed/moved) so dependent overlays re-read via a fresh
    * `version`. App.tsx already passes it. */
   onDocumentChanged: () => void;
+  /** Notify the parent that the *viewport* changed locally so it can mark the
+   * render loop dirty and the volume repaints under the moved camera. The 3D
+   * twin of the 2D overlay's prop: the pull-based loop won't repaint on its own,
+   * so `focusPin`'s recenter (issue #526) must trip it, exactly like the
+   * plate-selector well-click does after a `set_center`. Optional + defaulted to
+   * a no-op so the overlay works unwired (e.g. a test harness); then a recenter
+   * simply isn't reflected until the next frame the loop already redraws. */
+  onViewportChanged?: () => void;
   /** Personal, view-only visibility for ALL annotations (issue #792) — the 3D
    * twin of the 2D overlay's prop. When `false`, the overlay renders NOTHING (no
    * pin markers, no line/box geometry, no open thread popover), so one toolbar
@@ -85,6 +94,14 @@ interface Props {
    * omitted) the overlay behaves exactly as before. Local only: no command, no
    * wire/document change, no peer effect (peer cursors are not annotations). */
   visible?: boolean;
+  /** People who can be @-mentioned in a comment (issue #526), threaded straight
+   * through to the shared {@link ThreadPopover} — the SAME prop the 2D overlay
+   * takes, so the mention behavior is identical in 2D and 3D. In production App
+   * derives these from a union of the workspace member roster and the document's
+   * participants (distinct `scene.annotations()` authors plus the current user),
+   * each carrying a stable @handle; a test injects them. Optional + defaulted to
+   * `[]`, so omitting it just means no mention picker. */
+  mentionCandidates?: MentionCandidate[];
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click rather
@@ -127,7 +144,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, visible = true }: Props) {
+export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [] }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per line/box, re-projected each frame through the SAME
   // `project_annotation` call the dots use — so a line/box tracks the volume as
@@ -194,6 +211,47 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
   const datasetIdRef = useRef(datasetId);
   // eslint-disable-next-line react-hooks/refs
   datasetIdRef.current = datasetId;
+
+  // Imperative navigation seam (issue #526) — the 3D twin of the 2D overlay's
+  // `focusPin`, with the IDENTICAL handle shape so a host wires "jump to a pin"
+  // the same way for both views; only the recenter MECHANICS differ. The 2D
+  // `set_center` only moves the slice camera, so it is a NO-OP in 3D (the camera
+  // is the arcball/fly, which `set_center` never touches). Instead this issues
+  // `arcball_center_on_voxel`: the scene lifts the pin's voxel point to world via
+  // the SAME rendering transform `project_annotation` uses and makes it the
+  // arcball target, so the pin's marker re-projects to the viewport center. Then
+  // it marks the render loop dirty (`onViewportChanged`) — the pull-based loop
+  // won't repaint otherwise — so the volume actually moves. The RAF tick
+  // reprojects the now-open pin's marker, and its thread popover anchors there.
+  // Reads the live pin set + dataset via refs; a missing pin / unready scene is a
+  // safe no-op (and an unanchorable dataset is a no-op scene-side too).
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusPin: (pinId: string) => {
+        const pin = annotationsRef.current.find((p) => p.id === pinId);
+        if (!pin) return;
+        setOpenPinId(pin.id);
+        const scene = wasmSceneRef.current;
+        if (scene) {
+          applyViewportCommand(scene, {
+            type: "arcball_center_on_voxel",
+            dataset_id: datasetIdRef.current,
+            x: pin.position[0],
+            y: pin.position[1],
+            // The pin's slice depth (defaulted to 0 on a pre-depth pin), so the
+            // arcball target is the pin's full 3D world point, not its in-plane
+            // projection at z=0.
+            z: pin.z ?? 0,
+          });
+          // Repaint under the moved camera; the pull-based loop won't otherwise.
+          // No-op when unwired (e.g. a test harness).
+          onViewportChanged?.();
+        }
+      },
+    }),
+    [wasmSceneRef, onViewportChanged],
+  );
 
   // The live gesture, if any. Declared before the RAF effect because the tick
   // reads it to skip reprojecting the dot being Shift-moved (see below).
@@ -670,6 +728,7 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
                 sendCommand={sendCommand}
                 onDocumentChanged={onDocumentChanged}
                 onClose={() => setOpenPinId(null)}
+                mentionCandidates={mentionCandidates}
               />
             )}
           </div>
@@ -677,4 +736,4 @@ export function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, 
       })}
     </div>
   );
-}
+});

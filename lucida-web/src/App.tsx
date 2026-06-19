@@ -5,8 +5,10 @@ import { DimensionControls } from "./components/DimensionControls.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
-import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
+import { AnnotationOverlay, type Annotation, type AnnotationOverlayHandle } from "./components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
+import { MentionsOfMe } from "./components/MentionsOfMe.tsx";
+import { currentDatasetAnnotations } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
@@ -16,6 +18,7 @@ import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSide
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
+import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
@@ -31,9 +34,10 @@ import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
+import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
-import { getWorkspaceSavedView, getWorkspaceViewerProfile } from "./workspaceApi.ts";
-import type { WorkspaceRole } from "./workspaceApi.ts";
+import { getWorkspaceSavedView, getWorkspaceViewerProfile, getWorkspaceSharing } from "./workspaceApi.ts";
+import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import "./App.css";
 
 interface AppProps {
@@ -90,8 +94,23 @@ function App({
   // box (and their threads) at once; flipping it back re-renders the untouched
   // annotation set. Peer cursors are a separate overlay and stay visible.
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
+  // Imperative handles on the two annotation overlays (issue #526), so the
+  // "mentions of me" inbox can JUMP to a pin even though each overlay owns its
+  // own `openPinId` state. The host holds a ref to whichever overlay is mounted
+  // (2D vs 3D follow the view mode) and calls `focusPin(pinId)`, which opens that
+  // pin's thread and recenters on it. One ref per overlay keeps the seam explicit
+  // and view-specific without leaking overlay internals into App.
+  const overlay2dRef = useRef<AnnotationOverlayHandle | null>(null);
+  const overlay3dRef = useRef<AnnotationOverlayHandle | null>(null);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
+  // Workspace member roster for @-mention candidates (issue #526). Best-effort:
+  // `getWorkspaceSharing` is owner-only server-side (403 for editors/viewers) and
+  // unavailable offline, so a failure leaves this `[]` and the picker falls back
+  // to the document's participants. Fetched once per workspace (the roster is
+  // small and changes rarely); members supply REAL display-name handles so you
+  // can @-mention a collaborator before they've touched the document.
+  const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
   const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
     source: workspaceName,
@@ -271,6 +290,146 @@ function App({
     bridge.emitDatasetPresence();
     savedViewSync.notifyChange();
   }, [bridge, savedViewSync]);
+
+  // Fetch the workspace member roster for @-mention handles (issue #526) once per
+  // workspace. Best-effort: `getWorkspaceSharing` is owner-only and unavailable
+  // offline, so any failure just leaves `workspaceMembers` empty and the picker
+  // falls back to document participants — the feature degrades, never throws.
+  useEffect(() => {
+    let cancelled = false;
+    getWorkspaceSharing(workspaceId)
+      .then((sharing) => {
+        if (!cancelled) setWorkspaceMembers(sharing.members);
+      })
+      .catch(() => {
+        // Forbidden (non-owner), offline, or any error: no roster, just
+        // participants. Reset so a previous workspace's roster never leaks in.
+        if (!cancelled) setWorkspaceMembers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // @-mention candidates for annotation comments (issue #526), threaded to both
+  // overlays' shared ThreadPopover. SOURCE = a graceful UNION of the workspace
+  // members (real display-name handles, when the roster fetch succeeded) and the
+  // document's PARTICIPANTS — the distinct authors already in
+  // `scene.annotations(selectedDataset)` (pin AND comment authors) plus the
+  // current user. Re-derived whenever the document changes (remoteDocumentVersion)
+  // or the scoped dataset switches, so the picker tracks who's in the conversation
+  // as pins/comments arrive. Reading the scene in a memo is the same JSON read the
+  // overlays do; a parse failure degrades to participants + you rather than
+  // throwing. Each candidate carries a STABLE, viewer-independent @handle, so a
+  // mention means the same person to everyone (see annotationParticipants.ts).
+  // The current dataset's annotations (pins + nested comments), read ONCE from
+  // the scene per doc/dataset change and shared by the mention-candidate builder
+  // AND the "mentions of me" inbox (issue #526). A single typed read is the same
+  // JSON the overlays parse; a malformed/empty snapshot degrades to `[]` rather
+  // than throwing. Scoped to `selectedDatasetId` so everything downstream is
+  // CURRENT-dataset only (cross-dataset aggregation is out of scope).
+  const currentAnnotations = useMemo<Annotation[]>(() => {
+    // Read the CURRENT dataset's pins+comments for the mention machinery (the
+    // "mentions of me" badge + the candidate builder). The resolver scopes to
+    // `selectedDatasetId` when one is selected, and otherwise falls back to the
+    // first dataset that actually has annotations — so a peer's mention that
+    // lands before any dataset is selected is still counted live (bug #802).
+    // See currentDatasetAnnotations.ts.
+    return currentDatasetAnnotations(scene.wasmSceneRef.current, selectedDatasetId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on doc/dataset change; the scene is a stable ref.
+  }, [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion]);
+
+  // Per-browser read-state for the "mentions of me" inbox (issue #803): which
+  // mention comment ids THIS browser has already viewed, persisted in
+  // localStorage and scoped to the selected dataset so reads never bleed across
+  // datasets. Personal state only — never synced, no command, no Rust. The
+  // <MentionsOfMe> badge counts only ids NOT in this set, and a click on an item
+  // marks it viewed (composed with the navigate below).
+  const { viewedCommentIds, markViewed } = useViewedMentions(selectedDatasetId);
+
+  const mentionCandidates = useMemo(() => {
+    return deriveMentionCandidates({
+      annotations: currentAnnotations,
+      currentUserId: annotationAuthor,
+      members: workspaceMembers,
+      currentUserEmail: authSession.principal.email,
+    });
+  }, [currentAnnotations, annotationAuthor, workspaceMembers, authSession.principal.email]);
+
+  // Jump to a mentioning comment (issue #526): reveal the owning pin and open its
+  // thread in whichever overlay is mounted (2D vs 3D, by view mode). Three things
+  // must happen for the pin to actually be VISIBLE after the jump:
+  //
+  //  1. Bring it ON-CONTEXT. A pin carries its own Z/T/C (issue #779) and may
+  //     live off the current view — off-context it renders dimmed in 2D and, in
+  //     3D, a behind-camera pin's wrapper is `display:none` (its thread would open
+  //     invisibly). So set the view's Z/T/C to the pin's FIRST, in BOTH views
+  //     (in 3D the volume ignores the Z slab, but the off-context dim keys off the
+  //     same Z/T/C, so this still un-dims the marker). Mirrors the dimension
+  //     handlers: apply the scene command per changed axis, break follow, and emit
+  //     presence once.
+  //  2. RECENTER + open the thread, via the mounted overlay's `focusPin` — which
+  //     moves the right camera (2D `set_center`; 3D `arcball_center_on_voxel`) and
+  //     marks the render loop dirty. The ref guard makes a missing overlay a safe
+  //     no-op.
+  //  3. If annotations are HIDDEN, re-show them first (navigating to a mention you
+  //     can't see is a dead end), then defer the focus one frame so the re-mounted
+  //     overlay's imperative ref exists before we call into it. The on-context
+  //     step can run immediately — it doesn't need the overlay.
+  //
+  // The deps are the primitives/values actually read (the view's Z/T/C + view
+  // mode, the visibility flag, the pin set); the rest — `dims`'s stable setters,
+  // `bridge.breakFollow`, `emitPresenceWithUrl`, and the `scene.wasmSceneRef` ref
+  // — are stable across renders, so listing them would only churn this click
+  // handler's identity for no benefit. The manual deps are intentional (same
+  // stance as the current-dataset read above).
+  const handleNavigateToMention = useCallback((pinId: string) => {
+    // Move the view to the pin's Z/T/C so it is on-context (and thus undimmed /
+    // not hidden) after the jump. Pre-depth pins default each axis to 0, matching
+    // the overlays' read. Only issue a command per axis that actually changes, so
+    // an already-on-context jump stays a pure recenter.
+    const pin = currentAnnotations.find((p) => p.id === pinId);
+    if (pin) {
+      const ws = scene.wasmSceneRef.current;
+      const targetZ = pin.z ?? 0;
+      const targetT = pin.t ?? 0;
+      const targetC = pin.c ?? 0;
+      let contextChanged = false;
+      if (targetZ !== dims.z) {
+        dims.setZ(targetZ);
+        if (ws) applyViewportCommand(ws, { type: "set_z", z: targetZ });
+        contextChanged = true;
+      }
+      if (targetT !== dims.t) {
+        dims.setT(targetT);
+        if (ws) applyViewportCommand(ws, { type: "set_t", t: targetT });
+        contextChanged = true;
+      }
+      if (targetC !== dims.c) {
+        dims.setC(targetC);
+        if (ws) applyViewportCommand(ws, { type: "set_c", c: targetC });
+        contextChanged = true;
+      }
+      if (contextChanged) {
+        bridge.breakFollow();
+        emitPresenceWithUrl();
+      }
+    }
+
+    const focus = () => {
+      const handle = dims.viewMode === "3d" ? overlay3dRef.current : overlay2dRef.current;
+      handle?.focusPin(pinId);
+    };
+    if (!annotationsVisible) {
+      setAnnotationsVisible(true);
+      // The overlay mounts on the re-show; defer the focus one frame so its
+      // imperative ref exists before we call into it.
+      requestAnimationFrame(focus);
+      return;
+    }
+    focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- omitted deps (dims setters, bridge, emitPresenceWithUrl, scene ref) are stable; see note above.
+  }, [dims.viewMode, dims.z, dims.t, dims.c, annotationsVisible, currentAnnotations]);
 
   // Populate callback refs — runs during render, before effects fire.
   // See the comment block above (savedViewHooksRef) for the rationale.
@@ -666,6 +825,7 @@ function App({
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
               <AnnotationOverlay
+                ref={overlay2dRef}
                 datasetId={selectedDatasetId}
                 wasmSceneRef={scene.wasmSceneRef}
                 canvas={render.canvasRef.current}
@@ -676,6 +836,7 @@ function App({
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
                 visible={annotationsVisible}
+                mentionCandidates={mentionCandidates}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
@@ -730,6 +891,7 @@ function App({
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
               <AnnotationOverlay3D
+                ref={overlay3dRef}
                 datasetId={selectedDatasetId}
                 wasmSceneRef={scene.wasmSceneRef}
                 canvas={render.canvasRef.current}
@@ -738,7 +900,9 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
+                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
                 visible={annotationsVisible}
+                mentionCandidates={mentionCandidates}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
@@ -844,6 +1008,25 @@ function App({
               <option value="box">Box</option>
             </select>
           </label>
+          {/* "Mentions of me" inbox (issue #526): an always-present badge with the
+              count of CURRENT-dataset comments that @-mention the current user,
+              toggling a panel of those comments; clicking one opens its pin thread
+              and recenters via the overlay's imperative `focusPin` seam. Fed by
+              the same current-dataset annotations the mention-candidate builder
+              reads, the principal email, and the workspace roster. Sits next to
+              the annotation-visibility toggle in the toolbar row. */}
+          <MentionsOfMe
+            annotations={currentAnnotations}
+            currentUserId={annotationAuthor}
+            currentUserEmail={authSession.principal.email}
+            members={workspaceMembers}
+            onNavigate={handleNavigateToMention}
+            // Read/unread inbox (issue #803): the persisted per-browser viewed
+            // set drives the unread count + per-item read marks; clicking an
+            // item marks it viewed (the component composes this with onNavigate).
+            viewedCommentIds={viewedCommentIds}
+            onMarkViewed={markViewed}
+          />
           {/* One personal view toggle (issue #792): show/hide ALL annotations
               (pins, lines, boxes — and their threads) at once. Flips local state
               passed as `visible` to both overlays; it is not a command, not
