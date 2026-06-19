@@ -34,6 +34,7 @@ import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
+import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { getWorkspaceSavedView, getWorkspaceViewerProfile, getWorkspaceSharing } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
@@ -337,6 +338,14 @@ function App({
     return currentDatasetAnnotations(scene.wasmSceneRef.current, selectedDatasetId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on doc/dataset change; the scene is a stable ref.
   }, [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion]);
+
+  // Per-browser read-state for the "mentions of me" inbox (issue #803): which
+  // mention comment ids THIS browser has already viewed, persisted in
+  // localStorage and scoped to the selected dataset so reads never bleed across
+  // datasets. Personal state only — never synced, no command, no Rust. The
+  // <MentionsOfMe> badge counts only ids NOT in this set, and a click on an item
+  // marks it viewed (composed with the navigate below).
+  const { viewedCommentIds, markViewed } = useViewedMentions(selectedDatasetId);
 
   const mentionCandidates = useMemo(() => {
     return deriveMentionCandidates({
@@ -1012,6 +1021,11 @@ function App({
             currentUserEmail={authSession.principal.email}
             members={workspaceMembers}
             onNavigate={handleNavigateToMention}
+            // Read/unread inbox (issue #803): the persisted per-browser viewed
+            // set drives the unread count + per-item read marks; clicking an
+            // item marks it viewed (the component composes this with onNavigate).
+            viewedCommentIds={viewedCommentIds}
+            onMarkViewed={markViewed}
           />
           {/* One personal view toggle (issue #792): show/hide ALL annotations
               (pins, lines, boxes — and their threads) at once. Flips local state

@@ -56,6 +56,17 @@ interface Props {
   /** Jump to a mentioning comment: the host opens that comment's pin thread AND
    * recenters on it. `pinId` is the id of the annotation OWNING the comment. */
   onNavigate: (pinId: string) => void;
+  /** The comment ids the current viewer has already VIEWED (issue #803), owned +
+   * persisted by the host (per-browser, per-dataset). The badge counts only ids
+   * NOT in this list, and each item is marked `data-viewed` by its membership.
+   * Defaults to `[]` (nothing viewed) so a host that hasn't adopted read-state —
+   * and the slice-2 contract — behaves exactly as before. */
+  viewedCommentIds?: string[];
+  /** Mark a mention VIEWED. Called (alongside {@link onNavigate}) when its panel
+   * item is clicked; the host persists it so it stays read across reloads. No-op
+   * default keeps this optional and the component drop-in for hosts that don't
+   * track read-state. */
+  onMarkViewed?: (commentId: string) => void;
 }
 
 /** A flattened reference to one comment that mentions the current user, paired
@@ -146,11 +157,23 @@ export function MentionsOfMe({
   currentUserEmail,
   members = [],
   onNavigate,
+  viewedCommentIds = [],
+  onMarkViewed,
 }: Props) {
   // Whether the panel is shown. The badge is ALWAYS rendered (it shows the count
   // even at zero); the panel only appears after a click on the badge, and a
   // second click hides it again — the contract's toggle.
   const [open, setOpen] = useState(false);
+
+  // Whether the panel hides already-viewed mentions (issue #803). Off by
+  // default, so the panel lists EVERY mentioning comment (viewed ones simply
+  // marked); when engaged it drops viewed items, leaving an unread-only inbox.
+  const [hideViewed, setHideViewed] = useState(false);
+
+  // O(1) membership for "is this comment id viewed?" — built from the prop so
+  // the host stays the single owner of read-state. Recomputed only when the id
+  // list identity changes.
+  const viewedSet = useMemo(() => new Set(viewedCommentIds), [viewedCommentIds]);
 
   // The mentioning comments, in document order (pins in order, comments within a
   // pin in order). Recomputed only when the data or identity changes — pure, so
@@ -170,13 +193,29 @@ export function MentionsOfMe({
     return out;
   }, [annotations, currentUserId, currentUserEmail, members]);
 
-  const count = hits.length;
+  // The badge counts only UNVIEWED mentions (issue #803): comments that mention
+  // me whose id is NOT in the viewed set. 0 when every mention is viewed (or
+  // there are none) — so the pill clears once the inbox is read.
+  const unviewedCount = useMemo(
+    () => hits.reduce((n, h) => (viewedSet.has(h.commentId) ? n : n + 1), 0),
+    [hits, viewedSet],
+  );
+  const count = unviewedCount;
+
+  // The mentions actually rendered as items: all of them, or only the unviewed
+  // ones when the hide-viewed toggle is engaged. Viewed items that survive are
+  // still marked via `data-viewed` so "read" stays visible.
+  const visibleHits = useMemo(
+    () => (hideViewed ? hits.filter((h) => !viewedSet.has(h.commentId)) : hits),
+    [hits, hideViewed, viewedSet],
+  );
 
   return (
     <div style={{ position: "relative", display: "inline-flex" }}>
       {/* The always-present badge. Its textContent includes the integer count of
-          comments that mention me (0 when none), so a glance tells the user
-          whether anyone has pointed at them. Clicking toggles the panel. */}
+          UNREAD comments that mention me (0 when all read / none), so a glance
+          tells the user whether anyone is waiting on them. Clicking toggles the
+          panel. */}
       <button
         type="button"
         data-testid="mentions-of-me-badge"
@@ -184,13 +223,13 @@ export function MentionsOfMe({
         aria-expanded={open}
         aria-label={
           count === 0
-            ? "Mentions of me: none"
-            : `Mentions of me: ${count} comment${count === 1 ? "" : "s"}`
+            ? "Mentions of me: no unread"
+            : `Mentions of me: ${count} unread comment${count === 1 ? "" : "s"}`
         }
         title={
           count === 0
-            ? "No comments mention you in this dataset"
-            : `${count} comment${count === 1 ? "" : "s"} mention you — click to view`
+            ? "No unread mentions in this dataset"
+            : `${count} unread comment${count === 1 ? "" : "s"} mention you — click to view`
         }
         style={{
           padding: "0.375rem 0.75rem",
@@ -253,55 +292,112 @@ export function MentionsOfMe({
             fontSize: 12,
           }}
         >
+          {/* Header: the headline tracks UNVIEWED ("4 unread"), the slice-803
+              read/unread framing, while the row beneath carries the hide-viewed
+              toggle. Empty-state copy keys off whether ANY mention exists at all
+              (not the unviewed count), so a fully-read inbox still explains
+              itself rather than claiming no one ever mentioned you. */}
           <div
             style={{
               padding: "8px 10px",
               borderBottom: "1px solid #30363d",
               fontWeight: 600,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
             }}
           >
-            {count === 0
-              ? "No one has mentioned you here"
-              : `${count} comment${count === 1 ? "" : "s"} mention you`}
+            <span>
+              {hits.length === 0
+                ? "No one has mentioned you here"
+                : count === 0
+                  ? "All mentions read"
+                  : `${count} unread mention${count === 1 ? "" : "s"}`}
+            </span>
+            {/* Hide-viewed toggle (issue #803). Always present while the panel is
+                open so it's testable in every state; when engaged the list below
+                renders only UNVIEWED items. aria-pressed + label reflect current
+                state for a screen reader. */}
+            <button
+              type="button"
+              data-testid="mentions-of-me-hide-viewed-toggle"
+              onClick={() => setHideViewed((v) => !v)}
+              aria-pressed={hideViewed}
+              aria-label={hideViewed ? "Show viewed mentions" : "Hide viewed mentions"}
+              title={hideViewed ? "Show viewed mentions" : "Hide viewed mentions"}
+              style={{
+                padding: "2px 8px",
+                fontSize: 11,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                borderRadius: 6,
+                border: "1px solid #30363d",
+                cursor: "pointer",
+                background: hideViewed ? "#646cff" : "transparent",
+                color: hideViewed ? "#fff" : "#8b949e",
+              }}
+            >
+              {hideViewed ? "Unread only" : "Hide read"}
+            </button>
           </div>
-          {count === 0 ? (
+          {hits.length === 0 ? (
             <div style={{ padding: "10px", color: "#8b949e" }}>
               When a collaborator @-mentions you in a comment on this dataset, it
               shows up here.
             </div>
+          ) : visibleHits.length === 0 ? (
+            // There ARE mentions, but hide-viewed is engaged and every one is
+            // read: list NO items (contract #5) and say why.
+            <div style={{ padding: "10px", color: "#8b949e" }}>
+              No unread mentions. Toggle off “Hide read” to see read ones.
+            </div>
           ) : (
             <ul style={{ listStyle: "none", margin: 0, padding: "4px 0" }}>
-              {hits.map((hit) => (
-                <li key={hit.commentId}>
-                  <button
-                    type="button"
-                    data-testid={`mention-of-me-item-${hit.commentId}`}
-                    // Jump: the host opens this comment's pin thread and recenters
-                    // on it. A mention is identified by the pin that owns the
-                    // comment, so navigation targets the pin.
-                    onClick={() => onNavigate(hit.pinId)}
-                    title={hit.text}
-                    style={{
-                      display: "block",
-                      width: "100%",
-                      textAlign: "left",
-                      padding: "7px 10px",
-                      fontSize: 12,
-                      lineHeight: 1.4,
-                      background: "none",
-                      border: "none",
-                      borderBottom: "1px solid rgba(48,54,61,0.6)",
-                      color: "#e6edf3",
-                      cursor: "pointer",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {snippet(hit.text)}
-                  </button>
-                </li>
-              ))}
+              {visibleHits.map((hit) => {
+                const isViewed = viewedSet.has(hit.commentId);
+                return (
+                  <li key={hit.commentId}>
+                    <button
+                      type="button"
+                      data-testid={`mention-of-me-item-${hit.commentId}`}
+                      // Each item declares its read-state so "read" is visible +
+                      // testable (contract #3).
+                      data-viewed={isViewed ? "true" : "false"}
+                      // Click does BOTH (contract #2): jump to the comment's pin
+                      // thread (host recenters) AND mark this mention viewed so
+                      // it drops out of the unread count (and, with hide-viewed
+                      // engaged, out of the list).
+                      onClick={() => {
+                        onNavigate(hit.pinId);
+                        onMarkViewed?.(hit.commentId);
+                      }}
+                      title={hit.text}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        textAlign: "left",
+                        padding: "7px 10px",
+                        fontSize: 12,
+                        lineHeight: 1.4,
+                        background: "none",
+                        border: "none",
+                        borderBottom: "1px solid rgba(48,54,61,0.6)",
+                        // Read items recede (dimmed, normal weight); unread stay
+                        // bright + bold so the unread ones pop in a mixed list.
+                        color: isViewed ? "#8b949e" : "#e6edf3",
+                        fontWeight: isViewed ? 400 : 600,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {snippet(hit.text)}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
