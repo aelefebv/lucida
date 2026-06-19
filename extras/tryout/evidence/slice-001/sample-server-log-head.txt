@@ -1,0 +1,8 @@
+# lucida-server: ~/code/lucida/target/debug/lucida-server
+# bind: 127.0.0.1:51737
+# db: <tmp>
+# argv: ~/code/lucida/target/debug/lucida-server serve
+
+[2m2026-06-19T06:40:19.904825Z[0m [32m INFO[0m [2mlucida_server[0m[2m:[0m proxy.config [3mcache_dir[0m[2m=[0m~/Library/Caches/lucida/proxies [3mconcurrency[0m[2m=[0m9 [3mlegacy_enabled[0m[2m=[0mfalse
+[2m2026-06-19T06:40:19.904879Z[0m [32m INFO[0m [2mlucida_server[0m[2m:[0m generated_coarse.config [3menabled[0m[2m=[0mtrue [3mcache_dir[0m[2m=[0m~/Library/Caches/lucida/proxies/generated-coarse [3mconcurrency[0m[2m=[0m1 [3mbackground_chunk_limit[0m[2m=[0m32 [3mtarget_long_axis[0m[2m=[0m512 [3mchunk_long_axis[0m[2m=[0m256 [3mmax_chunk_bytes[0m[2m=[0m2097152 [3mdisk_budget_bytes[0m[2m=[0mNone
+[2m2026-06-19T06:40:19.904959Z[0m [32m INFO[0m [2mlucida_server[0m[2m:[0m auth.startup [3mmode[0m[2m=[0mdisabled [3mbind[0m[2m=[0m127.0.0.1:51737 [3mcookie[0m[2m=[0mlucida_session [3mdb[0m[2m=[0m<tmp> [3midle_timeout_s[0m[2m=[0m604800 [3mhard_cap_s[0m[2m=[0m2592000
