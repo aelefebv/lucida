@@ -29,13 +29,18 @@ LUCIDA_TRYOUT_SERVER_BIN=target/debug/lucida-server \
 LUCIDA_TRYOUT_CLI=target/debug/lucida \
 LUCIDA_TRYOUT_WEB_DIST=lucida-web/dist \
   python3 extras/tryout/tryout.py report --json --fixture /path/to/dataset.ome.zarr
+
+# Verify ONE feature like a user (seed -> drive the UI by testid -> screenshots):
+  python3 extras/tryout/tryout.py drive --scenario mentions --json \
+  --out /tmp/scn --fixture /path/to/dataset.ome.zarr   # add --email to bundle shots (dry-run)
 ```
 
 Read the printed JSON's `report_html` and open it: a PASS/FAIL banner, the three
 surfaces, and the rendered-viewer screenshots inline. With no `--out` the report
 + raw artifacts land under a gitignored `<repo>/.tmp/tryout/<ts>/` (the JSON's
-`out_dir`). `--help`, `up --help`, `drive --help`, and `report --help` describe
-every flag.
+`out_dir`). A **scenario** instead verifies one feature end-to-end and saves named
+shots under `DIR/<scenario>/` (`drive --scenario list` lists them). `--help`,
+`up --help`, `drive --help`, and `report --help` describe every flag.
 
 ## `up`: bring up + tear down
 
@@ -216,6 +221,82 @@ pass count or `viewer_png_nonblank`), `workspace_id`, `dataset_id`, plus
 }
 ```
 
+## `drive --scenario`: verify ONE feature like a user → screenshots → email
+
+```bash
+python3 extras/tryout/tryout.py drive --scenario <name> [--json] --out DIR \
+  [--fixture PATH] [--email] [--email-send]
+python3 extras/tryout/tryout.py drive --scenario list   # list available scenarios
+```
+
+Where a *surface* answers "does lucida's CLI/Python/web layer work at all?", a
+**scenario** answers "does this specific feature behave correctly end-to-end?" —
+it **seeds** some collaborative state, **drives the real SPA by `data-testid`**
+like a person, **captures named screenshots**, and (optionally) **emails** them.
+One repeatable command instead of a bespoke script each time.
+
+- **Registry, like surfaces.** Each scenario is a small module registered under
+  `tryout/scenarios/` (`Scenario(name, description, run)`); `--scenario <name>`
+  dispatches, `--scenario list` prints the names + descriptions, an unknown name
+  is a clean error (exit 1). Adding a scenario is *one registration* — the
+  framework carries seed/page/capture; the scenario is just the steps.
+- **Captures land in `DIR/<scenario>/<name>.png`** and each is checked non-blank
+  via `scripts/assert_png_nonblank.py` (the same checker the web surface uses).
+  `DIR/<scenario>/scenario.json` holds the scenario result and the top-level
+  `drive.json` carries it under `scenario`.
+- **`--email` bundles the shots + a summary and hands them to
+  [courier](../../). DRY-RUN BY DEFAULT** — it builds and previews the message and
+  lists the attachments but **sends nothing**; only `--email-send` actually sends.
+  Courier is located via `LUCIDA_TRYOUT_COURIER` (a path to `courier.py`) or the
+  installed skill on `PATH`; if courier isn't found, the run records
+  `email.{attempted: true, sent: false, reason}` and the scenario is **not**
+  failed.
+- **Hermetic + always-reaped**, reusing the same spine: free port, throwaway DB,
+  `LUCIDA_AUTH=disabled`, fixture opened read-only, prebuilt artifacts reused. The
+  server is reaped on every path; the browser driver runs in its own process
+  group with a hard timeout, so neither the server nor any browser child is
+  orphaned. A scenario error is graceful (recorded, whatever shots exist are kept,
+  non-zero exit).
+
+### The `mentions` scenario
+
+`mentions` verifies lucida's @-mention flow (the feature first verified by hand,
+now one command). It pins the browser identity in `localStorage`
+(`lucida.annotation.author = tryout-verifier`) **before load**, computes the
+handle the SPA derives for "me", seeds a pin + a comment by `alice-9f2` mentioning
+me + a comment mentioning `@Alice`/`@Bob` over WS, then drives the UI by testid:
+the **mentions-of-me badge** → **panel** → click the mention row to open the
+**thread** (rendered `@`-chips) → type `@` in the composer for the **collaborator
+autocomplete** — capturing `mentions-badge`, `mentions-panel`, `thread-chips`,
+`autocomplete`. (The mention feature needs a mentions-bearing build; the harness
+drives whatever `LUCIDA_TRYOUT_WEB_DIST`/`_SERVER_BIN`/`_CLI` point at, so the
+scenario is build-agnostic — CI/runtime supplies the build.)
+
+### Result object (`drive --scenario`)
+
+```jsonc
+{
+  "ok": true,
+  "mode": "scenario",
+  "workspace_id": "…", "dataset_id": "wds-…",
+  "scenario": {
+    "name": "mentions", "ok": true,
+    "shots": [
+      { "name": "mentions-badge", "path": ".../mentions/mentions-badge.png", "nonblank": true },
+      { "name": "mentions-panel", "path": "…", "nonblank": true },
+      { "name": "thread-chips",   "path": "…", "nonblank": true },
+      { "name": "autocomplete",   "path": "…", "nonblank": true }
+    ],
+    "notes": ["seeded 3 document command(s)", "UI program: completed"]
+  },
+  "email": {
+    "attempted": true, "dry_run": true, "sent": false,
+    "attachments": [".../mentions-badge.png", "…"]
+  },
+  "teardown": "clean"
+}
+```
+
 ## What it does, and the guarantees it keeps
 
 Lifecycle: **build (or reuse) → boot → health-gate → create workspace / open
@@ -249,6 +330,7 @@ fixture → report → teardown.**
 | `LUCIDA_TRYOUT_WEB_DIST` | Reuse this prebuilt `lucida-web/dist` (must contain `index.html`) for the web surface; else it is built from the working tree. |
 | `LUCIDA_TRYOUT_PLAYWRIGHT_DIR` | A `node_modules`-parent dir where Playwright is provisioned/cached for the real-SPA ceiling (default: `~/.cache/lucida-tryout/playwright`). |
 | `LUCIDA_BROWSER` | Browser executable used by both the floor (product CLI) and the real-SPA ceiling; defaults to the platform's Chrome/Chromium/Edge. |
+| `LUCIDA_TRYOUT_COURIER` | Path to courier's `courier.py` for `drive --scenario --email`; else a `courier` on `PATH` is used, else email is recorded as skipped (never fatal). |
 
 ## Layout
 
@@ -269,6 +351,13 @@ extras/tryout/
       cli_surface.py   # drive the real `lucida` CLI tour, capture each command
       python_surface.py# broad LucidaClient read/mutate tour, capture transcript
       web_surface.py   # non-blank viewer screenshot (CLI) + real-SPA Playwright capture
+    scenarios/
+      __init__.py      # the ScenarioResult contract + the Scenario REGISTRY
+      _runner.py       # the framework: boot -> seed -> drive UI -> capture -> (email) -> reap
+      _ws.py           # WS seed transport: push document commands, await acks
+      _browser.py      # generic Playwright driver: run a declarative testid-driven UI program
+      _courier.py      # the --email step: bundle shots + summary -> courier (dry-run default)
+      mentions.py      # the @-mention scenario (pure steps: seed + UI program + verdict)
     capture.py         # the one writer: record shape + on-disk artifacts (up.json/drive.json/report.*)
     netutil.py         # free-port allocation, /healthz polling
     errors.py          # staged TryoutError
@@ -288,6 +377,20 @@ a SPA bundle (`web.py`) before boot so the real viewer can be rendered.
 portable `report.html` + `report.md`) on top of the raw artifacts `drive` already
 writes — so the run logic lives in exactly one place. All record/artifact writes
 go through `capture` (the one writer).
+
+The `scenarios/` package mirrors that registry shape for *feature* verification.
+Each scenario registers a `Scenario(name, description, run)` in its own `REGISTRY`
+(so `--scenario <name>`/`list` stay generic), but a scenario module is **pure
+steps**: it declares a `seed` (document commands), a declarative testid-driven UI
+`program` of actions + named shots, the `localStorage` pins to install before
+load, and an `ok` verdict. The framework (`_runner.py`) owns boot (the same
+`server.py` spine + `python_client.py` bring-up, with the SPA bundle served), the
+WS seed transport (`_ws.py`, riding the same `websockets` stack the client uses),
+the Playwright launch/teardown (`_browser.py`, the same system-Chrome + WebGPU
+launch config as `web_surface.py`, running one generic UI driver so the browser is
+owned in one place and reaped via `_subproc.run_group`), the `shot` capture, and
+the `--email` step (`_courier.py`, dry-run by default). Adding a scenario is a
+small module, not edits across the harness.
 
 ## Fast self-test
 
@@ -314,6 +417,16 @@ LUCIDA_TRYOUT_WEB_DIST=lucida-web/dist \
   python3 extras/tryout/tryout.py report --json \
   --out /tmp/tryout-report --fixture /path/to/dataset.ome.zarr
 open /tmp/tryout-report/report.html   # macOS; or xdg-open on Linux
+
+# scenario: verify the @-mention feature like a user, capture shots, preview email
+LUCIDA_TRYOUT_SERVER_BIN=target/debug/lucida-server \
+LUCIDA_TRYOUT_CLI=target/debug/lucida \
+LUCIDA_TRYOUT_WEB_DIST=lucida-web/dist \
+LUCIDA_TRYOUT_COURIER=/path/to/courier/courier.py \
+  python3 extras/tryout/tryout.py drive --scenario mentions --email --json \
+  --out /tmp/tryout-scn --fixture /path/to/dataset.ome.zarr
+python3 scripts/assert_png_nonblank.py /tmp/tryout-scn/mentions/thread-chips.png
+python3 extras/tryout/tryout.py drive --scenario list   # the available scenarios
 ```
 
 For `up`: expect exit 0, a JSON object on stdout with a `127.0.0.1:PORT` base URL
@@ -336,3 +449,11 @@ standalone with the screenshots showing inline (the bytes are embedded as base64
 the report lands under a gitignored `<repo>/.tmp/tryout/<ts>/` (reported as
 `out_dir`); run with `--fixture /nonexistent.ome.zarr` to confirm the report is
 **still written** (showing the failure) while the process exits non-zero.
+
+For `drive --scenario mentions`: expect exit 0, `scenario.ok: true`, and all four
+shots (`mentions-badge`, `mentions-panel`, `thread-chips`, `autocomplete`) present
+under `/tmp/tryout-scn/mentions/` and **non-blank** (each
+`assert_png_nonblank.py` exits 0). With `--email` (no `--email-send`),
+`email.dry_run` is `true` and `email.sent` is `false` (nothing is sent).
+`drive --scenario list` lists `mentions`; `drive --scenario nonesuch` exits 1
+cleanly. `teardown: "clean"` and no orphaned `lucida-server`/browser/node remain.
