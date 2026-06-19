@@ -1,0 +1,102 @@
+{
+  "base_url": "http://127.0.0.1:52564",
+  "dataset_id": "wds-1a8c652b0ff74106b042729ed9bbae02",
+  "dataset_name": "lif_test.ome.zarr",
+  "db_path": "<tmp>",
+  "elapsed_s": 4.837,
+  "fixture": "~/local_data/lucida_test_zarrs/lif_test.ome.zarr",
+  "healthz": true,
+  "ok": true,
+  "out_dir": "~/code/lucida/.tmp/tryout/slice-003",
+  "pid": 13035,
+  "requested_surfaces": [
+    "web"
+  ],
+  "server_log": "~/code/lucida/.tmp/tryout/slice-003/server.log",
+  "surfaces": {
+    "web": {
+      "captures": [
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:52564",
+            "--workspace",
+            "1a7777fa-2d69-4b87-a808-4723c3bb5051",
+            "--json",
+            "viewer",
+            "screenshot",
+            "~/code/lucida/.tmp/tryout/slice-003/web/viewer.png",
+            "--timeout-seconds",
+            "150"
+          ],
+          "duration_s": 1.447,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-003/web/viewer.log",
+          "name": "viewer",
+          "nonblank": true,
+          "ok": true,
+          "png": "~/code/lucida/.tmp/tryout/slice-003/web/viewer.png",
+          "png_exists": true,
+          "url": "http://127.0.0.1:52564/w/1a7777fa-2d69-4b87-a808-4723c3bb5051?viewer_profile=default"
+        },
+        {
+          "argv": [
+            "~/code/lucida/target/debug/lucida",
+            "--server",
+            "http://127.0.0.1:52564",
+            "--workspace",
+            "1a7777fa-2d69-4b87-a808-4723c3bb5051",
+            "--json",
+            "viewer",
+            "overview",
+            "~/code/lucida/.tmp/tryout/slice-003/web/overview.png",
+            "--timeout-seconds",
+            "150"
+          ],
+          "duration_s": 1.246,
+          "exit_code": 0,
+          "log": "~/code/lucida/.tmp/tryout/slice-003/web/overview.log",
+          "name": "overview",
+          "nonblank": true,
+          "ok": true,
+          "png": "~/code/lucida/.tmp/tryout/slice-003/web/overview.png",
+          "png_exists": true,
+          "url": "http://127.0.0.1:52564/w/1a7777fa-2d69-4b87-a808-4723c3bb5051?viewer_profile=default"
+        }
+      ],
+      "console_log": "~/code/lucida/.tmp/tryout/slice-003/web/console.log",
+      "dataset_id": "wds-1a8c652b0ff74106b042729ed9bbae02",
+      "ok": true,
+      "out_dir": "~/code/lucida/.tmp/tryout/slice-003/web",
+      "ran": true,
+      "real_spa": {
+        "captured": true,
+        "console_log": "~/code/lucida/.tmp/tryout/slice-003/web/console.log",
+        "console_messages": 0,
+        "log": "~/code/lucida/.tmp/tryout/slice-003/web/spa-driver.log",
+        "reason": "rendered",
+        "render": {
+          "canvas_height": 600,
+          "canvas_width": 800,
+          "dataset_count": 1,
+          "frame_count": 3,
+          "ready": true,
+          "reason": "rendered"
+        },
+        "spa_png": "~/code/lucida/.tmp/tryout/slice-003/web/spa.png",
+        "spa_png_nonblank": true,
+        "url": "http://127.0.0.1:52564/w/1a7777fa-2d69-4b87-a808-4723c3bb5051?viewer_profile=default"
+      },
+      "spa_png": "~/code/lucida/.tmp/tryout/slice-003/web/spa.png",
+      "viewer_png": "~/code/lucida/.tmp/tryout/slice-003/web/viewer.png",
+      "viewer_png_nonblank": true,
+      "viewer_url": "http://127.0.0.1:52564/w/1a7777fa-2d69-4b87-a808-4723c3bb5051?viewer_profile=default",
+      "web_dist": "~/code/lucida/lucida-web/dist",
+      "web_dist_source": "env"
+    }
+  },
+  "teardown": "clean",
+  "workspace_id": "1a7777fa-2d69-4b87-a808-4723c3bb5051",
+  "ws_url": "ws://127.0.0.1:52564/ws/workspaces/1a7777fa-2d69-4b87-a808-4723c3bb5051"
+}

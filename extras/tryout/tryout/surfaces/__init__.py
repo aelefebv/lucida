@@ -10,8 +10,11 @@ slot in here without touching the bring-up/teardown spine:
     agent-style tour, capturing every command (``drive``).
   * :mod:`tryout.surfaces.python_surface` — a broad ``LucidaClient`` read/mutate
     tour against the opened workspace, capturing a transcript (``drive``).
+  * :mod:`tryout.surfaces.web_surface` — capture the real rendered viewer as a
+    non-blank screenshot via the product CLI, plus a best-effort real-SPA
+    full-page capture + browser console via Playwright (``drive``).
 
-The web surface that comes next plugs in alongside these the same way.
+Each surface is a thin adapter over the same booted server, kept separable.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 from .cli_surface import CliSurfaceResult, run_cli_surface
 from .python_client import WorkspaceResult, create_workspace_and_open
 from .python_surface import PythonSurfaceResult, run_python_surface
+from .web_surface import WebSurfaceResult, run_web_surface
 
 __all__ = [
     "WorkspaceResult",
@@ -27,4 +31,6 @@ __all__ = [
     "run_cli_surface",
     "PythonSurfaceResult",
     "run_python_surface",
+    "WebSurfaceResult",
+    "run_web_surface",
 ]

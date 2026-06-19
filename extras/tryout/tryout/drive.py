@@ -40,10 +40,14 @@ from .server import ServerProcess
 from .surfaces import create_workspace_and_open
 from .surfaces.cli_surface import run_cli_surface
 from .surfaces.python_surface import run_python_surface
+from .surfaces.web_surface import WebSurfaceResult, run_web_surface
+from .web import WebDist, resolve_web_dist
 
 
-# The surfaces this command knows how to drive, in a stable tour order.
-ALL_SURFACES = ("cli", "python")
+# The surfaces this command knows how to drive, in a stable tour order. The web
+# surface comes last so the CLI/Python tours (which can mutate view state) run
+# first and a maintainer's screenshot reflects the post-tour state too.
+ALL_SURFACES = ("cli", "python", "web")
 
 
 @dataclass(frozen=True)
@@ -125,9 +129,25 @@ def drive(
             out_dir=out_dir, error=error, surfaces=surfaces, fixture=fixture, log=log
         )
 
+    # The web surface needs the server to serve the SPA, which it only does when
+    # booted with LUCIDA_WEB_DIST. Resolve (or build) the bundle BEFORE boot so we
+    # can point the server at it. A resolution failure is NOT fatal to the whole
+    # run: we boot anyway so cli/python still run, and the web surface records a
+    # clean ran=False with this error.
+    web_dist: WebDist | None = None
+    web_dist_error: TryoutError | None = None
+    if "web" in surfaces:
+        try:
+            web_dist = resolve_web_dist(log=log)
+        except TryoutError as error:
+            web_dist_error = error
+            log(f"[tryout] web: SPA bundle unavailable ({error.message}); "
+                "web surface will be skipped, other surfaces continue")
+
     server = ServerProcess(
         out_dir=out_dir,
         binary=server_binary,
+        web_dist=(web_dist.path if web_dist is not None else None),
         health_timeout_s=health_timeout_s,
         log=log,
     )
@@ -223,6 +243,31 @@ def drive(
                 )
                 surface_results["python"] = py_result.to_dict()
                 if not py_result.ran:
+                    any_surface_failed = True
+
+            if "web" in surfaces:
+                if web_dist is None:
+                    # Bundle couldn't be resolved pre-boot: record a clean skip.
+                    web_result = WebSurfaceResult(
+                        ran=False,
+                        ok=False,
+                        out_dir=str(out_dir / "web"),
+                        error=(web_dist_error.to_error() if web_dist_error is not None
+                               else {"stage": "config", "message": "SPA bundle unavailable"}),
+                    )
+                else:
+                    web_result = run_web_surface(
+                        base_url=base_url,
+                        workspace_id=workspace_id,
+                        dataset_id=dataset_id,
+                        out_dir=out_dir,
+                        config_path=cli_config_path,
+                        web_dist=web_dist.path,
+                        web_dist_source=web_dist.source,
+                        log=log,
+                    )
+                surface_results["web"] = web_result.to_dict()
+                if not web_result.ran:
                     any_surface_failed = True
     finally:
         # Defensive: guarantee the server is down even on an unexpected escape.

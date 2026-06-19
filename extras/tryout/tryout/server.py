@@ -156,6 +156,7 @@ class ServerProcess:
         binary: Path | None = None,
         host: str = LOOPBACK,
         data_dir: Path | None = None,
+        web_dist: Path | None = None,
         health_timeout_s: float = DEFAULT_HEALTH_TIMEOUT_S,
         log=print,
     ):
@@ -163,6 +164,7 @@ class ServerProcess:
         self._binary = binary
         self._host = host
         self._data_dir = data_dir
+        self._web_dist = web_dist
         self._health_timeout_s = health_timeout_s
         self._log = log
 
@@ -199,7 +201,8 @@ class ServerProcess:
             f"# lucida-server: {binary}\n"
             f"# bind: {self._host}:{self._port}\n"
             f"# db: {self._db_path}\n"
-            f"# argv: {binary} serve\n\n"
+            + (f"# web_dist: {self._web_dist}\n" if self._web_dist is not None else "")
+            + f"# argv: {binary} serve\n\n"
         )
         self._log_handle.flush()
 
@@ -248,6 +251,13 @@ class ServerProcess:
         # at a non-loopback bind (which would then demand LUCIDA_INSECURE) or at
         # a different DB. We own these for the throwaway server.
         env.pop("LUCIDA_INSECURE", None)
+        # Web surface: point the server at the SPA bundle to serve (ADR-0020) so a
+        # real browser can render the viewer. Absolute, because the server's cwd
+        # is our throwaway temp dir, not the repo. When unset, we leave the
+        # server's own default (./lucida-web/dist) untouched so non-web bring-ups
+        # (up, drive --surface cli/python) behave exactly as before.
+        if self._web_dist is not None:
+            env["LUCIDA_WEB_DIST"] = str(self._web_dist)
         # Make the boot deterministic & greppable in server.log.
         env.setdefault("RUST_LOG", "info")
         return env
