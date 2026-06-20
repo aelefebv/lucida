@@ -57,8 +57,8 @@ use crate::layout::{
 use crate::output::Output;
 use crate::saved_view::{
     SavedViewApplyOutput, SavedViewCaptureOutput, SavedViewDefaultOutput, SavedViewDeleteOutput,
-    SavedViewLinkOutput, SavedViewListOutput, SavedViewOutput, WorkspaceSavedViewClient,
-    format_saved_view_apply_human, format_saved_view_capture_human,
+    SavedViewLinkOutput, SavedViewListOutput, SavedViewOutput, SavedViewVisibility,
+    WorkspaceSavedViewClient, format_saved_view_apply_human, format_saved_view_capture_human,
     format_saved_view_default_human, format_saved_view_delete_human, format_saved_view_human,
     format_saved_view_link_human, format_saved_view_list_human, resolve_saved_view_record,
     saved_view_link, saved_view_summaries, saved_view_summary,
@@ -1139,6 +1139,9 @@ enum SavedViewCommand {
         /// Capture from an explicit peer's presence instead of this CLI session
         #[arg(long, value_name = "CLIENT_ID")]
         from_peer: Option<u64>,
+        /// Sharing layer for the new saved view
+        #[arg(long, value_enum, default_value_t = SavedViewVisibility::Shared)]
+        visibility: SavedViewVisibility,
     },
     /// Rename a saved view
     Rename {
@@ -1172,6 +1175,24 @@ enum SavedViewCommand {
     ClearDefault,
     /// Print a browser link to a workspace saved view
     Link {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+    /// Change a saved view's sharing layer (defaults to promoting it to shared)
+    Promote {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+        /// Target sharing layer
+        #[arg(long, value_enum, default_value_t = SavedViewVisibility::Shared)]
+        visibility: SavedViewVisibility,
+    },
+    /// Approve a proposed saved view (editor action; re-scopes it to shared)
+    Approve {
+        /// Saved-view id or unambiguous saved-view name
+        saved_view: String,
+    },
+    /// Reject a proposed saved view (editor action; returns it to personal)
+    Reject {
         /// Saved-view id or unambiguous saved-view name
         saved_view: String,
     },
@@ -2391,9 +2412,15 @@ async fn emit_saved_view_command(
                 format_saved_view_apply_human(&output_payload)
             })?;
         }
-        SavedViewCommand::Capture { name, from_peer } => {
+        SavedViewCommand::Capture {
+            name,
+            from_peer,
+            visibility,
+        } => {
             let (source, view) = saved_view_client.capture(*from_peer, wait).await?;
-            let saved_view = saved_view_client.create(&workspace, name, &view).await?;
+            let saved_view = saved_view_client
+                .create(&workspace, name, &view, *visibility)
+                .await?;
             let output_payload = SavedViewCaptureOutput {
                 server,
                 workspace,
@@ -2505,6 +2532,47 @@ async fn emit_saved_view_command(
             output.print_either(&output_payload, || {
                 format_saved_view_link_human(&output_payload)
             })?;
+        }
+        SavedViewCommand::Promote {
+            saved_view,
+            visibility,
+        } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let saved_view = saved_view_client
+                .set_visibility(&workspace, &resolved.id, *visibility)
+                .await?;
+            let output_payload = SavedViewOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+            };
+            output.print_either(&output_payload, || format_saved_view_human(&output_payload))?;
+        }
+        SavedViewCommand::Approve { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let saved_view = saved_view_client.approve(&workspace, &resolved.id).await?;
+            let output_payload = SavedViewOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+            };
+            output.print_either(&output_payload, || format_saved_view_human(&output_payload))?;
+        }
+        SavedViewCommand::Reject { saved_view } => {
+            let saved_views = saved_view_client.list(&workspace).await?;
+            let resolved = resolve_saved_view_record(saved_view, &saved_views)?;
+            let saved_view = saved_view_client.reject(&workspace, &resolved.id).await?;
+            let output_payload = SavedViewOutput {
+                server,
+                workspace,
+                target,
+                saved_view,
+            };
+            output.print_either(&output_payload, || format_saved_view_human(&output_payload))?;
         }
     }
 
@@ -4634,12 +4702,29 @@ mod tests {
         let capture = parse(&["saved-view", "capture", "Current", "--from-peer", "7"]);
         match capture.command {
             Command::SavedView {
-                command: SavedViewCommand::Capture { name, from_peer },
+                command:
+                    SavedViewCommand::Capture {
+                        name,
+                        from_peer,
+                        visibility,
+                    },
                 ..
             } => {
                 assert_eq!(name, "Current");
                 assert_eq!(from_peer, Some(7));
+                // Defaults to shared so existing capture invocations are unchanged.
+                assert_eq!(visibility, SavedViewVisibility::Shared);
             }
+            _ => panic!("expected saved-view capture"),
+        }
+
+        let capture_personal =
+            parse(&["saved-view", "capture", "Mine", "--visibility", "personal"]);
+        match capture_personal.command {
+            Command::SavedView {
+                command: SavedViewCommand::Capture { visibility, .. },
+                ..
+            } => assert_eq!(visibility, SavedViewVisibility::Personal),
             _ => panic!("expected saved-view capture"),
         }
 
@@ -4714,6 +4799,52 @@ mod tests {
                 ..
             } => assert_eq!(saved_view, "sv-1"),
             _ => panic!("expected saved-view link"),
+        }
+
+        // Promote defaults to shared (the #699 happy path) and accepts an
+        // explicit target visibility.
+        let promote = parse(&["saved-view", "promote", "sv-1"]);
+        match promote.command {
+            Command::SavedView {
+                command:
+                    SavedViewCommand::Promote {
+                        saved_view,
+                        visibility,
+                    },
+                ..
+            } => {
+                assert_eq!(saved_view, "sv-1");
+                assert_eq!(visibility, SavedViewVisibility::Shared);
+            }
+            _ => panic!("expected saved-view promote"),
+        }
+
+        let promote_personal =
+            parse(&["saved-view", "promote", "sv-1", "--visibility", "personal"]);
+        match promote_personal.command {
+            Command::SavedView {
+                command: SavedViewCommand::Promote { visibility, .. },
+                ..
+            } => assert_eq!(visibility, SavedViewVisibility::Personal),
+            _ => panic!("expected saved-view promote"),
+        }
+
+        let approve = parse(&["saved-view", "approve", "sv-1"]);
+        match approve.command {
+            Command::SavedView {
+                command: SavedViewCommand::Approve { saved_view },
+                ..
+            } => assert_eq!(saved_view, "sv-1"),
+            _ => panic!("expected saved-view approve"),
+        }
+
+        let reject = parse(&["saved-view", "reject", "sv-1"]);
+        match reject.command {
+            Command::SavedView {
+                command: SavedViewCommand::Reject { saved_view },
+                ..
+            } => assert_eq!(saved_view, "sv-1"),
+            _ => panic!("expected saved-view reject"),
         }
     }
 

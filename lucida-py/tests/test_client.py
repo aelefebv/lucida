@@ -490,3 +490,97 @@ def test_layer_and_channel_commands_send_dataset_presence(tmp_path):
     assert sent["type"] == "dataset_presence"
     settings = sent["dataset_settings"]["wds-test"]
     assert settings["channel_settings"][1]["colormap"] == "green"
+
+
+def saved_view_record(saved_view_id="sv-1", visibility="shared"):
+    return {
+        "id": saved_view_id,
+        "workspace_id": "w1",
+        "name": "Captured",
+        "created_by": "dev@local",
+        "created_by_name": "Local Dev",
+        "created_at": "2026-06-07T00:00:00Z",
+        "updated_at": "2026-06-07T00:00:00Z",
+        "visibility": visibility,
+        "view": {"v": 2},
+    }
+
+
+def saved_views_workspace(tmp_path, responses):
+    transport = RecordingTransport(responses)
+    client = LucidaClient(
+        "http://127.0.0.1:9988",
+        token="t",
+        config_path=tmp_path / "config.json",
+        transport=transport,
+    )
+    return WorkspaceResource(client, workspace_record()), transport
+
+
+def test_saved_views_create_sends_visibility(tmp_path):
+    workspace, transport = saved_views_workspace(
+        tmp_path, [response(201, saved_view_record(visibility="personal"))]
+    )
+
+    record = workspace.saved_views.create(
+        "Captured", {"v": 2}, visibility="personal"
+    )
+
+    request = transport.requests[0]
+    assert request["method"] == "POST"
+    assert request["url"].endswith("/api/workspaces/w1/saved-views")
+    assert json.loads(request["body"]) == {
+        "name": "Captured",
+        "view": {"v": 2},
+        "visibility": "personal",
+    }
+    assert record["visibility"] == "personal"
+
+
+def test_saved_views_create_defaults_to_shared(tmp_path):
+    workspace, transport = saved_views_workspace(
+        tmp_path, [response(201, saved_view_record())]
+    )
+
+    workspace.saved_views.create("Captured", {"v": 2})
+
+    assert json.loads(transport.requests[0]["body"])["visibility"] == "shared"
+
+
+def test_saved_views_set_visibility_patches_visibility(tmp_path):
+    workspace, transport = saved_views_workspace(
+        tmp_path, [response(200, saved_view_record(visibility="shared"))]
+    )
+
+    record = workspace.saved_views.set_visibility("sv-1", "shared")
+
+    request = transport.requests[0]
+    assert request["method"] == "PATCH"
+    assert request["url"].endswith("/api/workspaces/w1/saved-views/sv-1/visibility")
+    assert json.loads(request["body"]) == {"visibility": "shared"}
+    assert record["visibility"] == "shared"
+
+
+def test_saved_views_approve_and_reject_post_without_body(tmp_path):
+    workspace, transport = saved_views_workspace(
+        tmp_path,
+        [
+            response(200, saved_view_record(visibility="shared")),
+            response(200, saved_view_record(visibility="personal")),
+        ],
+    )
+
+    approved = workspace.saved_views.approve("sv-1")
+    rejected = workspace.saved_views.reject("sv-1")
+
+    approve_request = transport.requests[0]
+    assert approve_request["method"] == "POST"
+    assert approve_request["url"].endswith("/api/workspaces/w1/saved-views/sv-1/approve")
+    assert approve_request["body"] is None
+    assert approved["visibility"] == "shared"
+
+    reject_request = transport.requests[1]
+    assert reject_request["method"] == "POST"
+    assert reject_request["url"].endswith("/api/workspaces/w1/saved-views/sv-1/reject")
+    assert reject_request["body"] is None
+    assert rejected["visibility"] == "personal"

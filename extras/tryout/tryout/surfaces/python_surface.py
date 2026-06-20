@@ -228,6 +228,94 @@ def main():
             summarize=lambda layers: {"count": len(layers)},
         )
 
+    # --- saved-view sharing lifecycle (#699 promote, #702 propose/approve/reject)
+    # The Python parity for the CLI's sharing verbs. Build a real SavedView
+    # payload from this client's own presence in a live snapshot (so the `v`,
+    # camera/view/display the server requires are genuine, not hand-faked), then
+    # drive create(visibility=...) / set_visibility() / approve() / reject().
+    # The single dev user owns the workspace, so they can both propose and
+    # approve/reject — exercising every command end-to-end.
+    def build_saved_view():
+        snapshot = workspace.snapshot(timeout=timeout)
+        own_id = snapshot.get("your_id")
+        presence = None
+        for peer in snapshot.get("peers") or []:
+            if peer.get("client_id") == own_id:
+                presence = peer
+                break
+        if presence is None:
+            raise LucidaError("protocol", "snapshot did not include this client presence")
+        return {
+            "v": 1,
+            "camera": presence["camera"],
+            "view": presence["view"],
+            "display": presence["display"],
+        }
+
+    view_payload = record(
+        "saved_views.build_view",
+        build_saved_view,
+        summarize=lambda v: {"v": v.get("v")},
+    )
+
+    if view_payload is not None:
+        # personal -> set_visibility(shared)
+        personal = record(
+            "saved_views.create.personal",
+            lambda: workspace.saved_views.create(
+                "py-share-personal", view_payload, visibility="personal"
+            ),
+            summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+        )
+        if personal is not None:
+            record(
+                "saved_views.set_visibility.shared",
+                lambda: workspace.saved_views.set_visibility(personal["id"], "shared"),
+                summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+            )
+
+        # proposed -> approve -> shared
+        approve = record(
+            "saved_views.create.proposed_approve",
+            lambda: workspace.saved_views.create(
+                "py-share-approve", view_payload, visibility="proposed"
+            ),
+            summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+        )
+        if approve is not None:
+            record(
+                "saved_views.approve",
+                lambda: workspace.saved_views.approve(approve["id"]),
+                summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+            )
+
+        # proposed -> reject -> personal
+        reject = record(
+            "saved_views.create.proposed_reject",
+            lambda: workspace.saved_views.create(
+                "py-share-reject", view_payload, visibility="proposed"
+            ),
+            summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+        )
+        if reject is not None:
+            record(
+                "saved_views.reject",
+                lambda: workspace.saved_views.reject(reject["id"]),
+                summarize=lambda sv: {"id": sv.get("id"), "visibility": sv.get("visibility")},
+            )
+
+        # Final list shows every view at its resolved visibility.
+        record(
+            "saved_views.list",
+            lambda: workspace.saved_views.list(),
+            summarize=lambda views: {
+                "count": len(views),
+                "visibilities": sorted(
+                    {v.get("visibility") for v in views if isinstance(v, dict)}
+                ),
+            },
+        )
+
     ran_steps = len(steps)
     # Surface ok iff every non-optional step succeeded. Optional steps (which use
     # APIs that may not exist on every client build / dataset) are captured but
