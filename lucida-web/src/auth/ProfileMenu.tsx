@@ -13,6 +13,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthSession } from "./AuthSession.ts";
 import { fetchDevAuthStatus, postDevLogin } from "./whoami.ts";
+import {
+  getRestoreLastViewEnabled,
+  setRestoreLastViewEnabled,
+} from "../lastViewPreference.ts";
 
 export function ProfileMenu() {
   const { principal, refresh, signOut } = useAuthSession();
@@ -25,8 +29,17 @@ export function ProfileMenu() {
   const [devAdmin, setDevAdmin] = useState(false);
   const [devPending, setDevPending] = useState(false);
   const [devError, setDevError] = useState<string | null>(null);
+  // "Remember my last view" per-workspace preference (#700). Browser-local,
+  // default on; read from localStorage when the menu opens so an edit made in
+  // another tab is reflected.
+  const [restoreLastView, setRestoreLastView] = useState(getRestoreLastViewEnabled);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const nameVisible = hovered || open;
+
+  const handleRestoreLastViewToggle = useCallback((next: boolean) => {
+    setRestoreLastView(next);
+    setRestoreLastViewEnabled(next);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,6 +85,8 @@ export function ProfileMenu() {
       setDevDisplayName(principal.display_name);
       setDevAdmin(false);
       setDevError(null);
+      // Re-sync from storage in case another tab changed it.
+      setRestoreLastView(getRestoreLastViewEnabled());
     }
     setOpen(nextOpen);
   }, [open, principal.display_name, principal.email]);
@@ -168,6 +183,29 @@ export function ProfileMenu() {
             <div style={{ fontWeight: 600 }}>{principal.display_name}</div>
             <div style={{ color: "#aaa", fontSize: "0.8125rem", overflow: "hidden", textOverflow: "ellipsis" }}>
               {principal.email}
+            </div>
+          </div>
+          <div style={{ padding: "8px 12px", borderBottom: "1px solid #333" }}>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                color: "#ccc",
+                fontSize: "0.8125rem",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={restoreLastView}
+                onChange={(e) => handleRestoreLastViewToggle(e.target.checked)}
+              />
+              Restore my last view
+            </label>
+            <div style={{ color: "#888", fontSize: "0.75rem", marginTop: 4 }}>
+              Reopen each workspace where you left off (a link with a view
+              always wins).
             </div>
           </div>
           {devAuthEnabled && (
