@@ -125,3 +125,5 @@
 - feat(workspace): personal saved views server foundation (#699) (slipway, reversible: git-revert)
 - feat(workspace): personal saved views web UI (#699) (slipway, reversible: git-revert)
 - feat(workspace): remember my last view per workspace (#700) (slipway, reversible: git-revert)
+- feat(workspace): promote a personal saved view to shared (#699) (slipway, reversible: git-revert)
+- feat(workspace): viewer-proposed saved views (#702) (slipway, reversible: git-revert)

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  approveWorkspaceSavedView as apiApprove,
   createWorkspaceSavedView as apiCreate,
   deleteWorkspaceSavedView as apiDelete,
   listWorkspaceSavedViews as apiList,
+  rejectWorkspaceSavedView as apiReject,
+  setWorkspaceSavedViewVisibility as apiSetVisibility,
   updateWorkspaceSavedView as apiUpdate,
   type WorkspaceSavedView,
   type WorkspaceSavedViewVisibility,
@@ -41,6 +44,16 @@ export interface UseWorkspaceSavedViewsHandle {
   ) => Promise<WorkspaceSavedView>;
   renameSavedView: (id: string, name: string) => Promise<WorkspaceSavedView>;
   replaceSavedView: (id: string, view: SavedView) => Promise<WorkspaceSavedView>;
+  setSavedViewVisibility: (
+    id: string,
+    visibility: WorkspaceSavedViewVisibility,
+  ) => Promise<WorkspaceSavedView>;
+  /** Approve a pending proposal (editor-only): it becomes shared. Refreshes
+   *  the list so the review queue and the shared section both update. */
+  approveSavedView: (id: string) => Promise<WorkspaceSavedView>;
+  /** Reject a pending proposal (editor-only): it reverts to the proposer's
+   *  personal view and leaves the editor's review queue. Refreshes. */
+  rejectSavedView: (id: string) => Promise<WorkspaceSavedView>;
   deleteSavedView: (id: string) => Promise<void>;
 }
 
@@ -156,6 +169,52 @@ export function useWorkspaceSavedViews({
     [workspaceId],
   );
 
+  const setSavedViewVisibility = useCallback(
+    async (
+      id: string,
+      visibility: WorkspaceSavedViewVisibility,
+    ): Promise<WorkspaceSavedView> => {
+      // Use the server's canonical row (it preserves created_by and bumps
+      // updated_at) rather than guessing the next shape locally, so the chip,
+      // "mine only" filter, and ordering all reflect the real post-promote
+      // state.
+      const updated = await apiSetVisibility(workspaceId, id, visibility);
+      setAllSavedViews((prev) => prev.map((item) => (
+        item.id === id ? updated : item
+      )));
+      return updated;
+    },
+    [workspaceId],
+  );
+
+  const approveSavedView = useCallback(
+    async (id: string): Promise<WorkspaceSavedView> => {
+      // The proposal becomes shared and stays visible to the reviewing editor,
+      // so swap in the server's canonical row immediately for a snappy UI, then
+      // refresh so any concurrent review changes reconcile.
+      const updated = await apiApprove(workspaceId, id);
+      setAllSavedViews((prev) => prev.map((item) => (
+        item.id === id ? updated : item
+      )));
+      void refresh();
+      return updated;
+    },
+    [refresh, workspaceId],
+  );
+
+  const rejectSavedView = useCallback(
+    async (id: string): Promise<WorkspaceSavedView> => {
+      // A rejected proposal reverts to the proposer's PERSONAL view, which the
+      // reviewing editor can no longer see — drop it from the list, then
+      // refresh to reconcile with the server's authoritative view.
+      const updated = await apiReject(workspaceId, id);
+      setAllSavedViews((prev) => prev.filter((item) => item.id !== id));
+      void refresh();
+      return updated;
+    },
+    [refresh, workspaceId],
+  );
+
   const deleteSavedView = useCallback(async (id: string): Promise<void> => {
     const original = allSavedViews.find((item) => item.id === id) ?? null;
     setAllSavedViews((prev) => prev.filter((item) => item.id !== id));
@@ -181,6 +240,9 @@ export function useWorkspaceSavedViews({
     createSavedView,
     renameSavedView,
     replaceSavedView,
+    setSavedViewVisibility,
+    approveSavedView,
+    rejectSavedView,
     deleteSavedView,
   };
 }

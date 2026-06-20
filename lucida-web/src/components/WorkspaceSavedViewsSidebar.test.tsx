@@ -112,6 +112,92 @@ describe("WorkspaceSavedViewsSidebar — visibility on rows", () => {
   });
 });
 
+async function openRowMenu(view: { name: string }) {
+  const rows = screen.getAllByTestId("saved-view-row");
+  const row = rows.find((r) => within(r).queryByText(view.name)) as HTMLElement;
+  const trigger = within(row).getByRole("button", { name: /saved view actions/i });
+  await userEvent.click(trigger);
+  return screen.getByRole("menu");
+}
+
+describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
+  it("shows 'Share with team' for an own personal view (editor), PATCHes visibility, and the row becomes shared", async () => {
+    let listBody = [
+      savedViewRow({ id: "p1", name: "My layout", visibility: "personal" }),
+    ];
+    let patchBody: Record<string, unknown> | null = null;
+    let patchedUrl: string | null = null;
+    let patchMethod: string | null = null;
+    responder = (url, init) => {
+      if (init?.method === "PATCH") {
+        patchMethod = init.method;
+        patchBody = JSON.parse(init.body as string) as Record<string, unknown>;
+        patchedUrl = url;
+        // Server promotes it; the canonical row now reads as shared.
+        const promoted = savedViewRow({ id: "p1", name: "My layout", visibility: "shared" });
+        listBody = [promoted];
+        return jsonResponse(200, promoted);
+      }
+      return jsonResponse(200, listBody);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "My layout" });
+    const promote = within(menu).getByTestId("saved-view-promote-p1");
+    expect(promote.textContent).toMatch(/share with team/i);
+
+    await act(async () => {
+      await userEvent.click(promote);
+    });
+
+    expect(patchMethod).toBe("PATCH");
+    expect(patchBody).toEqual({ visibility: "shared" });
+    expect(patchedUrl).toBe("/api/workspaces/ws-1/saved-views/p1/visibility");
+
+    // The row lost its Personal chip once the server's shared row landed.
+    const row = screen
+      .getAllByTestId("saved-view-row")
+      .find((r) => within(r).queryByText("My layout")) as HTMLElement;
+    expect(row.getAttribute("data-visibility")).toBe("shared");
+    expect(within(row).queryByText("Personal")).toBeNull();
+  });
+
+  it("does not offer 'Share with team' for a shared view", async () => {
+    responder = () =>
+      jsonResponse(200, [savedViewRow({ id: "s1", name: "Team layout", visibility: "shared" })]);
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Team layout" });
+    expect(within(menu).queryByTestId("saved-view-promote-s1")).toBeNull();
+  });
+
+  it("does not offer 'Share with team' for someone else's personal view", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({
+          id: "p2",
+          name: "Bob layout",
+          visibility: "personal",
+          created_by: "bob@example.com",
+          created_by_name: "Bob",
+        }),
+      ]);
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Bob layout" });
+    expect(within(menu).queryByTestId("saved-view-promote-p2")).toBeNull();
+  });
+
+  it("does not offer 'Share with team' to a viewer (cannot edit) even on their own personal view", async () => {
+    responder = () =>
+      jsonResponse(200, [savedViewRow({ id: "p1", name: "My layout", visibility: "personal" })]);
+    await renderSidebar(false);
+
+    const menu = await openRowMenu({ name: "My layout" });
+    expect(within(menu).queryByTestId("saved-view-promote-p1")).toBeNull();
+  });
+});
+
 describe("WorkspaceSavedViewsSidebar — save modal (editor)", () => {
   it("defaults to shared, lets the editor pick personal, and POSTs visibility", async () => {
     let postBody: Record<string, unknown> | null = null;

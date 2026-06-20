@@ -67,11 +67,40 @@ export function WorkspaceSavedViewsSidebar({
     createSavedView,
     renameSavedView,
     replaceSavedView,
+    setSavedViewVisibility,
+    approveSavedView,
+    rejectSavedView,
     deleteSavedView,
   } = useWorkspaceSavedViews({
     workspaceId,
     currentUserEmail,
   });
+
+  // A personal view may be promoted to shared only by the member who created
+  // it, and only when they have edit access (the server enforces all three;
+  // the UI just avoids offering an action that would 403). Mirrors the
+  // hook's "mine only" lowercase email comparison.
+  const normalizedCurrentUserEmail = currentUserEmail?.toLowerCase() ?? null;
+  const isMine = useCallback(
+    (view: WorkspaceSavedView): boolean =>
+      normalizedCurrentUserEmail !== null &&
+      view.created_by.toLowerCase() === normalizedCurrentUserEmail,
+    [normalizedCurrentUserEmail],
+  );
+  const canPromoteToShared = useCallback(
+    (view: WorkspaceSavedView): boolean =>
+      canEdit && view.visibility === "personal" && isMine(view),
+    [canEdit, isMine],
+  );
+  // A viewer (no edit access) can't share directly, so they instead *propose*
+  // their own personal view to the team for an editor to approve (#702). An
+  // editor uses the direct "Share with team" action above, so the two never
+  // overlap.
+  const canProposeToTeam = useCallback(
+    (view: WorkspaceSavedView): boolean =>
+      !canEdit && view.visibility === "personal" && isMine(view),
+    [canEdit, isMine],
+  );
 
   const [savePromptOpen, setSavePromptOpen] = useState(false);
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -172,6 +201,54 @@ export function WorkspaceSavedViewsSidebar({
     [getCurrentSavedView, replaceSavedView, showToast],
   );
 
+  const handlePromote = useCallback(
+    async (view: WorkspaceSavedView) => {
+      try {
+        await setSavedViewVisibility(view.id, "shared");
+        showToast(`Shared "${view.name}" with the team`);
+      } catch (e) {
+        showToast(`Share failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      }
+    },
+    [setSavedViewVisibility, showToast],
+  );
+
+  const handlePropose = useCallback(
+    async (view: WorkspaceSavedView) => {
+      try {
+        await setSavedViewVisibility(view.id, "proposed");
+        showToast(`Proposed "${view.name}" to the team for review`);
+      } catch (e) {
+        showToast(`Propose failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      }
+    },
+    [setSavedViewVisibility, showToast],
+  );
+
+  const handleApprove = useCallback(
+    async (view: WorkspaceSavedView) => {
+      try {
+        await approveSavedView(view.id);
+        showToast(`Approved "${view.name}" — now shared with the team`);
+      } catch (e) {
+        showToast(`Approve failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      }
+    },
+    [approveSavedView, showToast],
+  );
+
+  const handleReject = useCallback(
+    async (view: WorkspaceSavedView) => {
+      try {
+        await rejectSavedView(view.id);
+        showToast(`Rejected "${view.name}" — returned to the proposer`);
+      } catch (e) {
+        showToast(`Reject failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      }
+    },
+    [rejectSavedView, showToast],
+  );
+
   const handleSetDefault = useCallback(
     async (view: WorkspaceSavedView) => {
       const nextDefaultId = defaultSavedViewId === view.id ? null : view.id;
@@ -230,6 +307,19 @@ export function WorkspaceSavedViewsSidebar({
     filterActive: filter.search.trim().length > 0 || filter.mineOnly,
   });
 
+  // Editors get a dedicated review queue: every pending proposal the server
+  // surfaced to them (their own + every other member's) is pulled out of the
+  // main list into its own section with Approve / Reject. For a plain viewer
+  // there is no review queue — their own proposals just stay inline with a
+  // "Proposed" chip so they can see the pending status. Keeping the partition
+  // local means shared/personal rows render exactly as before.
+  const reviewQueue = canEdit
+    ? savedViews.filter((view) => view.visibility === "proposed")
+    : [];
+  const mainList = canEdit
+    ? savedViews.filter((view) => view.visibility !== "proposed")
+    : savedViews;
+
   return (
     <div className="bookmark-sidebar" style={style}>
       <div className="bookmark-sidebar-header">
@@ -269,58 +359,67 @@ export function WorkspaceSavedViewsSidebar({
       {error && <div className="bookmark-error">Error: {error}</div>}
       {isLoading && <div className="bookmark-loading">Loading saved views...</div>}
 
-      <div className="bookmark-list" role="list">
-        {savedViews.map((view) => (
-          <div
-            key={view.id}
-            role="listitem"
-            className="bookmark-row"
-            data-testid="saved-view-row"
-            data-visibility={view.visibility}
-            onClick={(e) => {
-              const target = e.target as HTMLElement | null;
-              if (target?.closest(".bookmark-menu-btn")) return;
-              if (target?.closest(".bookmark-name-input")) return;
-              if (renameId === view.id) return;
-              void handleOpen(view);
-            }}
-          >
-            <div className="bookmark-row-top">
-              {renameId === view.id ? (
-                <RenameInput
-                  initial={view.name}
-                  onCommit={(n) => handleRenameCommit(view.id, n)}
-                  onCancel={() => setRenameId(null)}
-                />
-              ) : (
-                <span className="bookmark-name" title={view.name}>{view.name}</span>
-              )}
-              {view.visibility === "personal" && (
-                <span
-                  className="bookmark-visibility-chip"
-                  title="Only you can see this saved view"
-                >
-                  Personal
-                </span>
-              )}
-              <button
-                type="button"
-                className="bookmark-menu-btn"
-                aria-label="Saved view actions"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom });
-                }}
-              >
-                ...
-              </button>
-            </div>
-            <div className="bookmark-row-meta">
-              {view.created_by_name || view.created_by} | {relativeTimeFromIso(view.updated_at)}
-              {defaultSavedViewId === view.id ? " | default" : ""}
-            </div>
+      {reviewQueue.length > 0 && (
+        <div className="bookmark-review-section" data-testid="saved-view-review-queue">
+          <div className="bookmark-section-header">
+            Proposed for review ({reviewQueue.length})
           </div>
+          <div className="bookmark-list" role="list">
+            {reviewQueue.map((view) => (
+              <SavedViewRow
+                key={view.id}
+                view={view}
+                isRenaming={renameId === view.id}
+                isDefault={defaultSavedViewId === view.id}
+                onRenameCommit={(n) => handleRenameCommit(view.id, n)}
+                onRenameCancel={() => setRenameId(null)}
+                onOpen={() => void handleOpen(view)}
+                onMenu={(rect) =>
+                  setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom })}
+              >
+                <div className="bookmark-review-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    data-testid={`saved-view-approve-${view.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleApprove(view);
+                    }}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    data-testid={`saved-view-reject-${view.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleReject(view);
+                    }}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </SavedViewRow>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="bookmark-list" role="list">
+        {mainList.map((view) => (
+          <SavedViewRow
+            key={view.id}
+            view={view}
+            isRenaming={renameId === view.id}
+            isDefault={defaultSavedViewId === view.id}
+            onRenameCommit={(n) => handleRenameCommit(view.id, n)}
+            onRenameCancel={() => setRenameId(null)}
+            onOpen={() => void handleOpen(view)}
+            onMenu={(rect) =>
+              setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom })}
+          />
         ))}
         {showEmptyState && <div className="bookmark-empty">{emptyText}</div>}
       </div>
@@ -331,6 +430,25 @@ export function WorkspaceSavedViewsSidebar({
           y={menu.y}
           canEdit={canEdit}
           isDefault={defaultSavedViewId === menu.savedViewId}
+          savedViewId={menu.savedViewId}
+          canPromote={(() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            return view ? canPromoteToShared(view) : false;
+          })()}
+          canPropose={(() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            return view ? canProposeToTeam(view) : false;
+          })()}
+          onPromote={() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            setMenu(null);
+            if (view) void handlePromote(view);
+          }}
+          onPropose={() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            setMenu(null);
+            if (view) void handlePropose(view);
+          }}
           onRename={() => {
             setRenameId(menu.savedViewId);
             setMenu(null);
@@ -390,6 +508,93 @@ export function WorkspaceSavedViewsSidebar({
   );
 }
 
+const VISIBILITY_CHIP: Record<
+  WorkspaceSavedView["visibility"],
+  { label: string; title: string } | null
+> = {
+  shared: null,
+  personal: { label: "Personal", title: "Only you can see this saved view" },
+  proposed: {
+    label: "Proposed",
+    title: "Pending: proposed to the team, awaiting an editor's review",
+  },
+};
+
+function SavedViewRow({
+  view,
+  isRenaming,
+  isDefault,
+  onRenameCommit,
+  onRenameCancel,
+  onOpen,
+  onMenu,
+  children,
+}: {
+  view: WorkspaceSavedView;
+  isRenaming: boolean;
+  isDefault: boolean;
+  onRenameCommit: (name: string) => void;
+  onRenameCancel: () => void;
+  onOpen: () => void;
+  onMenu: (rect: DOMRect) => void;
+  children?: React.ReactNode;
+}) {
+  const chip = VISIBILITY_CHIP[view.visibility];
+  return (
+    <div
+      role="listitem"
+      className="bookmark-row"
+      data-testid="saved-view-row"
+      data-visibility={view.visibility}
+      onClick={(e) => {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest(".bookmark-menu-btn")) return;
+        if (target?.closest(".bookmark-name-input")) return;
+        if (target?.closest(".bookmark-review-actions")) return;
+        if (isRenaming) return;
+        onOpen();
+      }}
+    >
+      <div className="bookmark-row-top">
+        {isRenaming ? (
+          <RenameInput
+            initial={view.name}
+            onCommit={onRenameCommit}
+            onCancel={onRenameCancel}
+          />
+        ) : (
+          <span className="bookmark-name" title={view.name}>{view.name}</span>
+        )}
+        {chip && (
+          <span
+            className={`bookmark-visibility-chip bookmark-visibility-chip-${view.visibility}`}
+            data-testid={`saved-view-visibility-${view.id}`}
+            title={chip.title}
+          >
+            {chip.label}
+          </span>
+        )}
+        <button
+          type="button"
+          className="bookmark-menu-btn"
+          aria-label="Saved view actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            onMenu((e.currentTarget as HTMLElement).getBoundingClientRect());
+          }}
+        >
+          ...
+        </button>
+      </div>
+      <div className="bookmark-row-meta">
+        {view.created_by_name || view.created_by} | {relativeTimeFromIso(view.updated_at)}
+        {isDefault ? " | default" : ""}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function pickEmptyMessage({
   canEdit,
   filterActive,
@@ -444,6 +649,11 @@ function WorkspaceSavedViewActionsMenu({
   y,
   canEdit,
   isDefault,
+  savedViewId,
+  canPromote,
+  canPropose,
+  onPromote,
+  onPropose,
   onRename,
   onSetDefault,
   onReplace,
@@ -454,6 +664,11 @@ function WorkspaceSavedViewActionsMenu({
   y: number;
   canEdit: boolean;
   isDefault: boolean;
+  savedViewId: string;
+  canPromote: boolean;
+  canPropose: boolean;
+  onPromote: () => void;
+  onPropose: () => void;
   onRename: () => void;
   onSetDefault: () => void;
   onReplace: () => void;
@@ -467,6 +682,26 @@ function WorkspaceSavedViewActionsMenu({
       role="menu"
     >
       <button type="button" role="menuitem" onClick={onCopyLink}>Copy view link</button>
+      {canPromote && (
+        <button
+          type="button"
+          role="menuitem"
+          data-testid={`saved-view-promote-${savedViewId}`}
+          onClick={onPromote}
+        >
+          Share with team
+        </button>
+      )}
+      {canPropose && (
+        <button
+          type="button"
+          role="menuitem"
+          data-testid={`saved-view-propose-${savedViewId}`}
+          onClick={onPropose}
+        >
+          Propose to team
+        </button>
+      )}
       {canEdit && (
         <>
           <button type="button" role="menuitem" onClick={onSetDefault}>

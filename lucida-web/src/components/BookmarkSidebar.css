@@ -128,6 +128,43 @@
   border-left: 2px solid rgba(100, 108, 255, 0.55);
 }
 
+/* A pending proposal reads as "awaiting review" — a warm amber, distinct from
+   the cool personal/shared palette. */
+.bookmark-visibility-chip-proposed {
+  color: #ffd79a;
+  background: rgba(240, 173, 78, 0.16);
+  border-color: rgba(240, 173, 78, 0.5);
+}
+
+.bookmark-row[data-visibility="proposed"] {
+  border-left: 2px solid rgba(240, 173, 78, 0.6);
+}
+
+.bookmark-review-section {
+  margin-bottom: 0.5rem;
+}
+
+.bookmark-section-header {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #ffd79a;
+  padding: 0.3rem 0.5rem 0.2rem;
+}
+
+.bookmark-review-actions {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.bookmark-review-actions button {
+  flex: 1;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.4rem;
+}
+
 .bookmark-menu-btn {
   width: 1.5rem;
   height: 1.5rem;

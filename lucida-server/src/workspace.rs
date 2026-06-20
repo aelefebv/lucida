@@ -80,15 +80,20 @@ impl TryFrom<&str> for WorkspaceRole {
 /// `Shared` views are part of the workspace's collaborative surface (the
 /// historical behavior); `Personal` views belong to exactly one member —
 /// keyed on the normalized `AuthPrincipal.email` in `created_by` — and are
-/// never disclosed to anyone else, not even owners. Persisted as TEXT
-/// (`"shared"` / `"personal"`) and serialized into the REST/JSON response so
-/// the client can tell the two layers apart.
+/// never disclosed to anyone else, not even owners. `Proposed` views (#702)
+/// are a viewer's bid to share: like a `Personal` view they belong to exactly
+/// one member and are hidden from other plain viewers, but they are *also*
+/// surfaced to editors as a review queue — an editor can approve (→ `Shared`)
+/// or reject (→ back to the proposer's `Personal`). Persisted as TEXT
+/// (`"shared"` / `"personal"` / `"proposed"`) and serialized into the
+/// REST/JSON response so the client can tell the layers apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SavedViewVisibility {
     #[default]
     Shared,
     Personal,
+    Proposed,
 }
 
 impl SavedViewVisibility {
@@ -96,6 +101,7 @@ impl SavedViewVisibility {
         match self {
             Self::Shared => "shared",
             Self::Personal => "personal",
+            Self::Proposed => "proposed",
         }
     }
 }
@@ -107,6 +113,7 @@ impl TryFrom<&str> for SavedViewVisibility {
         match value {
             "shared" => Ok(Self::Shared),
             "personal" => Ok(Self::Personal),
+            "proposed" => Ok(Self::Proposed),
             other => Err(StoreError::InvalidSavedViewVisibility(other.to_string())),
         }
     }
@@ -464,14 +471,18 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         link_role: WorkspaceRole,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError>;
 
-    /// Saved views visible to `viewer_email`: every `Shared` view plus the
-    /// caller's own `Personal` views, and no other member's personal view. The
-    /// shared-∪-own-personal predicate is resolved in SQL (one round-trip, no
+    /// Saved views visible to `viewer_email`: every `Shared` view, plus the
+    /// caller's own `Personal`/`Proposed` views, plus — when `viewer_can_edit`
+    /// is true — *every* `Proposed` view in the workspace (the editor review
+    /// queue, #702). No other member's `Personal` view, and no other member's
+    /// `Proposed` view unless the caller can edit, ever crosses the store
+    /// boundary. The whole predicate is resolved in SQL (one round-trip, no
     /// fetch-all-then-filter); `viewer_email` must already be normalized.
     async fn list_saved_views(
         &self,
         workspace_id: &str,
         viewer_email: &str,
+        viewer_can_edit: bool,
     ) -> Result<Vec<WorkspaceSavedView>, StoreError>;
 
     async fn get_saved_view(
@@ -502,6 +513,13 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         saved_view_id: &str,
     ) -> Result<bool, StoreError>;
+
+    async fn set_saved_view_visibility(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+        visibility: SavedViewVisibility,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError>;
 
     async fn set_default_saved_view(
         &self,
@@ -1572,11 +1590,14 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         workspace_id: &str,
         viewer_email: &str,
+        viewer_can_edit: bool,
     ) -> Result<Vec<WorkspaceSavedView>, StoreError> {
-        // The shared-∪-own-personal predicate lives entirely here: a row is
-        // visible when it is shared, or it is the caller's own personal row.
-        // No fetch-all-then-filter — another member's personal row never
-        // crosses the store boundary.
+        // The whole visibility predicate lives here, resolved in SQL: a row is
+        // visible when it is shared, it is the caller's own (personal OR
+        // proposed) row, or — only when the caller can edit — it is *any*
+        // proposed row (the editor review queue, #702). No fetch-all-then-
+        // filter: another member's personal row, or another member's proposed
+        // row for a plain viewer, never crosses the store boundary.
         let rows = sqlx::query(
             r#"
             SELECT
@@ -1584,12 +1605,17 @@ impl WorkspaceStore for SqliteWorkspaceStore {
                 created_at, updated_at, visibility, view_json
             FROM workspace_saved_views
             WHERE workspace_id = ?
-                AND (visibility = 'shared' OR created_by = ?)
+                AND (
+                    visibility = 'shared'
+                    OR created_by = ?
+                    OR (? AND visibility = 'proposed')
+                )
             ORDER BY updated_at DESC
             "#,
         )
         .bind(workspace_id)
         .bind(viewer_email)
+        .bind(viewer_can_edit)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sql)?;
@@ -1761,6 +1787,48 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         touch_workspace(&mut tx, workspace_id, &now).await?;
         tx.commit().await.map_err(map_sql)?;
         Ok(true)
+    }
+
+    async fn set_saved_view_visibility(
+        &self,
+        workspace_id: &str,
+        saved_view_id: &str,
+        visibility: SavedViewVisibility,
+    ) -> Result<Option<WorkspaceSavedView>, StoreError> {
+        if !self.workspace_exists(workspace_id).await? {
+            return Ok(None);
+        }
+
+        // Re-scope only the visibility column (and updated_at); name/view_json/
+        // created_by are left untouched so attribution and the saved camera are
+        // preserved across the promote/demote. Mirrors update_saved_view.
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let result = sqlx::query(
+            r#"
+            UPDATE workspace_saved_views
+            SET
+                visibility = ?,
+                updated_at = ?
+            WHERE workspace_id = ? AND id = ?
+            "#,
+        )
+        .bind(visibility.as_str())
+        .bind(&now)
+        .bind(workspace_id)
+        .bind(saved_view_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sql)?;
+            return Ok(None);
+        }
+
+        touch_workspace(&mut tx, workspace_id, &now).await?;
+        tx.commit().await.map_err(map_sql)?;
+        self.get_saved_view(workspace_id, saved_view_id).await
     }
 
     async fn set_default_saved_view(
@@ -2578,11 +2646,17 @@ impl WorkspaceManager {
         principal: &AuthPrincipal,
     ) -> Result<Vec<WorkspaceSavedView>, WorkspaceError> {
         // Members only — a non-member is denied by the viewer gate before any
-        // row is read. The shared-∪-own-personal filter is then applied in SQL,
-        // scoped to this caller's normalized email.
-        self.require_viewer(workspace_id, principal).await?;
+        // row is read. The shared-∪-own-(personal|proposed) filter is then
+        // applied in SQL, scoped to this caller's normalized email; editors
+        // additionally get every proposed view in the workspace (the #702
+        // review queue), so the caller's edit-ness is pushed into the query.
+        let role = self.require_viewer(workspace_id, principal).await?;
         self.store
-            .list_saved_views(workspace_id, &normalize_email(&principal.email))
+            .list_saved_views(
+                workspace_id,
+                &normalize_email(&principal.email),
+                role.can_edit(),
+            )
             .await
             .map_err(WorkspaceError::Store)
     }
@@ -2593,19 +2667,34 @@ impl WorkspaceManager {
         principal: &AuthPrincipal,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
-        self.require_viewer(workspace_id, principal).await?;
+        let role = self.require_viewer(workspace_id, principal).await?;
         let saved_view = self
             .store
             .get_saved_view(workspace_id, saved_view_id)
             .await
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::NotFound)?;
-        // Never-leak boundary: a personal view is disclosed only to its
-        // creator. Any other caller gets NotFound — identical to a missing row,
-        // so existence is never confirmed. This is the single read-side gate; a
-        // refactor cannot reopen the leak without removing this check.
-        ensure_saved_view_readable(&saved_view, principal)?;
-        Ok(saved_view)
+        // Never-leak boundary: a personal view — and a pending proposed view —
+        // is disclosed by the role-blind gate only to its creator; any other
+        // caller gets NotFound, identical to a missing row, so existence is
+        // never confirmed.
+        //
+        // The one role-dependent exception (#702): an *editor* reviewing the
+        // workspace may read ANY pending proposal. It is layered here, not in
+        // the pure gate, so the never-leak default stays deny-by-construction.
+        // A rejected proposal becomes `Personal`, at which point this exception
+        // no longer applies and the editor loses visibility unless it is their
+        // own — exactly the personal-view boundary.
+        match ensure_saved_view_readable(&saved_view, principal) {
+            Ok(()) => Ok(saved_view),
+            Err(err) => {
+                if saved_view.visibility == SavedViewVisibility::Proposed && role.can_edit() {
+                    Ok(saved_view)
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 
     pub async fn create_saved_view(
@@ -2617,9 +2706,12 @@ impl WorkspaceManager {
         visibility: SavedViewVisibility,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
         // Personal views are private and never mutate shared state, so any
-        // member (viewer+) may save one. Shared views remain editor-gated.
+        // member (viewer+) may save one. A Proposed view is a viewer's *bid* to
+        // share: it likewise touches no shared state until an editor approves
+        // it, so a plain viewer may create one too (#702). Only directly
+        // creating a Shared view remains editor-gated.
         match visibility {
-            SavedViewVisibility::Personal => {
+            SavedViewVisibility::Personal | SavedViewVisibility::Proposed => {
                 self.require_viewer(workspace_id, principal).await?;
             }
             SavedViewVisibility::Shared => {
@@ -2686,6 +2778,126 @@ impl WorkspaceManager {
         }
     }
 
+    /// Promote/demote a saved view between `Personal` and `Shared`.
+    ///
+    /// Authorization is entirely delegated to `ensure_saved_view_rescopable`
+    /// (the single re-scope gate); this method only persists the new
+    /// visibility once the gate has returned the visible view. `created_by` is
+    /// never written here, so attribution is preserved across the change.
+    pub async fn set_saved_view_visibility(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+        visibility: SavedViewVisibility,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.ensure_saved_view_rescopable(workspace_id, principal, saved_view_id, visibility)
+            .await?;
+        self.store
+            .set_saved_view_visibility(workspace_id, saved_view_id, visibility)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    /// Approve a viewer's proposed saved view (#702): it becomes `Shared`.
+    ///
+    /// This is **editor authority over another member's proposal**, which is
+    /// fundamentally different from the creator-only re-scope path
+    /// (`set_saved_view_visibility` / `ensure_saved_view_rescopable`): the
+    /// approving editor is, by design, *not* the author. So it does NOT route
+    /// through that creator-only gate. Instead `require_editor` is the single
+    /// authority check — a viewer cannot approve (`Forbidden`).
+    ///
+    /// `created_by` is never written, so the proposer stays the author once the
+    /// view goes shared (attribution is preserved). The view MUST currently be
+    /// `Proposed`: approving an already-shared (or anyone's personal) view is a
+    /// `BadRequest`, not a silent no-op — except that another member's personal
+    /// view stays `NotFound` even to an editor, preserving the never-leak rule.
+    pub async fn approve_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.ensure_proposal_reviewable(workspace_id, principal, saved_view_id)
+            .await?;
+        self.store
+            .set_saved_view_visibility(workspace_id, saved_view_id, SavedViewVisibility::Shared)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    /// Reject a viewer's proposed saved view (#702): it reverts to the
+    /// proposer's own `Personal` view — non-destructive, the saved camera and
+    /// attribution are untouched, the proposer simply keeps it privately.
+    ///
+    /// Same authority as `approve_saved_view`: `require_editor` (a viewer
+    /// cannot reject), editor-over-another-member's-proposal, NOT the
+    /// creator-only re-scope gate. The view MUST currently be `Proposed`
+    /// (`BadRequest` otherwise; never-leak preserved for others' personal).
+    pub async fn reject_saved_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.ensure_proposal_reviewable(workspace_id, principal, saved_view_id)
+            .await?;
+        self.store
+            .set_saved_view_visibility(workspace_id, saved_view_id, SavedViewVisibility::Personal)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)
+    }
+
+    /// The shared authority gate for the two editor review actions
+    /// (`approve` / `reject`), kept distinct from the creator-only re-scope
+    /// gate because the authority is genuinely different: here the reviewer is
+    /// an editor acting on *someone else's* proposal.
+    ///
+    /// Order, and why:
+    /// 1. `require_editor` — a viewer (or non-member) cannot review at all
+    ///    (`Forbidden`); this is the entire authority for the action.
+    /// 2. fetch — a missing id is `NotFound`.
+    /// 3. never-leak guard — a `Personal` view that is not the editor's own is
+    ///    still `NotFound`, exactly as the read gate would say, so reviewing a
+    ///    proposal can never be used to probe for another member's hidden
+    ///    personal views.
+    /// 4. **must be `Proposed`** — any other (readable) state is a `BadRequest`;
+    ///    approve/reject only ever act on a pending proposal.
+    ///
+    /// Returns the confirmed-`Proposed` view so callers can persist without
+    /// re-fetching.
+    async fn ensure_proposal_reviewable(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.require_editor(workspace_id, principal).await?;
+        let saved_view = self
+            .store
+            .get_saved_view(workspace_id, saved_view_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        // Never-leak: another member's personal view is invisible even to an
+        // editor, so reviewing cannot confirm it exists.
+        if saved_view.visibility == SavedViewVisibility::Personal
+            && saved_view.created_by != normalize_email(&principal.email)
+        {
+            return Err(WorkspaceError::NotFound);
+        }
+        if saved_view.visibility != SavedViewVisibility::Proposed {
+            return Err(WorkspaceError::BadRequest(
+                "saved view is not a pending proposal".to_string(),
+            ));
+        }
+        Ok(saved_view)
+    }
+
     /// The single mutation-authorization gate for saved views, mirroring the
     /// read path. Membership is required first (a non-member gets `Forbidden`
     /// before any row is read, exactly like `get_saved_view`); the row is then
@@ -2712,6 +2924,61 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)?;
         ensure_saved_view_readable(&saved_view, principal)?;
         if saved_view.visibility == SavedViewVisibility::Shared {
+            self.require_editor(workspace_id, principal).await?;
+        }
+        Ok(saved_view)
+    }
+
+    /// The single authorization gate for *changing a saved view's visibility*
+    /// (re-scoping it between `Personal` and `Shared`), kept separate from the
+    /// read gate (`get_saved_view`) and the content-mutation gate
+    /// (`ensure_saved_view_mutable`) because the authority is genuinely
+    /// different: re-scoping is restricted to the **creator**, and *who else*
+    /// is allowed depends on the *target* visibility.
+    ///
+    /// The check order — and the reasons — are:
+    /// 1. `require_viewer` — a non-member is denied (`Forbidden`) before any
+    ///    row is read, so membership is never disclosed by a re-scope attempt.
+    /// 2. fetch + `ensure_saved_view_readable` — never-leak in one place: a
+    ///    personal view the caller cannot see yields `NotFound` (identical to a
+    ///    missing row), so even editors/owners/admins never learn it exists.
+    /// 3. **creator-only** — a shared view is readable by everyone, but only
+    ///    the original creator may re-scope it; anyone else gets `Forbidden`.
+    /// 4. **target-visibility authority** — making a view `Shared` is a
+    ///    shared-state mutation (exactly like creating a `Shared` view), so it
+    ///    additionally requires editor; demoting back to `Personal` needs no
+    ///    editor (the creator is merely making their own view private again).
+    ///
+    /// Returns the (now-confirmed-visible) view so callers can persist without
+    /// re-fetching. This is the gate #702 (approve/reject a proposed view)
+    /// reuses verbatim: "approve" is exactly a creator/authorized re-scope to
+    /// `Shared`, so it can call this with `target_visibility = Shared` and
+    /// inherit the same never-leak + creator-only + editor boundary rather than
+    /// re-deriving it.
+    async fn ensure_saved_view_rescopable(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+        target_visibility: SavedViewVisibility,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        let saved_view = self
+            .store
+            .get_saved_view(workspace_id, saved_view_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        // Never-leak: a personal view the caller didn't create is NotFound.
+        ensure_saved_view_readable(&saved_view, principal)?;
+        // Creator-only: re-scoping is an authorship act, not a read or a
+        // content edit. A non-creator (even of a shared view) cannot re-scope.
+        if saved_view.created_by != normalize_email(&principal.email) {
+            return Err(WorkspaceError::Forbidden);
+        }
+        // Target-visibility authority: promoting to Shared mutates shared
+        // state, so it needs editor; demoting to Personal does not.
+        if target_visibility == SavedViewVisibility::Shared {
             self.require_editor(workspace_id, principal).await?;
         }
         Ok(saved_view)
@@ -3067,17 +3334,25 @@ fn normalize_request_email(email: &str) -> Result<String, WorkspaceError> {
     Ok(normalized)
 }
 
-/// The personal-view never-leak rule, in one place: a `Personal` view is
-/// readable only by its creator (matched on normalized email); everyone else
-/// is told `NotFound` so the row's existence is never confirmed. `Shared`
-/// views are readable by any viewer (membership is enforced upstream).
+/// The never-leak rule for non-shared views, in one place: a `Personal` view —
+/// and a still-pending `Proposed` view — is readable here only by its creator
+/// (matched on normalized email); everyone else is told `NotFound` so the
+/// row's existence is never confirmed. `Shared` views are readable by any
+/// viewer (membership is enforced upstream).
+///
+/// This gate is intentionally **role-blind**: the editor review exception for
+/// `Proposed` views (an editor may read *any* member's pending proposal) is
+/// genuinely role-dependent and is therefore layered at the manager
+/// (`get_saved_view`, `list_saved_views`, `approve`/`reject`), not here.
+/// Keeping the pure match creator-only means a refactor cannot accidentally
+/// disclose another viewer's pending proposal: the default is always deny.
 fn ensure_saved_view_readable(
     saved_view: &WorkspaceSavedView,
     principal: &AuthPrincipal,
 ) -> Result<(), WorkspaceError> {
     match saved_view.visibility {
         SavedViewVisibility::Shared => Ok(()),
-        SavedViewVisibility::Personal => {
+        SavedViewVisibility::Personal | SavedViewVisibility::Proposed => {
             if saved_view.created_by == normalize_email(&principal.email) {
                 Ok(())
             } else {
@@ -3250,6 +3525,18 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
                 .delete(delete_workspace_saved_view),
         )
         .route(
+            "/api/workspaces/{workspace_id}/saved-views/{saved_view_id}/visibility",
+            patch(set_workspace_saved_view_visibility),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/saved-views/{saved_view_id}/approve",
+            post(approve_workspace_saved_view),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/saved-views/{saved_view_id}/reject",
+            post(reject_workspace_saved_view),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/viewer-profiles/{profile}",
             get(get_workspace_viewer_profile).put(upsert_workspace_viewer_profile),
         )
@@ -3330,6 +3617,11 @@ pub struct CreateWorkspaceSavedViewRequest {
 pub struct UpdateWorkspaceSavedViewRequest {
     pub name: Option<String>,
     pub view: Option<SavedView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetWorkspaceSavedViewVisibilityRequest {
+    pub visibility: SavedViewVisibility,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3731,6 +4023,52 @@ async fn update_workspace_saved_view(
             body.name.as_deref(),
             body.view,
         )
+        .await
+    {
+        Ok(saved_view) => (StatusCode::OK, Json(saved_view)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn set_workspace_saved_view_visibility(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, saved_view_id)): Path<(String, String)>,
+    Json(body): Json<SetWorkspaceSavedViewVisibilityRequest>,
+) -> Response {
+    match state
+        .manager
+        .set_saved_view_visibility(&workspace_id, &principal, &saved_view_id, body.visibility)
+        .await
+    {
+        Ok(saved_view) => (StatusCode::OK, Json(saved_view)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn approve_workspace_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, saved_view_id)): Path<(String, String)>,
+) -> Response {
+    match state
+        .manager
+        .approve_saved_view(&workspace_id, &principal, &saved_view_id)
+        .await
+    {
+        Ok(saved_view) => (StatusCode::OK, Json(saved_view)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn reject_workspace_saved_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path((workspace_id, saved_view_id)): Path<(String, String)>,
+) -> Response {
+    match state
+        .manager
+        .reject_saved_view(&workspace_id, &principal, &saved_view_id)
         .await
     {
         Ok(saved_view) => (StatusCode::OK, Json(saved_view)).into_response(),
@@ -5260,6 +5598,679 @@ pub mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn promote_personal_view_to_shared_enforces_creator_editor_and_never_leak() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let admin = principal("admin@example.com", true);
+        let workspace = store
+            .create_workspace(&owner, Some("Promote saved views"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        // The editor creates a personal view, plus a second personal view and a
+        // shared view that must remain untouched by any promotion.
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "editor personal",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let bystander = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "editor personal 2",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let shared = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "shared default",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+        manager
+            .set_default_saved_view(&workspace.id, &owner, Some(&shared.id))
+            .await
+            .unwrap();
+
+        // Never-leak: a non-creator (editor or owner or admin) of the *other*
+        // member's personal view cannot even see it, so promotion is NotFound —
+        // never Forbidden, which would confirm the row exists.
+        let viewer_personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer personal",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        for other in [&editor, &owner, &admin] {
+            let err = manager
+                .set_saved_view_visibility(
+                    &workspace.id,
+                    other,
+                    &viewer_personal.id,
+                    SavedViewVisibility::Shared,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, WorkspaceError::NotFound),
+                "promotion by {} of someone else's personal view should be NotFound, got {err:?}",
+                other.email
+            );
+        }
+
+        // A non-member is denied before any row is read (Forbidden, not
+        // NotFound — membership is the first gate).
+        let stranger = principal("stranger@example.com", false);
+        let err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &stranger,
+                &personal.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // The creator promotes their own personal view to shared. created_by is
+        // preserved (attribution) and the view payload is untouched.
+        let promoted = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+        assert_eq!(promoted.id, personal.id);
+        assert_eq!(promoted.visibility, SavedViewVisibility::Shared);
+        assert_eq!(promoted.created_by, normalize_email(&editor.email));
+        assert_eq!(promoted.created_by_name, personal.created_by_name);
+        assert_eq!(promoted.name, "editor personal");
+
+        // Now that it is shared, every member can see it — including the viewer,
+        // who never could before.
+        let seen = manager
+            .get_saved_view(&workspace.id, &viewer, &personal.id)
+            .await
+            .unwrap();
+        assert_eq!(seen.visibility, SavedViewVisibility::Shared);
+
+        // Promotion never touched the other personal view or the shared
+        // default.
+        let still_personal = manager
+            .get_saved_view(&workspace.id, &editor, &bystander.id)
+            .await
+            .unwrap();
+        assert_eq!(still_personal.visibility, SavedViewVisibility::Personal);
+        let record = store.get_workspace(&workspace.id).await.unwrap().unwrap();
+        assert_eq!(
+            record.default_saved_view_id.as_deref(),
+            Some(shared.id.as_str())
+        );
+
+        // The creator can demote it back to personal WITHOUT editor being
+        // required for the demote path itself: prove this with a creator who is
+        // only a viewer.
+        let owned_by_viewer = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer second",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        // A viewer cannot promote to shared (shared mutation needs editor).
+        let err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &viewer,
+                &owned_by_viewer.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // The editor demotes their now-shared view back to personal; no editor
+        // is strictly needed for demote, and attribution is still preserved.
+        let demoted = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(demoted.visibility, SavedViewVisibility::Personal);
+        assert_eq!(demoted.created_by, normalize_email(&editor.email));
+        // ...and once personal again, the viewer can no longer see it.
+        let err = manager
+            .get_saved_view(&workspace.id, &viewer, &personal.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+
+        // Creator-only on a SHARED view: a shared view is readable by everyone,
+        // but a non-creator (here the editor, who did not create `shared`)
+        // cannot re-scope it — Forbidden, not success and not NotFound.
+        let err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &shared.id,
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // A non-existent id is NotFound for everyone.
+        let err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                "does-not-exist",
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn set_saved_view_visibility_rest_promotes_and_preserves_attribution() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Promote REST"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+        ));
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "rest personal",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+
+        let app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri(format!(
+                        "/api/workspaces/{}/saved-views/{}/visibility",
+                        workspace.id, personal.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"visibility":"shared"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = response_json(res).await;
+        assert_eq!(body["id"], personal.id);
+        assert_eq!(body["visibility"], "shared");
+        assert_eq!(body["created_by"], normalize_email(&owner.email));
+
+        // The store reflects the new visibility.
+        let reread = store
+            .get_saved_view(&workspace.id, &personal.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reread.visibility, SavedViewVisibility::Shared);
+    }
+
+    #[test]
+    fn saved_view_visibility_proposed_round_trips_text() {
+        assert_eq!(SavedViewVisibility::Proposed.as_str(), "proposed");
+        assert_eq!(
+            SavedViewVisibility::try_from("proposed").unwrap(),
+            SavedViewVisibility::Proposed
+        );
+        // Serializes lowercase for the REST/JSON surface.
+        assert_eq!(
+            serde_json::to_value(SavedViewVisibility::Proposed).unwrap(),
+            serde_json::json!("proposed")
+        );
+        // An unknown string is still rejected (no silent fallback).
+        assert!(SavedViewVisibility::try_from("queued").is_err());
+    }
+
+    #[test]
+    fn proposed_view_is_readable_only_by_creator_in_the_pure_gate() {
+        // The role-blind gate treats Proposed exactly like Personal: creator
+        // Ok, everyone else NotFound. The editor exception is layered above.
+        let creator = principal("creator@example.com", false);
+        let other = principal("other@example.com", false);
+        let proposed = WorkspaceSavedView {
+            id: "sv".into(),
+            workspace_id: "ws".into(),
+            name: "p".into(),
+            created_by: normalize_email(&creator.email),
+            created_by_name: creator.display_name.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            visibility: SavedViewVisibility::Proposed,
+            view: SavedView::empty([800, 600]),
+        };
+        assert!(ensure_saved_view_readable(&proposed, &creator).is_ok());
+        assert!(matches!(
+            ensure_saved_view_readable(&proposed, &other),
+            Err(WorkspaceError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn viewer_can_propose_and_only_creator_or_editor_sees_it() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let other_viewer = principal("nosy@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Propose visibility"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+            (&other_viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+
+        // A plain viewer may propose, exactly as they may save a personal view.
+        let proposed = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer proposal",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+        assert_eq!(proposed.created_by, normalize_email(&viewer.email));
+
+        // The proposer sees their own proposal.
+        let seen = manager
+            .get_saved_view(&workspace.id, &viewer, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(seen.visibility, SavedViewVisibility::Proposed);
+        // An editor (and the owner) may read it for review.
+        for reviewer in [&editor, &owner] {
+            let seen = manager
+                .get_saved_view(&workspace.id, reviewer, &proposed.id)
+                .await
+                .unwrap();
+            assert_eq!(seen.id, proposed.id);
+        }
+        // Never-leak: another plain viewer cannot even see it (NotFound, not
+        // Forbidden — its existence is never confirmed).
+        let err = manager
+            .get_saved_view(&workspace.id, &other_viewer, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+
+        // list_saved_views: the proposer sees their proposal; an editor gets the
+        // review queue; another plain viewer does NOT see the pending proposal.
+        let viewer_list = manager
+            .list_saved_views(&workspace.id, &viewer)
+            .await
+            .unwrap();
+        assert!(viewer_list.iter().any(|v| v.id == proposed.id));
+        let editor_list = manager
+            .list_saved_views(&workspace.id, &editor)
+            .await
+            .unwrap();
+        assert!(editor_list.iter().any(|v| v.id == proposed.id));
+        let other_list = manager
+            .list_saved_views(&workspace.id, &other_viewer)
+            .await
+            .unwrap();
+        assert!(!other_list.iter().any(|v| v.id == proposed.id));
+    }
+
+    #[tokio::test]
+    async fn approve_proposal_shares_it_preserving_attribution_and_is_editor_only() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let other_viewer = principal("bystander@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Approve proposal"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+            (&other_viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+
+        let proposed = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "to approve",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+
+        // A viewer (the proposer included) cannot approve their own proposal.
+        for non_editor in [&viewer, &other_viewer] {
+            let err = manager
+                .approve_saved_view(&workspace.id, non_editor, &proposed.id)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, WorkspaceError::Forbidden));
+        }
+        // A non-member is denied before any row is read.
+        let stranger = principal("stranger@example.com", false);
+        let err = manager
+            .approve_saved_view(&workspace.id, &stranger, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // Still Proposed after the failed attempts.
+        let still = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.visibility, SavedViewVisibility::Proposed);
+
+        // The editor approves: it becomes Shared, attribution preserved.
+        let approved = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(approved.visibility, SavedViewVisibility::Shared);
+        assert_eq!(approved.created_by, normalize_email(&viewer.email));
+        assert_eq!(approved.created_by_name, proposed.created_by_name);
+        assert_eq!(approved.name, "to approve");
+
+        // Now every member sees it as a shared view, including the bystander.
+        let seen = manager
+            .get_saved_view(&workspace.id, &other_viewer, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(seen.visibility, SavedViewVisibility::Shared);
+
+        // Approving a non-proposed (already shared) view is a BadRequest.
+        let err = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
+
+        // A missing id is NotFound; another member's personal view stays
+        // NotFound even for an editor (never-leak), not BadRequest.
+        let err = manager
+            .approve_saved_view(&workspace.id, &editor, "does-not-exist")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+        let hidden_personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &other_viewer,
+                "private",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let err = manager
+            .approve_saved_view(&workspace.id, &editor, &hidden_personal.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn reject_proposal_reverts_to_proposer_personal_non_destructively() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let other_viewer = principal("bystander@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Reject proposal"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+            (&other_viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+
+        let proposed = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "to reject",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+
+        // A viewer cannot reject.
+        let err = manager
+            .reject_saved_view(&workspace.id, &viewer, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // The editor rejects: it reverts to the proposer's PERSONAL view,
+        // attribution and payload intact (non-destructive).
+        let rejected = manager
+            .reject_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(rejected.visibility, SavedViewVisibility::Personal);
+        assert_eq!(rejected.created_by, normalize_email(&viewer.email));
+        assert_eq!(rejected.name, "to reject");
+
+        // The proposer still owns it privately...
+        let still_mine = manager
+            .get_saved_view(&workspace.id, &viewer, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(still_mine.visibility, SavedViewVisibility::Personal);
+        // ...and it is no longer visible to anyone else, including the editor
+        // (the review exception only applies while it is pending).
+        for other in [&editor, &other_viewer] {
+            let err = manager
+                .get_saved_view(&workspace.id, other, &proposed.id)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, WorkspaceError::NotFound));
+        }
+
+        // Rejecting again (now personal, not proposed) is a BadRequest, and the
+        // editor cannot even probe via the personal id once it is hidden again
+        // -> NotFound for the now-hidden personal view.
+        let err = manager
+            .reject_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn approve_reject_rest_endpoints_are_editor_only_and_return_updated_view() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Review REST"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+        ));
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        // The viewer proposes (create with visibility Proposed is allowed for a
+        // viewer at the manager; the REST create path threads `visibility`
+        // straight through `CreateWorkspaceSavedViewRequest`).
+        let proposed = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "rest proposal",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        let proposed_id = proposed.id.clone();
+
+        // A viewer cannot approve through REST (403).
+        let viewer_app = workspace_router_with_principal(Arc::clone(&manager), viewer.clone());
+        let res = viewer_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/workspaces/{}/saved-views/{}/approve",
+                        workspace.id, proposed_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // The owner (editor authority) approves: 200 + updated shared view.
+        let owner_app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
+        let res = owner_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/workspaces/{}/saved-views/{}/approve",
+                        workspace.id, proposed_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = response_json(res).await;
+        assert_eq!(body["id"], proposed_id);
+        assert_eq!(body["visibility"], "shared");
+        assert_eq!(body["created_by"], normalize_email(&viewer.email));
+
+        // Approving the now-shared view again is a 400 (not a proposal).
+        let owner_app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
+        let res = owner_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/workspaces/{}/saved-views/{}/reject",
+                        workspace.id, proposed_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

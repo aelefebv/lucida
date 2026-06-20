@@ -45,7 +45,7 @@ export interface WorkspaceSharingSettings {
   members: WorkspaceMember[];
 }
 
-export type WorkspaceSavedViewVisibility = "shared" | "personal";
+export type WorkspaceSavedViewVisibility = "shared" | "personal" | "proposed";
 
 export interface WorkspaceSavedView {
   id: string;
@@ -307,6 +307,55 @@ export function deleteWorkspaceSavedView(
   return requestNoContent(workspaceSavedViewUrl(workspaceId, savedViewId), {
     method: "DELETE",
   });
+}
+
+/**
+ * Re-scope a saved view between `"personal"` and `"shared"` ("Share with team"
+ * promotes a personal view). The server preserves `created_by`, enforces
+ * creator-only + never-leak, and requires edit access to make a view shared.
+ */
+export function setWorkspaceSavedViewVisibility(
+  workspaceId: string,
+  savedViewId: string,
+  visibility: WorkspaceSavedViewVisibility,
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(
+    `${workspaceSavedViewUrl(workspaceId, savedViewId)}/visibility`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ visibility }),
+    },
+  );
+}
+
+/**
+ * Approve a viewer's proposed saved view (#702): an editor accepts the
+ * proposal and it becomes a `"shared"` view, with the proposer preserved as
+ * `created_by`. Editor-only server-side; resolves to the updated view.
+ */
+export function approveWorkspaceSavedView(
+  workspaceId: string,
+  savedViewId: string,
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(
+    `${workspaceSavedViewUrl(workspaceId, savedViewId)}/approve`,
+    { method: "POST" },
+  );
+}
+
+/**
+ * Reject a viewer's proposed saved view (#702): an editor declines the
+ * proposal and it reverts to the proposer's own `"personal"` view
+ * (non-destructive). Editor-only server-side; resolves to the updated view.
+ */
+export function rejectWorkspaceSavedView(
+  workspaceId: string,
+  savedViewId: string,
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(
+    `${workspaceSavedViewUrl(workspaceId, savedViewId)}/reject`,
+    { method: "POST" },
+  );
 }
 
 export function getWorkspaceViewerProfile(
