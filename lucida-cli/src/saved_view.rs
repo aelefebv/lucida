@@ -30,7 +30,41 @@ pub struct WorkspaceSavedViewRecord {
     pub created_by_name: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Sharing layer: "shared" | "personal" | "proposed". Defaulted to "shared"
+    /// so a record from a pre-visibility server (which omits the field) still
+    /// deserializes — matching how the server defaults the column.
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
     pub view: SavedView,
+}
+
+fn default_visibility() -> String {
+    SavedViewVisibility::default().as_str().to_string()
+}
+
+/// The saved-view sharing layer, mirroring the server's `SavedViewVisibility`.
+/// One source of truth for both the `--visibility` CLI flag (`ValueEnum`) and
+/// the JSON sent on the wire (`Serialize` as the server's lowercase tokens).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SavedViewVisibility {
+    /// Part of the workspace's collaborative surface (the historical default).
+    #[default]
+    Shared,
+    /// Belongs to one member; never disclosed to anyone else.
+    Personal,
+    /// A bid to share, surfaced to editors as a review queue (approve/reject).
+    Proposed,
+}
+
+impl SavedViewVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Personal => "personal",
+            Self::Proposed => "proposed",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +84,7 @@ pub struct SavedViewSummary {
     pub created_at: String,
     pub updated_at: String,
     pub is_default: bool,
+    pub visibility: String,
     pub dataset_count: usize,
     pub layout_count: usize,
 }
@@ -132,6 +167,12 @@ pub enum SavedViewPresenceSourceKind {
 struct CreateWorkspaceSavedViewBody<'a> {
     name: &'a str,
     view: &'a SavedView,
+    visibility: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct SetWorkspaceSavedViewVisibilityBody {
+    visibility: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -218,14 +259,82 @@ impl WorkspaceSavedViewClient {
         workspace: &WorkspaceRecord,
         name: &str,
         view: &SavedView,
+        visibility: SavedViewVisibility,
     ) -> Result<WorkspaceSavedViewRecord, CliError> {
         ensure_saved_view_mutation_allowed(workspace)?;
-        let body = CreateWorkspaceSavedViewBody { name, view };
+        let body = CreateWorkspaceSavedViewBody {
+            name,
+            view,
+            visibility: visibility.as_str(),
+        };
         self.send(
             self.http
                 .post(saved_view_collection_url(&self.base_url, &workspace.id)?)
                 .json(&body),
         )
+        .await?
+        .json::<WorkspaceSavedViewRecord>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    /// Re-scope a saved view's visibility (PATCH .../visibility). "Promote" in
+    /// the CLI is exactly this with `Shared`. The server owns every permission
+    /// and target-visibility authority check; the client just sends the verb.
+    pub async fn set_visibility(
+        &self,
+        workspace: &WorkspaceRecord,
+        saved_view_id: &str,
+        visibility: SavedViewVisibility,
+    ) -> Result<WorkspaceSavedViewRecord, CliError> {
+        let body = SetWorkspaceSavedViewVisibilityBody {
+            visibility: visibility.as_str(),
+        };
+        self.send(
+            self.http
+                .patch(saved_view_visibility_url(
+                    &self.base_url,
+                    &workspace.id,
+                    saved_view_id,
+                )?)
+                .json(&body),
+        )
+        .await?
+        .json::<WorkspaceSavedViewRecord>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    /// Approve a proposed view (POST .../approve) — an editor action that
+    /// re-scopes it to `Shared`. Returns the updated record.
+    pub async fn approve(
+        &self,
+        workspace: &WorkspaceRecord,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedViewRecord, CliError> {
+        self.send(self.http.post(saved_view_approve_url(
+            &self.base_url,
+            &workspace.id,
+            saved_view_id,
+        )?))
+        .await?
+        .json::<WorkspaceSavedViewRecord>()
+        .await
+        .map_err(CliError::from)
+    }
+
+    /// Reject a proposed view (POST .../reject) — an editor action that returns
+    /// it to the proposer's `Personal`. Returns the updated record.
+    pub async fn reject(
+        &self,
+        workspace: &WorkspaceRecord,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedViewRecord, CliError> {
+        self.send(self.http.post(saved_view_reject_url(
+            &self.base_url,
+            &workspace.id,
+            saved_view_id,
+        )?))
         .await?
         .json::<WorkspaceSavedViewRecord>()
         .await
@@ -376,8 +485,14 @@ pub fn format_saved_view_list_human(output: &SavedViewListOutput) -> String {
         .map(|view| {
             let default = if view.is_default { " default" } else { "" };
             format!(
-                "{}  {}{}  datasets={} layouts={} updated={}",
-                view.id, view.name, default, view.dataset_count, view.layout_count, view.updated_at
+                "{}  {}{}  visibility={} datasets={} layouts={} updated={}",
+                view.id,
+                view.name,
+                default,
+                view.visibility,
+                view.dataset_count,
+                view.layout_count,
+                view.updated_at
             )
         })
         .collect::<Vec<_>>()
@@ -390,11 +505,12 @@ pub fn format_saved_view_human(output: &SavedViewOutput) -> String {
         output.workspace.default_saved_view_id.as_deref(),
     );
     format!(
-        "Saved view: {}\nID: {}\nWorkspace: {} ({})\nCreated by: {} ({})\nUpdated: {}\nDatasets: {}\nLayouts: {}",
+        "Saved view: {}\nID: {}\nWorkspace: {} ({})\nVisibility: {}\nCreated by: {} ({})\nUpdated: {}\nDatasets: {}\nLayouts: {}",
         summary.name,
         summary.id,
         output.workspace.name,
         output.workspace.id,
+        output.saved_view.visibility,
         output.saved_view.created_by_name,
         output.saved_view.created_by,
         output.saved_view.updated_at,
@@ -429,11 +545,12 @@ pub fn format_saved_view_link_human(output: &SavedViewLinkOutput) -> String {
 
 pub fn format_saved_view_capture_human(output: &SavedViewCaptureOutput) -> String {
     format!(
-        "Captured saved view: {}\nID: {}\nWorkspace: {} ({})\nSource: {}",
+        "Captured saved view: {}\nID: {}\nWorkspace: {} ({})\nVisibility: {}\nSource: {}",
         output.saved_view.name,
         output.saved_view.id,
         output.workspace.name,
         output.workspace.id,
+        output.saved_view.visibility,
         format_source(&output.source)
     )
 }
@@ -497,6 +614,7 @@ pub fn saved_view_summary(
         created_at: saved_view.created_at.clone(),
         updated_at: saved_view.updated_at.clone(),
         is_default: default_saved_view_id == Some(saved_view.id.as_str()),
+        visibility: saved_view.visibility.clone(),
         dataset_count: saved_view.view.dataset_order.len(),
         layout_count: saved_view.view.active_layouts.len(),
     }
@@ -1022,6 +1140,60 @@ fn default_saved_view_url(server_url: &str, workspace_id: &str) -> Result<reqwes
     )
 }
 
+fn saved_view_visibility_url(
+    server_url: &str,
+    workspace_id: &str,
+    saved_view_id: &str,
+) -> Result<reqwest::Url, CliError> {
+    api_url(
+        server_url,
+        &[
+            "api",
+            "workspaces",
+            workspace_id,
+            "saved-views",
+            saved_view_id,
+            "visibility",
+        ],
+    )
+}
+
+fn saved_view_approve_url(
+    server_url: &str,
+    workspace_id: &str,
+    saved_view_id: &str,
+) -> Result<reqwest::Url, CliError> {
+    api_url(
+        server_url,
+        &[
+            "api",
+            "workspaces",
+            workspace_id,
+            "saved-views",
+            saved_view_id,
+            "approve",
+        ],
+    )
+}
+
+fn saved_view_reject_url(
+    server_url: &str,
+    workspace_id: &str,
+    saved_view_id: &str,
+) -> Result<reqwest::Url, CliError> {
+    api_url(
+        server_url,
+        &[
+            "api",
+            "workspaces",
+            workspace_id,
+            "saved-views",
+            saved_view_id,
+            "reject",
+        ],
+    )
+}
+
 fn api_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
     let mut url = reqwest::Url::parse(server_url)
         .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
@@ -1211,6 +1383,7 @@ mod tests {
             created_by_name: "Local Dev".to_string(),
             created_at: "2026-06-06T00:00:00Z".to_string(),
             updated_at: "2026-06-06T00:00:00Z".to_string(),
+            visibility: "shared".to_string(),
             view: SavedView::empty([800, 600]),
         }
     }
@@ -1284,6 +1457,55 @@ mod tests {
             saved_view_link(&target(), "sv-1").unwrap(),
             "http://127.0.0.1:9988/w/w#b=sv-1"
         );
+    }
+
+    #[test]
+    fn visibility_value_enum_serializes_as_server_lowercase_tokens() {
+        assert_eq!(SavedViewVisibility::default(), SavedViewVisibility::Shared);
+        assert_eq!(SavedViewVisibility::Shared.as_str(), "shared");
+        assert_eq!(SavedViewVisibility::Personal.as_str(), "personal");
+        assert_eq!(SavedViewVisibility::Proposed.as_str(), "proposed");
+        assert_eq!(
+            serde_json::to_string(&SavedViewVisibility::Proposed).unwrap(),
+            "\"proposed\""
+        );
+    }
+
+    #[test]
+    fn record_defaults_visibility_when_server_omits_it() {
+        // A pre-visibility server response (no `visibility` field) must still
+        // deserialize, defaulting to "shared" — never panic, never leak.
+        let record: WorkspaceSavedViewRecord = serde_json::from_value(serde_json::json!({
+            "id": "sv-1",
+            "workspace_id": "w",
+            "name": "Legacy",
+            "created_by": "dev@local",
+            "created_by_name": "Local Dev",
+            "created_at": "2026-06-06T00:00:00Z",
+            "updated_at": "2026-06-06T00:00:00Z",
+            "view": SavedView::empty([800, 600]),
+        }))
+        .unwrap();
+        assert_eq!(record.visibility, "shared");
+    }
+
+    #[test]
+    fn summary_carries_visibility_into_human_and_json_output() {
+        let mut record = saved_record("sv-1", "Proposal");
+        record.visibility = "proposed".to_string();
+        let summary = saved_view_summary(&record, None);
+        assert_eq!(summary.visibility, "proposed");
+
+        let output = SavedViewListOutput {
+            server: EffectiveServer {
+                url: "http://127.0.0.1:9988".to_string(),
+                source: crate::config::ServerSource::Default,
+            },
+            workspace: workspace(WorkspaceRole::Owner),
+            target: target(),
+            saved_views: vec![summary],
+        };
+        assert!(format_saved_view_list_human(&output).contains("visibility=proposed"));
     }
 
     #[test]

@@ -462,6 +462,7 @@ class WorkspaceResource:
         self.view = ViewResource(self)
         self.layer = LayerResource(self)
         self.channel = ChannelResource(self)
+        self.saved_views = SavedViewsResource(self)
         self.debug = DebugResource(self)
 
     @property
@@ -961,6 +962,64 @@ class DebugResource:
         }
 
 
+class SavedViewsResource:
+    """Workspace saved views, including the #699/#702 sharing layer.
+
+    Thin HTTP wrappers over the already-shipped, already-tested REST endpoints;
+    the server owns every permission and never-leak invariant. ``visibility`` is
+    one of ``"shared"`` | ``"personal"`` | ``"proposed"`` and is present on every
+    returned record. ``create`` defaults to ``"shared"`` so existing callers are
+    unaffected.
+    """
+
+    def __init__(self, workspace: WorkspaceResource):
+        self._workspace = workspace
+
+    @property
+    def _client(self) -> LucidaClient:
+        return self._workspace._client
+
+    def _segments(self, *suffix: str) -> list[str]:
+        return ["api", "workspaces", self._workspace.id, "saved-views", *suffix]
+
+    def list(self) -> list[dict[str, Any]]:
+        return self._client._request_json("GET", self._segments())
+
+    def get(self, saved_view_id: str) -> dict[str, Any]:
+        return self._client._request_json("GET", self._segments(saved_view_id))
+
+    def create(
+        self,
+        name: str,
+        view: dict[str, Any],
+        visibility: str = "shared",
+    ) -> dict[str, Any]:
+        return self._client._request_json(
+            "POST",
+            self._segments(),
+            body={"name": name, "view": view, "visibility": visibility},
+        )
+
+    def set_visibility(self, saved_view_id: str, visibility: str) -> dict[str, Any]:
+        return self._client._request_json(
+            "PATCH",
+            self._segments(saved_view_id, "visibility"),
+            body={"visibility": visibility},
+        )
+
+    def approve(self, saved_view_id: str) -> dict[str, Any]:
+        return self._client._request_json(
+            "POST",
+            self._segments(saved_view_id, "approve"),
+        )
+
+    def reject(self, saved_view_id: str) -> dict[str, Any]:
+        return self._client._request_json(
+            "POST",
+            self._segments(saved_view_id, "reject"),
+        )
+
+
 def build_url(
     base_url: str,
     segments: list[str],
@@ -1362,6 +1421,7 @@ __all__ = [
     "LayerResource",
     "LucidaClient",
     "LucidaError",
+    "SavedViewsResource",
     "ServerResource",
     "UrllibTransport",
     "ViewResource",

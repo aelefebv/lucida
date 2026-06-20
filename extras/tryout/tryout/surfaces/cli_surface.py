@@ -217,6 +217,15 @@ def plan_cli_tour(
         CliStep("viewer-state-after", ("viewer", "state"), as_json=True),
     ]
 
+    # --- saved-view sharing lifecycle (#699 promote, #702 propose/approve/reject)
+    # Capture the current state into views at each visibility, then exercise the
+    # CLI's sharing verbs end-to-end against the live server. The single dev user
+    # is the workspace owner here, so they can both propose and approve/reject —
+    # which is exactly what drives these commands through the wire. Each capture
+    # is shown in BOTH human and --json form so the logs document the visibility
+    # field; the transition commands are captured the same way.
+    steps += plan_saved_view_sharing_steps()
+
     if selector is not None:
         # A layer-level mutation against the real dataset: bump opacity, then
         # confirm via a follow-up layer list. Marked allow_failure so an
@@ -231,6 +240,69 @@ def plan_cli_tour(
         ]
 
     return steps
+
+
+def plan_saved_view_sharing_steps() -> list[CliStep]:
+    """Steps that exercise the saved-view sharing verbs end-to-end.
+
+    For each of the three sharing flows we capture the current workspace state
+    into a freshly named saved view at a given ``--visibility``, then drive the
+    transition verb. Each command is captured in BOTH human and ``--json`` form
+    (a re-capture of the same view is idempotent for the create, and re-running a
+    transition that is already at the target visibility is a no-op on the wire),
+    so the logs document the visibility field in both output modes:
+
+      * personal -> ``promote`` -> shared
+      * proposed -> ``approve``  -> shared
+      * proposed -> ``reject``   -> personal
+
+    Distinct names per flow keep name-based resolution unambiguous. These run
+    after the discovery/mutation tour, so the workspace already has real state to
+    capture. They are NOT marked ``allow_failure``: the whole point is that the
+    new commands must succeed against a live server.
+    """
+    personal = "tryout-share-personal"
+    propose_approve = "tryout-share-approve"
+    propose_reject = "tryout-share-reject"
+
+    def capture(slug: str, name: str, visibility: str) -> list[CliStep]:
+        args = ("saved-view", "capture", name, "--visibility", visibility)
+        # First capture creates the view; the human re-capture renames-in-place is
+        # avoided by only creating once, then `show` documents the human form.
+        return [
+            CliStep(f"saved-view-capture-{slug}", args, as_json=True),
+            CliStep(f"saved-view-capture-{slug}-human", ("saved-view", "show", name)),
+        ]
+
+    def transition(slug: str, args: tuple[str, ...], name: str) -> list[CliStep]:
+        # Run the verb (--json), then re-show in human form so both output modes
+        # are captured without double-applying a one-way transition.
+        return [
+            CliStep(f"saved-view-{slug}", args, as_json=True),
+            CliStep(f"saved-view-{slug}-human", ("saved-view", "show", name)),
+        ]
+
+    return [
+        # personal -> promote -> shared
+        *capture("personal", personal, "personal"),
+        *transition(
+            "promote",
+            ("saved-view", "promote", personal, "--visibility", "shared"),
+            personal,
+        ),
+        # proposed -> approve -> shared
+        *capture("proposed-approve", propose_approve, "proposed"),
+        *transition(
+            "approve", ("saved-view", "approve", propose_approve), propose_approve
+        ),
+        # proposed -> reject -> personal
+        *capture("proposed-reject", propose_reject, "proposed"),
+        *transition(
+            "reject", ("saved-view", "reject", propose_reject), propose_reject
+        ),
+        # Final list shows all three at their resolved visibilities.
+        CliStep("saved-view-list-after-sharing", ("saved-view", "list"), as_json=True),
+    ]
 
 
 def run_cli_surface(
