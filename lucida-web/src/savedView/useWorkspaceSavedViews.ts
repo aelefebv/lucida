@@ -6,10 +6,14 @@ import {
   listWorkspaceSavedViews as apiList,
   updateWorkspaceSavedView as apiUpdate,
   type WorkspaceSavedView,
+  type WorkspaceSavedViewVisibility,
 } from "../workspaceApi.ts";
 import type { SavedView } from "./types.ts";
 
-export type { WorkspaceSavedView } from "../workspaceApi.ts";
+export type {
+  WorkspaceSavedView,
+  WorkspaceSavedViewVisibility,
+} from "../workspaceApi.ts";
 
 export interface WorkspaceSavedViewFilter {
   search: string;
@@ -30,7 +34,11 @@ export interface UseWorkspaceSavedViewsHandle {
   setSearch: (s: string) => void;
   setMineOnly: (v: boolean) => void;
   refresh: () => Promise<void>;
-  createSavedView: (name: string, view: SavedView) => Promise<WorkspaceSavedView>;
+  createSavedView: (
+    name: string,
+    view: SavedView,
+    visibility?: WorkspaceSavedViewVisibility,
+  ) => Promise<WorkspaceSavedView>;
   renameSavedView: (id: string, name: string) => Promise<WorkspaceSavedView>;
   replaceSavedView: (id: string, view: SavedView) => Promise<WorkspaceSavedView>;
   deleteSavedView: (id: string) => Promise<void>;
@@ -98,8 +106,12 @@ export function useWorkspaceSavedViews({
   }, []);
 
   const createSavedView = useCallback(
-    async (name: string, view: SavedView): Promise<WorkspaceSavedView> => {
-      const created = await apiCreate(workspaceId, name, view);
+    async (
+      name: string,
+      view: SavedView,
+      visibility?: WorkspaceSavedViewVisibility,
+    ): Promise<WorkspaceSavedView> => {
+      const created = await apiCreate(workspaceId, name, view, visibility);
       setAllSavedViews((prev) => {
         if (prev.some((item) => item.id === created.id)) return prev;
         return [created, ...prev];

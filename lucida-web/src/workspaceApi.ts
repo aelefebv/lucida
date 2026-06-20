@@ -45,6 +45,8 @@ export interface WorkspaceSharingSettings {
   members: WorkspaceMember[];
 }
 
+export type WorkspaceSavedViewVisibility = "shared" | "personal";
+
 export interface WorkspaceSavedView {
   id: string;
   workspace_id: string;
@@ -53,6 +55,7 @@ export interface WorkspaceSavedView {
   created_by_name: string;
   created_at: string;
   updated_at: string;
+  visibility: WorkspaceSavedViewVisibility;
   view: SavedView;
 }
 
@@ -271,10 +274,11 @@ export function createWorkspaceSavedView(
   workspaceId: string,
   name: string,
   view: SavedView,
+  visibility: WorkspaceSavedViewVisibility = "shared",
 ): Promise<WorkspaceSavedView> {
   return requestJson<WorkspaceSavedView>(workspaceSavedViewsUrl(workspaceId), {
     method: "POST",
-    body: JSON.stringify({ name, view }),
+    body: JSON.stringify({ name, view, visibility }),
   });
 }
 

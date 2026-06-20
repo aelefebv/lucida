@@ -10,6 +10,7 @@ import {
   defaultWorkspaceSavedViewName,
   useWorkspaceSavedViews,
   type WorkspaceSavedView,
+  type WorkspaceSavedViewVisibility,
 } from "../savedView/useWorkspaceSavedViews.ts";
 import type { SavedView } from "../savedView/types.ts";
 import "./BookmarkSidebar.css";
@@ -105,15 +106,19 @@ export function WorkspaceSavedViewsSidebar({
   }, [menu]);
 
   const handleSave = useCallback(
-    async (name: string) => {
+    async (name: string, visibility: WorkspaceSavedViewVisibility) => {
       const view = getCurrentSavedView();
       if (!view) {
         showToast("No active view to save", "warn");
         return;
       }
       try {
-        await createSavedView(name, view);
-        showToast(`Saved "${name}"`);
+        await createSavedView(name, view, visibility);
+        showToast(
+          visibility === "personal"
+            ? `Saved "${name}" to your personal views`
+            : `Saved "${name}" for the team`,
+        );
       } catch (e) {
         showToast(`Save failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
       }
@@ -229,16 +234,18 @@ export function WorkspaceSavedViewsSidebar({
     <div className="bookmark-sidebar" style={style}>
       <div className="bookmark-sidebar-header">
         <h3>Saved Views</h3>
-        {canEdit && (
-          <button
-            type="button"
-            className="primary"
-            onClick={() => setSavePromptOpen(true)}
-            title="Save the current workspace view"
-          >
-            Save view
-          </button>
-        )}
+        <button
+          type="button"
+          className="primary"
+          onClick={() => setSavePromptOpen(true)}
+          title={
+            canEdit
+              ? "Save the current workspace view"
+              : "Save the current view to your personal views"
+          }
+        >
+          Save view
+        </button>
       </div>
 
       <div className="bookmark-filter-row">
@@ -268,6 +275,8 @@ export function WorkspaceSavedViewsSidebar({
             key={view.id}
             role="listitem"
             className="bookmark-row"
+            data-testid="saved-view-row"
+            data-visibility={view.visibility}
             onClick={(e) => {
               const target = e.target as HTMLElement | null;
               if (target?.closest(".bookmark-menu-btn")) return;
@@ -285,6 +294,14 @@ export function WorkspaceSavedViewsSidebar({
                 />
               ) : (
                 <span className="bookmark-name" title={view.name}>{view.name}</span>
+              )}
+              {view.visibility === "personal" && (
+                <span
+                  className="bookmark-visibility-chip"
+                  title="Only you can see this saved view"
+                >
+                  Personal
+                </span>
               )}
               <button
                 type="button"
@@ -344,10 +361,11 @@ export function WorkspaceSavedViewsSidebar({
       {savePromptOpen && (
         <SaveWorkspaceSavedViewModal
           defaultName={defaultName}
+          canSaveShared={canEdit}
           onCancel={() => setSavePromptOpen(false)}
-          onSave={async (name) => {
+          onSave={async (name, visibility) => {
             setSavePromptOpen(false);
-            await handleSave(name);
+            await handleSave(name, visibility);
           }}
         />
       )}
@@ -467,50 +485,124 @@ function WorkspaceSavedViewActionsMenu({
 
 function SaveWorkspaceSavedViewModal({
   defaultName,
+  canSaveShared,
   onCancel,
   onSave,
 }: {
   defaultName: string;
+  canSaveShared: boolean;
   onCancel: () => void;
-  onSave: (name: string) => void | Promise<void>;
+  onSave: (
+    name: string,
+    visibility: WorkspaceSavedViewVisibility,
+  ) => void | Promise<void>;
 }) {
   const [name, setName] = useState(defaultName);
+  // Editors keep today's "shared" default; viewers can only save personally,
+  // so personal is both the default and the only enabled choice.
+  const [visibility, setVisibility] = useState<WorkspaceSavedViewVisibility>(
+    canSaveShared ? "shared" : "personal",
+  );
   const ref = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     ref.current?.focus();
     ref.current?.select();
   }, []);
+
+  const trimmed = name.trim();
+  const submit = () => {
+    if (trimmed.length === 0) return;
+    onSave(trimmed, visibility);
+  };
+
   return (
     <div className="bookmark-save-overlay" onClick={onCancel}>
       <div
         className="bookmark-save-modal"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
+        aria-modal="true"
         aria-label="Save current view"
       >
         <h4>Save current view</h4>
-        <input
-          ref={ref}
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              if (name.trim()) onSave(name.trim());
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              onCancel();
-            }
-          }}
-        />
+        <label className="bookmark-save-field">
+          <span className="bookmark-save-field-label">Name</span>
+          <input
+            ref={ref}
+            type="text"
+            data-testid="saved-view-name-input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                onCancel();
+              }
+            }}
+          />
+        </label>
+
+        <fieldset className="bookmark-visibility-fieldset">
+          <legend className="bookmark-save-field-label">Who can see this</legend>
+          <div className="bookmark-visibility-options" role="radiogroup" aria-label="Who can see this view">
+            <label
+              className={`bookmark-visibility-option${
+                visibility === "personal" ? " selected" : ""
+              }`}
+            >
+              <input
+                type="radio"
+                name="saved-view-visibility"
+                data-testid="visibility-personal"
+                value="personal"
+                checked={visibility === "personal"}
+                onChange={() => setVisibility("personal")}
+              />
+              <span className="bookmark-visibility-option-text">
+                <span className="bookmark-visibility-option-title">Personal (only me)</span>
+                <span className="bookmark-visibility-option-hint">
+                  Saved to your account; teammates won't see it.
+                </span>
+              </span>
+            </label>
+
+            <label
+              className={`bookmark-visibility-option${
+                visibility === "shared" ? " selected" : ""
+              }${canSaveShared ? "" : " disabled"}`}
+            >
+              <input
+                type="radio"
+                name="saved-view-visibility"
+                data-testid="visibility-shared"
+                value="shared"
+                checked={visibility === "shared"}
+                disabled={!canSaveShared}
+                onChange={() => setVisibility("shared")}
+              />
+              <span className="bookmark-visibility-option-text">
+                <span className="bookmark-visibility-option-title">Shared (team)</span>
+                <span className="bookmark-visibility-option-hint">
+                  {canSaveShared
+                    ? "Everyone in this workspace can open it."
+                    : "Needs edit access — viewers can only save personal views."}
+                </span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
         <div className="bookmark-save-modal-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button
             type="button"
             className="primary"
-            disabled={name.trim().length === 0}
-            onClick={() => onSave(name.trim())}
+            data-testid="saved-view-save-confirm"
+            disabled={trimmed.length === 0}
+            onClick={submit}
           >
             Save
           </button>
