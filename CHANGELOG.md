@@ -122,3 +122,6 @@
 - feat(tryout): web client surface — headless + real-SPA screenshots (slice 3) (slipway, reversible: git-revert)
 - feat(tryout): unified cross-surface verification report + discoverability (slice 4) (slipway, reversible: git-revert)
 - refactor(tryout): unify the surface contract behind one registry + subprocess spine (slipway, reversible: git-revert)
+- feat(workspace): personal saved views server foundation (#699) (slipway, reversible: git-revert)
+- feat(workspace): personal saved views web UI (#699) (slipway, reversible: git-revert)
+- feat(workspace): remember my last view per workspace (#700) (slipway, reversible: git-revert)
