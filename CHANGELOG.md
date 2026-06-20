@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.8.0](https://github.com/aelefebv/lucida/compare/v0.7.0...v0.8.0) (2026-06-20)
+
+
+### Features
+
+* @-mention autocomplete in the comment edit composer ([#800](https://github.com/aelefebv/lucida/issues/800)) ([a24febc](https://github.com/aelefebv/lucida/commit/a24febcf55e8f349842e0fcde3b5fced883b8d6f))
+* @-mention collaborators in annotation comments ([#798](https://github.com/aelefebv/lucida/issues/798)) ([ffb4107](https://github.com/aelefebv/lucida/commit/ffb410720f077d38c98948be31592993c54b7edd))
+* add dataset reliability diagnostics ([#763](https://github.com/aelefebv/lucida/issues/763)) ([943e264](https://github.com/aelefebv/lucida/commit/943e264a3acb72c7e15d027b4517877c152a9af0))
+* collaborative annotations — pins, threads, shapes, 3D, and data-context anchoring ([#797](https://github.com/aelefebv/lucida/issues/797)) ([b365c8f](https://github.com/aelefebv/lucida/commit/b365c8f77ed2c4671f16fb5c4141df21f8cdee74))
+* mentions-of-me — find and jump to comments that @-mention you ([#807](https://github.com/aelefebv/lucida/issues/807)) ([8fa54f1](https://github.com/aelefebv/lucida/commit/8fa54f1fce4e3d1fddbda25077f1886b59e2308f))
+* **tryout:** agent tryout harness — web/CLI/Python + saved screenshots & logs ([d187c41](https://github.com/aelefebv/lucida/commit/d187c41f5fc0bdc4ae754f4a9345cbaedf4c5150))
+* **tryout:** drive + capture the CLI and Python surfaces (slice 2) ([730d294](https://github.com/aelefebv/lucida/commit/730d294a5328ec72e28a3afdeb37d52d92d6cbb4))
+* **tryout:** one-command lucida env bring-up for agents (slice 1) ([35d7653](https://github.com/aelefebv/lucida/commit/35d765333a3358954796df108bf2980808c0fe3e))
+* **tryout:** scenario layer — drive --scenario + mentions scenario + --email (slice 6) ([#809](https://github.com/aelefebv/lucida/issues/809)) ([1269c44](https://github.com/aelefebv/lucida/commit/1269c44ff59b2badba1860abf8d48f5294000f6c))
+* **tryout:** unified cross-surface verification report + discoverability (slice 4) ([59717bc](https://github.com/aelefebv/lucida/commit/59717bc921ce46db762473aa4d7b77aec03edbe6))
+* **tryout:** web client surface — headless + real-SPA screenshots (slice 3) ([d33b713](https://github.com/aelefebv/lucida/commit/d33b713c9f95abb8c8335c7ad497c66e5d207565))
+* viewed vs. unviewed @-mentions ([#803](https://github.com/aelefebv/lucida/issues/803)) ([#806](https://github.com/aelefebv/lucida/issues/806)) ([98cb8a0](https://github.com/aelefebv/lucida/commit/98cb8a06215e6efc2d85b074ab02e39ee8b14983))
+* **workspace:** personal saved views server foundation ([#699](https://github.com/aelefebv/lucida/issues/699)) ([1a2126b](https://github.com/aelefebv/lucida/commit/1a2126b5b94baed351d917a6cbdc0d5575fae92c))
+* **workspace:** personal saved views web UI ([#699](https://github.com/aelefebv/lucida/issues/699)) ([5167eda](https://github.com/aelefebv/lucida/commit/5167eda2c2a8a83dc563efc86f2ddfd8b9d5cebd))
+* **workspace:** promote a personal saved view to shared ([#699](https://github.com/aelefebv/lucida/issues/699)) ([1b9dd1f](https://github.com/aelefebv/lucida/commit/1b9dd1fee8c5a6a5db4fb74ef010f21b4dffe19e))
+* **workspace:** remember my last view per workspace ([#700](https://github.com/aelefebv/lucida/issues/700)) ([f324dc6](https://github.com/aelefebv/lucida/commit/f324dc6b8ae4632e28e44a51b4cad2cad23cc20a))
+* **workspace:** viewer-proposed saved views ([#702](https://github.com/aelefebv/lucida/issues/702)) ([039712c](https://github.com/aelefebv/lucida/commit/039712ca1ef56a46df63dd60b184ca4dadfb99d1))
+
+
+### Bug Fixes
+
+* first @-mention shows in the Mentions indicator live, no refresh ([#805](https://github.com/aelefebv/lucida/issues/805)) ([4db6958](https://github.com/aelefebv/lucida/commit/4db6958299736c0e38bbeeda6a08ee0f8aaf97c7))
+* show a readable collaborator handle in the annotation thread, not the raw author id ([#804](https://github.com/aelefebv/lucida/issues/804)) ([e2f28bd](https://github.com/aelefebv/lucida/commit/e2f28bdf73fb33970ffc80682883d9758f321bdf))
+
+
+### Refactors
+
+* **tryout:** unify the surface contract behind one registry + subprocess spine ([d7bce0e](https://github.com/aelefebv/lucida/commit/d7bce0ed6c337edd8ad730a5a18ec80b70055d24))
+
 ## [0.7.0](https://github.com/aelefebv/lucida/compare/v0.6.0...v0.7.0) (2026-06-09)
 
 
