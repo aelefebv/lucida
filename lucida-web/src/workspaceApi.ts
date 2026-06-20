@@ -309,6 +309,25 @@ export function deleteWorkspaceSavedView(
   });
 }
 
+/**
+ * Re-scope a saved view between `"personal"` and `"shared"` ("Share with team"
+ * promotes a personal view). The server preserves `created_by`, enforces
+ * creator-only + never-leak, and requires edit access to make a view shared.
+ */
+export function setWorkspaceSavedViewVisibility(
+  workspaceId: string,
+  savedViewId: string,
+  visibility: WorkspaceSavedViewVisibility,
+): Promise<WorkspaceSavedView> {
+  return requestJson<WorkspaceSavedView>(
+    `${workspaceSavedViewUrl(workspaceId, savedViewId)}/visibility`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ visibility }),
+    },
+  );
+}
+
 export function getWorkspaceViewerProfile(
   workspaceId: string,
   profile: string,

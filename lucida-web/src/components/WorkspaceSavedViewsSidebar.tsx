@@ -67,11 +67,26 @@ export function WorkspaceSavedViewsSidebar({
     createSavedView,
     renameSavedView,
     replaceSavedView,
+    setSavedViewVisibility,
     deleteSavedView,
   } = useWorkspaceSavedViews({
     workspaceId,
     currentUserEmail,
   });
+
+  // A personal view may be promoted to shared only by the member who created
+  // it, and only when they have edit access (the server enforces all three;
+  // the UI just avoids offering an action that would 403). Mirrors the
+  // hook's "mine only" lowercase email comparison.
+  const normalizedCurrentUserEmail = currentUserEmail?.toLowerCase() ?? null;
+  const canPromoteToShared = useCallback(
+    (view: WorkspaceSavedView): boolean =>
+      canEdit &&
+      view.visibility === "personal" &&
+      normalizedCurrentUserEmail !== null &&
+      view.created_by.toLowerCase() === normalizedCurrentUserEmail,
+    [canEdit, normalizedCurrentUserEmail],
+  );
 
   const [savePromptOpen, setSavePromptOpen] = useState(false);
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -170,6 +185,18 @@ export function WorkspaceSavedViewsSidebar({
       }
     },
     [getCurrentSavedView, replaceSavedView, showToast],
+  );
+
+  const handlePromote = useCallback(
+    async (view: WorkspaceSavedView) => {
+      try {
+        await setSavedViewVisibility(view.id, "shared");
+        showToast(`Shared "${view.name}" with the team`);
+      } catch (e) {
+        showToast(`Share failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      }
+    },
+    [setSavedViewVisibility, showToast],
   );
 
   const handleSetDefault = useCallback(
@@ -331,6 +358,16 @@ export function WorkspaceSavedViewsSidebar({
           y={menu.y}
           canEdit={canEdit}
           isDefault={defaultSavedViewId === menu.savedViewId}
+          savedViewId={menu.savedViewId}
+          canPromote={(() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            return view ? canPromoteToShared(view) : false;
+          })()}
+          onPromote={() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            setMenu(null);
+            if (view) void handlePromote(view);
+          }}
           onRename={() => {
             setRenameId(menu.savedViewId);
             setMenu(null);
@@ -444,6 +481,9 @@ function WorkspaceSavedViewActionsMenu({
   y,
   canEdit,
   isDefault,
+  savedViewId,
+  canPromote,
+  onPromote,
   onRename,
   onSetDefault,
   onReplace,
@@ -454,6 +494,9 @@ function WorkspaceSavedViewActionsMenu({
   y: number;
   canEdit: boolean;
   isDefault: boolean;
+  savedViewId: string;
+  canPromote: boolean;
+  onPromote: () => void;
   onRename: () => void;
   onSetDefault: () => void;
   onReplace: () => void;
@@ -467,6 +510,16 @@ function WorkspaceSavedViewActionsMenu({
       role="menu"
     >
       <button type="button" role="menuitem" onClick={onCopyLink}>Copy view link</button>
+      {canPromote && (
+        <button
+          type="button"
+          role="menuitem"
+          data-testid={`saved-view-promote-${savedViewId}`}
+          onClick={onPromote}
+        >
+          Share with team
+        </button>
+      )}
       {canEdit && (
         <>
           <button type="button" role="menuitem" onClick={onSetDefault}>

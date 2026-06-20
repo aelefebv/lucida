@@ -4,6 +4,7 @@ import {
   createWorkspaceSavedView as apiCreate,
   deleteWorkspaceSavedView as apiDelete,
   listWorkspaceSavedViews as apiList,
+  setWorkspaceSavedViewVisibility as apiSetVisibility,
   updateWorkspaceSavedView as apiUpdate,
   type WorkspaceSavedView,
   type WorkspaceSavedViewVisibility,
@@ -41,6 +42,10 @@ export interface UseWorkspaceSavedViewsHandle {
   ) => Promise<WorkspaceSavedView>;
   renameSavedView: (id: string, name: string) => Promise<WorkspaceSavedView>;
   replaceSavedView: (id: string, view: SavedView) => Promise<WorkspaceSavedView>;
+  setSavedViewVisibility: (
+    id: string,
+    visibility: WorkspaceSavedViewVisibility,
+  ) => Promise<WorkspaceSavedView>;
   deleteSavedView: (id: string) => Promise<void>;
 }
 
@@ -156,6 +161,24 @@ export function useWorkspaceSavedViews({
     [workspaceId],
   );
 
+  const setSavedViewVisibility = useCallback(
+    async (
+      id: string,
+      visibility: WorkspaceSavedViewVisibility,
+    ): Promise<WorkspaceSavedView> => {
+      // Use the server's canonical row (it preserves created_by and bumps
+      // updated_at) rather than guessing the next shape locally, so the chip,
+      // "mine only" filter, and ordering all reflect the real post-promote
+      // state.
+      const updated = await apiSetVisibility(workspaceId, id, visibility);
+      setAllSavedViews((prev) => prev.map((item) => (
+        item.id === id ? updated : item
+      )));
+      return updated;
+    },
+    [workspaceId],
+  );
+
   const deleteSavedView = useCallback(async (id: string): Promise<void> => {
     const original = allSavedViews.find((item) => item.id === id) ?? null;
     setAllSavedViews((prev) => prev.filter((item) => item.id !== id));
@@ -181,6 +204,7 @@ export function useWorkspaceSavedViews({
     createSavedView,
     renameSavedView,
     replaceSavedView,
+    setSavedViewVisibility,
     deleteSavedView,
   };
 }

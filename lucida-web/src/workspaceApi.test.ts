@@ -9,6 +9,7 @@ import {
   listWorkspaceSavedViews,
   openWorkspace,
   restoreWorkspace,
+  setWorkspaceSavedViewVisibility,
   updateWorkspaceSavedView,
   updateWorkspaceDefaultSavedView,
   updateWorkspacePin,
@@ -150,6 +151,54 @@ describe("workspace saved view API", () => {
     await deleteWorkspaceSavedView("workspace-1", "view-1");
     expect(calls[0].method).toBe("DELETE");
     expect(calls[0].url).toBe("/api/workspaces/workspace-1/saved-views/view-1");
+  });
+
+  it("PATCHes visibility to promote a saved view and returns the updated view", async () => {
+    responder = () => jsonResponse(200, {
+      id: "view/1",
+      workspace_id: "workspace/a b",
+      name: "view",
+      created_by: "alice@example.com",
+      created_by_name: "Alice",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+      visibility: "shared",
+      view: emptyView(),
+    });
+
+    const updated = await setWorkspaceSavedViewVisibility(
+      "workspace/a b",
+      "view/1",
+      "shared",
+    );
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe(
+      "/api/workspaces/workspace%2Fa%20b/saved-views/view%2F1/visibility",
+    );
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ visibility: "shared" });
+    expect(updated.visibility).toBe("shared");
+    // Attribution is preserved end-to-end (the server returns created_by).
+    expect(updated.created_by).toBe("alice@example.com");
+  });
+
+  it("PATCHes visibility to demote a saved view back to personal", async () => {
+    responder = () => jsonResponse(200, {
+      id: "view-1",
+      workspace_id: "workspace-1",
+      name: "view",
+      created_by: "alice@example.com",
+      created_by_name: "Alice",
+      created_at: "2026-05-29T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+      visibility: "personal",
+      view: emptyView(),
+    });
+
+    await setWorkspaceSavedViewVisibility("workspace-1", "view-1", "personal");
+    expect(calls[0].url).toBe(
+      "/api/workspaces/workspace-1/saved-views/view-1/visibility",
+    );
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ visibility: "personal" });
   });
 
   it("PATCHes the workspace default saved view pointer", async () => {
