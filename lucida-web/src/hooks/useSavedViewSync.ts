@@ -16,6 +16,7 @@ import { dataset_id_for_url } from "lucida-core";
 import { SavedViewApplier } from "../savedView/applier.ts";
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
+import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
 import type { DatasetReferenceMode, SavedView } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
@@ -61,6 +62,21 @@ interface Params {
   fetchSavedViewById?: (id: string) => Promise<{ id: string; view: SavedView } | null>;
   fetchDefaultSavedView?: () => Promise<{ id: string; view: SavedView } | null>;
   fetchViewerProfile?: (profile: string) => Promise<{ id: string; view: SavedView } | null>;
+  /** Resolve the caller's own remembered last view for a bare workspace open
+   *  (#700). When omitted, last-view restore is disabled (the bootstrap falls
+   *  back to the workspace default). */
+  fetchLastView?: () => Promise<{ id: string; view: SavedView } | null>;
+  /** Persist the current view as the caller's last view (#700), debounced on
+   *  view-change. When omitted (auth-off mode), capture is disabled and no
+   *  server call is ever made. Errors degrade silently — never thrown to UI. */
+  persistLastView?: (view: SavedView) => Promise<unknown>;
+  /** Whether the per-user "restore my last view" toggle is on. Defaults to the
+   *  localStorage-backed preference; injectable for tests. Gates BOTH restore
+   *  (bootstrap) and capture. */
+  restoreLastViewEnabled?: () => boolean;
+  /** Debounce for the last-view capture (#700). A few seconds so a burst of
+   *  pans coalesces into one write. Default 3000ms; overridable for tests. */
+  lastViewDebounceMs?: number;
   allowDocumentLayoutMutation?: boolean;
 }
 
@@ -89,6 +105,10 @@ export function useSavedViewSync({
   fetchSavedViewById,
   fetchDefaultSavedView,
   fetchViewerProfile,
+  fetchLastView,
+  persistLastView,
+  restoreLastViewEnabled,
+  lastViewDebounceMs = 3000,
   allowDocumentLayoutMutation = true,
 }: Params): {
   applier: SavedViewApplier;
@@ -102,12 +122,21 @@ export function useSavedViewSync({
   const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
   const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
   const fetchViewerProfileRef = useRef(fetchViewerProfile);
+  const fetchLastViewRef = useRef(fetchLastView);
+  const persistLastViewRef = useRef(persistLastView);
+  const restoreEnabledRef = useRef(restoreLastViewEnabled);
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
   // eslint-disable-next-line react-hooks/refs
   fetchDefaultSavedViewRef.current = fetchDefaultSavedView;
   // eslint-disable-next-line react-hooks/refs
   fetchViewerProfileRef.current = fetchViewerProfile;
+  // eslint-disable-next-line react-hooks/refs
+  fetchLastViewRef.current = fetchLastView;
+  // eslint-disable-next-line react-hooks/refs
+  persistLastViewRef.current = persistLastView;
+  // eslint-disable-next-line react-hooks/refs
+  restoreEnabledRef.current = restoreLastViewEnabled;
 
   // Construct everything lazily on first render via useState's initializer
   // (runs exactly once). The captured `autoContrastMapRef` is read at
@@ -153,6 +182,13 @@ export function useSavedViewSync({
       fetchSavedViewById: async (id) => fetchSavedViewByIdRef.current?.(id) ?? null,
       fetchDefaultSavedView: async () => fetchDefaultSavedViewRef.current?.() ?? null,
       fetchViewerProfile: async (profile) => fetchViewerProfileRef.current?.(profile) ?? null,
+      // Read the resolver from the ref at call time so enabling it later
+      // (e.g. once auth resolves) takes effect; when no resolver is wired it
+      // returns null, so the bootstrap's priority sees `hasLastView: false`
+      // and falls back to the default. The toggle gate lives inside UrlSync.
+      fetchLastView: async () => fetchLastViewRef.current?.() ?? null,
+      restoreLastViewEnabled: () =>
+        (restoreEnabledRef.current ?? getRestoreLastViewEnabled)(),
     });
     return { applier, urlSync, urlByDatasetId };
   });
@@ -207,6 +243,41 @@ export function useSavedViewSync({
   useEffect(() => {
     bundle.urlSync.notifyChange();
   }, [bundle.urlSync, changeTick]);
+
+  // Debounced "remember my last view" capture (#700). Piggybacks on the same
+  // change signal that drives the URL/presence sync, but with a longer
+  // debounce (a few seconds) so a burst of pans coalesces into one write.
+  //
+  // Fires only when (a) a `persistLastView` callback is wired — absent in
+  // auth-off mode, so NO server call is ever made there — and (b) the
+  // per-user toggle is on. The capture is wrapped so a build/persist failure
+  // (offline, non-member 403/404, encode error) degrades silently and never
+  // throws into the UI. We skip while an apply is in progress so we don't
+  // persist a view the recipient is mid-applying rather than one the user
+  // navigated to.
+  useEffect(() => {
+    // Cheap setup gate: skip scheduling entirely when capture can't apply
+    // (no callback = auth-off, or toggle off). The authoritative checks run
+    // again at fire time below, since both can change during the debounce.
+    if (!persistLastViewRef.current) return;
+    if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
+    const timer = setTimeout(() => {
+      // Re-read at fire time: the toggle may have flipped, or an apply may be
+      // mid-flight (don't persist a view the recipient is applying rather than
+      // one the user navigated to).
+      if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
+      const persistNow = persistLastViewRef.current;
+      if (!persistNow) return;
+      if (bundle.applier.isInProgress()) return;
+      const view = captureBuilder();
+      if (!view) return;
+      void Promise.resolve(persistNow(view)).catch((e) => {
+        // Non-member / offline / auth-off race: never surface to the UI.
+        console.warn("[SavedView] last-view capture failed:", e);
+      });
+    }, lastViewDebounceMs);
+    return () => clearTimeout(timer);
+  }, [bundle.applier, captureBuilder, changeTick, lastViewDebounceMs]);
 
   // Selected-dataset wrinkle (option c): subscribe to the applier's
   // post-apply summary and forward to the parent so it can re-target

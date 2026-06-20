@@ -36,7 +36,13 @@ import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
-import { getWorkspaceSavedView, getWorkspaceViewerProfile, getWorkspaceSharing } from "./workspaceApi.ts";
+import {
+  getWorkspaceSavedView,
+  getWorkspaceViewerProfile,
+  getWorkspaceSharing,
+  getWorkspaceUserState,
+  updateWorkspaceLastView,
+} from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import "./App.css";
 
@@ -215,6 +221,24 @@ function App({
     return { id: `viewer_profile:${record.profile}`, view: record.view };
   }, [workspaceId]);
 
+  // "Remember my last view" (#700) restore source for a bare /w/:id open.
+  // Returns the caller's own remembered view (server-scoped to the principal),
+  // or null when none / unavailable — the bootstrap then falls back to the
+  // workspace default. The toggle gate + URL-hash precedence live in UrlSync.
+  const fetchWorkspaceLastView = useCallback(async () => {
+    const state = await getWorkspaceUserState(workspaceId);
+    if (!state.last_view) return null;
+    return { id: `last-view:${workspaceId}`, view: state.last_view };
+  }, [workspaceId]);
+
+  // Persist the caller's current view as their last view (#700). Scoped to the
+  // principal server-side; never touches the shared default. Errors degrade
+  // silently in the capture effect (offline / non-member / auth-off).
+  const persistWorkspaceLastView = useCallback(
+    (view: SavedView) => updateWorkspaceLastView(workspaceId, view),
+    [workspaceId],
+  );
+
   // SavedView wiring. Mounts the URL→scene sync, exposes the
   // share-button capture, gives the loading banner a handle on apply
   // progress, and forwards apply summaries for the selectedDatasetId
@@ -243,6 +267,8 @@ function App({
     fetchSavedViewById: fetchWorkspaceSavedViewById,
     fetchDefaultSavedView: fetchDefaultWorkspaceSavedView,
     fetchViewerProfile: fetchWorkspaceViewerProfile,
+    fetchLastView: fetchWorkspaceLastView,
+    persistLastView: persistWorkspaceLastView,
     allowDocumentLayoutMutation: canEditWorkspace,
   });
 

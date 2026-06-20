@@ -45,6 +45,8 @@ export interface WorkspaceSharingSettings {
   members: WorkspaceMember[];
 }
 
+export type WorkspaceSavedViewVisibility = "shared" | "personal";
+
 export interface WorkspaceSavedView {
   id: string;
   workspace_id: string;
@@ -53,6 +55,7 @@ export interface WorkspaceSavedView {
   created_by_name: string;
   created_at: string;
   updated_at: string;
+  visibility: WorkspaceSavedViewVisibility;
   view: SavedView;
 }
 
@@ -70,6 +73,10 @@ export interface WorkspaceUserState {
   workspace_id: string;
   last_opened_at: string | null;
   pinned_at: string | null;
+  /** The caller's own last-open view in this workspace (#700), restored on
+   *  a bare `/w/:id` open behind the "Restore my last view" toggle. Absent /
+   *  null until the member records one; never another member's view. */
+  last_view?: SavedView | null;
 }
 
 async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -271,10 +278,11 @@ export function createWorkspaceSavedView(
   workspaceId: string,
   name: string,
   view: SavedView,
+  visibility: WorkspaceSavedViewVisibility = "shared",
 ): Promise<WorkspaceSavedView> {
   return requestJson<WorkspaceSavedView>(workspaceSavedViewsUrl(workspaceId), {
     method: "POST",
-    body: JSON.stringify({ name, view }),
+    body: JSON.stringify({ name, view, visibility }),
   });
 }
 
@@ -333,5 +341,31 @@ export function updateWorkspacePin(
       method: "PATCH",
       body: JSON.stringify({ pinned }),
     },
+  );
+}
+
+/** Record the caller's own last-open view for a workspace (#700). Scoped to
+ *  the authenticated principal server-side; never mutates the shared
+ *  workspace default. Returns the caller's refreshed state (incl. last_view). */
+export function updateWorkspaceLastView(
+  workspaceId: string,
+  view: SavedView,
+): Promise<WorkspaceUserState> {
+  return requestJson<WorkspaceUserState>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/last-view`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ view }),
+    },
+  );
+}
+
+/** Read the caller's own workspace state, including their remembered
+ *  `last_view` (#700). Principal-scoped; never another member's state. */
+export function getWorkspaceUserState(
+  workspaceId: string,
+): Promise<WorkspaceUserState> {
+  return requestJson<WorkspaceUserState>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/user-state`,
   );
 }

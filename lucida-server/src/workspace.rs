@@ -75,6 +75,43 @@ impl TryFrom<&str> for WorkspaceRole {
     }
 }
 
+/// Visibility of a workspace saved view.
+///
+/// `Shared` views are part of the workspace's collaborative surface (the
+/// historical behavior); `Personal` views belong to exactly one member —
+/// keyed on the normalized `AuthPrincipal.email` in `created_by` — and are
+/// never disclosed to anyone else, not even owners. Persisted as TEXT
+/// (`"shared"` / `"personal"`) and serialized into the REST/JSON response so
+/// the client can tell the two layers apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SavedViewVisibility {
+    #[default]
+    Shared,
+    Personal,
+}
+
+impl SavedViewVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Personal => "personal",
+        }
+    }
+}
+
+impl TryFrom<&str> for SavedViewVisibility {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "shared" => Ok(Self::Shared),
+            "personal" => Ok(Self::Personal),
+            other => Err(StoreError::InvalidSavedViewVisibility(other.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceLinkAccess {
@@ -164,6 +201,7 @@ pub struct WorkspaceSavedView {
     pub created_by_name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub visibility: SavedViewVisibility,
     pub view: SavedView,
 }
 
@@ -183,6 +221,12 @@ pub struct WorkspaceUserState {
     pub workspace_id: String,
     pub last_opened_at: Option<DateTime<Utc>>,
     pub pinned_at: Option<DateTime<Utc>>,
+    /// The caller's own last-open view in this workspace (#700), restored on
+    /// a bare `/w/:id` open behind a user toggle. `None` until the member
+    /// records one. Per-user isolated (keyed on the member's email alongside
+    /// the rest of this row) and never another user's. Recording it never
+    /// mutates the shared `workspaces.default_saved_view_id`.
+    pub last_view: Option<SavedView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,6 +264,8 @@ pub enum StoreError {
     InvalidRole(String),
     #[error("workspace link access is invalid: {0}")]
     InvalidLinkAccess(String),
+    #[error("workspace saved-view visibility is invalid: {0}")]
+    InvalidSavedViewVisibility(String),
 }
 
 fn map_sql(e: sqlx::Error) -> StoreError {
@@ -418,9 +464,14 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         link_role: WorkspaceRole,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError>;
 
+    /// Saved views visible to `viewer_email`: every `Shared` view plus the
+    /// caller's own `Personal` views, and no other member's personal view. The
+    /// shared-∪-own-personal predicate is resolved in SQL (one round-trip, no
+    /// fetch-all-then-filter); `viewer_email` must already be normalized.
     async fn list_saved_views(
         &self,
         workspace_id: &str,
+        viewer_email: &str,
     ) -> Result<Vec<WorkspaceSavedView>, StoreError>;
 
     async fn get_saved_view(
@@ -435,6 +486,7 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         name: &str,
         created_by: &AuthPrincipal,
         view: SavedView,
+        visibility: SavedViewVisibility,
     ) -> Result<Option<WorkspaceSavedView>, StoreError>;
 
     async fn update_saved_view(
@@ -484,6 +536,27 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         principal: &AuthPrincipal,
         pinned: bool,
+    ) -> Result<WorkspaceUserState, StoreError>;
+
+    /// Upsert the caller's own last-open view (#700) for
+    /// `(workspace_id, principal.email)`, returning their refreshed state
+    /// (which includes `last_view`). Mirrors `upsert_viewer_profile`: writes
+    /// only this user's row and ONLY the `last_view_json` column — it must
+    /// never touch `workspaces.default_saved_view_id`.
+    async fn set_user_workspace_last_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        view: SavedView,
+    ) -> Result<WorkspaceUserState, StoreError>;
+
+    /// Read the caller's own workspace state including `last_view`.
+    /// Per-user isolated (keyed on `principal.email`); never returns another
+    /// member's state, and yields `last_view = None` when unset.
+    async fn get_user_workspace_state_for(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
     ) -> Result<WorkspaceUserState, StoreError>;
 }
 
@@ -558,7 +631,7 @@ impl SqliteWorkspaceStore {
     ) -> Result<WorkspaceUserState, StoreError> {
         let row = sqlx::query(
             r#"
-            SELECT workspace_id, last_opened_at, pinned_at
+            SELECT workspace_id, last_opened_at, pinned_at, last_view_json
             FROM user_workspace_state
             WHERE workspace_id = ? AND user_email = ?
             "#,
@@ -575,6 +648,7 @@ impl SqliteWorkspaceStore {
                 workspace_id: workspace_id.to_string(),
                 last_opened_at: None,
                 pinned_at: None,
+                last_view: None,
             }),
         }
     }
@@ -1497,18 +1571,25 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     async fn list_saved_views(
         &self,
         workspace_id: &str,
+        viewer_email: &str,
     ) -> Result<Vec<WorkspaceSavedView>, StoreError> {
+        // The shared-∪-own-personal predicate lives entirely here: a row is
+        // visible when it is shared, or it is the caller's own personal row.
+        // No fetch-all-then-filter — another member's personal row never
+        // crosses the store boundary.
         let rows = sqlx::query(
             r#"
             SELECT
                 id, workspace_id, name, created_by, created_by_name,
-                created_at, updated_at, view_json
+                created_at, updated_at, visibility, view_json
             FROM workspace_saved_views
             WHERE workspace_id = ?
+                AND (visibility = 'shared' OR created_by = ?)
             ORDER BY updated_at DESC
             "#,
         )
         .bind(workspace_id)
+        .bind(viewer_email)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sql)?;
@@ -1525,7 +1606,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             r#"
             SELECT
                 id, workspace_id, name, created_by, created_by_name,
-                created_at, updated_at, view_json
+                created_at, updated_at, visibility, view_json
             FROM workspace_saved_views
             WHERE workspace_id = ? AND id = ?
             "#,
@@ -1545,6 +1626,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         name: &str,
         created_by: &AuthPrincipal,
         view: SavedView,
+        visibility: SavedViewVisibility,
     ) -> Result<Option<WorkspaceSavedView>, StoreError> {
         if !self.workspace_exists(workspace_id).await? {
             return Ok(None);
@@ -1560,8 +1642,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         sqlx::query(
             r#"
             INSERT INTO workspace_saved_views
-                (id, workspace_id, name, created_by, created_by_name, created_at, updated_at, view_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, workspace_id, name, created_by, created_by_name, created_at, updated_at, visibility, view_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -1571,6 +1653,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .bind(&created_by.display_name)
         .bind(&now_s)
         .bind(&now_s)
+        .bind(visibility.as_str())
         .bind(&view_json)
         .execute(&mut *tx)
         .await
@@ -1586,6 +1669,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             created_by_name: created_by.display_name.clone(),
             created_at: now,
             updated_at: now,
+            visibility,
             view,
         }))
     }
@@ -1862,6 +1946,53 @@ impl WorkspaceStore for SqliteWorkspaceStore {
 
         self.get_user_workspace_state(workspace_id, &email).await
     }
+
+    async fn set_user_workspace_last_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        view: SavedView,
+    ) -> Result<WorkspaceUserState, StoreError> {
+        let email = normalize_email(&principal.email);
+        let now = Utc::now().to_rfc3339();
+        let view_json = serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+        // Upsert ONLY this member's row, touching ONLY `last_view_json` (and
+        // `updated_at`) on conflict. Crucially this never writes
+        // `last_opened_at`/`pinned_at` for an existing row (so a remembered
+        // view doesn't perturb recents/pins) and never touches the
+        // `workspaces` table — `default_saved_view_id` is unrelated storage,
+        // upholding the "recording a last view never changes the default"
+        // invariant by construction.
+        sqlx::query(
+            r#"
+            INSERT INTO user_workspace_state
+                (user_email, workspace_id, created_at, updated_at, last_opened_at, pinned_at, last_view_json)
+            VALUES (?, ?, ?, ?, NULL, NULL, ?)
+            ON CONFLICT(user_email, workspace_id) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                last_view_json = excluded.last_view_json
+            "#,
+        )
+        .bind(&email)
+        .bind(workspace_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&view_json)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        self.get_user_workspace_state(workspace_id, &email).await
+    }
+
+    async fn get_user_workspace_state_for(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceUserState, StoreError> {
+        let email = normalize_email(&principal.email);
+        self.get_user_workspace_state(workspace_id, &email).await
+    }
 }
 
 fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
@@ -1945,6 +2076,7 @@ fn row_to_saved_view(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSavedView,
         created_by_name: row.get("created_by_name"),
         created_at: parse_dt(row.get("created_at"))?,
         updated_at: parse_dt(row.get("updated_at"))?,
+        visibility: SavedViewVisibility::try_from(row.get::<String, _>("visibility").as_str())?,
         view: serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?,
     })
 }
@@ -1971,7 +2103,27 @@ fn row_to_user_workspace_state(
         workspace_id: row.get("workspace_id"),
         last_opened_at: parse_opt_dt(row.get("last_opened_at"))?,
         pinned_at: parse_opt_dt(row.get("pinned_at"))?,
+        last_view: parse_opt_saved_view(row.get("last_view_json")),
     })
+}
+
+/// Decode the persisted `last_view_json` (#700). `None` for the common
+/// "never set" case (NULL/empty). A malformed payload (e.g. from a future
+/// schema or a partial write) degrades to `None` rather than erroring the
+/// whole user-state read — the member simply gets no restored view and
+/// falls back to the default, never a broken workspace open.
+fn parse_opt_saved_view(raw: Option<String>) -> Option<SavedView> {
+    let raw = raw?;
+    if raw.is_empty() {
+        return None;
+    }
+    match serde_json::from_str(&raw) {
+        Ok(view) => Some(view),
+        Err(e) => {
+            tracing::warn!("workspace.last_view_json_decode_failed: {e}");
+            None
+        }
+    }
 }
 
 pub struct LiveWorkspace {
@@ -2425,9 +2577,12 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<Vec<WorkspaceSavedView>, WorkspaceError> {
+        // Members only — a non-member is denied by the viewer gate before any
+        // row is read. The shared-∪-own-personal filter is then applied in SQL,
+        // scoped to this caller's normalized email.
         self.require_viewer(workspace_id, principal).await?;
         self.store
-            .list_saved_views(workspace_id)
+            .list_saved_views(workspace_id, &normalize_email(&principal.email))
             .await
             .map_err(WorkspaceError::Store)
     }
@@ -2439,11 +2594,18 @@ impl WorkspaceManager {
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
         self.require_viewer(workspace_id, principal).await?;
-        self.store
+        let saved_view = self
+            .store
             .get_saved_view(workspace_id, saved_view_id)
             .await
             .map_err(WorkspaceError::Store)?
-            .ok_or(WorkspaceError::NotFound)
+            .ok_or(WorkspaceError::NotFound)?;
+        // Never-leak boundary: a personal view is disclosed only to its
+        // creator. Any other caller gets NotFound — identical to a missing row,
+        // so existence is never confirmed. This is the single read-side gate; a
+        // refactor cannot reopen the leak without removing this check.
+        ensure_saved_view_readable(&saved_view, principal)?;
+        Ok(saved_view)
     }
 
     pub async fn create_saved_view(
@@ -2452,12 +2614,22 @@ impl WorkspaceManager {
         principal: &AuthPrincipal,
         name: &str,
         view: SavedView,
+        visibility: SavedViewVisibility,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
-        self.require_editor(workspace_id, principal).await?;
+        // Personal views are private and never mutate shared state, so any
+        // member (viewer+) may save one. Shared views remain editor-gated.
+        match visibility {
+            SavedViewVisibility::Personal => {
+                self.require_viewer(workspace_id, principal).await?;
+            }
+            SavedViewVisibility::Shared => {
+                self.require_editor(workspace_id, principal).await?;
+            }
+        }
         let name = normalize_saved_view_name(name)?;
         let view = workspace_saved_view_payload(view);
         self.store
-            .create_saved_view(workspace_id, &name, principal, view)
+            .create_saved_view(workspace_id, &name, principal, view, visibility)
             .await
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::NotFound)
@@ -2471,7 +2643,12 @@ impl WorkspaceManager {
         name: Option<&str>,
         view: Option<SavedView>,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
-        self.require_editor(workspace_id, principal).await?;
+        // Mirror create/get: ownership of a personal view (or editor on a
+        // shared view) is enforced before any mutation. A non-creator of a
+        // personal view — including editors, owners, and admins — gets
+        // NotFound and never confirms the row exists.
+        self.ensure_saved_view_mutable(workspace_id, principal, saved_view_id)
+            .await?;
         if name.is_none() && view.is_none() {
             return Err(WorkspaceError::BadRequest(
                 "saved view patch is empty".to_string(),
@@ -2492,7 +2669,11 @@ impl WorkspaceManager {
         principal: &AuthPrincipal,
         saved_view_id: &str,
     ) -> Result<(), WorkspaceError> {
-        self.require_editor(workspace_id, principal).await?;
+        // Same ownership gate as update: a personal view can be deleted only by
+        // its creator; a shared view requires editor. Everyone else gets
+        // NotFound.
+        self.ensure_saved_view_mutable(workspace_id, principal, saved_view_id)
+            .await?;
         let deleted = self
             .store
             .delete_saved_view(workspace_id, saved_view_id)
@@ -2505,6 +2686,37 @@ impl WorkspaceManager {
         }
     }
 
+    /// The single mutation-authorization gate for saved views, mirroring the
+    /// read path. Membership is required first (a non-member gets `Forbidden`
+    /// before any row is read, exactly like `get_saved_view`); the row is then
+    /// fetched and funnelled through `ensure_saved_view_readable`, so a
+    /// personal view that is not the caller's own yields `NotFound` and is
+    /// never confirmed to exist — for editors, owners, and admins alike. Only
+    /// after the view is confirmed visible do `Shared` views additionally
+    /// require editor, leaving today's shared-view behavior intact while
+    /// letting a viewer mutate their own personal view (as `create` allows a
+    /// viewer to make one). Routing both `update` and `delete` through here
+    /// keeps the never-leak rule in one place.
+    async fn ensure_saved_view_mutable(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        saved_view_id: &str,
+    ) -> Result<WorkspaceSavedView, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        let saved_view = self
+            .store
+            .get_saved_view(workspace_id, saved_view_id)
+            .await
+            .map_err(WorkspaceError::Store)?
+            .ok_or(WorkspaceError::NotFound)?;
+        ensure_saved_view_readable(&saved_view, principal)?;
+        if saved_view.visibility == SavedViewVisibility::Shared {
+            self.require_editor(workspace_id, principal).await?;
+        }
+        Ok(saved_view)
+    }
+
     pub async fn set_default_saved_view(
         &self,
         workspace_id: &str,
@@ -2513,11 +2725,20 @@ impl WorkspaceManager {
     ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
         let role = self.require_editor(workspace_id, principal).await?;
         if let Some(saved_view_id) = saved_view_id {
-            self.store
+            let saved_view = self
+                .store
                 .get_saved_view(workspace_id, saved_view_id)
                 .await
                 .map_err(WorkspaceError::Store)?
                 .ok_or(WorkspaceError::NotFound)?;
+            // A workspace-wide default must be shared: pointing it at a personal
+            // view would surface that view to every member through the default,
+            // breaking the never-leak invariant. Reject rather than leak.
+            if saved_view.visibility != SavedViewVisibility::Shared {
+                return Err(WorkspaceError::BadRequest(
+                    "a personal saved view cannot be the workspace default".to_string(),
+                ));
+            }
         }
         self.store
             .set_default_saved_view(workspace_id, saved_view_id)
@@ -2568,6 +2789,42 @@ impl WorkspaceManager {
         self.require_viewer(workspace_id, principal).await?;
         self.store
             .set_workspace_pinned(workspace_id, principal, pinned)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    /// Record the caller's own last-open view (#700). Any member (viewer+)
+    /// may remember their own view; the write is scoped to
+    /// `(workspace_id, principal.email)` and stores ONLY the per-user
+    /// `last_view` — it never mutates the shared `default_saved_view_id`.
+    /// Source URLs are stripped (mirroring `upsert_viewer_profile`) since
+    /// workspace views address datasets by workspace-local id.
+    pub async fn set_user_workspace_last_view(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        view: SavedView,
+    ) -> Result<WorkspaceUserState, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        let view = workspace_saved_view_payload(view);
+        self.store
+            .set_user_workspace_last_view(workspace_id, principal, view)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    /// Read the caller's own workspace state including `last_view` (#700).
+    /// `require_viewer` gates access; the store keys on `principal.email`, so
+    /// the result is the caller's own row only — never another member's, and
+    /// `last_view = None` when they've never recorded one.
+    pub async fn get_user_workspace_state(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<WorkspaceUserState, WorkspaceError> {
+        self.require_viewer(workspace_id, principal).await?;
+        self.store
+            .get_user_workspace_state_for(workspace_id, principal)
             .await
             .map_err(WorkspaceError::Store)
     }
@@ -2810,6 +3067,26 @@ fn normalize_request_email(email: &str) -> Result<String, WorkspaceError> {
     Ok(normalized)
 }
 
+/// The personal-view never-leak rule, in one place: a `Personal` view is
+/// readable only by its creator (matched on normalized email); everyone else
+/// is told `NotFound` so the row's existence is never confirmed. `Shared`
+/// views are readable by any viewer (membership is enforced upstream).
+fn ensure_saved_view_readable(
+    saved_view: &WorkspaceSavedView,
+    principal: &AuthPrincipal,
+) -> Result<(), WorkspaceError> {
+    match saved_view.visibility {
+        SavedViewVisibility::Shared => Ok(()),
+        SavedViewVisibility::Personal => {
+            if saved_view.created_by == normalize_email(&principal.email) {
+                Ok(())
+            } else {
+                Err(WorkspaceError::NotFound)
+            }
+        }
+    }
+}
+
 fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2985,6 +3262,14 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
             patch(update_workspace_pin),
         )
         .route(
+            "/api/workspaces/{workspace_id}/last-view",
+            patch(update_workspace_last_view),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/user-state",
+            get(get_workspace_user_state),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/archive",
             post(archive_workspace),
         )
@@ -3036,6 +3321,9 @@ pub struct UpdateLinkAccessRequest {
 pub struct CreateWorkspaceSavedViewRequest {
     pub name: String,
     pub view: SavedView,
+    /// Defaults to `shared` so existing clients (which omit it) are unaffected.
+    #[serde(default)]
+    pub visibility: SavedViewVisibility,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3059,6 +3347,11 @@ pub struct UpsertWorkspaceViewerProfileRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateWorkspacePinRequest {
     pub pinned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceLastViewRequest {
+    pub view: SavedView,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3398,7 +3691,13 @@ async fn create_workspace_saved_view(
 ) -> Response {
     match state
         .manager
-        .create_saved_view(&workspace_id, &principal, &body.name, body.view)
+        .create_saved_view(
+            &workspace_id,
+            &principal,
+            &body.name,
+            body.view,
+            body.visibility,
+        )
         .await
     {
         Ok(saved_view) => {
@@ -3521,6 +3820,37 @@ async fn update_workspace_pin(
     match state
         .manager
         .set_workspace_pinned(&workspace_id, &principal, body.pinned)
+        .await
+    {
+        Ok(user_state) => (StatusCode::OK, Json(user_state)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn update_workspace_last_view(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpdateWorkspaceLastViewRequest>,
+) -> Response {
+    match state
+        .manager
+        .set_user_workspace_last_view(&workspace_id, &principal, body.view)
+        .await
+    {
+        Ok(user_state) => (StatusCode::OK, Json(user_state)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn get_workspace_user_state(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match state
+        .manager
+        .get_user_workspace_state(&workspace_id, &principal)
         .await
     {
         Ok(user_state) => (StatusCode::OK, Json(user_state)).into_response(),
@@ -3857,6 +4187,96 @@ pub mod tests {
         assert_eq!(body["workspace"]["owner_count"], 1);
         assert_eq!(body["members"][0]["email"], "owner@example.com");
         assert_eq!(body["members"][1]["email"], "editor@example.com");
+    }
+
+    #[tokio::test]
+    async fn last_view_rest_round_trips_and_preserves_default() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Last view REST"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+        ));
+
+        // Pin a shared default so we can prove the last-view PATCH leaves it.
+        let shared = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "shared",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+        manager
+            .set_default_saved_view(&workspace.id, &owner, Some(&shared.id))
+            .await
+            .unwrap();
+
+        let app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
+
+        // GET user-state before any record: last_view is null.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/workspaces/{}/user-state", workspace.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = response_json(res).await;
+        assert!(body["last_view"].is_null());
+
+        // PATCH last-view with a {view} body.
+        let view = SavedView::empty([1024, 768]);
+        let payload = serde_json::json!({ "view": view });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri(format!("/api/workspaces/{}/last-view", workspace.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = response_json(res).await;
+        assert_eq!(body["workspace_id"], workspace.id);
+        assert!(!body["last_view"].is_null());
+
+        // GET user-state now returns the remembered view.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/workspaces/{}/user-state", workspace.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_json(res).await;
+        assert_eq!(body["last_view"]["v"], 1);
+
+        // Invariant at the wire layer: the shared default is untouched.
+        let record = store.get_workspace(&workspace.id).await.unwrap().unwrap();
+        assert_eq!(
+            record.default_saved_view_id.as_deref(),
+            Some(shared.id.as_str())
+        );
     }
 
     #[tokio::test]
@@ -4619,7 +5039,13 @@ pub mod tests {
         view.dataset_order.push(DatasetId("wds_workspace_a".into()));
 
         let saved = manager
-            .create_saved_view(&a.id, &owner, "  morphology view  ", view)
+            .create_saved_view(
+                &a.id,
+                &owner,
+                "  morphology view  ",
+                view,
+                SavedViewVisibility::Shared,
+            )
             .await
             .unwrap();
         assert_eq!(saved.workspace_id, a.id);
@@ -4677,7 +5103,13 @@ pub mod tests {
             .unwrap();
 
         let saved = manager
-            .create_saved_view(&workspace.id, &owner, "view", SavedView::empty([800, 600]))
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "view",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
+            )
             .await
             .unwrap();
 
@@ -4702,6 +5134,7 @@ pub mod tests {
                 &viewer,
                 "viewer create",
                 SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
             )
             .await
             .unwrap_err();
@@ -4718,6 +5151,115 @@ pub mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn workspace_personal_saved_view_mutations_are_creator_only() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let admin = principal("admin@example.com", true);
+        let workspace = store
+            .create_workspace(&owner, Some("Personal saved views"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        // A viewer may create a personal view (mirrors create_saved_view), and
+        // must be able to mutate their own — editor is NOT required for the
+        // owner of a personal view.
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "my personal",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(personal.visibility, SavedViewVisibility::Personal);
+
+        // Every other caller — editor, owner, admin — is told NotFound (never
+        // Forbidden, never success): the row's existence is never confirmed.
+        for other in [&editor, &owner, &admin] {
+            let err = manager
+                .update_saved_view(&workspace.id, other, &personal.id, Some("hijack"), None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, WorkspaceError::NotFound),
+                "update by {} should be NotFound, got {err:?}",
+                other.email
+            );
+            let err = manager
+                .delete_saved_view(&workspace.id, other, &personal.id)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, WorkspaceError::NotFound),
+                "delete by {} should be NotFound, got {err:?}",
+                other.email
+            );
+        }
+
+        // The personal view survived every unauthorized attempt.
+        let still_there = manager
+            .get_saved_view(&workspace.id, &viewer, &personal.id)
+            .await
+            .unwrap();
+        assert_eq!(still_there.name, "my personal");
+
+        // The creator (a viewer) can update their own personal view.
+        let updated = manager
+            .update_saved_view(&workspace.id, &viewer, &personal.id, Some("renamed"), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "renamed");
+
+        // ...and delete it.
+        manager
+            .delete_saved_view(&workspace.id, &viewer, &personal.id)
+            .await
+            .unwrap();
+        let err = manager
+            .get_saved_view(&workspace.id, &viewer, &personal.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+
+        // A non-existent id is NotFound for everyone (unchanged).
+        let err = manager
+            .update_saved_view(&workspace.id, &owner, "does-not-exist", Some("x"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+        let err = manager
+            .delete_saved_view(&workspace.id, &owner, "does-not-exist")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
     }
 
     #[tokio::test]
@@ -4846,6 +5388,7 @@ pub mod tests {
                 &owner,
                 "default",
                 SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
             )
             .await
             .unwrap();
@@ -4855,6 +5398,7 @@ pub mod tests {
                 &owner,
                 "other default",
                 SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
             )
             .await
             .unwrap();
@@ -4887,6 +5431,177 @@ pub mod tests {
             .unwrap();
         let restored = store.get_workspace(&workspace.id).await.unwrap().unwrap();
         assert!(restored.default_saved_view_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_last_view_round_trips_per_user_and_never_touches_default() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Remember my last view"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        // Pin the shared default first so we can prove recording a last view
+        // leaves it untouched.
+        let shared = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "shared default",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+        manager
+            .set_default_saved_view(&workspace.id, &owner, Some(&shared.id))
+            .await
+            .unwrap();
+
+        // Before any record, the caller's state has no last view.
+        let before = manager
+            .get_user_workspace_state(&workspace.id, &viewer)
+            .await
+            .unwrap();
+        assert!(before.last_view.is_none());
+
+        // A viewer (lowest role) records their own view; source URLs are
+        // stripped, the workspace-local dataset order is kept.
+        let mut view = SavedView::empty([1024, 768]);
+        view.datasets.push("/secret/source.zarr".into());
+        view.dataset_order.push(DatasetId("wds_mine".into()));
+        let state = manager
+            .set_user_workspace_last_view(&workspace.id, &viewer, view)
+            .await
+            .unwrap();
+        let last = state.last_view.expect("last_view recorded");
+        assert!(last.datasets.is_empty(), "source URLs must be stripped");
+        assert_eq!(last.dataset_order, vec![DatasetId("wds_mine".into())]);
+
+        // Read-back via the principal-scoped getter sees the same view.
+        let got = manager
+            .get_user_workspace_state(&workspace.id, &viewer)
+            .await
+            .unwrap();
+        assert_eq!(
+            got.last_view.as_ref().map(|v| &v.dataset_order),
+            Some(&vec![DatasetId("wds_mine".into())])
+        );
+
+        // Invariant: recording a last view never changes the shared default.
+        let record = store.get_workspace(&workspace.id).await.unwrap().unwrap();
+        assert_eq!(
+            record.default_saved_view_id.as_deref(),
+            Some(shared.id.as_str())
+        );
+
+        // Per-user isolation: another member never sees the viewer's last view.
+        let owner_state = manager
+            .get_user_workspace_state(&workspace.id, &owner)
+            .await
+            .unwrap();
+        assert!(owner_state.last_view.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_last_view_does_not_disturb_pin_and_recents() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Last view coexists"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        // Establish pin + recents on the owner's row.
+        manager
+            .set_workspace_pinned(&workspace.id, &owner, true)
+            .await
+            .unwrap();
+        let opened = store
+            .record_workspace_open(&workspace.id, &owner)
+            .await
+            .unwrap();
+        assert!(opened.pinned_at.is_some());
+        assert!(opened.last_opened_at.is_some());
+
+        // Recording a last view must upsert ONLY last_view, leaving the
+        // existing pin/recents intact.
+        let state = manager
+            .set_user_workspace_last_view(&workspace.id, &owner, SavedView::empty([640, 480]))
+            .await
+            .unwrap();
+        assert!(state.last_view.is_some());
+        assert!(
+            state.pinned_at.is_some(),
+            "pin must survive a last-view write"
+        );
+        assert!(
+            state.last_opened_at.is_some(),
+            "recents must survive a last-view write"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_last_view_requires_membership() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let stranger = principal("stranger@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Members only"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let set_err = manager
+            .set_user_workspace_last_view(&workspace.id, &stranger, SavedView::empty([800, 600]))
+            .await
+            .unwrap_err();
+        assert!(matches!(set_err, WorkspaceError::Forbidden));
+
+        let get_err = manager
+            .get_user_workspace_state(&workspace.id, &stranger)
+            .await
+            .unwrap_err();
+        assert!(matches!(get_err, WorkspaceError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn workspace_last_view_absent_on_legacy_rows() {
+        // A row written before #700 (here: via record_workspace_open, which
+        // leaves last_view_json NULL) reads back last_view = None — the
+        // additive migration adds a nullable column with no backfill.
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Legacy"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        store
+            .record_workspace_open(&workspace.id, &owner)
+            .await
+            .unwrap();
+        let state = manager
+            .get_user_workspace_state(&workspace.id, &owner)
+            .await
+            .unwrap();
+        assert!(state.last_opened_at.is_some());
+        assert!(state.last_view.is_none());
     }
 
     #[tokio::test]

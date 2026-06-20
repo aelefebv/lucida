@@ -12,6 +12,8 @@ import {
   updateWorkspaceSavedView,
   updateWorkspaceDefaultSavedView,
   updateWorkspacePin,
+  updateWorkspaceLastView,
+  getWorkspaceUserState,
 } from "./workspaceApi.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./savedView/types.ts";
 
@@ -225,6 +227,48 @@ describe("workspace saved view API", () => {
     expect(calls[0].method).toBe("PATCH");
     expect(calls[0].url).toBe("/api/workspaces/workspace-1/pin");
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({ pinned: true });
+  });
+
+  it("PATCHes the per-user last view with a {view} body (#700)", async () => {
+    responder = () => jsonResponse(200, {
+      workspace_id: "workspace/a b",
+      last_opened_at: "2026-06-19T01:00:00Z",
+      pinned_at: null,
+      last_view: emptyView(),
+    });
+
+    const state = await updateWorkspaceLastView("workspace/a b", emptyView());
+    expect(calls[0].method).toBe("PATCH");
+    expect(calls[0].url).toBe("/api/workspaces/workspace%2Fa%20b/last-view");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({
+      view: emptyView(),
+    });
+    expect(state.last_view).toMatchObject({ v: SAVED_VIEW_VERSION });
+  });
+
+  it("GETs the principal-scoped user state incl. last_view (#700)", async () => {
+    responder = () => jsonResponse(200, {
+      workspace_id: "workspace-1",
+      last_opened_at: "2026-06-19T01:00:00Z",
+      pinned_at: null,
+      last_view: emptyView(),
+    });
+
+    const state = await getWorkspaceUserState("workspace-1");
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("/api/workspaces/workspace-1/user-state");
+    expect(state.last_view).toMatchObject({ v: SAVED_VIEW_VERSION });
+  });
+
+  it("tolerates a user state with no remembered last view (#700)", async () => {
+    responder = () => jsonResponse(200, {
+      workspace_id: "workspace-1",
+      last_opened_at: null,
+      pinned_at: null,
+    });
+
+    const state = await getWorkspaceUserState("workspace-1");
+    expect(state.last_view ?? null).toBeNull();
   });
 
   it("lists archived workspaces under the archived route", async () => {

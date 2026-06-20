@@ -23,6 +23,10 @@ import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
 import { SavedViewApplier } from "./applier.ts";
 import { getBookmark } from "./bookmarksApi.ts";
+import {
+  getRestoreLastViewEnabled,
+  resolveInitialViewSource,
+} from "../lastViewPreference.ts";
 
 export interface ResolvedSavedView {
   id: string;
@@ -43,6 +47,12 @@ export interface UrlSyncOptions {
   fetchDefaultSavedView?: () => Promise<ResolvedSavedView | null>;
   /** Resolve `?viewer_profile=<name>` to a private viewer profile. */
   fetchViewerProfile?: (profile: string) => Promise<ResolvedSavedView | null>;
+  /** Resolve the caller's own remembered last view for a bare workspace URL
+   *  (#700). Returns null when there is none (or the user isn't a member). */
+  fetchLastView?: () => Promise<ResolvedSavedView | null>;
+  /** Whether the per-user "restore my last view" toggle is on. Defaults to
+   *  the localStorage-backed preference; injectable for tests. */
+  restoreLastViewEnabled?: () => boolean;
 }
 
 export type CaptureBuilder = () => SavedView | null;
@@ -50,6 +60,7 @@ export type CaptureBuilder = () => SavedView | null;
 export type FetchSavedViewById = (id: string) => Promise<ResolvedSavedView | null>;
 export type FetchDefaultSavedView = () => Promise<ResolvedSavedView | null>;
 export type FetchViewerProfile = (profile: string) => Promise<ResolvedSavedView | null>;
+export type FetchLastView = () => Promise<ResolvedSavedView | null>;
 
 /** Default `#b=<id>` resolver — the REST helper. Tests inject their
  *  own to avoid the production fetch path. */
@@ -70,6 +81,8 @@ export class UrlSync {
   private readonly fetchSavedViewById: FetchSavedViewById;
   private readonly fetchDefaultSavedView: FetchDefaultSavedView | null;
   private readonly fetchViewerProfile: FetchViewerProfile | null;
+  private readonly fetchLastView: FetchLastView | null;
+  private readonly restoreLastViewEnabled: () => boolean;
   private suppressNextEmptyHashFlush = false;
 
   constructor(
@@ -85,6 +98,9 @@ export class UrlSync {
       options.fetchSavedViewById ?? options.fetchBookmark ?? defaultFetchSavedViewById;
     this.fetchDefaultSavedView = options.fetchDefaultSavedView ?? null;
     this.fetchViewerProfile = options.fetchViewerProfile ?? null;
+    this.fetchLastView = options.fetchLastView ?? null;
+    this.restoreLastViewEnabled =
+      options.restoreLastViewEnabled ?? getRestoreLastViewEnabled;
   }
 
   /** Hook the popstate listener. Idempotent + re-armable after `destroy()`
@@ -161,8 +177,8 @@ export class UrlSync {
         await this.applyViewerProfile(viewerProfile);
         return;
       }
-      if (isEmptyHash(hash) && this.fetchDefaultSavedView) {
-        await this.applyDefaultSavedView();
+      if (isEmptyHash(hash)) {
+        await this.applyInitialViewForEmptyHash();
       }
       return;
     }
@@ -174,6 +190,53 @@ export class UrlSync {
       return;
     }
     await this.applier.apply(view);
+  }
+
+  /**
+   * Bare workspace open (no `#view=`/`#b=` hash, no `?viewer_profile=`):
+   * choose what to apply via the pure {@link resolveInitialViewSource}
+   * priority — the per-user remembered last view (#700) slots BETWEEN the
+   * URL-hash branch (handled above; a hash always wins) and the shared
+   * workspace default.
+   *
+   * We fetch the user's last view ONLY when the toggle is on and a fetcher is
+   * wired (so auth-off / non-member callers — which pass no `fetchLastView` —
+   * never issue the request); a fetch failure degrades silently to the
+   * default. We NEVER write the workspace default here.
+   */
+  private async applyInitialViewForEmptyHash(): Promise<void> {
+    const restoreEnabled = this.restoreLastViewEnabled();
+
+    // Resolve the remembered last view first (only when eligible), so the
+    // priority function has a truthful `hasLastView`. A fetch error is
+    // swallowed — the verdict simply falls through to the default.
+    let lastView: ResolvedSavedView | null = null;
+    if (restoreEnabled && this.fetchLastView) {
+      try {
+        lastView = await this.fetchLastView();
+      } catch (e) {
+        console.warn("[UrlSync] failed to fetch last view:", e);
+        lastView = null;
+      }
+    }
+
+    const source = resolveInitialViewSource({
+      // A hash would have been handled by the branches above; at this point
+      // the workspace URL is bare.
+      hasUrlHash: false,
+      restoreEnabled,
+      hasLastView: lastView !== null,
+      hasDefault: this.fetchDefaultSavedView !== null,
+    });
+
+    if (source === "last-view" && lastView !== null) {
+      this.suppressNextEmptyHashFlush = true;
+      await this.applier.apply(lastView.view);
+      return;
+    }
+    if (source === "default") {
+      await this.applyDefaultSavedView();
+    }
   }
 
   private async applyViewerProfile(profile: string): Promise<void> {

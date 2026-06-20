@@ -517,3 +517,139 @@ describe("UrlSync — default saved view bootstrap", () => {
     sync.destroy();
   });
 });
+
+describe("UrlSync — last view bootstrap (#700)", () => {
+  let applier: FakeApplier;
+  let captureBuilder: () => SavedView | null;
+
+  beforeEach(() => {
+    applier = new FakeApplier();
+    captureBuilder = () => emptyView();
+  });
+
+  it("restores the per-user last view for a bare workspace open when enabled", async () => {
+    const win = makeFakeWindow("");
+    const last = emptyView();
+    last.view.t = 5;
+    const fetchLastView = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "last-view",
+      view: last,
+    }));
+    const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "default",
+      view: emptyView(),
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchLastView,
+      fetchDefaultSavedView: fetchDefault,
+      restoreLastViewEnabled: () => true,
+    });
+
+    await sync.bootstrap();
+
+    expect(fetchLastView).toHaveBeenCalledOnce();
+    // Last view takes priority over the default — the default is never fetched.
+    expect(fetchDefault).not.toHaveBeenCalled();
+    expect(applier.applied[0].view.t).toBe(5);
+    sync.destroy();
+  });
+
+  it("falls back to the default when the toggle is off (and never fetches last view)", async () => {
+    const win = makeFakeWindow("");
+    const def = emptyView();
+    def.view.t = 9;
+    const fetchLastView = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "last-view",
+      view: emptyView(),
+    }));
+    const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "default",
+      view: def,
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchLastView,
+      fetchDefaultSavedView: fetchDefault,
+      restoreLastViewEnabled: () => false,
+    });
+
+    await sync.bootstrap();
+
+    expect(fetchLastView).not.toHaveBeenCalled();
+    expect(fetchDefault).toHaveBeenCalledOnce();
+    expect(applier.applied[0].view.t).toBe(9);
+    sync.destroy();
+  });
+
+  it("falls back to the default when there is no remembered last view", async () => {
+    const win = makeFakeWindow("");
+    const def = emptyView();
+    def.view.t = 2;
+    const fetchLastView = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
+    const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "default",
+      view: def,
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchLastView,
+      fetchDefaultSavedView: fetchDefault,
+      restoreLastViewEnabled: () => true,
+    });
+
+    await sync.bootstrap();
+
+    expect(fetchLastView).toHaveBeenCalledOnce();
+    expect(fetchDefault).toHaveBeenCalledOnce();
+    expect(applier.applied[0].view.t).toBe(2);
+    sync.destroy();
+  });
+
+  it("a URL #view= always wins over the remembered last view", async () => {
+    const explicit = emptyView();
+    explicit.view.t = 42;
+    const payload = await encode(explicit);
+    const win = makeFakeWindow(`#view=${payload}`);
+    const fetchLastView = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "last-view",
+      view: emptyView(),
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchLastView,
+      restoreLastViewEnabled: () => true,
+    });
+
+    await sync.bootstrap();
+
+    // The hash branch handled it; the last view was never consulted.
+    expect(fetchLastView).not.toHaveBeenCalled();
+    expect(applier.applied[0].view.t).toBe(42);
+    sync.destroy();
+  });
+
+  it("degrades to the default when the last-view fetch throws", async () => {
+    const win = makeFakeWindow("");
+    const def = emptyView();
+    def.view.t = 8;
+    const fetchLastView = vi.fn(async (): Promise<ResolvedSavedView | null> => {
+      throw new Error("offline");
+    });
+    const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "default",
+      view: def,
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchLastView,
+      fetchDefaultSavedView: fetchDefault,
+      restoreLastViewEnabled: () => true,
+    });
+
+    await sync.bootstrap();
+
+    expect(applier.applied[0].view.t).toBe(8);
+    sync.destroy();
+  });
+});
