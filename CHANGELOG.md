@@ -127,3 +127,4 @@
 - feat(workspace): remember my last view per workspace (#700) (slipway, reversible: git-revert)
 - feat(workspace): promote a personal saved view to shared (#699) (slipway, reversible: git-revert)
 - feat(workspace): viewer-proposed saved views (#702) (slipway, reversible: git-revert)
+- feat(cli,python): saved-view sharing parity — visibility, promote, approve, reject (#699/#702) (slipway, reversible: git-revert)
