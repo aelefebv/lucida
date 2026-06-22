@@ -665,4 +665,25 @@ describe("clampViewIndices", () => {
     expect(out.zStart).toBe(5);
     expect(out.zEnd).toBe(10);
   });
+
+  it("does not crush a deep Z when a shallow 2D dataset is co-loaded (#814 restore)", () => {
+    // Regression for the #814 restore path: a 340-plane volume co-loaded with a
+    // 2D image (Z=1). The saved deep plane must survive — the clamp bound is the
+    // DEEPEST visible volume (what the global Z slider navigates), not the
+    // shallowest, so a co-visible 2D dataset can't collapse a valid Z to 0.
+    const scene = {
+      dataset_volume_shape: (id: string) =>
+        new Uint32Array([id === "ds-vol" ? 340 : 1, 256, 256]),
+    } as unknown as Parameters<typeof clampViewIndices>[0];
+    const v = emptyView();
+    v.view.z_range = { start: 119, end: 120 };
+    const out = clampViewIndices(
+      scene,
+      [{ url: "", id: "ds-vol" }, { url: "", id: "ds-2d" }],
+      v,
+    );
+    expect(out.zStart).toBe(119);
+    expect(out.zEnd).toBe(120);
+    expect(out.clamped).toBe(false);
+  });
 });

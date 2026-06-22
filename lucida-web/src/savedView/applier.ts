@@ -740,16 +740,20 @@ export function clampViewIndices(
     ? requestedIds
     : requestedIds.filter((r) => addressedVisible.has(r.id));
 
-  // Smallest extent per axis across the relevant datasets (the
-  // conservative choice — out-of-range clamps to a bound that's safe for
-  // every volume). `undefined` means "not determinable for any relevant
-  // dataset", which leaves that axis unclamped.
-  let minZ: number | undefined;
-  let minT: number | undefined;
-  let minC: number | undefined;
-  const considerMin = (cur: number | undefined, next: number | undefined) => {
+  // LARGEST extent per axis across the relevant datasets — the bound the
+  // global Z/T/C sliders actually navigate (the DEEPEST visible volume). A
+  // co-visible SHALLOW dataset (e.g. a 2D image with Z=1) must NOT crush a
+  // deep volume's valid plane: each dataset clamps its own rendering, so the
+  // saved index only needs to fit the deepest relevant volume. (Using the
+  // smallest extent here was the #814 restore regression: a 2D dataset
+  // co-loaded with a 340-plane volume collapsed a valid Z to 0.) `undefined`
+  // means "not determinable for any relevant dataset", leaving the axis alone.
+  let maxZ: number | undefined;
+  let maxT: number | undefined;
+  let maxC: number | undefined;
+  const considerMax = (cur: number | undefined, next: number | undefined) => {
     if (next === undefined || !Number.isFinite(next) || next <= 0) return cur;
-    return cur === undefined ? next : Math.min(cur, next);
+    return cur === undefined ? next : Math.max(cur, next);
   };
 
   for (const r of idsToClamp) {
@@ -757,7 +761,7 @@ export function clampViewIndices(
     // dimension `dataset_volume_shape` carries.
     try {
       const shape = scene.dataset_volume_shape(r.id);
-      if (shape.length >= 1) minZ = considerMin(minZ, shape[0]);
+      if (shape.length >= 1) maxZ = considerMax(maxZ, shape[0]);
     } catch {
       // Dataset not yet loaded / no shape; skip — its extent is unknown.
     }
@@ -766,8 +770,8 @@ export function clampViewIndices(
     if (extentsFor) {
       try {
         const ext = extentsFor(r.id);
-        minT = considerMin(minT, ext.t);
-        minC = considerMin(minC, ext.c);
+        maxT = considerMax(maxT, ext.t);
+        maxC = considerMax(maxC, ext.c);
       } catch {
         // Resolver couldn't determine extents for this dataset; skip.
       }
@@ -776,25 +780,25 @@ export function clampViewIndices(
 
   const requested = view.view;
 
-  // --- Z slab: clamp start and end into [0, minZ], keeping a slab of
-  // thickness >= 1. Preserves the slab when it already fits. ---
+  // --- Z slab: clamp start and end into [0, maxZ], keeping a slab of
+  // thickness >= 1. Preserves the slab when it fits the deepest visible volume. ---
   let zStart = requested.z_range.start;
   let zEnd = requested.z_range.end;
-  if (minZ !== undefined) {
-    zStart = Math.max(0, Math.min(zStart, minZ - 1));
-    zEnd = Math.max(zStart + 1, Math.min(zEnd, minZ));
+  if (maxZ !== undefined) {
+    zStart = Math.max(0, Math.min(zStart, maxZ - 1));
+    zEnd = Math.max(zStart + 1, Math.min(zEnd, maxZ));
   }
 
-  // --- T: clamp into [0, minT - 1] when the extent is known. ---
+  // --- T: clamp into [0, maxT - 1] when the extent is known. ---
   let t = requested.t;
-  if (minT !== undefined) {
-    t = Math.max(0, Math.min(t, minT - 1));
+  if (maxT !== undefined) {
+    t = Math.max(0, Math.min(t, maxT - 1));
   }
 
-  // --- C: clamp into [0, minC - 1] when the extent is known. ---
+  // --- C: clamp into [0, maxC - 1] when the extent is known. ---
   let c = requested.c;
-  if (minC !== undefined) {
-    c = Math.max(0, Math.min(c, minC - 1));
+  if (maxC !== undefined) {
+    c = Math.max(0, Math.min(c, maxC - 1));
   }
 
   // Report per-axis adjustments precisely so the notice can name them.
