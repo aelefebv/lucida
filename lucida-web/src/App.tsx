@@ -239,6 +239,37 @@ function App({
     [workspaceId],
   );
 
+  // Authoritative live Z/T/C for "Save view". The React dimension state
+  // (dims.z/t/c/multiChannel) is the source of truth for what the user is
+  // looking at; the scene's presence export can lag (peer-follow, restore,
+  // dim-clamp) and report the default `z_range {0,1}`, which the encoder
+  // then strips. We take z/t/c/multi_channel from React and preserve the
+  // current slab THICKNESS from the scene (React only tracks z_range.start
+  // via dims.z), so a multi-plane slab survives the capture.
+  const getLiveView = useCallback((): SavedView["view"] | null => {
+    const ws = scene.wasmSceneRef.current;
+    let slabThickness = 1;
+    if (ws) {
+      try {
+        const presence = JSON.parse(ws.export_presence()) as {
+          view?: { z_range?: { start: number; end: number } };
+        };
+        const r = presence.view?.z_range;
+        if (r && r.end > r.start) slabThickness = r.end - r.start;
+      } catch {
+        // Fall back to a single-plane slab if presence is unreadable.
+      }
+    }
+    return {
+      z_range: { start: dims.z, end: dims.z + slabThickness },
+      t: dims.t,
+      c: dims.c,
+      multi_channel: dims.multiChannel,
+    };
+    // wasmSceneRef is a stable ref; reading .current at call time is intended.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dims.z, dims.t, dims.c, dims.multiChannel]);
+
   // SavedView wiring. Mounts the URL→scene sync, exposes the
   // share-button capture, gives the loading banner a handle on apply
   // progress, and forwards apply summaries for the selectedDatasetId
@@ -256,6 +287,8 @@ function App({
     changeTick: datasetsVersion + remoteDocumentVersion,
     onApplyResult: handleApplyResult,
     loopRef: render.loopRef,
+    getLiveView,
+    dimensionExtentsFor: dims.dimensionExtentsFor,
     setC: dims.setC,
     setT: dims.setT,
     setZ: dims.setZ,
