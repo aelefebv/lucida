@@ -140,6 +140,13 @@
   border-left: 2px solid rgba(240, 173, 78, 0.6);
 }
 
+/* The saved view currently applied to the viewer — a steady highlight (no
+   hover dependency) so the user can see at a glance which view is open. */
+.bookmark-row[data-active="true"] {
+  background: #25253a;
+  border-left: 2px solid #646cff;
+}
+
 .bookmark-review-section {
   margin-bottom: 0.5rem;
 }
@@ -394,7 +401,7 @@
 
 .bookmark-confirm-modal {
   background: #22222a;
-  border: 1px solid #b85555;
+  border: 1px solid #444;
   border-radius: 8px;
   padding: 1rem 1.25rem;
   min-width: 300px;
@@ -402,6 +409,16 @@
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+}
+
+/* The accent border echoes the confirm button: warm red for a destructive
+   action, brand blue for a deliberate-but-benign one (propose). */
+.bookmark-confirm-modal-danger {
+  border-color: #b85555;
+}
+
+.bookmark-confirm-modal-primary {
+  border-color: #646cff;
 }
 
 .bookmark-confirm-modal h4 {
@@ -414,6 +431,7 @@
   margin: 0;
   color: #ccc;
   font-size: 0.85rem;
+  line-height: 1.4;
 }
 
 .bookmark-confirm-modal-actions {
@@ -422,9 +440,25 @@
   gap: 0.4rem;
 }
 
+.bookmark-confirm-modal-actions button {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: #ddd;
+}
+
 .bookmark-confirm-modal-actions button.danger {
   background: #b85555;
   border-color: #b85555;
+  color: #fff;
+}
+
+.bookmark-confirm-modal-actions button.primary {
+  background: #646cff;
+  border-color: #646cff;
   color: #fff;
 }
 
@@ -432,6 +466,9 @@
   position: fixed;
   bottom: 16px;
   right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   background: #222;
   color: #fff;
   padding: 0.5rem 0.75rem;
@@ -445,4 +482,26 @@
 .bookmark-toast.warn {
   background: #5a3a00;
   border-color: #b88500;
+}
+
+.bookmark-toast-text {
+  flex: 1;
+}
+
+/* The toast's inline action (e.g. Undo): a quiet button that reads as a link
+   so it doesn't compete with the message, but is plainly clickable. */
+.bookmark-toast-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: #9aa6ff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.bookmark-toast-action:hover {
+  color: #c2c9ff;
 }

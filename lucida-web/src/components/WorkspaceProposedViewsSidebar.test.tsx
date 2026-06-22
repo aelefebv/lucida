@@ -98,6 +98,8 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
     await userEvent.click(screen.getByLabelText("Saved view actions"));
     const proposeBtn = await screen.findByTestId("saved-view-propose-sv-own");
     await userEvent.click(proposeBtn);
+    // Slice 3: proposing now asks for confirmation before it is sent.
+    await userEvent.click(await screen.findByRole("button", { name: /propose|confirm|share/i }));
 
     await waitFor(() =>
       expect(setVisibilityMock).toHaveBeenCalledWith("ws-1", "sv-own", "proposed"),
@@ -128,7 +130,7 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
 });
 
 describe("WorkspaceSavedViewsSidebar — editor review queue", () => {
-  it("shows proposed views distinctly with Approve / Reject and calls the API", async () => {
+  it("shows proposed views distinctly; Approve is immediate, Reject is deferred + undoable", async () => {
     const proposal = view({
       id: "sv-prop",
       name: "Pending proposal",
@@ -170,7 +172,11 @@ describe("WorkspaceSavedViewsSidebar — editor review queue", () => {
     );
     await screen.findByTestId("saved-view-reject-sv-prop");
     await userEvent.click(screen.getByTestId("saved-view-reject-sv-prop"));
-    await waitFor(() => expect(rejectMock).toHaveBeenCalledWith("ws-1", "sv-prop"));
+    // Slice 3: reject is a deferred, cancelable send — not fired immediately;
+    // an Undo cancels it entirely (no API call).
+    expect(rejectMock).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByText(/undo/i));
+    expect(rejectMock).not.toHaveBeenCalled();
   });
 
   it("does not render a review queue when there are no proposals", async () => {

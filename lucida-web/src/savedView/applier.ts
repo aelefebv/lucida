@@ -17,7 +17,8 @@
 //   7. SetDatasetOrder, then per-dataset SetDatasetVisible/Opacity/contrast/
 //      gamma/blend/render mode/per-channel colormap+contrast+gamma.
 //   8. SetContrast / SetGamma / SetMultiChannel.
-//   9. SetT / SetC / SetZRange — clamp out-of-range silently.
+//   9. SetT / SetC / SetZRange — clamp out-of-range to fit the
+//      recipient's datasets, with a non-blocking "adjusted to fit" notice.
 //  10. Camera last (via import_presence so it goes through one mutator).
 //
 // `applyInProgress` is exposed so urlSync can suppress writes; the
@@ -161,6 +162,10 @@ export class SavedViewApplier {
   private readonly datasetReferenceMode: DatasetReferenceMode;
   private readonly allowDocumentLayoutMutation: boolean;
   private readonly openTimeoutMs: number;
+  /** Resolves per-dataset T/C extents for clamping (Z comes from the
+   *  scene's volume shape). Optional: when absent, t/c pass through
+   *  unclamped — see `clampViewIndices`. */
+  private readonly dimensionExtentsFor?: DimensionExtentsResolver;
 
   constructor(
     bridge: ApplierBridge,
@@ -173,6 +178,11 @@ export class SavedViewApplier {
     openTimeoutMs: number = 30_000,
     datasetReferenceMode: DatasetReferenceMode = "source-url",
     allowDocumentLayoutMutation: boolean = true,
+    /** Resolves the recipient's per-dataset T/C extents so out-of-range
+     *  timepoint/channel indices in an applied view clamp to fit. Z is
+     *  always derived from `dataset_volume_shape`; this only adds T/C.
+     *  Optional — omit (e.g. in tests) to leave t/c unclamped. */
+    dimensionExtentsFor?: DimensionExtentsResolver,
   ) {
     this.bridge = bridge;
     this.getScene = getScene;
@@ -180,6 +190,7 @@ export class SavedViewApplier {
     this.datasetReferenceMode = datasetReferenceMode;
     this.allowDocumentLayoutMutation = allowDocumentLayoutMutation;
     this.openTimeoutMs = openTimeoutMs;
+    this.dimensionExtentsFor = dimensionExtentsFor;
   }
 
   // State subscription (used by LoadingViewBanner)
@@ -384,12 +395,26 @@ export class SavedViewApplier {
         });
       }
 
-      // Step 9: SetT / SetC / SetZRange — clamp silently.
-      // Clamp against every currently-loaded dataset, not just the
-      // requested URLs — handles "view already has datasets loaded; the
-      // saved view's z is bigger than any loaded volume" silently.
+      // Step 9: SetT / SetC / SetZRange — clamp out-of-range indices to
+      // fit the recipient's datasets, with a non-blocking notice.
+      // `clampViewIndices` narrows this loaded set to the datasets the view
+      // addresses + makes visible, so a co-loaded, unreferenced (or hidden)
+      // shallow neighbor can't crush the authoritative Z/T/C of the
+      // deep/multi-channel dataset the view is actually restoring.
       const clampedDatasets = Array.from(loadedAfter, (id) => ({ url: "", id }));
-      const clamped = clampViewIndices(sceneAfter, clampedDatasets, view);
+      const clamped = clampViewIndices(
+        sceneAfter,
+        clampedDatasets,
+        view,
+        this.dimensionExtentsFor,
+      );
+      if (clamped.clamped) {
+        // Non-blocking notice via the existing warnings channel (rendered
+        // by LoadingViewBanner). Name the axes so the user understands
+        // exactly what moved, e.g. "Z adjusted to fit this dataset" or
+        // "Z and C adjusted to fit this dataset".
+        this.addWarning(clampNotice(clamped.adjustedAxes));
+      }
       this.applyViewport(sceneAfter, { type: "set_t", t: clamped.t });
       this.applyViewport(sceneAfter, { type: "set_c", c: clamped.c });
       this.applyViewport(sceneAfter, {
@@ -634,41 +659,172 @@ export interface ClampedView {
   c: number;
   zStart: number;
   zEnd: number;
+  /** True iff the clamp adjusted ANY of z (start or end), t, or c to fit
+   *  the recipient's datasets. Drives the non-blocking "adjusted to fit
+   *  this dataset" notice. When the saved indices were already in range,
+   *  this is false and z/t/c are returned unchanged. */
+  clamped: boolean;
+  /** Human-readable names of the axes that were adjusted (subset of
+   *  `["Z", "T", "C"]`, in that order). Empty when `clamped` is false.
+   *  Lets the caller surface a precise per-axis notice. */
+  adjustedAxes: readonly string[];
 }
 
+/**
+ * Resolves the valid per-dataset extents (counts) for clamping, by axis.
+ * Any axis whose extent is not determinable for a dataset is reported as
+ * `undefined`, and that axis is left unclamped (the "clamp ... when
+ * determinable" contract). Extents are counts: a value of `N` means valid
+ * indices are `0..N-1` and a valid z slab is `0..N`.
+ */
+export type DimensionExtentsResolver = (
+  datasetId: string,
+) => { z?: number; t?: number; c?: number };
+
+/**
+ * The datasets a view actually addresses AND keeps visible — i.e. the
+ * volumes whose extents the z/t/c indices must remain valid for. A dataset
+ * is "addressed" if it appears in `dataset_order` or `dataset_settings`,
+ * and "visible" unless its per-dataset settings say `visible: false`.
+ *
+ * Returns `undefined` when the view addresses no datasets at all (e.g. an
+ * empty/global view) so callers can fall back to "all loaded".
+ */
+function visibleAddressedDatasetIds(view: SavedView): Set<string> | undefined {
+  const addressed = new Set<string>();
+  for (const id of view.dataset_order) addressed.add(id);
+  for (const id of Object.keys(view.dataset_settings)) addressed.add(id);
+  if (addressed.size === 0) return undefined;
+
+  const visible = new Set<string>();
+  for (const id of addressed) {
+    // No per-dataset settings = visible by default (matches the applier's
+    // step-5 logic, which only hides datasets dropped from the link).
+    if (view.dataset_settings[id]?.visible === false) continue;
+    visible.add(id);
+  }
+  return visible;
+}
+
+/**
+ * Clamp a saved view's z slab / t / c so they fit the recipient's
+ * currently-loaded datasets.
+ *
+ * Z extents come from the per-dataset `dataset_volume_shape` (authoritative
+ * and precise). T/C extents are NOT carried by `dataset_volume_shape`, so
+ * they are only clamped when an `extentsFor` resolver supplies them — see
+ * `useSavedViewSync`, which wires the recipient's manifest-derived union
+ * extents. When no extent is determinable for an axis, that axis passes
+ * through unchanged (matching the legacy behavior for t/c).
+ *
+ * The clamp is conservative: it uses the SMALLEST extent across the
+ * datasets the view ADDRESSES and makes VISIBLE (intersected with the
+ * loaded set passed in `requestedIds`), so an index stays valid for every
+ * volume it must address — without being crushed to an unrelated/hidden
+ * co-loaded neighbor. When the view addresses no datasets at all, every
+ * loaded id in `requestedIds` is considered (legacy behavior).
+ */
 export function clampViewIndices(
   scene: WasmScene,
   requestedIds: { url: string; id: string }[],
   view: SavedView,
+  extentsFor?: DimensionExtentsResolver,
 ): ClampedView {
-  // Find the smallest dimension across loaded datasets (the conservative
-  // choice — out-of-range silently clamps to the lower bound that's safe).
-  let minZ = Number.POSITIVE_INFINITY;
-  for (const r of requestedIds) {
+  // Restrict the extent scan to the datasets the view addresses + keeps
+  // visible. A co-loaded dataset the view never referenced (or hides) must
+  // not drag the conservative min down and crush a deep/multi-channel
+  // volume's valid Z/T/C. Fall back to all-loaded only for a view that
+  // addresses nothing (empty/global).
+  const addressedVisible = visibleAddressedDatasetIds(view);
+  const idsToClamp = addressedVisible === undefined
+    ? requestedIds
+    : requestedIds.filter((r) => addressedVisible.has(r.id));
+
+  // LARGEST extent per axis across the relevant datasets — the bound the
+  // global Z/T/C sliders actually navigate (the DEEPEST visible volume). A
+  // co-visible SHALLOW dataset (e.g. a 2D image with Z=1) must NOT crush a
+  // deep volume's valid plane: each dataset clamps its own rendering, so the
+  // saved index only needs to fit the deepest relevant volume. (Using the
+  // smallest extent here was the #814 restore regression: a 2D dataset
+  // co-loaded with a 340-plane volume collapsed a valid Z to 0.) `undefined`
+  // means "not determinable for any relevant dataset", leaving the axis alone.
+  let maxZ: number | undefined;
+  let maxT: number | undefined;
+  let maxC: number | undefined;
+  const considerMax = (cur: number | undefined, next: number | undefined) => {
+    if (next === undefined || !Number.isFinite(next) || next <= 0) return cur;
+    return cur === undefined ? next : Math.max(cur, next);
+  };
+
+  for (const r of idsToClamp) {
+    // Z extent: from the volume shape ([Z, Y, X]). This is the only
+    // dimension `dataset_volume_shape` carries.
     try {
       const shape = scene.dataset_volume_shape(r.id);
-      if (shape.length >= 3) {
-        // shape returns [Z, Y, X]; t/c are not in volume_shape — but
-        // dataset_volume_shape is the only call we have for "max valid
-        // index". The clamp contract is "clamp out-of-range silently"
-        // specifically about z/t/c — we conservatively clamp z to
-        // volume_shape[0] and pass t/c through (downstream WASM
-        // `set_t`/`set_c` accept any u32; out-of-range there is
-        // harmless because rendering will skip frames we don't have).
-        minZ = Math.min(minZ, shape[0]);
-      }
+      if (shape.length >= 1) maxZ = considerMax(maxZ, shape[0]);
     } catch {
-      // Dataset not yet loaded; skip.
+      // Dataset not yet loaded / no shape; skip — its extent is unknown.
+    }
+    // T/C extents: only available via the injected resolver (manifest
+    // union on the recipient). Resolver failures are non-fatal.
+    if (extentsFor) {
+      try {
+        const ext = extentsFor(r.id);
+        maxT = considerMax(maxT, ext.t);
+        maxC = considerMax(maxC, ext.c);
+      } catch {
+        // Resolver couldn't determine extents for this dataset; skip.
+      }
     }
   }
-  if (minZ === Number.POSITIVE_INFINITY) minZ = view.view.z_range.end;
 
-  const t = view.view.t;
-  const c = view.view.c;
-  const zStart = Math.max(0, Math.min(view.view.z_range.start, minZ - 1));
-  const zEnd = Math.max(zStart + 1, Math.min(view.view.z_range.end, minZ));
+  const requested = view.view;
 
-  return { t, c, zStart, zEnd };
+  // --- Z slab: clamp start and end into [0, maxZ], keeping a slab of
+  // thickness >= 1. Preserves the slab when it fits the deepest visible volume. ---
+  let zStart = requested.z_range.start;
+  let zEnd = requested.z_range.end;
+  if (maxZ !== undefined) {
+    zStart = Math.max(0, Math.min(zStart, maxZ - 1));
+    zEnd = Math.max(zStart + 1, Math.min(zEnd, maxZ));
+  }
+
+  // --- T: clamp into [0, maxT - 1] when the extent is known. ---
+  let t = requested.t;
+  if (maxT !== undefined) {
+    t = Math.max(0, Math.min(t, maxT - 1));
+  }
+
+  // --- C: clamp into [0, maxC - 1] when the extent is known. ---
+  let c = requested.c;
+  if (maxC !== undefined) {
+    c = Math.max(0, Math.min(c, maxC - 1));
+  }
+
+  // Report per-axis adjustments precisely so the notice can name them.
+  const adjustedAxes: string[] = [];
+  if (zStart !== requested.z_range.start || zEnd !== requested.z_range.end) {
+    adjustedAxes.push("Z");
+  }
+  if (t !== requested.t) adjustedAxes.push("T");
+  if (c !== requested.c) adjustedAxes.push("C");
+
+  return { t, c, zStart, zEnd, clamped: adjustedAxes.length > 0, adjustedAxes };
+}
+
+/**
+ * Build the non-blocking notice shown when `clampViewIndices` adjusted one
+ * or more axes, naming exactly which ones moved. Examples:
+ *   ["Z"]           -> "Z adjusted to fit this dataset"
+ *   ["Z", "C"]      -> "Z and C adjusted to fit this dataset"
+ *   ["Z", "T", "C"] -> "Z, T and C adjusted to fit this dataset"
+ * Exported for tests so the wording can be asserted without a WasmScene.
+ */
+export function clampNotice(adjustedAxes: readonly string[]): string {
+  const axes = adjustedAxes.length > 1
+    ? `${adjustedAxes.slice(0, -1).join(", ")} and ${adjustedAxes[adjustedAxes.length - 1]}`
+    : (adjustedAxes[0] ?? "");
+  return `${axes} adjusted to fit this dataset`;
 }
 
 /** Helper: re-export shape used by tests so they can construct an applier-like

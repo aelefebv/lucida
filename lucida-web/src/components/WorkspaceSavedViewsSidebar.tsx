@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -15,23 +14,38 @@ import {
 import type { SavedView } from "../savedView/types.ts";
 import "./BookmarkSidebar.css";
 
+// How long a rejected proposal lingers (hidden, undoable) before the reject
+// PATCH actually fires. Long enough to read the toast and hit Undo; short
+// enough that an editor curating a queue isn't left waiting.
+const REJECT_UNDO_WINDOW_MS = 6000;
+
 export interface WorkspaceSavedViewsSidebarProps {
   workspaceId: string;
   currentUserEmail: string | null;
   canEdit: boolean;
   getCurrentSavedView: () => SavedView | null;
-  onOpenSavedView: (view: SavedView) => void | Promise<void>;
+  onOpenSavedView: (view: SavedView, savedViewId: string) => void | Promise<void>;
   loadedDatasetNames: readonly string[];
   activeLayoutName?: string | null;
   defaultSavedViewId: string | null;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
+  /** Id of the saved view currently applied to the viewer, if any. The matching
+   *  row renders as active so the user can see which view they're looking at. */
+  currentOpenSavedViewId?: string | null;
   style?: React.CSSProperties;
   visible: boolean;
+}
+
+interface ToastAction {
+  label: string;
+  onClick: () => void;
 }
 
 interface ToastMessage {
   text: string;
   kind: "info" | "warn";
+  /** Optional inline action (e.g. "Undo") rendered as a button in the toast. */
+  action?: ToastAction;
 }
 
 interface ConfirmRequest {
@@ -54,6 +68,7 @@ export function WorkspaceSavedViewsSidebar({
   activeLayoutName,
   defaultSavedViewId,
   onSetDefaultSavedView,
+  currentOpenSavedViewId,
   style,
   visible,
 }: WorkspaceSavedViewsSidebarProps) {
@@ -101,18 +116,62 @@ export function WorkspaceSavedViewsSidebar({
       !canEdit && view.visibility === "personal" && isMine(view),
     [canEdit, isMine],
   );
+  // The proposer can pull their own still-pending proposal back to private at
+  // any time (the server permits a creator's Proposed -> Personal). Scoped to
+  // the proposer's *own* proposed view — never another member's, never an
+  // already-approved/shared one. Available whether or not they can edit.
+  const canWithdrawProposal = useCallback(
+    (view: WorkspaceSavedView): boolean =>
+      view.visibility === "proposed" && isMine(view),
+    [isMine],
+  );
 
   const [savePromptOpen, setSavePromptOpen] = useState(false);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
+  const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+  // Ids whose Reject is in its cancelable window: hidden from the review queue
+  // optimistically, but NOT yet sent to the server (Undo can still cancel).
+  const [pendingReject, setPendingReject] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   const dismissToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showToast = useCallback((text: string, kind: ToastMessage["kind"] = "info") => {
-    setToast({ text, kind });
+  const dismissToast = useCallback(() => {
     if (dismissToastTimer.current) clearTimeout(dismissToastTimer.current);
-    dismissToastTimer.current = setTimeout(() => setToast(null), 3000);
+    dismissToastTimer.current = null;
+    setToast(null);
+  }, []);
+  const showToast = useCallback(
+    (
+      text: string,
+      kind: ToastMessage["kind"] = "info",
+      opts?: { action?: ToastAction; durationMs?: number },
+    ) => {
+      setToast({ text, kind, action: opts?.action });
+      if (dismissToastTimer.current) clearTimeout(dismissToastTimer.current);
+      dismissToastTimer.current = setTimeout(
+        () => setToast(null),
+        opts?.durationMs ?? 3000,
+      );
+    },
+    [],
+  );
+
+  // One timer per deferred reject so a power-user can stack several at once and
+  // Undo each independently. Cleaned up on unmount so a pending PATCH never
+  // fires after the sidebar is gone.
+  const rejectTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = rejectTimers.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+      // Also clear the toast auto-dismiss timer so it can't setState after unmount.
+      if (dismissToastTimer.current) clearTimeout(dismissToastTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -158,7 +217,7 @@ export function WorkspaceSavedViewsSidebar({
   const handleOpen = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
-        await onOpenSavedView(view.view);
+        await onOpenSavedView(view.view, view.id);
       } catch (e) {
         showToast(`Open failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
       }
@@ -213,6 +272,8 @@ export function WorkspaceSavedViewsSidebar({
     [setSavedViewVisibility, showToast],
   );
 
+  // Sending the proposal only happens after the confirm step (confirmPropose);
+  // this is the actual PATCH the modal's confirm button triggers.
   const handlePropose = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
@@ -220,6 +281,24 @@ export function WorkspaceSavedViewsSidebar({
         showToast(`Proposed "${view.name}" to the team for review`);
       } catch (e) {
         showToast(`Propose failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+      } finally {
+        setConfirmPropose(null);
+      }
+    },
+    [setSavedViewVisibility, showToast],
+  );
+
+  // Withdraw: the proposer pulls their own pending proposal back to a private
+  // personal view (the server allows a creator's Proposed -> Personal). Same
+  // visibility PATCH the rest of the flow uses, so the chip/filters reconcile
+  // off the server's canonical row.
+  const handleWithdraw = useCallback(
+    async (view: WorkspaceSavedView) => {
+      try {
+        await setSavedViewVisibility(view.id, "personal");
+        showToast(`Withdrew "${view.name}" — back to your personal views`);
+      } catch (e) {
+        showToast(`Withdraw failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
       }
     },
     [setSavedViewVisibility, showToast],
@@ -237,16 +316,73 @@ export function WorkspaceSavedViewsSidebar({
     [approveSavedView, showToast],
   );
 
-  const handleReject = useCallback(
-    async (view: WorkspaceSavedView) => {
-      try {
-        await rejectSavedView(view.id);
-        showToast(`Rejected "${view.name}" — returned to the proposer`);
-      } catch (e) {
-        showToast(`Reject failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+  // Cancel a pending reject before it commits: clear its timer, un-hide the
+  // row (it was only hidden locally — never sent), and drop the toast. No
+  // PATCH ever happens, so the rejection simply never occurred.
+  const cancelReject = useCallback(
+    (id: string) => {
+      const timer = rejectTimers.current.get(id);
+      if (timer) {
+        clearTimeout(timer);
+        rejectTimers.current.delete(id);
       }
+      setPendingReject((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      dismissToast();
     },
-    [rejectSavedView, showToast],
+    [dismissToast],
+  );
+
+  // Reject is a delayed, cancelable send: hide the row immediately and offer an
+  // Undo, but only fire the reject PATCH once the window elapses. Approve stays
+  // immediate (see handleApprove) — only rejection is recoverable.
+  const handleReject = useCallback(
+    (view: WorkspaceSavedView) => {
+      const id = view.id;
+      // Coalesce a re-click on an already-pending row: keep the existing timer.
+      if (rejectTimers.current.has(id)) return;
+
+      setPendingReject((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+
+      const timer = setTimeout(() => {
+        rejectTimers.current.delete(id);
+        // The window elapsed without an Undo: commit the rejection. The hook
+        // drops it from the list and refreshes; clear our local hide once it
+        // settles (on failure the refresh restores the row, so it reappears).
+        void rejectSavedView(id)
+          .catch((e) => {
+            showToast(
+              `Reject failed: ${e instanceof Error ? e.message : String(e)}`,
+              "warn",
+            );
+          })
+          .finally(() => {
+            setPendingReject((prev) => {
+              if (!prev.has(id)) return prev;
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+          });
+      }, REJECT_UNDO_WINDOW_MS);
+      rejectTimers.current.set(id, timer);
+
+      // Keep the toast (and its Undo) alive for the whole cancelable window so
+      // the affordance never vanishes while the reject can still be undone.
+      showToast(`Rejected "${view.name}"`, "info", {
+        durationMs: REJECT_UNDO_WINDOW_MS,
+        action: { label: "Undo", onClick: () => cancelReject(id) },
+      });
+    },
+    [cancelReject, rejectSavedView, showToast],
   );
 
   const handleSetDefault = useCallback(
@@ -294,9 +430,17 @@ export function WorkspaceSavedViewsSidebar({
     [showToast],
   );
 
-  const defaultName = useMemo(
-    () => defaultWorkspaceSavedViewName(loadedDatasetNames, activeLayoutName ?? null),
-    [loadedDatasetNames, activeLayoutName],
+  // Built fresh when the Save dialog opens (the modal seeds its own state once
+  // from this prop) so the suggested name reflects the position — Z plane, and
+  // T/C when non-default — at the moment of saving.
+  const makeDefaultName = useCallback(
+    () =>
+      defaultWorkspaceSavedViewName(
+        loadedDatasetNames,
+        activeLayoutName ?? null,
+        getCurrentSavedView()?.view,
+      ),
+    [loadedDatasetNames, activeLayoutName, getCurrentSavedView],
   );
 
   if (!visible) return null;
@@ -313,8 +457,13 @@ export function WorkspaceSavedViewsSidebar({
   // there is no review queue — their own proposals just stay inline with a
   // "Proposed" chip so they can see the pending status. Keeping the partition
   // local means shared/personal rows render exactly as before.
+  // A row whose Reject is mid-window is hidden from the queue right away (the
+  // optimistic removal) even though its PATCH hasn't been sent yet; Undo brings
+  // it straight back because it was never actually removed from the data.
   const reviewQueue = canEdit
-    ? savedViews.filter((view) => view.visibility === "proposed")
+    ? savedViews.filter(
+        (view) => view.visibility === "proposed" && !pendingReject.has(view.id),
+      )
     : [];
   const mainList = canEdit
     ? savedViews.filter((view) => view.visibility !== "proposed")
@@ -371,6 +520,7 @@ export function WorkspaceSavedViewsSidebar({
                 view={view}
                 isRenaming={renameId === view.id}
                 isDefault={defaultSavedViewId === view.id}
+                isActive={currentOpenSavedViewId === view.id}
                 onRenameCommit={(n) => handleRenameCommit(view.id, n)}
                 onRenameCancel={() => setRenameId(null)}
                 onOpen={() => void handleOpen(view)}
@@ -395,7 +545,7 @@ export function WorkspaceSavedViewsSidebar({
                     data-testid={`saved-view-reject-${view.id}`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void handleReject(view);
+                      handleReject(view);
                     }}
                   >
                     Reject
@@ -414,6 +564,7 @@ export function WorkspaceSavedViewsSidebar({
             view={view}
             isRenaming={renameId === view.id}
             isDefault={defaultSavedViewId === view.id}
+            isActive={currentOpenSavedViewId === view.id}
             onRenameCommit={(n) => handleRenameCommit(view.id, n)}
             onRenameCancel={() => setRenameId(null)}
             onOpen={() => void handleOpen(view)}
@@ -429,6 +580,13 @@ export function WorkspaceSavedViewsSidebar({
           x={menu.x}
           y={menu.y}
           canEdit={canEdit}
+          isMine={(() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            // Own-management (Rename/Delete) is scoped to a creator's own
+            // personal/proposed view — a shared view is editor-only (the server
+            // enforces this), so don't offer it for an own *shared* view.
+            return view ? isMine(view) && view.visibility !== "shared" : false;
+          })()}
           isDefault={defaultSavedViewId === menu.savedViewId}
           savedViewId={menu.savedViewId}
           canPromote={(() => {
@@ -439,6 +597,10 @@ export function WorkspaceSavedViewsSidebar({
             const view = savedViews.find((item) => item.id === menu.savedViewId);
             return view ? canProposeToTeam(view) : false;
           })()}
+          canWithdraw={(() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            return view ? canWithdrawProposal(view) : false;
+          })()}
           onPromote={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
             setMenu(null);
@@ -447,7 +609,13 @@ export function WorkspaceSavedViewsSidebar({
           onPropose={() => {
             const view = savedViews.find((item) => item.id === menu.savedViewId);
             setMenu(null);
-            if (view) void handlePropose(view);
+            // Confirm first — proposing makes the view visible to every editor.
+            if (view) setConfirmPropose({ savedView: view });
+          }}
+          onWithdraw={() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            setMenu(null);
+            if (view) void handleWithdraw(view);
           }}
           onRename={() => {
             setRenameId(menu.savedViewId);
@@ -478,7 +646,7 @@ export function WorkspaceSavedViewsSidebar({
 
       {savePromptOpen && (
         <SaveWorkspaceSavedViewModal
-          defaultName={defaultName}
+          defaultName={makeDefaultName()}
           canSaveShared={canEdit}
           onCancel={() => setSavePromptOpen(false)}
           onSave={async (name, visibility) => {
@@ -489,10 +657,38 @@ export function WorkspaceSavedViewsSidebar({
       )}
 
       {confirmDelete && (
-        <ConfirmDeleteModal
-          name={confirmDelete.savedView.name}
+        <ConfirmModal
+          ariaLabel="Confirm delete"
+          tone="danger"
+          title="Delete saved view?"
+          confirmLabel="Delete"
+          body={
+            <>
+              Delete saved view <strong>"{confirmDelete.savedView.name}"</strong>?
+              {" "}This cannot be undone.
+            </>
+          }
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => handleDelete(confirmDelete.savedView)}
+        />
+      )}
+
+      {confirmPropose && (
+        <ConfirmModal
+          ariaLabel="Confirm propose"
+          tone="primary"
+          title="Propose to the team?"
+          confirmLabel="Propose to team"
+          confirmTestId="saved-view-propose-confirm"
+          body={
+            <>
+              Propose <strong>"{confirmPropose.savedView.name}"</strong> to the
+              team? Every editor will see it in their review queue and can approve
+              it to share it with the whole workspace.
+            </>
+          }
+          onCancel={() => setConfirmPropose(null)}
+          onConfirm={() => void handlePropose(confirmPropose.savedView)}
         />
       )}
 
@@ -501,7 +697,17 @@ export function WorkspaceSavedViewsSidebar({
           role="status"
           className={`bookmark-toast${toast.kind === "warn" ? " warn" : ""}`}
         >
-          {toast.text}
+          <span className="bookmark-toast-text">{toast.text}</span>
+          {toast.action && (
+            <button
+              type="button"
+              className="bookmark-toast-action"
+              data-testid="saved-view-toast-action"
+              onClick={toast.action.onClick}
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -512,7 +718,7 @@ const VISIBILITY_CHIP: Record<
   WorkspaceSavedView["visibility"],
   { label: string; title: string } | null
 > = {
-  shared: null,
+  shared: { label: "Shared", title: "Shared with the whole team" },
   personal: { label: "Personal", title: "Only you can see this saved view" },
   proposed: {
     label: "Proposed",
@@ -524,6 +730,7 @@ function SavedViewRow({
   view,
   isRenaming,
   isDefault,
+  isActive,
   onRenameCommit,
   onRenameCancel,
   onOpen,
@@ -533,6 +740,7 @@ function SavedViewRow({
   view: WorkspaceSavedView;
   isRenaming: boolean;
   isDefault: boolean;
+  isActive: boolean;
   onRenameCommit: (name: string) => void;
   onRenameCancel: () => void;
   onOpen: () => void;
@@ -546,6 +754,8 @@ function SavedViewRow({
       className="bookmark-row"
       data-testid="saved-view-row"
       data-visibility={view.visibility}
+      data-active={isActive ? "true" : undefined}
+      aria-current={isActive ? "true" : undefined}
       onClick={(e) => {
         const target = e.target as HTMLElement | null;
         if (target?.closest(".bookmark-menu-btn")) return;
@@ -648,12 +858,15 @@ function WorkspaceSavedViewActionsMenu({
   x,
   y,
   canEdit,
+  isMine,
   isDefault,
   savedViewId,
   canPromote,
   canPropose,
+  canWithdraw,
   onPromote,
   onPropose,
+  onWithdraw,
   onRename,
   onSetDefault,
   onReplace,
@@ -663,18 +876,26 @@ function WorkspaceSavedViewActionsMenu({
   x: number;
   y: number;
   canEdit: boolean;
+  isMine: boolean;
   isDefault: boolean;
   savedViewId: string;
   canPromote: boolean;
   canPropose: boolean;
+  canWithdraw: boolean;
   onPromote: () => void;
   onPropose: () => void;
+  onWithdraw: () => void;
   onRename: () => void;
   onSetDefault: () => void;
   onReplace: () => void;
   onDelete: () => void;
   onCopyLink: () => void;
 }) {
+  // Renaming/deleting a row you created is a personal action the server already
+  // permits its creator (workspace_personal_saved_view_mutations_are_creator_only),
+  // so offer it whenever the row is mine — even to a viewer. Set-default /
+  // Update / promote act on the shared document and stay gated by edit access.
+  const canManageOwn = canEdit || isMine;
   return (
     <div
       className="bookmark-menu"
@@ -702,12 +923,26 @@ function WorkspaceSavedViewActionsMenu({
           Propose to team
         </button>
       )}
+      {canWithdraw && (
+        <button
+          type="button"
+          role="menuitem"
+          data-testid={`saved-view-withdraw-${savedViewId}`}
+          onClick={onWithdraw}
+        >
+          Withdraw proposal
+        </button>
+      )}
       {canEdit && (
         <>
           <button type="button" role="menuitem" onClick={onSetDefault}>
             {isDefault ? "Clear default" : "Set as default"}
           </button>
           <button type="button" role="menuitem" onClick={onReplace}>Update from current view</button>
+        </>
+      )}
+      {canManageOwn && (
+        <>
           <button type="button" role="menuitem" onClick={onRename}>Rename</button>
           <button type="button" role="menuitem" className="danger" onClick={onDelete}>
             Delete
@@ -733,10 +968,11 @@ function SaveWorkspaceSavedViewModal({
   ) => void | Promise<void>;
 }) {
   const [name, setName] = useState(defaultName);
-  // Editors keep today's "shared" default; viewers can only save personally,
-  // so personal is both the default and the only enabled choice.
+  // Personal is the default for everyone — sharing stays a deliberate one-click
+  // choice. Viewers can only save personally, so for them it's also the only
+  // enabled option.
   const [visibility, setVisibility] = useState<WorkspaceSavedViewVisibility>(
-    canSaveShared ? "shared" : "personal",
+    "personal",
   );
   const ref = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
@@ -847,31 +1083,48 @@ function SaveWorkspaceSavedViewModal({
   );
 }
 
-function ConfirmDeleteModal({
-  name,
+// One confirm affordance for any irreversible-or-broadcasting action (delete,
+// propose). `tone` only swaps the accent on the confirm button — a warm danger
+// for destructive actions, the brand primary for a benign-but-deliberate one
+// like proposing — so the two flows stay visually consistent.
+function ConfirmModal({
+  ariaLabel,
+  title,
+  body,
+  confirmLabel,
+  tone,
+  confirmTestId,
   onCancel,
   onConfirm,
 }: {
-  name: string;
+  ariaLabel: string;
+  title: string;
+  body: React.ReactNode;
+  confirmLabel: string;
+  tone: "danger" | "primary";
+  confirmTestId?: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   return (
     <div className="bookmark-confirm-overlay" onClick={onCancel}>
       <div
-        className="bookmark-confirm-modal"
+        className={`bookmark-confirm-modal bookmark-confirm-modal-${tone}`}
         onClick={(e) => e.stopPropagation()}
         role="alertdialog"
-        aria-label="Confirm delete"
+        aria-label={ariaLabel}
       >
-        <h4>Delete saved view?</h4>
-        <p>
-          Delete saved view <strong>"{name}"</strong>? This cannot be undone.
-        </p>
+        <h4>{title}</h4>
+        <p>{body}</p>
         <div className="bookmark-confirm-modal-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
-          <button type="button" className="danger" onClick={onConfirm}>
-            Delete
+          <button
+            type="button"
+            className={tone}
+            data-testid={confirmTestId}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
           </button>
         </div>
       </div>

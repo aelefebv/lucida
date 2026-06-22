@@ -49,6 +49,25 @@ export interface CaptureInputs {
    *  `useDatasetSettings.autoContrastMap`. Optional — omitted when no
    *  per-dataset preference has been set. */
   autoContrastByDatasetId?: AutoContrastByDatasetId;
+  /**
+   * The authoritative live Z/T/C selection, sourced from the React
+   * dimension state rather than the scene's presence export.
+   *
+   * Why this exists: the live React Z/T/C sliders are not always pushed
+   * into the WASM scene before a "Save view" (e.g. a peer-follow update,
+   * a bootstrap restore, or the dim-clamp effect can move React state
+   * while the scene's `set_z`/`set_t`/`set_c` write is gated behind an
+   * `if (scene)` guard or simply hasn't fired yet). When that happens,
+   * `scene.export_presence().view` reports the *default* `z_range {0,1}`
+   * (t/c = 0), which the encoder then strips — silently losing the user's
+   * actual slab/timepoint/channel.
+   *
+   * When provided, this view is captured verbatim as the `view` field,
+   * preserving the FULL `z_range` slab (start AND end), `t`, `c`, and
+   * `multi_channel`. When omitted, we fall back to the scene's presence
+   * export (legacy behavior) so other callers are unaffected.
+   */
+  liveView?: ViewState;
 }
 
 /**
@@ -63,12 +82,21 @@ export function buildCapture({
   urlByDatasetId,
   datasetReferenceMode = "source-url",
   autoContrastByDatasetId,
+  liveView,
 }: CaptureInputs): SavedView {
   const presence = JSON.parse(scene.export_presence()) as {
     camera: Camera;
     view: ViewState;
     display: DisplayState;
   };
+
+  // Capture the authoritative live Z/T/C when the caller supplied it,
+  // since the React dimension state — not the scene's presence export —
+  // is the source of truth for what the user is actually looking at. The
+  // full `z_range` slab (start AND end), `t`, `c`, and `multi_channel`
+  // are all preserved. Falls back to the scene's `view` when no live
+  // state is passed (keeps legacy callers unchanged).
+  const view: ViewState = liveView ?? presence.view;
   const datasetPresence = JSON.parse(scene.export_dataset_presence()) as {
     dataset_order: DatasetId[];
     dataset_settings: Record<DatasetId, DatasetDisplaySettings>;
@@ -128,7 +156,7 @@ export function buildCapture({
     datasets: orderedUrls,
     active_layouts: activeLayouts,
     camera: presence.camera,
-    view: presence.view,
+    view,
     display: presence.display,
     dataset_order: datasetPresence.dataset_order,
     dataset_settings: datasetPresence.dataset_settings,

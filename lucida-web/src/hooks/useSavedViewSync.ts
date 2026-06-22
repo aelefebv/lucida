@@ -13,11 +13,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { dataset_id_for_url } from "lucida-core";
-import { SavedViewApplier } from "../savedView/applier.ts";
+import { SavedViewApplier, type DimensionExtentsResolver } from "../savedView/applier.ts";
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
-import type { DatasetReferenceMode, SavedView } from "../savedView/types.ts";
+import type { DatasetReferenceMode, SavedView, ViewState } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
@@ -44,6 +44,21 @@ interface Params {
    *  interactive+residency dirty, the RAF-pull-based loop sits idle
    *  until the next user input (Bug #2 root cause). */
   loopRef: React.RefObject<RenderLoop | null>;
+  /** Reads the authoritative live Z/T/C as a `ViewState` from the React
+   *  dimension state. Captured verbatim by `buildCapture` so "Save view"
+   *  records what the user is actually looking at — independent of whether
+   *  the live slab/timepoint/channel has been flushed into the WASM scene
+   *  yet (the capture root cause: scene presence can still report the
+   *  default `z_range {0,1}`). Returns null when no scene/dims exist.
+   *  Optional: when omitted, capture falls back to the scene's presence
+   *  view (legacy behavior). */
+  getLiveView?: () => ViewState | null;
+  /** Resolves the recipient's per-dataset T/C extents (counts) so an
+   *  applied view's out-of-range timepoint/channel clamps to fit. Sourced
+   *  from the live manifest-derived dimension union; Z is handled by the
+   *  applier via the scene's volume shape. Optional — omit to leave t/c
+   *  unclamped. */
+  dimensionExtentsFor?: DimensionExtentsResolver;
   /** React-side dim mirrors. The applier writes set_c/set_t/set_z_range
    *  to WASM; without these the C/T/Z sliders stay stale (e.g. bookmark
    *  saved on ch2 opens with the C slider showing 0; Bug #3 root cause). */
@@ -94,6 +109,8 @@ export function useSavedViewSync({
   debounceMs,
   onApplyResult,
   loopRef,
+  getLiveView,
+  dimensionExtentsFor,
   setC,
   setT,
   setZ,
@@ -125,6 +142,15 @@ export function useSavedViewSync({
   const fetchLastViewRef = useRef(fetchLastView);
   const persistLastViewRef = useRef(persistLastView);
   const restoreEnabledRef = useRef(restoreLastViewEnabled);
+  // Live-view + extents resolvers are read at call time (capture fires
+  // from event handlers; extents from inside apply), so keep them in refs
+  // that track the latest props without relifting the bundle initializer.
+  const getLiveViewRef = useRef(getLiveView);
+  const dimensionExtentsForRef = useRef(dimensionExtentsFor);
+  // eslint-disable-next-line react-hooks/refs
+  getLiveViewRef.current = getLiveView;
+  // eslint-disable-next-line react-hooks/refs
+  dimensionExtentsForRef.current = dimensionExtentsFor;
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
   // eslint-disable-next-line react-hooks/refs
@@ -155,6 +181,9 @@ export function useSavedViewSync({
           urlByDatasetId,
           datasetReferenceMode,
           autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
+          // Authoritative live Z/T/C from React; falls back to the scene's
+          // presence view inside buildCapture when null.
+          liveView: getLiveViewRef.current?.() ?? undefined,
         });
       } catch (e) {
         console.warn("[SavedView] capture failed:", e);
@@ -176,6 +205,9 @@ export function useSavedViewSync({
       30_000,
       datasetReferenceMode,
       allowDocumentLayoutMutation,
+      // Read the resolver from the ref at call time so updates to the
+      // recipient's manifest-derived extents take effect across applies.
+      (datasetId) => dimensionExtentsForRef.current?.(datasetId) ?? {},
     );
     const urlSync = new UrlSync(captureFn, applier, {
       debounceMs,
@@ -203,6 +235,10 @@ export function useSavedViewSync({
         urlByDatasetId: bundle.urlByDatasetId,
         datasetReferenceMode,
         autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
+        // Authoritative live Z/T/C from React (read via ref so the share
+        // button captures the user's actual slab/timepoint/channel even if
+        // it hasn't been flushed to the scene yet).
+        liveView: getLiveViewRef.current?.() ?? undefined,
       });
     } catch (e) {
       console.warn("[SavedView] capture failed:", e);

@@ -46,6 +46,20 @@ export function useDimensions({
     dimT = Math.max(dimT, shape[Axis.T]);
   }
 
+  // Per-dataset T/C/Z extents (counts) for saved-view clamping. The applier
+  // can read Z from the scene's volume shape but NOT T/C, so it asks for
+  // these. We answer from the loaded manifest (shape is [T, C, Z, Y, X]);
+  // an unknown/unloaded dataset returns `{}`, leaving that axis unclamped.
+  const dimensionExtentsFor = useCallback(
+    (datasetId: string): { z?: number; t?: number; c?: number } => {
+      const ds = datasetsRef.current.get(datasetId);
+      const shape = ds?.manifest.images[0]?.multiscale.levels[0]?.shape;
+      if (!shape) return {};
+      return { z: shape[Axis.Z], t: shape[Axis.T], c: shape[Axis.C] };
+    },
+    [datasetsRef],
+  );
+
   // Clamp slider values when union dimensions shrink, and sync to WASM scene.
   // The clamp is a synchronization with external state (manifest dim union),
   // not a derivation — z/c/t are user-controlled but must follow the open
@@ -145,6 +159,7 @@ export function useDimensions({
     viewMode, setViewMode,
     multiChannel, setMultiChannel,
     dimZ, dimC, dimT,
+    dimensionExtentsFor,
     handleViewModeToggle,
     handleZChange, handleCChange, handleTChange, handleMultiChannelToggle,
   };

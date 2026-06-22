@@ -162,3 +162,7 @@
 - feat(workspace): promote a personal saved view to shared (#699) (slipway, reversible: git-revert)
 - feat(workspace): viewer-proposed saved views (#702) (slipway, reversible: git-revert)
 - feat(cli,python): saved-view sharing parity — visibility, promote, approve, reject (#699/#702) (slipway, reversible: git-revert)
+- docs: note that large datasets are fine for testing (chunked loading) (#815) (slipway, reversible: git-revert)
+- fix(web): capture + restore the saved-view Z/T/C plane, clamp to the addressed dataset (#814) (slipway, reversible: git-revert)
+- feat(web): saved-view sidebar UX — Shared chip, default-Personal, position-aware names, viewer manages own views, active-row feedback (slipway, reversible: git-revert)
+- feat(web): confirm before proposing, withdraw a proposal, and undoable reject (#702 follow-up) (slipway, reversible: git-revert)
