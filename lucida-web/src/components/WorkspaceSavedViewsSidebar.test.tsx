@@ -199,12 +199,15 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
 });
 
 describe("WorkspaceSavedViewsSidebar — save modal (editor)", () => {
-  it("defaults to shared, lets the editor pick personal, and POSTs visibility", async () => {
+  it("defaults to personal, lets the editor pick shared, and POSTs visibility", async () => {
+    // Slice 2 (#699/#700 follow-up): the dialog now defaults to Personal for ALL
+    // roles so a hurried save can't broadcast to the team by accident; an editor
+    // can still deliberately pick Shared.
     let postBody: Record<string, unknown> | null = null;
     responder = (_url, init) => {
       if (init?.method === "POST") {
         postBody = JSON.parse(init.body as string) as Record<string, unknown>;
-        return jsonResponse(201, savedViewRow({ id: "new", visibility: "personal" }));
+        return jsonResponse(201, savedViewRow({ id: "new", visibility: "shared" }));
       }
       return jsonResponse(200, []);
     };
@@ -215,18 +218,18 @@ describe("WorkspaceSavedViewsSidebar — save modal (editor)", () => {
     const shared = screen.getByTestId("visibility-shared") as HTMLInputElement;
     const personal = screen.getByTestId("visibility-personal") as HTMLInputElement;
     expect(shared.disabled).toBe(false);
-    expect(shared.checked).toBe(true);
-    expect(personal.checked).toBe(false);
-
-    await userEvent.click(personal);
     expect(personal.checked).toBe(true);
+    expect(shared.checked).toBe(false);
+
+    await userEvent.click(shared);
+    expect(shared.checked).toBe(true);
 
     await act(async () => {
       await userEvent.click(screen.getByTestId("saved-view-save-confirm"));
     });
 
     expect(postBody).not.toBeNull();
-    expect(postBody).toMatchObject({ visibility: "personal" });
+    expect(postBody).toMatchObject({ visibility: "shared" });
   });
 });
 

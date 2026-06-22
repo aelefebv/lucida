@@ -11,7 +11,7 @@ import {
   type WorkspaceSavedView,
   type WorkspaceSavedViewVisibility,
 } from "../workspaceApi.ts";
-import type { SavedView } from "./types.ts";
+import type { SavedView, ViewState } from "./types.ts";
 
 export type {
   WorkspaceSavedView,
@@ -250,6 +250,7 @@ export function useWorkspaceSavedViews({
 export function defaultWorkspaceSavedViewName(
   datasetNames: readonly string[],
   activeLayoutName: string | null,
+  view?: Pick<ViewState, "z_range" | "t" | "c"> | null,
 ): string {
   if (datasetNames.length === 0) return "Untitled";
   let base = datasetNames.filter((name) => name.trim().length > 0).join(", ");
@@ -257,7 +258,27 @@ export function defaultWorkspaceSavedViewName(
   if (activeLayoutName && activeLayoutName.trim().length > 0) {
     base = `${base} - ${activeLayoutName}`;
   }
+  // Two views of the same dataset+layout differ only by where they're parked,
+  // so append the position. The Z plane (the slab's start) always disambiguates;
+  // T and C are added only when non-default, mirroring the URL encoder's
+  // `t !== 0` / `c !== 0` defaults so an unmoved time/channel adds no noise.
+  const position = positionSuffix(view);
+  // Truncate the name part first so the distinguishing position isn't the thing
+  // that gets cut off.
+  if (position.length > 0) {
+    return `${truncate(base, 60 - position.length - 3)} — ${position}`;
+  }
   return truncate(base, 60);
+}
+
+function positionSuffix(
+  view?: Pick<ViewState, "z_range" | "t" | "c"> | null,
+): string {
+  if (!view) return "";
+  const parts = [`Z${view.z_range.start}`];
+  if (view.t !== 0) parts.push(`T${view.t}`);
+  if (view.c !== 0) parts.push(`C${view.c}`);
+  return parts.join(" ");
 }
 
 function truncate(s: string, max: number): string {

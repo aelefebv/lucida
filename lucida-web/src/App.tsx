@@ -662,6 +662,7 @@ function App({
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
+  const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
 
@@ -697,9 +698,12 @@ function App({
 
   const savedViewApplier = savedViewSync.applier;
   const notifySavedViewChange = savedViewSync.notifyChange;
-  const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView) => {
+  const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
     await savedViewApplier.apply(view);
     notifySavedViewChange();
+    // Remember which saved view is now applied so the sidebar can flag the
+    // active row. Set it only after a successful apply.
+    setCurrentOpenSavedViewId(savedViewId);
   }, [savedViewApplier, notifySavedViewChange]);
 
   const commitWorkspaceName = useCallback(() => {
@@ -1148,6 +1152,7 @@ function App({
         activeLayoutName={activeLayoutName}
         defaultSavedViewId={defaultSavedViewId}
         onSetDefaultSavedView={onSetDefaultSavedView}
+        currentOpenSavedViewId={currentOpenSavedViewId}
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />

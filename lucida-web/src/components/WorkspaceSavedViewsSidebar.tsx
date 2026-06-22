@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -20,11 +19,14 @@ export interface WorkspaceSavedViewsSidebarProps {
   currentUserEmail: string | null;
   canEdit: boolean;
   getCurrentSavedView: () => SavedView | null;
-  onOpenSavedView: (view: SavedView) => void | Promise<void>;
+  onOpenSavedView: (view: SavedView, savedViewId: string) => void | Promise<void>;
   loadedDatasetNames: readonly string[];
   activeLayoutName?: string | null;
   defaultSavedViewId: string | null;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
+  /** Id of the saved view currently applied to the viewer, if any. The matching
+   *  row renders as active so the user can see which view they're looking at. */
+  currentOpenSavedViewId?: string | null;
   style?: React.CSSProperties;
   visible: boolean;
 }
@@ -54,6 +56,7 @@ export function WorkspaceSavedViewsSidebar({
   activeLayoutName,
   defaultSavedViewId,
   onSetDefaultSavedView,
+  currentOpenSavedViewId,
   style,
   visible,
 }: WorkspaceSavedViewsSidebarProps) {
@@ -158,7 +161,7 @@ export function WorkspaceSavedViewsSidebar({
   const handleOpen = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
-        await onOpenSavedView(view.view);
+        await onOpenSavedView(view.view, view.id);
       } catch (e) {
         showToast(`Open failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
       }
@@ -294,9 +297,17 @@ export function WorkspaceSavedViewsSidebar({
     [showToast],
   );
 
-  const defaultName = useMemo(
-    () => defaultWorkspaceSavedViewName(loadedDatasetNames, activeLayoutName ?? null),
-    [loadedDatasetNames, activeLayoutName],
+  // Built fresh when the Save dialog opens (the modal seeds its own state once
+  // from this prop) so the suggested name reflects the position — Z plane, and
+  // T/C when non-default — at the moment of saving.
+  const makeDefaultName = useCallback(
+    () =>
+      defaultWorkspaceSavedViewName(
+        loadedDatasetNames,
+        activeLayoutName ?? null,
+        getCurrentSavedView()?.view,
+      ),
+    [loadedDatasetNames, activeLayoutName, getCurrentSavedView],
   );
 
   if (!visible) return null;
@@ -371,6 +382,7 @@ export function WorkspaceSavedViewsSidebar({
                 view={view}
                 isRenaming={renameId === view.id}
                 isDefault={defaultSavedViewId === view.id}
+                isActive={currentOpenSavedViewId === view.id}
                 onRenameCommit={(n) => handleRenameCommit(view.id, n)}
                 onRenameCancel={() => setRenameId(null)}
                 onOpen={() => void handleOpen(view)}
@@ -414,6 +426,7 @@ export function WorkspaceSavedViewsSidebar({
             view={view}
             isRenaming={renameId === view.id}
             isDefault={defaultSavedViewId === view.id}
+            isActive={currentOpenSavedViewId === view.id}
             onRenameCommit={(n) => handleRenameCommit(view.id, n)}
             onRenameCancel={() => setRenameId(null)}
             onOpen={() => void handleOpen(view)}
@@ -429,6 +442,13 @@ export function WorkspaceSavedViewsSidebar({
           x={menu.x}
           y={menu.y}
           canEdit={canEdit}
+          isMine={(() => {
+            const view = savedViews.find((item) => item.id === menu.savedViewId);
+            // Own-management (Rename/Delete) is scoped to a creator's own
+            // personal/proposed view — a shared view is editor-only (the server
+            // enforces this), so don't offer it for an own *shared* view.
+            return view ? isMine(view) && view.visibility !== "shared" : false;
+          })()}
           isDefault={defaultSavedViewId === menu.savedViewId}
           savedViewId={menu.savedViewId}
           canPromote={(() => {
@@ -478,7 +498,7 @@ export function WorkspaceSavedViewsSidebar({
 
       {savePromptOpen && (
         <SaveWorkspaceSavedViewModal
-          defaultName={defaultName}
+          defaultName={makeDefaultName()}
           canSaveShared={canEdit}
           onCancel={() => setSavePromptOpen(false)}
           onSave={async (name, visibility) => {
@@ -512,7 +532,7 @@ const VISIBILITY_CHIP: Record<
   WorkspaceSavedView["visibility"],
   { label: string; title: string } | null
 > = {
-  shared: null,
+  shared: { label: "Shared", title: "Shared with the whole team" },
   personal: { label: "Personal", title: "Only you can see this saved view" },
   proposed: {
     label: "Proposed",
@@ -524,6 +544,7 @@ function SavedViewRow({
   view,
   isRenaming,
   isDefault,
+  isActive,
   onRenameCommit,
   onRenameCancel,
   onOpen,
@@ -533,6 +554,7 @@ function SavedViewRow({
   view: WorkspaceSavedView;
   isRenaming: boolean;
   isDefault: boolean;
+  isActive: boolean;
   onRenameCommit: (name: string) => void;
   onRenameCancel: () => void;
   onOpen: () => void;
@@ -546,6 +568,8 @@ function SavedViewRow({
       className="bookmark-row"
       data-testid="saved-view-row"
       data-visibility={view.visibility}
+      data-active={isActive ? "true" : undefined}
+      aria-current={isActive ? "true" : undefined}
       onClick={(e) => {
         const target = e.target as HTMLElement | null;
         if (target?.closest(".bookmark-menu-btn")) return;
@@ -648,6 +672,7 @@ function WorkspaceSavedViewActionsMenu({
   x,
   y,
   canEdit,
+  isMine,
   isDefault,
   savedViewId,
   canPromote,
@@ -663,6 +688,7 @@ function WorkspaceSavedViewActionsMenu({
   x: number;
   y: number;
   canEdit: boolean;
+  isMine: boolean;
   isDefault: boolean;
   savedViewId: string;
   canPromote: boolean;
@@ -675,6 +701,11 @@ function WorkspaceSavedViewActionsMenu({
   onDelete: () => void;
   onCopyLink: () => void;
 }) {
+  // Renaming/deleting a row you created is a personal action the server already
+  // permits its creator (workspace_personal_saved_view_mutations_are_creator_only),
+  // so offer it whenever the row is mine — even to a viewer. Set-default /
+  // Update / promote act on the shared document and stay gated by edit access.
+  const canManageOwn = canEdit || isMine;
   return (
     <div
       className="bookmark-menu"
@@ -708,6 +739,10 @@ function WorkspaceSavedViewActionsMenu({
             {isDefault ? "Clear default" : "Set as default"}
           </button>
           <button type="button" role="menuitem" onClick={onReplace}>Update from current view</button>
+        </>
+      )}
+      {canManageOwn && (
+        <>
           <button type="button" role="menuitem" onClick={onRename}>Rename</button>
           <button type="button" role="menuitem" className="danger" onClick={onDelete}>
             Delete
@@ -733,10 +768,11 @@ function SaveWorkspaceSavedViewModal({
   ) => void | Promise<void>;
 }) {
   const [name, setName] = useState(defaultName);
-  // Editors keep today's "shared" default; viewers can only save personally,
-  // so personal is both the default and the only enabled choice.
+  // Personal is the default for everyone — sharing stays a deliberate one-click
+  // choice. Viewers can only save personally, so for them it's also the only
+  // enabled option.
   const [visibility, setVisibility] = useState<WorkspaceSavedViewVisibility>(
-    canSaveShared ? "shared" : "personal",
+    "personal",
   );
   const ref = useRef<HTMLInputElement | null>(null);
   useEffect(() => {

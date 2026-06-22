@@ -140,6 +140,13 @@
   border-left: 2px solid rgba(240, 173, 78, 0.6);
 }
 
+/* The saved view currently applied to the viewer — a steady highlight (no
+   hover dependency) so the user can see at a glance which view is open. */
+.bookmark-row[data-active="true"] {
+  background: #25253a;
+  border-left: 2px solid #646cff;
+}
+
 .bookmark-review-section {
   margin-bottom: 0.5rem;
 }
