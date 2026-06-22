@@ -407,10 +407,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       // cancels a pending linger-hide) so a later re-show starts from a quiet
       // baseline (no stale popover, no flashed handles). Syncing transient state
       // to a changed prop — keep the effect.
-      /* eslint-disable react-hooks/set-state-in-effect */
+       
       setOpenPinId(null);
       setActiveShapeId(null);
-      /* eslint-enable react-hooks/set-state-in-effect */
+       
       if (hideHandlesTimer.current !== null) {
         clearTimeout(hideHandlesTimer.current);
         hideHandlesTimer.current = null;
@@ -435,7 +435,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       // author or a peer, or the dataset changed), so the popover must close or
       // it would dangle. External-data-driven reset, not avoidable derived render
       // state — keep the effect.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       setOpenPinId(null);
     }
   }, [annotations, openPinId]);
@@ -444,7 +444,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     // Deliberate transient-UI reset on a prop (dataset) change: the open thread
     // belongs to the previous dataset's pin, so switching datasets must close it.
     // Syncing transient state to a changed prop — keep the effect.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setOpenPinId(null);
   }, [datasetId]);
 
@@ -458,7 +458,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       // Deliberate cleanup: the hovered shape was removed (or its dataset
       // changed), so drop the hover or its handles would linger as orphans.
       // External-data-driven reset, not avoidable derived render state — keep it.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       setActiveShapeId(null);
     }
   }, [annotations, activeShapeId]);
@@ -475,7 +475,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // render phase is the same idempotent pattern PeerCursors uses for its
   // per-frame reads — written, never read, during this render.
   const annotationsRef = useRef(annotations);
-  // eslint-disable-next-line react-hooks/refs
+   
   annotationsRef.current = annotations;
 
   // Imperative navigation seam (issue #526): let a host jump to a pin from

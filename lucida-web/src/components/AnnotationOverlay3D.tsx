@@ -173,7 +173,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       // author or a peer), so the popover must close or it would dangle. This is
       // an external-data-driven reset, not avoidable derived render state — keep
       // the effect.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       setOpenPinId(null);
     }
   }, [annotations, openPinId]);
@@ -184,7 +184,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     // belongs to the previous dataset's pin, so it must close when the dataset
     // switches. This is exactly the "synchronize transient state to a changed
     // prop" case, not derived render state — keep the effect.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setOpenPinId(null);
   }, [datasetId]);
 
@@ -198,7 +198,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     // Deliberate transient-UI reset on a prop (visibility) change: hiding the
     // overlay drops the open thread so a later re-show starts clean (no stale
     // popover pops open). Syncing transient state to a changed prop — keep it.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     if (!visible) setOpenPinId(null);
   }, [visible]);
 
@@ -206,10 +206,10 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   // remounting when the set changes — the same render-phase, write-only mirror
   // pattern PeerCursors and AnnotationOverlay use.
   const annotationsRef = useRef(annotations);
-  // eslint-disable-next-line react-hooks/refs
+   
   annotationsRef.current = annotations;
   const datasetIdRef = useRef(datasetId);
-  // eslint-disable-next-line react-hooks/refs
+   
   datasetIdRef.current = datasetId;
 
   // Imperative navigation seam (issue #526) — the 3D twin of the 2D overlay's
