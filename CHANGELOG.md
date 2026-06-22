@@ -168,4 +168,5 @@
 - feat(web): confirm before proposing, withdraw a proposal, and undoable reject (#702 follow-up) (slipway, reversible: git-revert)
 - fix(deps): bump vulnerable lockfile deps; drop stray npm lockfile (slipway, reversible: git-revert)
 - fix(deps): jsonwebtoken 9 -> 10.3 (auth; fixes exp/nbf type-confusion bypass) (slipway, reversible: git-revert)
+- ci(deps): add lucida-py CI job; drop Python 3.9 (clears pytest alert) (slipway, reversible: git-revert)
 - fix(deps): lru 0.12 -> 0.16 (lucida-store; clears soundness alert) (slipway, reversible: git-revert)

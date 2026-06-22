@@ -282,3 +282,30 @@ jobs:
 
       - name: kubeconform validation
         run: kubeconform -strict -summary /tmp/k8s-rendered/
+
+  python:
+    name: lucida-py (maturin + pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build (shared with rust job)
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # lucida-py is excluded from the cargo workspace, so the `rust` job does
+      # NOT build it — this job is its sole CI gate. Build the pyo3 extension
+      # with maturin and run the client tests. uv provisions a >=3.10
+      # interpreter per pyproject's requires-python.
+      - name: Build extension + run tests
+        working-directory: lucida-py
+        run: |
+          uv sync --python 3.12
+          uv run maturin develop
+          uv run pytest -q
