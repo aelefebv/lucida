@@ -34,20 +34,35 @@ For any production-shape deployment — multi-user identity, proper admin gating
 
 ### Develop on it
 
+Prerequisites: rust + cargo, pnpm, wasm-pack, node — your package manager equivalent.
+
+One command brings everything up to date and runs both servers:
+
+```bash
+./scripts/dev.sh
+```
+
+It installs the web deps if they're missing, rebuilds the `lucida-core` wasm pkg **only when a `lucida-*` Rust source actually changed** (content-hashed, so an mtime bump from `git checkout` doesn't trigger a needless rebuild), builds `lucida-server`, then starts the relay server (binds `127.0.0.1:9876`, auth auto-disabled on loopback) and the Vite SPA dev server (which proxies `/auth /api /admin /ws` to `:9876`), streaming both logs. `Ctrl-C` stops both cleanly. Pass `--wasm` to force a wasm rebuild, or `--help` for details.
+
+Then visit <http://localhost:5173>.
+
+<details>
+<summary>Prefer to run the two-terminal loop by hand?</summary>
+
 One-time setup:
 
-rust + cargo, pnpm, wasm-pack, node — your package manager equivalent
 ```bash
 (cd lucida-web && pnpm install)
 ```
 
-Two-terminal dev loop:
+Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopback):
 
-Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopback)
 ```bash
 cargo run -p lucida-server
 ```
-Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876)
+
+Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876):
+
 ```bash
 (pnpm install --force && cd lucida-web && pnpm run build:wasm && pnpm run dev -- --force)
 ```
@@ -55,6 +70,8 @@ Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876)
 `pnpm install --force` refreshes the local `file:../lucida-core/pkg` copy in `node_modules`, and `pnpm run dev -- --force` makes Vite discard any stale optimized dependency cache.
 
 Visit <http://localhost:5173>.
+
+</details>
 
 ### Use the CLI and Python client
 
@@ -184,7 +201,7 @@ docker run --rm -p 127.0.0.1:9876:9876 \
 
 ## Working with the codebase
 
-- **Rust changes in any `lucida-*` crate** → rerun `(cd lucida-web && pnpm run build:wasm)` so the SPA picks up the new WASM
+- **Rust changes in any `lucida-*` crate** → the SPA needs a fresh WASM build; `./scripts/dev.sh` rebuilds it automatically on restart, or rerun `(cd lucida-web && pnpm run build:wasm)` by hand
 - **TypeScript changes in `lucida-web/`** → Vite hot-reloads automatically
 - **Python binding changes in `lucida-py/`** → `(cd lucida-py && maturin develop)`
 
