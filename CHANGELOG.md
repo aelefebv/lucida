@@ -166,3 +166,4 @@
 - fix(web): capture + restore the saved-view Z/T/C plane, clamp to the addressed dataset (#814) (slipway, reversible: git-revert)
 - feat(web): saved-view sidebar UX — Shared chip, default-Personal, position-aware names, viewer manages own views, active-row feedback (slipway, reversible: git-revert)
 - feat(web): confirm before proposing, withdraw a proposal, and undoable reject (#702 follow-up) (slipway, reversible: git-revert)
+- fix(deps): bump vulnerable lockfile deps; drop stray npm lockfile (slipway, reversible: git-revert)
