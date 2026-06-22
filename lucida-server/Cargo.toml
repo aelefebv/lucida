@@ -50,7 +50,11 @@ cookie = "0.18"
 # `urlencoding` are pulled in directly so the state-token + redirect-URL
 # builders don't depend on `reqwest`'s private re-exports.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset"] }
-jsonwebtoken = "9"
+# jsonwebtoken 10 dropped the `ring` backend (used elsewhere via rustls) and makes
+# the crypto backend explicit. We pick `aws_lc_rs` over `rust_crypto`: the latter
+# pulls the `rsa` crate (RUSTSEC-2023-0071 "Marvin", unpatched), which would add a
+# new advisory. 10.3 fixes the exp/nbf type-confusion authz bypass; APIs unchanged.
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 base64 = "0.22"
 urlencoding = "2"
 
