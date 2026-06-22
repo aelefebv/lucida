@@ -167,3 +167,4 @@
 - feat(web): saved-view sidebar UX — Shared chip, default-Personal, position-aware names, viewer manages own views, active-row feedback (slipway, reversible: git-revert)
 - feat(web): confirm before proposing, withdraw a proposal, and undoable reject (#702 follow-up) (slipway, reversible: git-revert)
 - fix(deps): bump vulnerable lockfile deps; drop stray npm lockfile (slipway, reversible: git-revert)
+- fix(deps): jsonwebtoken 9 -> 10.3 (auth; fixes exp/nbf type-confusion bypass) (slipway, reversible: git-revert)
