@@ -35,7 +35,7 @@ vi.mock("lucida-core", () => ({
     if (raw.startsWith("file:///")) {
       return (
         // call self via the module-local binding
-        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+         
         moduleStub.normalize_dataset_url(raw.slice("file:///".length))
       );
     }
