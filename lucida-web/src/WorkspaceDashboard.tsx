@@ -8,12 +8,16 @@ import {
   updateWorkspacePin,
   type WorkspaceSummary,
 } from "./workspaceApi.ts";
+import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
+import { FileBrowser } from "./components/FileBrowser.tsx";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import "./WorkspaceDashboard.css";
 
 interface Props {
-  onOpenWorkspace: (id: string) => void;
+  /** Open a workspace. When `datasetUrls` is given (create-from-dataset flow,
+   *  #697), the viewer auto-opens those datasets once connected. */
+  onOpenWorkspace: (id: string, datasetUrls?: readonly string[]) => void;
 }
 
 export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
@@ -25,6 +29,12 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  // "New workspace from dataset" composer (#697): the typed URL/path and a
+  // shared in-flight flag (covers both the typed-URL create and the file-browser
+  // create) so the buttons disable while a workspace is being spun up.
+  const [datasetUrlInput, setDatasetUrlInput] = useState("");
+  const [creatingFromDataset, setCreatingFromDataset] = useState(false);
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +73,31 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
       setCreating(false);
     }
   }, [onOpenWorkspace]);
+
+  // Create a NEW workspace around the given dataset URL(s)/path(s) and open it
+  // (#697). The workspace is created with the server's default sharing
+  // (restricted, owner-only, link OFF — `createWorkspaceFromDatasets` only sends
+  // a name), then we navigate in and hand the urls to the viewer, which opens
+  // them and (on failure) surfaces the error there while KEEPING the workspace.
+  // Only the workspace-creation step can fail here; if it does, we surface it on
+  // the dashboard and no navigation happens.
+  const handleCreateFromDatasets = useCallback(
+    async (urls: readonly string[]) => {
+      const cleaned = urls.map((u) => u.trim()).filter((u) => u.length > 0);
+      if (cleaned.length === 0) return;
+      setCreatingFromDataset(true);
+      setError(null);
+      try {
+        const workspace = await createWorkspaceFromDatasets(cleaned);
+        onOpenWorkspace(workspace.id, cleaned);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setCreatingFromDataset(false);
+      }
+    },
+    [onOpenWorkspace],
+  );
 
   const handlePin = useCallback(async (workspace: WorkspaceSummary, pinned: boolean) => {
     setPinningId(workspace.id);
@@ -133,11 +168,47 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
             >
               {showArchived ? "Active" : "Archived"}
             </button>
-            <button onClick={handleCreate} disabled={creating || showArchived}>
+            <button
+              onClick={handleCreate}
+              disabled={creating || creatingFromDataset || showArchived}
+            >
               {creating ? "Creating..." : "New Workspace"}
             </button>
           </div>
         </div>
+        {!showArchived && (
+          <form
+            className="workspace-from-dataset"
+            data-testid="new-workspace-from-dataset"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleCreateFromDatasets([datasetUrlInput]);
+            }}
+          >
+            <input
+              className="workspace-from-dataset-input"
+              value={datasetUrlInput}
+              onChange={(e) => setDatasetUrlInput(e.target.value)}
+              placeholder="New workspace from dataset — file path or remote URL"
+              aria-label="New workspace from dataset URL or path"
+              disabled={creatingFromDataset}
+            />
+            <button
+              type="submit"
+              disabled={creatingFromDataset || !datasetUrlInput.trim()}
+            >
+              {creatingFromDataset ? "Creating..." : "Create from URL"}
+            </button>
+            <button
+              type="button"
+              className="workspace-dashboard-secondary"
+              onClick={() => setShowFileBrowser(true)}
+              disabled={creatingFromDataset}
+            >
+              Browse files…
+            </button>
+          </form>
+        )}
         <input
           className="workspace-search"
           value={query}
@@ -213,6 +284,15 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
           </div>
         )}
       </div>
+      {showFileBrowser && (
+        <FileBrowser
+          onClose={() => setShowFileBrowser(false)}
+          onCreateWorkspace={(paths) => {
+            setShowFileBrowser(false);
+            void handleCreateFromDatasets(paths);
+          }}
+        />
+      )}
     </div>
   );
 }

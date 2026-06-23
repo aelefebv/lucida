@@ -11,7 +11,15 @@ interface BrowseResponse {
 }
 
 interface FileBrowserProps {
-  onSelect: (path: string) => void;
+  /** Open the single navigated-to dataset into the CURRENT workspace (the
+   *  in-viewer "Browse Local" flow). Optional so the browser can also be used
+   *  purely to create a new workspace (#697) via `onCreateWorkspace`. */
+  onSelect?: (path: string) => void;
+  /** Create a NEW workspace from the selected dataset(s) (#697). When provided,
+   *  the browser shows multi-select affordances (accumulate one or more zarr
+   *  directories) and a "Create workspace from selection" action. Receives the
+   *  canonical-form paths the user accumulated. */
+  onCreateWorkspace?: (paths: string[]) => void;
   onClose: () => void;
   serverPort?: number;
 }
@@ -30,6 +38,7 @@ interface FileBrowserProps {
  */
 export function FileBrowser({
   onSelect,
+  onCreateWorkspace,
   onClose,
   serverPort = 9876,
 }: FileBrowserProps) {
@@ -44,6 +53,12 @@ export function FileBrowser({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasZarrJson, setHasZarrJson] = useState(false);
+  // Accumulated dataset paths for the "create workspace from selection" flow
+  // (#697). Only meaningful when `onCreateWorkspace` is provided; lets the user
+  // walk to several zarr directories and collect them before creating.
+  const [selected, setSelected] = useState<string[]>([]);
+  const multiSelect = Boolean(onCreateWorkspace);
+  const alreadySelected = selected.includes(currentPath);
 
   const browse = useCallback(
     async (path: string) => {
@@ -117,9 +132,31 @@ export function FileBrowser({
   }, [browse, currentPath]);
 
   const handleOpen = useCallback(() => {
-    onSelect(currentPath);
+    onSelect?.(currentPath);
     onClose();
   }, [currentPath, onSelect, onClose]);
+
+  const handleAddToSelection = useCallback(() => {
+    if (!hasZarrJson) return;
+    setSelected((prev) => (prev.includes(currentPath) ? prev : [...prev, currentPath]));
+  }, [currentPath, hasZarrJson]);
+
+  const handleRemoveFromSelection = useCallback((path: string) => {
+    setSelected((prev) => prev.filter((p) => p !== path));
+  }, []);
+
+  const handleCreateWorkspace = useCallback(() => {
+    if (!onCreateWorkspace) return;
+    // Include the current dataset if it's a zarr dir and not already collected,
+    // so a single-dataset create works without an explicit "Add" click.
+    const paths =
+      hasZarrJson && !selected.includes(currentPath)
+        ? [...selected, currentPath]
+        : selected;
+    if (paths.length === 0) return;
+    onCreateWorkspace(paths);
+    onClose();
+  }, [onCreateWorkspace, hasZarrJson, selected, currentPath, onClose]);
 
   // Breadcrumb segments — works for both Unix (`/foo/bar`) and Windows
   // (`c:/Users/me`) because both use forward slashes throughout.
@@ -349,7 +386,65 @@ export function FileBrowser({
           )}
         </div>
 
-        {/* Footer with Open button */}
+        {/* Selection tray — only in the create-workspace (multi-select) flow. */}
+        {multiSelect && selected.length > 0 && (
+          <div
+            data-testid="file-browser-selection"
+            style={{
+              padding: "8px 16px",
+              borderTop: "1px solid rgba(255, 255, 255, 0.05)",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 6,
+            }}
+          >
+            {selected.map((path) => (
+              <span
+                key={path}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "2px 8px",
+                  borderRadius: 12,
+                  background: "rgba(100, 108, 255, 0.25)",
+                  fontSize: 12,
+                  maxWidth: "100%",
+                }}
+              >
+                <span
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 360,
+                  }}
+                  title={path}
+                >
+                  {path}
+                </span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${path} from selection`}
+                  onClick={() => handleRemoveFromSelection(path)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "rgba(255,255,255,0.6)",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    padding: 0,
+                    lineHeight: 1,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Footer with action buttons */}
         <div
           style={{
             padding: "12px 16px",
@@ -357,6 +452,7 @@ export function FileBrowser({
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            gap: 8,
           }}
         >
           <span
@@ -384,24 +480,75 @@ export function FileBrowser({
             >
               Cancel
             </button>
-            <button
-              onClick={handleOpen}
-              disabled={!hasZarrJson}
-              style={{
-                padding: "6px 16px",
-                border: "none",
-                borderRadius: 4,
-                background: hasZarrJson
-                  ? "rgba(100, 108, 255, 0.8)"
-                  : "rgba(100, 108, 255, 0.2)",
-                color: hasZarrJson ? "white" : "rgba(255,255,255,0.3)",
-                cursor: hasZarrJson ? "pointer" : "default",
-                fontSize: 13,
-                fontWeight: 500,
-              }}
-            >
-              Open
-            </button>
+            {multiSelect && (
+              <button
+                type="button"
+                onClick={handleAddToSelection}
+                disabled={!hasZarrJson || alreadySelected}
+                style={{
+                  padding: "6px 16px",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: 4,
+                  background: "none",
+                  color:
+                    hasZarrJson && !alreadySelected
+                      ? "rgba(255,255,255,0.85)"
+                      : "rgba(255,255,255,0.3)",
+                  cursor: hasZarrJson && !alreadySelected ? "pointer" : "default",
+                  fontSize: 13,
+                }}
+              >
+                {alreadySelected ? "Added" : "Add to selection"}
+              </button>
+            )}
+            {onSelect && (
+              <button
+                onClick={handleOpen}
+                disabled={!hasZarrJson}
+                style={{
+                  padding: "6px 16px",
+                  border: "none",
+                  borderRadius: 4,
+                  background: hasZarrJson
+                    ? "rgba(100, 108, 255, 0.8)"
+                    : "rgba(100, 108, 255, 0.2)",
+                  color: hasZarrJson ? "white" : "rgba(255,255,255,0.3)",
+                  cursor: hasZarrJson ? "pointer" : "default",
+                  fontSize: 13,
+                  fontWeight: 500,
+                }}
+              >
+                Open
+              </button>
+            )}
+            {multiSelect && (
+              <button
+                type="button"
+                onClick={handleCreateWorkspace}
+                disabled={selected.length === 0 && !hasZarrJson}
+                style={{
+                  padding: "6px 16px",
+                  border: "none",
+                  borderRadius: 4,
+                  background:
+                    selected.length > 0 || hasZarrJson
+                      ? "rgba(100, 108, 255, 0.8)"
+                      : "rgba(100, 108, 255, 0.2)",
+                  color:
+                    selected.length > 0 || hasZarrJson
+                      ? "white"
+                      : "rgba(255,255,255,0.3)",
+                  cursor:
+                    selected.length > 0 || hasZarrJson ? "pointer" : "default",
+                  fontSize: 13,
+                  fontWeight: 500,
+                }}
+              >
+                {selected.length > 1
+                  ? `Create workspace (${selected.length})`
+                  : "Create workspace from selection"}
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -36,6 +36,7 @@ import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from 
 import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
+import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
@@ -58,9 +59,22 @@ interface AppProps {
   workspaceRole: WorkspaceRole;
   defaultSavedViewId: string | null;
   canRenameWorkspace: boolean;
+  /** Dataset URLs/paths to auto-open once the viewer connects (#697). Set by
+   *  the "create workspace from dataset(s)" flow (dashboard / file browser):
+   *  the workspace is created and navigated into first, then these are opened
+   *  here via the same path as the in-viewer "Open" flow. A failed open
+   *  surfaces through the normal open-failed banner and LEAVES the workspace in
+   *  place (it already exists and we're already in it). Already canonicalized
+   *  by the caller. Empty/undefined in the normal open-existing-workspace
+   *  case, so this is a no-op there. */
+  initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
+  /** Create a NEW workspace from dataset(s) chosen in the in-viewer file
+   *  browser and navigate into it (#697). Mirrors the dashboard entry point so
+   *  the "create workspace from selection" action is reachable from both. */
+  onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
 }
 
 function App({
@@ -69,9 +83,11 @@ function App({
   workspaceRole,
   defaultSavedViewId,
   canRenameWorkspace,
+  initialDatasetUrls,
   onBackToDashboard,
   onRenameWorkspace,
   onSetDefaultSavedView,
+  onCreateWorkspaceFromDatasets,
 }: AppProps) {
   // Authenticated principal — provided by <AuthGate> above us; throws if
   // accessed unauthenticated. We forward the email to saved-view UI for
@@ -345,6 +361,28 @@ function App({
     // Wrap so URL→DatasetId tracking is populated for every local open
     // (FileBrowser-driven, URL-bar-driven, applier-driven).
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
+  });
+
+  // Auto-open the seed dataset(s) for a "create workspace from dataset(s)" flow
+  // (#697). The workspace was created and navigated into by the dashboard /
+  // file browser; here we open the dataset(s) over the websocket exactly as the
+  // in-viewer "Open" affordance does (`datasets.handleUrlSubmit` →
+  // `trackedSendOpen` → `sendOpenRemoteDataset`), so dedup, URL→DatasetId
+  // tracking, the loading banner, and the open-failed error path all apply
+  // unchanged. Gated on `bridge.sessionReady` — the REAL transport-readiness
+  // signal (WS open AND first snapshot applied), NOT `Boolean(bridge.bridge)`,
+  // which flips synchronously while the socket is still CONNECTING. With the
+  // weaker gate the seed send could fire against a CONNECTING socket and be
+  // SILENTLY DROPPED by `Bridge.send` (no queue), leaving the new workspace
+  // stuck on "dataset open request sent" forever (the one-shot guard had
+  // already latched). `useSeedDatasetOpens` only latches AFTER it actually
+  // sends, so until `sessionReady` it simply waits, then fires exactly once. A
+  // FAILED import leaves the workspace in place and surfaces through the
+  // existing `remoteDatasetError` banner below; we don't unwind.
+  useSeedDatasetOpens({
+    initialDatasetUrls,
+    ready: bridge.sessionReady,
+    openDataset: datasets.handleUrlSubmit,
   });
 
   // Layout registry — null until WasmScene is set up; subscribe so the
@@ -1425,6 +1463,14 @@ function App({
         {showFileBrowser && (
           <FileBrowser
             onSelect={handleFileBrowserSelect}
+            onCreateWorkspace={
+              onCreateWorkspaceFromDatasets
+                ? (paths) => {
+                    setShowFileBrowser(false);
+                    onCreateWorkspaceFromDatasets(paths);
+                  }
+                : undefined
+            }
             onClose={() => setShowFileBrowser(false)}
           />
         )}

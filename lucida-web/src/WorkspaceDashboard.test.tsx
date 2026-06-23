@@ -18,6 +18,31 @@ vi.mock("./auth/ProfileMenu.tsx", () => ({
   ProfileMenu: () => null,
 }));
 
+// Stub the file browser: it fetches `/api/browse` on mount, which we don't want
+// to exercise here. Expose a button that drives the create-from-selection
+// callback so the dashboard's file-browser entry point is still covered.
+vi.mock("./components/FileBrowser.tsx", () => ({
+  FileBrowser: ({
+    onCreateWorkspace,
+    onClose,
+  }: {
+    onCreateWorkspace?: (paths: string[]) => void;
+    onClose: () => void;
+  }) => (
+    <div data-testid="fake-file-browser">
+      <button
+        type="button"
+        onClick={() => onCreateWorkspace?.(["/data/a.zarr", "/data/b.zarr"])}
+      >
+        fake-create-from-selection
+      </button>
+      <button type="button" onClick={onClose}>
+        fake-close
+      </button>
+    </div>
+  ),
+}));
+
 vi.mock("./workspaceApi.ts", () => ({
   archiveWorkspace: vi.fn(),
   createWorkspace: vi.fn(),
@@ -150,6 +175,102 @@ describe("WorkspaceDashboard", () => {
     await waitFor(() => {
       expect(onOpenWorkspace).toHaveBeenCalledWith("created");
     });
+  });
+
+  it("creates a workspace FROM A DATASET URL named from the basename and opens it with the seed", async () => {
+    // The create call only sends a NAME — the workspace inherits the server's
+    // default sharing (restricted, owner-only, link OFF). We assert the name is
+    // the dataset basename and that NO sharing/visibility override is sent.
+    createWorkspaceMock.mockResolvedValue({
+      id: "ws-ds",
+      name: "embryo.ome.zarr",
+      role: "owner",
+      created_by: "owner@example.com",
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+      archived_at: null,
+      seq: 0,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+    listWorkspacesMock.mockResolvedValue([]);
+    const onOpenWorkspace = vi.fn();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+
+    fireEvent.change(
+      screen.getByLabelText("New workspace from dataset URL or path"),
+      { target: { value: "gs://bucket/scans/embryo.ome.zarr" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create from URL" }));
+
+    await waitFor(() => {
+      // Name derived from the basename; only the name is passed (default
+      // restricted owner-only reused, never weakened).
+      expect(createWorkspaceMock).toHaveBeenCalledWith("embryo.ome.zarr");
+      expect(createWorkspaceMock).toHaveBeenCalledTimes(1);
+      // Navigates into the new workspace WITH the dataset to auto-open.
+      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-ds", [
+        "gs://bucket/scans/embryo.ome.zarr",
+      ]);
+    });
+  });
+
+  it("creates a workspace from MULTIPLE datasets chosen in the file browser and opens all", async () => {
+    createWorkspaceMock.mockResolvedValue({
+      id: "ws-multi",
+      name: "a.zarr (+1)",
+      role: "owner",
+      created_by: "owner@example.com",
+      created_at: "2026-06-23T00:00:00Z",
+      updated_at: "2026-06-23T00:00:00Z",
+      archived_at: null,
+      seq: 0,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+    listWorkspacesMock.mockResolvedValue([]);
+    const onOpenWorkspace = vi.fn();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+
+    // Open the (stubbed) file browser and trigger create-from-selection.
+    fireEvent.click(screen.getByRole("button", { name: "Browse files…" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "fake-create-from-selection" }),
+    );
+
+    await waitFor(() => {
+      // Multi-name default: first basename + (+N).
+      expect(createWorkspaceMock).toHaveBeenCalledWith("a.zarr (+1)");
+      // All selected datasets carried as the seed to auto-open.
+      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-multi", [
+        "/data/a.zarr",
+        "/data/b.zarr",
+      ]);
+    });
+  });
+
+  it("keeps you on the dashboard and surfaces the error if create-from-dataset FAILS", async () => {
+    createWorkspaceMock.mockRejectedValue(new Error("quota exceeded"));
+    listWorkspacesMock.mockResolvedValue([]);
+    const onOpenWorkspace = vi.fn();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+
+    fireEvent.change(
+      screen.getByLabelText("New workspace from dataset URL or path"),
+      { target: { value: "/data/embryo.ome.zarr" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create from URL" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("quota exceeded")).toBeTruthy();
+    });
+    // No navigation happened — we stayed on the dashboard.
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
   });
 
   it("archives owner workspaces from the active dashboard", async () => {

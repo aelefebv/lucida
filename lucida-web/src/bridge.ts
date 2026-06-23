@@ -169,6 +169,14 @@ export interface BridgeHandlers {
     datasetUrls: string[],
   ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
+  /**
+   * The underlying WebSocket transitioned to OPEN — the transport can now
+   * carry frames (before this, [`Bridge.send`] silently drops). Distinct
+   * from `onSnapshot` (the application-level "session established" signal):
+   * a frame sent between `onConnected` and the first snapshot still reaches
+   * the server. Fires on every (re)connect's `onopen`.
+   */
+  onConnected?: () => void;
   onDisconnect?: () => void;
 }
 
@@ -230,6 +238,10 @@ export class Bridge {
 
     ws.onopen = () => {
       bridgeLog("ws.connected", { url: this.url }, ws.readyState);
+      // The socket is OPEN: `send` will no longer silently drop. Notify the
+      // app so readiness-gated work (e.g. the #697 seed open) can fire against
+      // a transport that actually carries it, instead of a CONNECTING socket.
+      this.handlers.onConnected?.();
     };
 
     ws.onmessage = (event) => {

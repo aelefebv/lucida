@@ -34,6 +34,27 @@ body {
   color: #888;
 }
 
+/* In-viewer "create workspace from selection" failure notice (#697). A
+   dismissible, non-blocking banner pinned above the viewer — the workspace
+   stays mounted underneath. Mirrors .workspace-dashboard-error's red styling. */
+.workspace-create-error {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 90vw;
+  padding: 0.75rem 1rem;
+  border: 1px solid #7a2b2b;
+  border-radius: 6px;
+  background: #341818;
+  color: #ffb4b4;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
 h1 {
   font-size: 3.2em;
   line-height: 1.1;
