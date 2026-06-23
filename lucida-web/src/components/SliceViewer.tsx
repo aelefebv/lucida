@@ -5,6 +5,7 @@ import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
 
 interface Props {
   z: number;
@@ -193,6 +194,19 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       const end = eventToWorld(e);
+      // Snapshot the author's CURRENT view onto the pin (annotation-views slice
+      // 1) so a later slice can restore it on navigation. Workspace-dataset-id
+      // form (no source URLs — it rides on broadcast/persisted document state).
+      // The live Z/T/C come from the slider refs, but the slab THICKNESS and
+      // `multi_channel` are read from the scene's presence via the canonical
+      // `getLiveView` shape (`liveViewWithLiveZTC`) — so a 2D pin captured with
+      // multi-channel on, or on a multi-plane slab, records them faithfully
+      // instead of collapsing to a single-plane, single-channel view. `null`
+      // (capture failure) just omits the view — it is optional/additive.
+      const capturedView = buildAnnotationView(
+        scene,
+        liveViewWithLiveZTC(scene, zRef.current, tRef.current, cRef.current),
+      );
       // Apply locally AND send (mirrors applyDocumentCommand for every other doc
       // command): the sender is excluded from the server's rebroadcast, so
       // without the local apply the author would never see their own shape. The
@@ -221,6 +235,9 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
           c: cRef.current,
           author: String(myIdRef.current),
           kind: drawShape ? kind : "point",
+          // The author's full view at creation (camera + display + slice).
+          // Omitted from the wire when capture failed (additive field).
+          ...(capturedView ? { view: capturedView } : {}),
         },
         sendCommandRef.current,
       );

@@ -58,6 +58,39 @@ pub enum DocumentCommand {
     /// so an `add_annotation` from a client that predates this slice (or a
     /// replayed older log entry) applies with `t = 0, c = 0` rather than failing
     /// to parse — additive, no wire break.
+    ///
+    /// `view` is the author's **full view at creation** — a [`SavedView`] capture
+    /// (camera + slice/timepoint/channel + per-dataset display) carried through to
+    /// the created annotation so a later slice can restore it on navigation. It is
+    /// captured in workspace-dataset-id form (empty `datasets`, no source URLs) so
+    /// it never leaks dataset URLs onto the document wire. Like `z`/`end`/`kind`,
+    /// it is `#[serde(default, skip_serializing_if = "Option::is_none")]`: an
+    /// `add_annotation` from a client that predates this slice (or a replayed older
+    /// log entry) applies with `view = None`, and a command WITHOUT a view
+    /// serializes byte-identically (the key is omitted) — additive, no wire break.
+    ///
+    /// A command WITH a view also rebroadcasts **byte-identically**: the server
+    /// rebroadcasts by `serde_json::from_str` → `to_string` (lucida-server's
+    /// `handler`), and that round-trip reproduces the inbound bytes exactly,
+    /// preserving the locked "inbound command and its rebroadcast are
+    /// byte-identical" invariant even for a multi-dataset embedded view. This
+    /// holds because [`SavedView`]'s per-dataset maps are `IndexMap` (NOT
+    /// `std::collections::HashMap`, whose `serde_json` order is
+    /// per-process-randomized): `IndexMap` preserves insertion/parse order, so
+    /// deserialize→serialize round-trips key order verbatim. (`SavedView: PartialEq`
+    /// additionally makes the round-trip equality-preserving for the stored pin.)
+    /// Regression-locked by
+    /// `protocol::tests::add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical`
+    /// and the `saved_view` determinism tests.
+    ///
+    /// The view is **boxed** (`Option<Box<SavedView>>`): a `SavedView` is large
+    /// (camera + per-dataset display maps), so inlining it would bloat every
+    /// `DocumentCommand` (and the `ClientMessage`/`ServerMessage` that wrap it) —
+    /// `clippy`'s `large_enum_variant`. Boxing keeps the common command small and
+    /// only pays a heap allocation on the cold path where a view is actually
+    /// captured. `Box` is serde-transparent, so the wire form is unchanged, and
+    /// the stored [`crate::scene::Annotation::view`] stays an unboxed
+    /// `Option<SavedView>` (the hot read path) — `apply` unboxes via `.map(|b| *b)`.
     AddAnnotation {
         dataset_id: DatasetId,
         id: String,
@@ -73,6 +106,8 @@ pub enum DocumentCommand {
         author: String,
         #[serde(default)]
         kind: crate::scene::AnnotationKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<Box<crate::saved_view::SavedView>>,
     },
     /// Remove a collaborative annotation by `id` from `dataset_id`. No-op if
     /// the id is unknown. Bumps `epochs.annotation`.
@@ -1970,6 +2005,7 @@ mod tests {
             c: 2,
             author: "biologist".into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2000,6 +2036,7 @@ mod tests {
                 c,
                 author,
                 kind,
+                view: _,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
                 assert_eq!(id, "11111111-2222-3333-4444-555555555555");
@@ -2032,6 +2069,7 @@ mod tests {
                 c,
                 author,
                 kind,
+                view: _,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
@@ -2081,6 +2119,7 @@ mod tests {
             c: 3,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
@@ -2108,6 +2147,7 @@ mod tests {
             c: 5,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         });
         let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
         assert_eq!(pin.t, 9);
@@ -2164,6 +2204,7 @@ mod tests {
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),
             anchor: None,
+            view: None,
         };
         let json = serde_json::to_string(&pin).unwrap();
         let back: crate::scene::Annotation = serde_json::from_str(&json).unwrap();
@@ -2221,6 +2262,7 @@ mod tests {
             c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Line,
+            view: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2577,6 +2619,7 @@ mod tests {
                 kind: crate::scene::AnnotationKind::Point,
                 comments: Vec::new(),
                 anchor: None,
+                view: None,
             },
         );
         switch_to(&mut doc, &ds, "moved");
@@ -2761,6 +2804,7 @@ mod tests {
             c: 0,
             author: author.into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         }
     }
 
@@ -2782,6 +2826,7 @@ mod tests {
             c: 0,
             author: "alice".into(),
             kind,
+            view: None,
         }
     }
 
@@ -3887,6 +3932,7 @@ mod tests {
             kind: crate::scene::AnnotationKind::Point,
             comments: Vec::new(),
             anchor: None,
+            view: None,
         }
     }
 
@@ -3908,6 +3954,7 @@ mod tests {
             kind,
             comments: Vec::new(),
             anchor: None,
+            view: None,
         }
     }
 

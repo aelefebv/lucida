@@ -57,7 +57,7 @@ impl Colormap {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelSettings {
     pub visible: bool,
     pub colormap: Colormap,
@@ -82,7 +82,7 @@ fn default_channel_blend_mode() -> BlendMode {
     BlendMode::Additive
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetDisplaySettings {
     pub visible: bool,
     pub opacity: f32,
@@ -133,7 +133,7 @@ impl Default for DatasetDisplaySettings {
 }
 
 /// Display settings (contrast window + gamma).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DisplayState {
     pub contrast_min: f64,
     pub contrast_max: f64,
@@ -270,6 +270,24 @@ pub struct Annotation {
     /// identically to a pre-slice one. No wire break.
     #[serde(default)]
     pub anchor: Option<EntityId>,
+    /// The **author's view at creation** — a snapshot of how they were looking
+    /// at the data when they dropped this pin (camera, slice/timepoint/channel,
+    /// per-dataset display), so a later slice can restore that exact view on
+    /// navigation. Reuses the existing [`SavedView`] capture type.
+    ///
+    /// Captured in **workspace-dataset-id** form: its `datasets` Vec is left
+    /// EMPTY (no source URLs), so embedding a view on a pin never leaks dataset
+    /// URLs into broadcast/persisted document state — membership is already owned
+    /// by the workspace document. `z`/`t`/`c` already record the discrete slice
+    /// context; this view carries the *full* viewport (camera + display) on top.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps this
+    /// strictly additive: a pin persisted (or broadcast) before this slice carries
+    /// no `view` key and deserializes as `None`, and a pin WITHOUT a captured view
+    /// serializes byte-identically to a pre-slice pin (the key is omitted). No wire
+    /// break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<crate::saved_view::SavedView>,
 }
 
 impl Annotation {
@@ -831,6 +849,7 @@ impl DocumentState {
                 c,
                 author,
                 kind,
+                view,
             } => {
                 // Glue the new pin to the nearest plate well/field in the resolved
                 // active layout (issue #780), so a later layout switch moves it
@@ -861,6 +880,12 @@ impl DocumentState {
                         // preserves any thread already accrued on that pin.
                         comments: Vec::new(),
                         anchor,
+                        // The author's captured view at creation (workspace-
+                        // dataset-id form, empty `datasets`). `None` for a
+                        // command from a client that predates this slice. The
+                        // command boxes the view to keep the enum small; the
+                        // stored pin holds it unboxed, so unbox here.
+                        view: view.map(|v| *v),
                     },
                 );
             }
@@ -911,4 +936,171 @@ pub struct MemberChunkPlan {
     pub position: [f64; 2],
     pub needed: Vec<ChunkCoord>,
     pub prefetch: Vec<ChunkCoord>,
+}
+
+#[cfg(test)]
+mod annotation_view_tests {
+    //! Slice 1 (annotation views): a pin captures its author's view at
+    //! creation as an embedded [`SavedView`]. These lock the wire/blob
+    //! contract — round-trip equality, strict backward-compat (a view-less
+    //! pin is byte-identical to a pre-slice pin), the command carrying the
+    //! view through to the stored pin, and the embedded view being in
+    //! workspace-dataset-id form (no source URLs). They ship as permanent
+    //! regression tests; see [[gotchas/scene-document-state-json-compat]].
+
+    use super::*;
+    use crate::saved_view::SavedView;
+
+    /// A sample captured view in **workspace-dataset-id form**: its `datasets`
+    /// Vec is intentionally EMPTY (no source URLs), exactly as `buildCapture`
+    /// emits in `workspace-dataset-id` mode. Carries some non-default
+    /// camera/slice/display state so equality is meaningful.
+    fn workspace_view() -> SavedView {
+        let mut v = SavedView::empty([1024, 768]);
+        // datasets stays empty (workspace-dataset-id mode) — assert it below.
+        v.view.t = 7;
+        v.view.c = 2;
+        v.view.set_z_range(10..15);
+        v.display.contrast_min = 100.0;
+        v.display.contrast_max = 5000.0;
+        v
+    }
+
+    /// A bare point pin carrying a captured view, for blob round-trip tests.
+    fn pin_with_view(view: Option<SavedView>) -> Annotation {
+        Annotation {
+            id: "pin-view".into(),
+            position: [10.0, 20.0],
+            end: None,
+            z: 3.0,
+            t: 7,
+            c: 2,
+            author: "alice".into(),
+            kind: AnnotationKind::Point,
+            comments: Vec::new(),
+            anchor: None,
+            view,
+        }
+    }
+
+    /// (1) An `Annotation` carrying a captured view round-trips through
+    /// `serde_json` (serialize → deserialize → `==`). Equality holds because
+    /// `Annotation: PartialEq`, which in turn relies on `SavedView: PartialEq`.
+    #[test]
+    fn annotation_with_view_round_trips() {
+        let pin = pin_with_view(Some(workspace_view()));
+        let json = serde_json::to_string(&pin).unwrap();
+        let back: Annotation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, pin);
+        // The view actually rode along (not silently dropped).
+        assert!(back.view.is_some());
+        assert_eq!(back.view.unwrap().view.t, 7);
+    }
+
+    /// (2a) Backward-compat: an annotation JSON written WITHOUT the `view` key
+    /// deserializes with `view == None` — a pin persisted/broadcast before this
+    /// slice still loads, no wire break.
+    #[test]
+    fn pin_without_view_key_deserializes_as_none() {
+        // No `view` key — exactly what a pre-slice snapshot pin looks like.
+        let json =
+            r#"{"id":"pin-old","position":[3.0,4.0],"z":2.0,"author":"alice","kind":"point"}"#;
+        let pin: Annotation = serde_json::from_str(json).unwrap();
+        assert_eq!(pin.view, None);
+    }
+
+    /// (2b) Byte-compat: a pin with NO captured view serializes with NO `view`
+    /// key, so a view-less pin is byte-identical to a pre-slice pin (the
+    /// `skip_serializing_if = "Option::is_none"` guarantee).
+    #[test]
+    fn pin_without_view_serializes_without_view_key() {
+        let pin = pin_with_view(None);
+        let json = serde_json::to_string(&pin).unwrap();
+        assert!(
+            !json.contains("\"view\""),
+            "a view-less pin must not emit a `view` key: {json}"
+        );
+    }
+
+    /// (3) `AddAnnotation` carries the view through a serde round-trip AND
+    /// `DocumentState::add_annotation` (via `apply`) stores it on the created
+    /// pin. Also guards the "inbound command == rebroadcast" invariant: the
+    /// command round-trips equality-preserving.
+    #[test]
+    fn add_annotation_command_carries_view_to_stored_pin() {
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [1.0, 2.0],
+            end: None,
+            z: 0.0,
+            t: 7,
+            c: 2,
+            author: "alice".into(),
+            kind: AnnotationKind::Point,
+            // The command boxes the view (keeps the enum small); the stored
+            // pin holds it unboxed.
+            view: Some(Box::new(workspace_view())),
+        };
+
+        // Equality-preserving serde round-trip (inbound command == its
+        // rebroadcast). `DocumentCommand` is not `PartialEq`, so — like the
+        // existing `add_annotation_broadcast_is_byte_identical_to_inbound_command`
+        // test — assert byte-identity via the normalized JSON value: re-encoding
+        // the parsed command must reproduce the original wire form, view and all.
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        let reser = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&reser).unwrap(),
+        );
+        // The view survived on the wire (not silently stripped).
+        let v: serde_json::Value = serde_json::from_str(&reser).unwrap();
+        assert_eq!(v["view"]["view"]["t"], 7);
+
+        // Applying lands the view on the stored pin (Annotation: PartialEq).
+        let mut doc = DocumentState::default();
+        doc.apply(parsed);
+        let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
+        assert_eq!(pin.view.as_ref(), Some(&workspace_view()));
+    }
+
+    /// (3b) An `add_annotation` command WITHOUT a `view` key parses with
+    /// `view == None` (the additive backward-compat guarantee), and a command
+    /// without a view serializes with no `view` key.
+    #[test]
+    fn add_annotation_view_defaults_to_none_and_is_skipped() {
+        let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"p","position":[3.0,4.0],"author":"alice","kind":"point"}"#;
+        let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
+        match &parsed {
+            DocumentCommand::AddAnnotation { view, .. } => assert_eq!(*view, None),
+            _ => panic!("expected AddAnnotation"),
+        }
+        let reser = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            !reser.contains("\"view\""),
+            "a view-less add_annotation must not emit a `view` key: {reser}"
+        );
+    }
+
+    /// (4) The captured view, as embedded, is in workspace-dataset-id form:
+    /// its `datasets` is EMPTY, so embedding a view on a pin never leaks
+    /// dataset source URLs onto the document wire.
+    #[test]
+    fn embedded_view_is_workspace_dataset_id_form_no_source_urls() {
+        let pin = pin_with_view(Some(workspace_view()));
+        let json = serde_json::to_string(&pin).unwrap();
+        let back: Annotation = serde_json::from_str(&json).unwrap();
+        let view = back.view.expect("pin should carry a view");
+        assert!(
+            view.datasets.is_empty(),
+            "embedded view must carry no source URLs (workspace-dataset-id form)"
+        );
+        // And the serialized blob carries an empty datasets array, not URLs.
+        assert!(
+            !json.contains("zarr") && !json.contains("gs://") && !json.contains("s3://"),
+            "no dataset source URL should appear in a pin's serialized view: {json}"
+        );
+    }
 }

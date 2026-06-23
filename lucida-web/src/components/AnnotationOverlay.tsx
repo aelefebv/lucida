@@ -20,6 +20,7 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
+import type { SavedView } from "../savedView/types.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import {
   annotationVertices,
@@ -70,6 +71,12 @@ export interface Annotation {
   /** Flat, insertion-ordered comment thread. Absent on a slice-1 pin →
    * defaulted to an empty array on read. */
   comments?: Comment[];
+  /** The author's captured view at creation — a {@link SavedView} snapshot
+   * (camera + slice/timepoint/channel + per-dataset display) in
+   * workspace-dataset-id form (empty `datasets`, no source URLs), so a later
+   * slice can restore that view on navigation. Absent on any pin created
+   * before this slice (and on the wire it is omitted when unset). */
+  view?: SavedView | null;
 }
 
 /**
