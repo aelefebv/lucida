@@ -5363,7 +5363,10 @@ pub mod tests {
         let store = fresh_store().await;
         let alice = principal("alice@example.com", false);
         let bob = principal("bob@example.com", false);
-        let workspace = store.create_workspace(&alice, Some("Linked")).await.unwrap();
+        let workspace = store
+            .create_workspace(&alice, Some("Linked"))
+            .await
+            .unwrap();
         let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
 
         // Before enabling the link, bob is a non-member → never-leak 404.
@@ -5380,7 +5383,10 @@ pub mod tests {
             .await
             .unwrap();
 
-        let (record, role) = manager.get_workspace_for(&workspace.id, &bob).await.unwrap();
+        let (record, role) = manager
+            .get_workspace_for(&workspace.id, &bob)
+            .await
+            .unwrap();
         assert_eq!(record.id, workspace.id);
         assert_eq!(role, WorkspaceRole::Viewer);
     }

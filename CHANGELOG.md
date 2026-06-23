@@ -173,3 +173,6 @@
 - fix(deps): force js-yaml 4.2.0 + @babel/core 7.29.6 via pnpm overrides (lucida-web) (slipway, reversible: git-revert)
 - build(deps): vite 7 -> 8 (rolldown); drops esbuild — clears last alert (slipway, reversible: git-revert)
 - chore: add .gitattributes with CHANGELOG.md merge=union (slipway, reversible: git-revert)
+- feat(annotations): capture the author's view when an annotation is created (slipway, reversible: git-revert)
+- feat(annotations): restore the author's view when navigating to an annotation (slipway, reversible: git-revert)
+- feat(annotations): share an annotation by link (deep-link, never-leak) (slipway, reversible: git-revert)
