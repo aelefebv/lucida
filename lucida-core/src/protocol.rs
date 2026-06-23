@@ -496,6 +496,7 @@ mod tests {
             c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         };
         let inbound = ClientMessage::Command {
             command: cmd.clone(),
@@ -516,6 +517,86 @@ mod tests {
     }
 
     #[test]
+    fn add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical() {
+        // The companion to the test above, but for an `AddAnnotation` carrying
+        // an embedded `SavedView` with >=2 datasets — and asserting byte-identity
+        // of the wire STRING, not a `serde_json::Value` compare. The Value compare
+        // above is order-insensitive, so it would pass even if the embedded view's
+        // per-dataset maps re-serialized in a different order; THIS test would not.
+        //
+        // It mimics the server's exact rebroadcast: parse the inbound
+        // `ClientMessage` bytes, then re-serialize the parsed command inside a
+        // `CommandBroadcast` (handler.rs: `from_str::<ClientMessage>` ->
+        // `to_string(CommandBroadcast { seq, command })`). The `command` substring
+        // of the broadcast must be byte-identical to the `command` substring of
+        // the inbound message. This holds because `SavedView`'s maps are
+        // `IndexMap` (insertion/parse order preserved); with `HashMap` the >=2
+        // dataset maps re-emit in randomized order and this diverges.
+        use crate::saved_view::SavedView;
+        use lucida_content::LayoutId;
+
+        let mut view = SavedView::empty([1024, 768]);
+        for k in ["ds-aaaa", "ds-bbbb", "ds-cccc"] {
+            view.active_layouts
+                .insert(DatasetId(k.into()), LayoutId(format!("L-{k}")));
+            view.dataset_settings
+                .insert(DatasetId(k.into()), DatasetDisplaySettings::default());
+            view.auto_contrast.insert(DatasetId(k.into()), false);
+            view.dataset_order.push(DatasetId(k.into()));
+        }
+
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: DatasetId("wds-1".into()),
+            id: "pin-1".into(),
+            position: [3.0, 4.0],
+            end: None,
+            z: 0.0,
+            t: 0,
+            c: 0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Point,
+            view: Some(Box::new(view)),
+        };
+
+        // Inbound wire bytes the author broadcasts.
+        let inbound_json = serde_json::to_string(&ClientMessage::Command {
+            command: cmd.clone(),
+        })
+        .unwrap();
+
+        // SERVER: parse the inbound message, then re-serialize the parsed command
+        // inside a broadcast (the real from_str -> to_string path).
+        let parsed: ClientMessage = serde_json::from_str(&inbound_json).unwrap();
+        let ClientMessage::Command { command } = parsed else {
+            panic!("expected Command");
+        };
+        let broadcast_json =
+            serde_json::to_string(&ServerMessage::CommandBroadcast { seq: 7, command }).unwrap();
+
+        // Extract the raw `command` value substring from each (NOT via Value,
+        // which would normalize order). In BOTH messages `command` is the LAST
+        // field, so everything from `"command":` to the message's final closing
+        // brace is the command value followed by exactly one `}` — identical
+        // framing for both, so comparing those suffixes compares the command
+        // bytes verbatim.
+        fn command_suffix(s: &str) -> &str {
+            let start = s.find("\"command\":").unwrap();
+            &s[start..]
+        }
+        let inbound_cmd = command_suffix(&inbound_json);
+        let broadcast_cmd = command_suffix(&broadcast_json);
+        assert_eq!(
+            inbound_cmd, broadcast_cmd,
+            "rebroadcast command bytes must be byte-identical to inbound for a \
+             >=2-dataset embedded view"
+        );
+        // Guard the embedded view actually rode along with >=2 datasets.
+        assert!(inbound_cmd.contains("ds-aaaa"));
+        assert!(inbound_cmd.contains("ds-bbbb"));
+        assert!(inbound_cmd.contains("ds-cccc"));
+    }
+
+    #[test]
     fn snapshot_carries_annotations_under_document() {
         // A late joiner loads pins from snapshot.document.annotations,
         // including each pin's depth `z`.
@@ -530,6 +611,7 @@ mod tests {
             c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         });
         let msg = ServerMessage::Snapshot {
             seq: 3,
@@ -643,6 +725,7 @@ mod tests {
             c: 0,
             author: "alice".into(),
             kind: crate::scene::AnnotationKind::Point,
+            view: None,
         });
         doc.apply(DocumentCommand::AddComment {
             dataset_id: DatasetId("wds-1".into()),

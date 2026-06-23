@@ -20,6 +20,7 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
+import type { SavedView } from "../savedView/types.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import {
   annotationVertices,
@@ -70,6 +71,12 @@ export interface Annotation {
   /** Flat, insertion-ordered comment thread. Absent on a slice-1 pin →
    * defaulted to an empty array on read. */
   comments?: Comment[];
+  /** The author's captured view at creation — a {@link SavedView} snapshot
+   * (camera + slice/timepoint/channel + per-dataset display) in
+   * workspace-dataset-id form (empty `datasets`, no source URLs), so a later
+   * slice can restore that view on navigation. Absent on any pin created
+   * before this slice (and on the wire it is omitted when unset). */
+  view?: SavedView | null;
 }
 
 /**
@@ -144,6 +151,13 @@ interface Props {
    * each carrying a stable @handle; a test injects them. Optional + defaulted to
    * `[]`, so omitting it just means no mention picker. */
   mentionCandidates?: MentionCandidate[];
+  /** Jump to a pin's captured author view (annotation-views slice 2), threaded
+   * to the shared {@link ThreadPopover} as its "Go to author's view" affordance.
+   * The host performs the full LIGHT restore (camera + z/t/c + display, no
+   * dataset opening/hiding, no layout broadcast). Optional + defaulted to a
+   * no-op, so passive canvas pin-select stays gentle and the overlay works
+   * unwired. */
+  onGoToAuthorView?: (pinId: string) => void;
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click, not a
@@ -309,7 +323,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [] }: Props, ref) {
+export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
@@ -1434,6 +1448,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 onDocumentChanged={onDocumentChanged}
                 onClose={() => setOpenPinId(null)}
                 mentionCandidates={mentionCandidates}
+                onGoToAuthorView={onGoToAuthorView}
               />
             )}
           </div>

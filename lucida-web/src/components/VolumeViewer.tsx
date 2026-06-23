@@ -5,6 +5,7 @@ import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
 import { useKeyState } from "../hooks/useKeyState.ts";
 import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
@@ -281,6 +282,13 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      // Snapshot the author's CURRENT view onto the pin (annotation-views slice
+      // 1) so a later slice can restore it on navigation. Workspace-dataset-id
+      // form (no source URLs). The 3D camera, z-slab, and display come from the
+      // scene's presence; T/C are overridden with the live refs so the embedded
+      // view's timepoint/channel match the pin's own t/c. `null` (capture
+      // failure) just omits the view — it is optional/additive.
+      const capturedView = buildAnnotationView(scene, liveViewWithLiveTC(scene, tRef.current, cRef.current));
       // Apply locally AND send (mirrors SliceViewer's draw and every other doc
       // command): the sender is excluded from the server's rebroadcast, so the
       // local apply is what shows the author their own shape. The client-supplied
@@ -301,6 +309,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           c: cRef.current,
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
+          // The author's full view at creation (camera + display + slice).
+          // Omitted from the wire when capture failed (additive field).
+          ...(capturedView ? { view: capturedView } : {}),
         },
         sendCommandRef.current,
       );

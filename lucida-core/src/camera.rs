@@ -72,7 +72,11 @@ pub enum ClipMode {
 }
 
 /// Unified camera: 2D slice viewing, 3D arcball, or free-fly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` (not `Eq` — the variants hold `f64`) so a type that embeds a
+/// camera (e.g. [`crate::saved_view::SavedView`] captured on a
+/// [`crate::scene::Annotation`]) can itself derive `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 pub enum Camera {
     #[serde(rename = "slice")]
@@ -96,7 +100,7 @@ pub struct Slice {
 
 /// 3D arcball camera for volume rendering.
 /// Uses spherical coordinates (theta, phi, distance) around a target point.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Arcball {
     pub target: [f64; 3],
     pub theta: f64,
@@ -115,7 +119,7 @@ pub struct Arcball {
 }
 
 /// Free-fly camera with position + quaternion orientation.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fly {
     pub position: [f64; 3],
     /// Quaternion (x, y, z, w) where w is the scalar part.

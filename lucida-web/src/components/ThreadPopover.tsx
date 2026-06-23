@@ -42,6 +42,7 @@ import {
 } from "./annotationMentions.ts";
 import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
+import { buildAnnotationLink } from "../savedView/urlSync.ts";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -72,6 +73,14 @@ interface Props {
    * Optional + defaulted to `[]` so the thread works with no candidates (the
    * picker simply never opens). */
   mentionCandidates?: MentionCandidate[];
+  /** Jump to the author's captured view for this pin (annotation-views slice 2).
+   * Rendered as a "Go to author's view" affordance ONLY when the pin carries a
+   * captured `view` (older pins have none → no button). The host performs the
+   * full LIGHT restore (camera + z/t/c + display, no dataset opening/hiding, no
+   * layout broadcast). This is how a pin selected PASSIVELY on the canvas (which
+   * stays a gentle recenter) opts into the author's framing on demand. Optional
+   * + defaulted to a no-op so the thread works unwired (e.g. a test harness). */
+  onGoToAuthorView?: (pinId: string) => void;
 }
 
 /** Stable client-supplied id so the local apply and peers' broadcast converge. */
@@ -90,6 +99,7 @@ export function ThreadPopover({
   onDocumentChanged,
   onClose,
   mentionCandidates = [],
+  onGoToAuthorView,
 }: Props) {
   // Draft text for a NEW comment in this thread.
   const [draft, setDraft] = useState("");
@@ -111,9 +121,31 @@ export function ThreadPopover({
   // Confirm/Cancel. Nothing is emitted until Confirm, so a pin and its whole
   // thread can never be destroyed by a single click.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Transient feedback for the "Copy link" share affordance (annotation-views
+  // slice 3): flips the label to "Copied!" briefly after a successful copy (or
+  // "Copy failed" if the clipboard write rejects). A tiny per-thread UI signal —
+  // not a command, not synced.
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   const mine = pin.author === String(myId);
   const comments = pin.comments ?? [];
+
+  // --- Copy a shareable deep-link to this pin (slice 3) ----------------------
+  // Builds `<workspace-url>#a=<pinId>` from the live location and copies it to
+  // the clipboard. A deep-link, NOT an access grant: it widens nothing — the
+  // recipient still loads the workspace through the existing gate, and the
+  // annotation lives in that workspace's document. Available to ANY viewer of
+  // the pin (mirrors "Go to author's view"), not just the author.
+  const copyLink = async () => {
+    const link = buildAnnotationLink(pin.id);
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    setTimeout(() => setCopyState("idle"), 2500);
+  };
 
   // --- Add a comment (add_comment) — anyone may add -------------------------
   const addComment = () => {
@@ -279,6 +311,63 @@ export function ThreadPopover({
       >
         <span>Thread{comments.length > 0 ? ` (${comments.length})` : ""}</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* "Copy link" — a shareable annotation DEEP-LINK
+              (`<workspace-url>#a=<pinId>`) to the clipboard (annotation-views
+              slice 3). Always present (any pin can be linked) and available to
+              ANY viewer, not just the author. It is a deep-link, not an access
+              grant: the recipient still loads the workspace through the existing
+              gate. The label flips to transient feedback after a copy. */}
+          <button
+            data-testid={`pin-copy-link-${pin.id}`}
+            onClick={copyLink}
+            title="Copy a shareable link to this annotation"
+            aria-label="Copy link to this annotation"
+            style={{
+              background: "none",
+              border: "none",
+              color: copyState === "failed" ? "#f85149" : "#58a6ff",
+              cursor: "pointer",
+              fontSize: 12,
+              lineHeight: 1,
+              padding: 0,
+              fontWeight: 600,
+            }}
+          >
+            {copyState === "copied"
+              ? "Copied!"
+              : copyState === "failed"
+                ? "Copy failed"
+                : "Copy link"}
+          </button>
+          {/* "Go to author's view" — the explicit, on-demand full restore of the
+              view the author had when they dropped this pin (annotation-views
+              slice 2). Rendered ONLY when the pin carries a captured `view`
+              (older view-less pins show nothing here). Clicking it asks the host
+              to restore the author's camera/z-t-c/display (LIGHT tier: local
+              only, no dataset opening/hiding, no shared-layout broadcast). This
+              is how a pin selected passively on the canvas — which stays a gentle
+              recenter — opts into the author's framing. Anyone (not just the
+              author) can use it. */}
+          {pin.view && (
+            <button
+              data-testid={`pin-goto-author-view-${pin.id}`}
+              onClick={() => onGoToAuthorView?.(pin.id)}
+              title="Go to the view the author had when they placed this pin"
+              aria-label="Go to author's view"
+              style={{
+                background: "none",
+                border: "none",
+                color: "#58a6ff",
+                cursor: "pointer",
+                fontSize: 12,
+                lineHeight: 1,
+                padding: 0,
+                fontWeight: 600,
+              }}
+            >
+              Go to author&rsquo;s view
+            </button>
+          )}
           {/* Delete trigger — author-only. Activating it arms the confirm below
               (it does NOT emit), so a pin and its whole thread can never be
               removed in one click. A peer's pin renders no pin-delete-* control. */}

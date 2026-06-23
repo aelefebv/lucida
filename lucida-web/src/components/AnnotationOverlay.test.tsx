@@ -1345,3 +1345,96 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     expect(dotTransform("static")).toBe(at);
   });
 });
+
+describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's view (slice 2)", () => {
+  // A pin carrying the author's captured view. The captured camera/contrast/z
+  // here must NEVER be applied by a passive canvas pin-select — only the explicit
+  // "Go to author's view" affordance (host-driven) restores it.
+  const VIEW = {
+    v: 1,
+    datasets: [],
+    active_layouts: {},
+    camera: { mode: "slice", center: [999, 999], zoom: 16, viewport: [800, 600] },
+    view: { z_range: { start: 7, end: 8 }, t: 2, c: 1 },
+    display: { contrast_min: 0, contrast_max: 1234, gamma: 2.2 },
+    dataset_order: [],
+    dataset_settings: {},
+  } as const;
+
+  function pinWithView(): Annotation {
+    return {
+      id: "pin-v",
+      position: [10, 20],
+      z: 3,
+      author: String(MY_ID),
+      kind: "point",
+      comments: [],
+      view: JSON.parse(JSON.stringify(VIEW)),
+    };
+  }
+
+  function renderWithGoTo(pin: Annotation) {
+    const { scene, applied } = makeScene([pin]);
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = scene;
+    const goToCalls: string[] = [];
+    const canvas = makeCanvas();
+    render(
+      <AnnotationOverlay
+        datasetId="wds-1"
+        wasmSceneRef={sceneRef}
+        canvas={canvas}
+        version={0}
+        viewContext={{ z: 3, t: 0, c: 0 }}
+        myId={MY_ID}
+        sendCommand={() => {}}
+        onDocumentChanged={() => {}}
+        onViewportChanged={() => {}}
+        onGoToAuthorView={(id) => goToCalls.push(id)}
+      />,
+    );
+    return { applied, goToCalls };
+  }
+
+  it("a plain click on a pin opens its thread but does NOT restore the author's camera/contrast/z (gentle)", () => {
+    const { applied } = renderWithGoTo(pinWithView());
+
+    // Passive canvas pin-select: a plain click on the dot. This opens the thread…
+    fireEvent.click(screen.getByTestId("annot-pin-pin-v"));
+    expect(screen.getByTestId("annot-thread-pin-v")).toBeTruthy();
+
+    // …and emits NO full-restore commands. The overlay's own click handler must
+    // never yank the camera/contrast/zoom/slice — that is the explicit tier's job.
+    const types = applied.map((c) => c.type);
+    expect(types).not.toContain("set_contrast");
+    expect(types).not.toContain("set_gamma");
+    expect(types).not.toContain("set_z_range");
+    expect(types).not.toContain("set_mode_slice");
+    expect(types).not.toContain("set_mode_arcball");
+    expect(types).not.toContain("set_center"); // not even a recenter on passive select
+  });
+
+  it("exposes the 'Go to author's view' affordance in the thread and fires it on click", () => {
+    const { goToCalls } = renderWithGoTo(pinWithView());
+
+    fireEvent.click(screen.getByTestId("annot-pin-pin-v"));
+    const goBtn = screen.getByTestId("pin-goto-author-view-pin-v");
+    expect(goBtn).toBeTruthy();
+    fireEvent.click(goBtn);
+    expect(goToCalls).toEqual(["pin-v"]);
+  });
+
+  it("a view-less pin's thread shows NO 'Go to author's view' affordance (backward-compat)", () => {
+    const noView: Annotation = {
+      id: "pin-old",
+      position: [10, 20],
+      z: 3,
+      author: String(MY_ID),
+      kind: "point",
+      comments: [],
+    };
+    renderWithGoTo(noView);
+    fireEvent.click(screen.getByTestId("annot-pin-pin-old"));
+    expect(screen.queryByTestId("pin-goto-author-view-pin-old")).toBeNull();
+  });
+});

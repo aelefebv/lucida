@@ -374,6 +374,20 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         principal: &AuthPrincipal,
     ) -> Result<Option<WorkspaceRole>, StoreError>;
 
+    /// The caller's explicit member role regardless of archive state.
+    ///
+    /// Unlike `role_for`, this ignores `archived_at` and does NOT consider
+    /// anyone-with-link: it answers only "is this principal a real member of
+    /// this workspace (active or archived)?" It exists so the workspace-open
+    /// path can decide whether an *archived* workspace should surface its
+    /// archived state (to a member) or stay indistinguishable from a missing
+    /// workspace (to a non-member) — see `get_workspace_for`.
+    async fn member_role_for_any_state(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Option<WorkspaceRole>, StoreError>;
+
     async fn rename_workspace(
         &self,
         workspace_id: &str,
@@ -1101,6 +1115,46 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         } else {
             Ok(None)
         }
+    }
+
+    async fn member_role_for_any_state(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Option<WorkspaceRole>, StoreError> {
+        if principal.is_admin {
+            // Admins are owner-equivalent on any workspace that exists, in any
+            // state (mirrors `role_for`/`owner_role_for_any_state`).
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM workspaces WHERE id = ?")
+                    .bind(workspace_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(map_sql)?;
+            if exists.is_some() {
+                return Ok(Some(WorkspaceRole::Owner));
+            }
+            return Ok(None);
+        }
+
+        let email = normalize_email(&principal.email);
+        let row = sqlx::query(
+            r#"
+            SELECT role
+            FROM workspace_members
+            WHERE workspace_id = ? AND email = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        WorkspaceRole::try_from(row.get::<String, _>("role").as_str()).map(Some)
     }
 
     async fn rename_workspace(
@@ -2422,6 +2476,19 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
+        // NEVER-LEAK (workspace-open path). This path is reachable by *anyone*
+        // who is handed a `/w/<id>` deep-link (annotation share-by-link), so a
+        // caller with no access must not be able to tell "exists but denied"
+        // from "does not exist": both collapse to NotFound (404), byte-identical
+        // to a missing row. This mirrors the saved-views never-leak discipline
+        // (see `get_saved_view`). The role check therefore comes FIRST, and a
+        // missing role yields NotFound, not Forbidden.
+        //
+        // Archived is surfaced (Gone/410) only to a real member — the one party
+        // that already knows the workspace exists; to a non-member an archived
+        // workspace is also indistinguishable from a missing one (NotFound).
+        // The anyone-with-link grant is honored by `role_for` (active rows
+        // only), so a valid link still resolves to a role → 200.
         let record = self
             .store
             .get_workspace(workspace_id)
@@ -2429,14 +2496,26 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::NotFound)?;
         if record.archived_at.is_some() {
-            return Err(WorkspaceError::Archived);
+            // `role_for` excludes archived rows, so distinguish member from
+            // non-member with an archive-state-agnostic membership lookup.
+            return if self
+                .store
+                .member_role_for_any_state(workspace_id, principal)
+                .await
+                .map_err(WorkspaceError::Store)?
+                .is_some()
+            {
+                Err(WorkspaceError::Archived)
+            } else {
+                Err(WorkspaceError::NotFound)
+            };
         }
         let role = self
             .store
             .role_for(workspace_id, principal)
             .await
             .map_err(WorkspaceError::Store)?
-            .ok_or(WorkspaceError::Forbidden)?;
+            .ok_or(WorkspaceError::NotFound)?;
         Ok((record, role))
     }
 
@@ -4704,11 +4783,14 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(details.workspace.owner_count, 0);
+        // The former owner was removed, so they are now a non-member: opening the
+        // workspace must be indistinguishable from a missing one (never-leak),
+        // i.e. NotFound rather than Forbidden. (Recovery is admin-only, below.)
         let err = manager
             .get_workspace_for(&workspace.id, &owner)
             .await
             .unwrap_err();
-        assert!(matches!(err, WorkspaceError::Forbidden));
+        assert!(matches!(err, WorkspaceError::NotFound));
 
         let member = manager
             .admin_upsert_owner(&workspace.id, &recovered.email, Some("Recovered Owner"))
@@ -5187,6 +5269,126 @@ pub mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    // Resolve the open-path error a non-member would receive to the concrete
+    // (status, json-body) a browser/CLI actually sees, going through the same
+    // terminal `WorkspaceError::into_response` mapping the handler uses.
+    async fn open_status_body(
+        manager: &WorkspaceManager,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> (StatusCode, serde_json::Value) {
+        let res = match manager.get_workspace_for(workspace_id, principal).await {
+            Ok((record, role)) => (
+                StatusCode::OK,
+                Json(WorkspaceResponse::from_record(record, role)),
+            )
+                .into_response(),
+            Err(err) => err.into_response(),
+        };
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn workspace_open_never_leaks_existence_to_non_member() {
+        // NEVER-LEAK regression (annotation share-by-link, slice 3): the
+        // workspace-open response a deep-link recipient receives must be
+        // byte-identical whether the workspace exists-but-is-restricted, is
+        // archived, or never existed. Otherwise a recipient enumerates which
+        // workspaces/annotations exist via the Network tab. Folded from the
+        // red-team family `annotation_deeplink_neverleak_family.json` cases
+        // nl-http-restricted-exists-vs-missing, nl-http-deleted-vs-missing,
+        // and nl-http-control-member-ok.
+        let store = fresh_store().await;
+        let alice = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+
+        // A default (restricted) workspace alice owns; bob is not a member.
+        let restricted = store
+            .create_workspace(&alice, Some("Restricted"))
+            .await
+            .unwrap();
+        // A workspace alice owns then archives; bob is not a member.
+        let archived = store
+            .create_workspace(&alice, Some("Archived"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .archive_workspace(&archived.id, &alice)
+            .await
+            .unwrap();
+
+        let missing = open_status_body(&manager, "does-not-exist-xyz", &bob).await;
+        let restricted_exists = open_status_body(&manager, &restricted.id, &bob).await;
+        let archived_exists = open_status_body(&manager, &archived.id, &bob).await;
+
+        // The control: a missing workspace is 404 {"error":"not_found"}.
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        assert_eq!(missing.1, json!({ "error": "not_found" }));
+
+        // exists-but-restricted is indistinguishable from missing.
+        assert_eq!(
+            restricted_exists, missing,
+            "restricted-but-existing open must be byte-identical to a missing one for a non-member"
+        );
+        // archived is also indistinguishable from missing (no 410 leak to a non-member).
+        assert_eq!(
+            archived_exists, missing,
+            "archived open must be byte-identical to a missing one for a non-member"
+        );
+
+        // Control: a real member (the owner) still opens the restricted one (200),
+        // so the never-leak collapse did not over-collapse access for everyone.
+        let owner_open = open_status_body(&manager, &restricted.id, &alice).await;
+        assert_eq!(owner_open.0, StatusCode::OK);
+
+        // Control: a member still learns their OWN archived workspace is archived
+        // (410), the one party that already knows it exists.
+        let owner_archived = open_status_body(&manager, &archived.id, &alice).await;
+        assert_eq!(owner_archived.0, StatusCode::GONE);
+        assert_eq!(owner_archived.1, json!({ "error": "workspace_archived" }));
+    }
+
+    #[tokio::test]
+    async fn workspace_open_anyone_with_link_still_grants_access() {
+        // The never-leak collapse must NOT break the share-by-link grant: a
+        // non-member opening an anyone-with-link workspace still gets 200 and the
+        // configured link role (the "deep-link is not a grant, but the link
+        // *role* is" path the feature relies on).
+        let store = fresh_store().await;
+        let alice = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let workspace = store
+            .create_workspace(&alice, Some("Linked"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        // Before enabling the link, bob is a non-member → never-leak 404.
+        let before = open_status_body(&manager, &workspace.id, &bob).await;
+        assert_eq!(before.0, StatusCode::NOT_FOUND);
+
+        manager
+            .update_link_access(
+                &workspace.id,
+                &alice,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let (record, role) = manager
+            .get_workspace_for(&workspace.id, &bob)
+            .await
+            .unwrap();
+        assert_eq!(record.id, workspace.id);
+        assert_eq!(role, WorkspaceRole::Viewer);
     }
 
     #[tokio::test]

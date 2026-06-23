@@ -1600,7 +1600,9 @@ fn scene_from_saved_view(document: &DocumentState, view: &SavedView) -> Scene {
     scene.view = view.view.clone();
     scene.display = view.display.clone();
     scene.dataset_order = view.dataset_order.clone();
-    scene.dataset_settings = view.dataset_settings.clone();
+    // `SavedView.dataset_settings` is an `IndexMap` (deterministic wire order);
+    // the CLI `Scene` mirror keeps a plain `HashMap`, so convert at the boundary.
+    scene.dataset_settings = view.dataset_settings.clone().into_iter().collect();
     hydrate_scene_document_defaults(&mut scene);
     scene
 }
@@ -1609,13 +1611,15 @@ fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> SavedView {
     SavedView {
         v: SAVED_VIEW_VERSION,
         datasets: Vec::new(),
-        active_layouts: active_layouts_from_document(document),
+        // The CLI helpers/`Scene` mirror use `HashMap`; collect into
+        // `SavedView`'s `IndexMap` fields at the boundary.
+        active_layouts: active_layouts_from_document(document).into_iter().collect(),
         camera: scene.camera,
         view: scene.view,
         display: scene.display,
         dataset_order: scene.dataset_order,
-        dataset_settings: scene.dataset_settings,
-        auto_contrast: HashMap::new(),
+        dataset_settings: scene.dataset_settings.into_iter().collect(),
+        auto_contrast: Default::default(),
     }
 }
 

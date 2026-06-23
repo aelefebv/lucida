@@ -553,64 +553,16 @@ export class SavedViewApplier {
     id: string,
     s: DatasetDisplaySettings,
   ): void {
+    // Visibility + opacity are the LAYER-PLACEMENT settings (which datasets show
+    // and how strongly). They are part of the HEAVY apply only — the light
+    // annotation-view restore deliberately leaves them untouched. Everything
+    // AFTER these two is the per-dataset/per-channel DISPLAY (colormap, contrast,
+    // gamma, blend), shared with the light path via `datasetDisplayCommands`.
     this.applyViewport(scene, { type: "set_dataset_visible", dataset_id: id, visible: s.visible });
     this.applyViewport(scene, { type: "set_dataset_opacity", dataset_id: id, opacity: s.opacity });
-    this.applyViewport(scene, {
-      type: "set_dataset_contrast",
-      dataset_id: id,
-      min: s.contrast_min,
-      max: s.contrast_max,
-    });
-    this.applyViewport(scene, { type: "set_dataset_gamma", dataset_id: id, gamma: s.gamma });
-    this.applyViewport(scene, {
-      type: "set_dataset_blend_mode",
-      dataset_id: id,
-      blend_mode: s.blend_mode,
-    });
-    if (s.render_mode !== undefined) {
-      this.applyViewport(scene, {
-        type: "set_dataset_render_mode",
-        dataset_id: id,
-        render_mode: s.render_mode,
-      });
+    for (const cmd of datasetDisplayCommands(id, s)) {
+      this.applyViewport(scene, cmd);
     }
-    if (s.channel_blend_mode !== undefined) {
-      this.applyViewport(scene, {
-        type: "set_channel_blend_mode",
-        dataset_id: id,
-        blend_mode: s.channel_blend_mode,
-      });
-    }
-    this.applyViewport(scene, {
-      type: "set_dataset_detail_level_override",
-      dataset_id: id,
-      level: s.detail_level_override ?? null,
-    });
-    if (s.channel_settings) {
-      s.channel_settings.forEach((c, i) => this.applyChannelSettings(scene, id, i, c));
-    }
-  }
-
-  private applyChannelSettings(
-    scene: WasmScene,
-    datasetId: string,
-    channel: number,
-    c: ChannelSettings,
-  ): void {
-    this.applyViewport(scene, {
-      type: "set_channel_visible", dataset_id: datasetId, channel, visible: c.visible,
-    });
-    this.applyViewport(scene, {
-      type: "set_channel_colormap", dataset_id: datasetId, channel, colormap: c.colormap,
-    });
-    this.applyViewport(scene, {
-      type: "set_channel_contrast",
-      dataset_id: datasetId, channel,
-      min: c.contrast_min, max: c.contrast_max,
-    });
-    this.applyViewport(scene, {
-      type: "set_channel_gamma", dataset_id: datasetId, channel, gamma: c.gamma,
-    });
   }
 
   private importCameraView(scene: WasmScene, camera: Camera): void {
@@ -648,6 +600,71 @@ export class SavedViewApplier {
       warnings: [...this.state.warnings, warning],
     });
   }
+}
+
+// Per-dataset / per-channel DISPLAY commands (colormap, contrast, gamma,
+// blend, render mode, detail level). These are all recipient-LOCAL
+// ViewportCommands — none of them is broadcast, opens a dataset, changes
+// visibility/opacity/order, or mutates the shared layout. Extracted from the
+// heavy applier's per-dataset settings step so the LIGHT annotation-view
+// restore can reproduce the AUTHOR'S per-channel colors/contrast for
+// already-loaded datasets WITHOUT forking the command shapes — and without
+// touching layer placement (visibility/opacity), which stay heavy-only.
+//
+// DELIBERATELY EXCLUDES `set_dataset_visible` and `set_dataset_opacity`: those
+// are layer-placement, not display, and reside in the heavy apply only (the
+// light restore must never hide/reorder a recipient's datasets).
+
+/** The per-channel display commands for one channel — colormap, contrast,
+ * gamma, and channel visibility (a channel toggle is display state, scoped to a
+ * single dataset's rendering; it never hides the DATASET). */
+export function channelDisplayCommands(
+  datasetId: string,
+  channel: number,
+  c: ChannelSettings,
+): Array<Record<string, unknown>> {
+  return [
+    { type: "set_channel_visible", dataset_id: datasetId, channel, visible: c.visible },
+    { type: "set_channel_colormap", dataset_id: datasetId, channel, colormap: c.colormap },
+    {
+      type: "set_channel_contrast",
+      dataset_id: datasetId, channel,
+      min: c.contrast_min, max: c.contrast_max,
+    },
+    { type: "set_channel_gamma", dataset_id: datasetId, channel, gamma: c.gamma },
+  ];
+}
+
+/** The per-dataset DISPLAY commands (contrast, gamma, blend, render mode,
+ * detail level, and every channel's display) for one dataset — i.e. everything
+ * `applyDatasetSettings` emits EXCEPT `set_dataset_visible` /
+ * `set_dataset_opacity`. Shared by the heavy applier and the light restore. */
+export function datasetDisplayCommands(
+  id: string,
+  s: DatasetDisplaySettings,
+): Array<Record<string, unknown>> {
+  const cmds: Array<Record<string, unknown>> = [
+    { type: "set_dataset_contrast", dataset_id: id, min: s.contrast_min, max: s.contrast_max },
+    { type: "set_dataset_gamma", dataset_id: id, gamma: s.gamma },
+    { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: s.blend_mode },
+  ];
+  if (s.render_mode !== undefined) {
+    cmds.push({ type: "set_dataset_render_mode", dataset_id: id, render_mode: s.render_mode });
+  }
+  if (s.channel_blend_mode !== undefined) {
+    cmds.push({ type: "set_channel_blend_mode", dataset_id: id, blend_mode: s.channel_blend_mode });
+  }
+  cmds.push({
+    type: "set_dataset_detail_level_override",
+    dataset_id: id,
+    level: s.detail_level_override ?? null,
+  });
+  if (s.channel_settings) {
+    s.channel_settings.forEach((c, i) => {
+      for (const cmd of channelDisplayCommands(id, i, c)) cmds.push(cmd);
+    });
+  }
+  return cmds;
 }
 
 // Out-of-range clamping for view indices.

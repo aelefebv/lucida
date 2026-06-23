@@ -690,13 +690,18 @@ fn capture_saved_view_from_snapshot(
     let view = SavedView {
         v: lucida_core::saved_view::SAVED_VIEW_VERSION,
         datasets: Vec::new(),
-        active_layouts: active_layouts_from_document(&snapshot.document),
+        // `SavedView`'s per-dataset maps are `IndexMap` (deterministic wire
+        // order); the CLI helpers build plain `HashMap`s, so collect into the
+        // field's `IndexMap` type at the boundary.
+        active_layouts: active_layouts_from_document(&snapshot.document)
+            .into_iter()
+            .collect(),
         camera: source_presence.camera.clone(),
         view: source_presence.view.clone(),
         display: source_presence.display.clone(),
         dataset_order,
-        dataset_settings,
-        auto_contrast: HashMap::new(),
+        dataset_settings: dataset_settings.into_iter().collect(),
+        auto_contrast: Default::default(),
     };
     let source = SavedViewPresenceSource {
         client_id: source_client_id,

@@ -26,8 +26,7 @@
 // call sites in the SPA continue to work, and the two new helpers are
 // available under the same import.
 
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, LayoutId};
@@ -57,7 +56,30 @@ pub const SAVED_VIEW_VERSION: u32 = 1;
 /// - `camera`, `view`, `display`, `dataset_order`, `dataset_settings`
 ///   mirror [[presence-and-follow-mode]]'s `PresenceState` surface
 ///   (where the camera is, which slice, contrast, per-dataset display).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` (not `Eq` — the camera/display fields hold `f64`) so a
+/// `SavedView` can be embedded in a `PartialEq` type. In particular
+/// [`crate::scene::Annotation`] derives `PartialEq` and captures the author's
+/// view as an `Option<SavedView>`, so this derive is load-bearing for that.
+///
+/// The per-dataset maps (`active_layouts`, `dataset_settings`,
+/// `auto_contrast`) are [`IndexMap`], NOT `std::collections::HashMap`. Once a
+/// `SavedView` is embedded in an
+/// [`Annotation`](crate::scene::Annotation)/`AddAnnotation` it rides the
+/// collaborative-document wire (broadcast, persisted, snapshotted), which
+/// requires **deterministic serialization**: the server rebroadcasts an
+/// inbound command by `serde_json::from_str` → `to_string` (lucida-server's
+/// `handler`), and that round-trip must be byte-identical to the inbound bytes
+/// (see [`crate::command`]). `serde_json` emits a `HashMap` in
+/// per-process-randomized hash order, so a multi-dataset view would
+/// re-serialize in a *different* order than it arrived — breaking the
+/// invariant. `IndexMap` preserves insertion order, and deserialize→serialize
+/// round-trips that order verbatim, so the rebroadcast is byte-identical. This
+/// matches the existing wire-borne document collections on
+/// [`DocumentState`](crate::scene::DocumentState) — its `manifests`,
+/// `asset_catalogs`, and `annotations` are `IndexMap` for exactly this reason
+/// ([[scene-state-and-epochs]]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedView {
     /// Schema version. Always [`SAVED_VIEW_VERSION`] (currently `1`) in
     /// the on-the-wire payload. The decoder rejects payloads where this
@@ -72,9 +94,11 @@ pub struct SavedView {
     pub datasets: Vec<String>,
 
     /// Active layout per dataset. Keyed by [`DatasetId`] so the order of
-    /// `datasets` doesn't have to match.
+    /// `datasets` doesn't have to match. [`IndexMap`] (insertion order) so the
+    /// embedded-on-the-wire form serializes deterministically — see the
+    /// type-level doc.
     #[serde(default)]
-    pub active_layouts: HashMap<DatasetId, LayoutId>,
+    pub active_layouts: IndexMap<DatasetId, LayoutId>,
 
     /// 2D / arcball / fly camera. Reuses the same enum as
     /// [`crate::protocol::PresenceState`].
@@ -95,17 +119,21 @@ pub struct SavedView {
 
     /// Per-dataset visibility / opacity / contrast / colormap / channel
     /// settings. Mirrors [`crate::scene::Scene::dataset_settings`].
+    /// [`IndexMap`] (insertion order) for deterministic on-the-wire
+    /// serialization — see the type-level doc.
     #[serde(default)]
-    pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    pub dataset_settings: IndexMap<DatasetId, DatasetDisplaySettings>,
 
     /// Per-dataset auto-contrast preference. Client-side state (lives in
     /// `useDatasetSettings.autoContrastMap` on the web client, not in the
     /// WASM scene). Captured + restored so manually-set contrast values
     /// aren't immediately overwritten by the recipient's auto-contrast
     /// intensity batcher (`useIntensityBatcher.ts`). `true` is the
-    /// default for any dataset not present in the map.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub auto_contrast: HashMap<DatasetId, bool>,
+    /// default for any dataset not present in the map. [`IndexMap`]
+    /// (insertion order) for deterministic on-the-wire serialization — see
+    /// the type-level doc.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub auto_contrast: IndexMap<DatasetId, bool>,
 }
 
 impl SavedView {
@@ -115,13 +143,13 @@ impl SavedView {
         Self {
             v: SAVED_VIEW_VERSION,
             datasets: Vec::new(),
-            active_layouts: HashMap::new(),
+            active_layouts: IndexMap::new(),
             camera: Camera::new_2d(viewport),
             view: ViewState::new(),
             display: DisplayState::default(),
             dataset_order: Vec::new(),
-            dataset_settings: HashMap::new(),
-            auto_contrast: HashMap::new(),
+            dataset_settings: IndexMap::new(),
+            auto_contrast: IndexMap::new(),
         }
     }
 }
@@ -322,5 +350,91 @@ mod tests {
         let id = dataset_id_for_url("");
         assert_eq!(id.len(), 19);
         assert!(id.starts_with("ds-"));
+    }
+
+    // ---- Deterministic on-the-wire serialization (>=2 datasets) ----------
+    //
+    // Once a `SavedView` is embedded in an `Annotation`/`AddAnnotation` it
+    // rides the collaborative-document wire, whose locked invariant is that an
+    // inbound command and its server rebroadcast are byte-identical (the server
+    // rebroadcasts via `serde_json::from_str` -> `to_string`; see
+    // `crate::command`'s `AddAnnotation` doc and
+    // `protocol::add_annotation_broadcast_is_byte_identical_to_inbound_command`).
+    // The per-dataset maps (`active_layouts`, `dataset_settings`,
+    // `auto_contrast`) are `IndexMap` precisely so that round-trip preserves
+    // key order; a `std::collections::HashMap` would re-emit them in
+    // per-process-randomized order and break this with >=2 entries.
+    //
+    // These guard the byte-identity of the wire STRING (NOT a `serde_json::Value`
+    // compare, which is order-insensitive and would pass even on the buggy
+    // `HashMap` form). Derived from the red-team determinism family.
+
+    /// A `SavedView` whose three maps each carry the same `keys`, inserted in
+    /// the given order (so we can build the "same logical view, opposite
+    /// insertion order" pair).
+    fn view_with_keys(keys: &[&str]) -> SavedView {
+        let mut v = SavedView::empty([1024, 768]);
+        for k in keys {
+            v.active_layouts
+                .insert(DatasetId((*k).into()), LayoutId(format!("L-{k}")));
+            v.dataset_settings
+                .insert(DatasetId((*k).into()), DatasetDisplaySettings::default());
+            v.auto_contrast.insert(DatasetId((*k).into()), false);
+            v.dataset_order.push(DatasetId((*k).into()));
+        }
+        v
+    }
+
+    /// THE invariant: the server's rebroadcast path (`from_str` -> `to_string`)
+    /// on a >=2-dataset view reproduces the inbound wire bytes byte-for-byte.
+    /// This is a *fixed golden* client wire (insertion order ds-aaaa < ds-bbbb <
+    /// ds-cccc in every map) — exactly what a browser emits via `JSON.stringify`.
+    /// With `HashMap` the re-serialization reordered the maps and this diverged;
+    /// `IndexMap` preserves the parsed order, so it round-trips verbatim.
+    #[test]
+    fn rebroadcast_of_multi_dataset_view_is_byte_identical() {
+        const CLIENT_WIRE: &str = r#"{"v":1,"datasets":[],"active_layouts":{"ds-aaaa":"L-a","ds-bbbb":"L-b","ds-cccc":"L-c"},"camera":{"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[1024,768]},"view":{"z_range":{"start":0,"end":1},"t":0,"c":0,"multi_channel":false},"display":{"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0},"dataset_order":["ds-aaaa","ds-bbbb","ds-cccc"],"dataset_settings":{"ds-aaaa":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"channel_blend_mode":"additive"},"ds-bbbb":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"channel_blend_mode":"additive"},"ds-cccc":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"channel_blend_mode":"additive"}},"auto_contrast":{"ds-aaaa":false,"ds-bbbb":false,"ds-cccc":false}}"#;
+        let parsed: SavedView = serde_json::from_str(CLIENT_WIRE).unwrap();
+        let rebroadcast = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(
+            CLIENT_WIRE, rebroadcast,
+            "server rebroadcast (from_str -> to_string) of a >=2-dataset SavedView \
+             must be byte-identical to the inbound wire"
+        );
+        // Sanity: the maps really do carry >=2 entries (so this isn't a
+        // vacuous 0/1-entry pass).
+        assert!(parsed.active_layouts.len() >= 2);
+        assert!(parsed.dataset_settings.len() >= 2);
+        assert!(parsed.auto_contrast.len() >= 2);
+    }
+
+    /// Repeated `from_str` -> `to_string` is a fixpoint for a >=2-dataset view:
+    /// re-parsing and re-serializing the rebroadcast yields the same bytes. (A
+    /// `HashMap` could land on a different order on each pass within a process.)
+    #[test]
+    fn multi_dataset_view_rebroadcast_is_a_fixpoint() {
+        let v = view_with_keys(&["ds-aaaa", "ds-bbbb", "ds-cccc", "ds-dddd"]);
+        let once = serde_json::to_string(&v).unwrap();
+        let parsed: SavedView = serde_json::from_str(&once).unwrap();
+        let twice = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(once, twice, "from_str -> to_string must be a byte fixpoint");
+    }
+
+    /// The map key order in the serialized blob follows insertion order
+    /// (`IndexMap` semantics), so a view captured the way the web client builds
+    /// it — iterating the scene's canonical dataset order — serializes in that
+    /// dataset order, and any peer deriving the same logical view from the same
+    /// canonical order produces the same bytes.
+    #[test]
+    fn multi_dataset_view_serializes_in_insertion_order() {
+        let v = view_with_keys(&["ds-aaaa", "ds-bbbb", "ds-cccc"]);
+        let json = serde_json::to_string(&v).unwrap();
+        let a = json.find("ds-aaaa").unwrap();
+        let b = json.find("ds-bbbb").unwrap();
+        let c = json.find("ds-cccc").unwrap();
+        assert!(
+            a < b && b < c,
+            "map keys must serialize in insertion order: {json}"
+        );
     }
 }
