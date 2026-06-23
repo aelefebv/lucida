@@ -176,3 +176,4 @@
 - feat(annotations): capture the author's view when an annotation is created (slipway, reversible: git-revert)
 - feat(annotations): restore the author's view when navigating to an annotation (slipway, reversible: git-revert)
 - feat(annotations): share an annotation by link (deep-link, never-leak) (slipway, reversible: git-revert)
+- fix(docker): pin rust-builder to bookworm so the binary's glibc matches the runtime (slipway, reversible: git-revert)
