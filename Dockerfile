@@ -21,7 +21,13 @@
 # requires Rust >= 1.85; transitive deps (time@0.3.47, ...) need 1.88+;
 # CI uses dtolnay/rust-toolchain@stable which currently resolves to 1.95.
 # Pinning here matches CI exactly. Bump when CI's stable advances.
-FROM rust:1.95-slim AS rust-builder
+#
+# Pin the Debian SUITE to bookworm (`-slim-bookworm`, not the bare `-slim`):
+# the bare tag floats to the newest Debian (now trixie, glibc 2.38), which made
+# the release binary require GLIBC_2.38 while the bookworm-slim runtime ships
+# glibc 2.36 — the server then failed to dynamically link ("GLIBC_2.38 not
+# found") and never started. Keep the builder's glibc == the runtime's.
+FROM rust:1.95-slim-bookworm AS rust-builder
 
 # Build deps. We deliberately do NOT install libssl-dev: lucida-server's
 # reqwest is configured `default-features = false, features =
