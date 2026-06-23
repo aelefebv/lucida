@@ -172,3 +172,4 @@
 - fix(deps): lru 0.12 -> 0.16 (lucida-store; clears soundness alert) (slipway, reversible: git-revert)
 - fix(deps): force js-yaml 4.2.0 + @babel/core 7.29.6 via pnpm overrides (lucida-web) (slipway, reversible: git-revert)
 - build(deps): vite 7 -> 8 (rolldown); drops esbuild — clears last alert (slipway, reversible: git-revert)
+- chore: add .gitattributes with CHANGELOG.md merge=union (slipway, reversible: git-revert)
