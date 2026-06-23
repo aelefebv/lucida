@@ -357,6 +357,14 @@ function App({
     () => 0,
   );
 
+  // Id of the saved view currently applied to the viewer, if any. The sidebar
+  // highlights the matching row so the user sees which view they're looking at.
+  // Set on a successful open (below); CLEARED the moment the live view diverges
+  // from it — see `emitPresenceWithUrl`, the single signal every viewport
+  // mutation funnels through — so the highlight means "the view on screen",
+  // not "the last row I clicked" (#818).
+  const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
+
   // Wrapped emitPresence/emitDatasetPresence — every viewport mutation
   // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
   // changeTick alone doesn't bump on viewport-only mutations like
@@ -366,6 +374,11 @@ function App({
   const emitPresenceWithUrl = useCallback(() => {
     bridge.emitPresence();
     savedViewSync.notifyChange();
+    // A viewport mutation (pan / zoom / Z / T / C / mode / multi-channel) means
+    // the live view no longer equals the opened saved view, so drop the active
+    // -row highlight (#818). Functional + guarded so it's a no-op (no re-render)
+    // when nothing is highlighted — this fires on every pan frame.
+    setCurrentOpenSavedViewId((prev) => (prev === null ? prev : null));
   }, [bridge, savedViewSync]);
   const emitDatasetPresenceWithUrl = useCallback(() => {
     bridge.emitDatasetPresence();
@@ -853,7 +866,6 @@ function App({
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
-  const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
 
@@ -896,6 +908,14 @@ function App({
     // active row. Set it only after a successful apply.
     setCurrentOpenSavedViewId(savedViewId);
   }, [savedViewApplier, notifySavedViewChange]);
+
+  // The sidebar tells us when the open saved view stops existing as the user
+  // acts on it (deleted / withdrawn / its deferred reject committed); drop the
+  // active-row highlight so it doesn't dangle on a view that's gone (#818).
+  // Guard on the id so a stale invalidation can't clear a newer open view.
+  const handleActiveSavedViewInvalidated = useCallback((savedViewId: string) => {
+    setCurrentOpenSavedViewId((prev) => (prev === savedViewId ? null : prev));
+  }, []);
 
   const commitWorkspaceName = useCallback(() => {
     const next = workspaceNameDraft.trim();
@@ -1424,6 +1444,7 @@ function App({
         defaultSavedViewId={defaultSavedViewId}
         onSetDefaultSavedView={onSetDefaultSavedView}
         currentOpenSavedViewId={currentOpenSavedViewId}
+        onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />

@@ -462,10 +462,21 @@
   color: #fff;
 }
 
-.bookmark-toast {
+/* Toasts now stack: the fixed-positioned column lives in the corner and each
+   toast flows inside it, so several pending-reject "Undo" toasts can coexist
+   without overlapping (#818). Newest is appended last → nearest the corner. */
+.bookmark-toast-stack {
   position: fixed;
   bottom: 16px;
   right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.bookmark-toast {
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -476,7 +487,8 @@
   border: 1px solid #444;
   font-size: 0.8rem;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  z-index: 9999;
+  /* Re-enable interaction (the stack disables it so empty gaps don't eat clicks). */
+  pointer-events: auto;
 }
 
 .bookmark-toast.warn {
