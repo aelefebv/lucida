@@ -135,6 +135,10 @@ export function useSavedViewSync({
    *  `emitPresence`/`emitDatasetPresence` callbacks so every viewport
    *  mutation co-taps the URL (Bug #1 fix). Stable identity. */
   notifyChange: () => void;
+  /** Collapse a resolved `#a=`/`#b=` hash to the live `#view=…` form — used by
+   *  App.tsx after restoring an annotation deep-link (slice 3), exactly as the
+   *  `#b=` bootstrap collapses after its apply. Stable identity. */
+  collapseDeepLinkHash: () => Promise<void>;
 } {
   const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
   const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
@@ -372,10 +376,18 @@ export function useSavedViewSync({
     bundle.urlSync.notifyChange();
   }, [bundle.urlSync]);
 
+  // Collapse a resolved `#a=`/`#b=` hash to the live `#view=…` form. Forwards to
+  // the underlying UrlSync; stable identity across renders.
+  const collapseDeepLinkHash = useCallback(
+    () => bundle.urlSync.collapseToLiveView(),
+    [bundle.urlSync],
+  );
+
   return {
     applier: bundle.applier,
     captureBuilder,
     trackedSendOpen,
     notifyChange,
+    collapseDeepLinkHash,
   };
 }

@@ -42,6 +42,7 @@ import {
 } from "./annotationMentions.ts";
 import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
+import { buildAnnotationLink } from "../savedView/urlSync.ts";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -120,9 +121,31 @@ export function ThreadPopover({
   // Confirm/Cancel. Nothing is emitted until Confirm, so a pin and its whole
   // thread can never be destroyed by a single click.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Transient feedback for the "Copy link" share affordance (annotation-views
+  // slice 3): flips the label to "Copied!" briefly after a successful copy (or
+  // "Copy failed" if the clipboard write rejects). A tiny per-thread UI signal —
+  // not a command, not synced.
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   const mine = pin.author === String(myId);
   const comments = pin.comments ?? [];
+
+  // --- Copy a shareable deep-link to this pin (slice 3) ----------------------
+  // Builds `<workspace-url>#a=<pinId>` from the live location and copies it to
+  // the clipboard. A deep-link, NOT an access grant: it widens nothing — the
+  // recipient still loads the workspace through the existing gate, and the
+  // annotation lives in that workspace's document. Available to ANY viewer of
+  // the pin (mirrors "Go to author's view"), not just the author.
+  const copyLink = async () => {
+    const link = buildAnnotationLink(pin.id);
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    setTimeout(() => setCopyState("idle"), 2500);
+  };
 
   // --- Add a comment (add_comment) — anyone may add -------------------------
   const addComment = () => {
@@ -288,6 +311,34 @@ export function ThreadPopover({
       >
         <span>Thread{comments.length > 0 ? ` (${comments.length})` : ""}</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* "Copy link" — a shareable annotation DEEP-LINK
+              (`<workspace-url>#a=<pinId>`) to the clipboard (annotation-views
+              slice 3). Always present (any pin can be linked) and available to
+              ANY viewer, not just the author. It is a deep-link, not an access
+              grant: the recipient still loads the workspace through the existing
+              gate. The label flips to transient feedback after a copy. */}
+          <button
+            data-testid={`pin-copy-link-${pin.id}`}
+            onClick={copyLink}
+            title="Copy a shareable link to this annotation"
+            aria-label="Copy link to this annotation"
+            style={{
+              background: "none",
+              border: "none",
+              color: copyState === "failed" ? "#f85149" : "#58a6ff",
+              cursor: "pointer",
+              fontSize: 12,
+              lineHeight: 1,
+              padding: 0,
+              fontWeight: 600,
+            }}
+          >
+            {copyState === "copied"
+              ? "Copied!"
+              : copyState === "failed"
+                ? "Copy failed"
+                : "Copy link"}
+          </button>
           {/* "Go to author's view" — the explicit, on-demand full restore of the
               view the author had when they dropped this pin (annotation-views
               slice 2). Rendered ONLY when the pin carries a captured `view`

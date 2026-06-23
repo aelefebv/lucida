@@ -41,6 +41,7 @@ import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
+import { useAnnotationDeepLink } from "./hooks/useAnnotationDeepLink.ts";
 import {
   getWorkspaceSavedView,
   getWorkspaceViewerProfile,
@@ -130,6 +131,15 @@ function App({
   // Distinct from the heavy applier's LoadingViewBanner (the light path never
   // goes through the applier — no dataset opening/hiding, no layout broadcast).
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
+  // A non-blocking notice for the annotation DEEP-LINK path (slice 3) when the
+  // `#a=<id>` couldn't be resolved against the loaded workspace document — the
+  // annotation was deleted, or the id is wrong/forged. Distinct from
+  // `restoreNotice` (a successful-but-clamped restore) so the two never clobber
+  // each other; rendered as a dismissible message rather than a silent no-op.
+  // NEVER-LEAK: this is the SAME outcome a recipient-without-access would see
+  // (they never get this far — the workspace load fails at the gate first), so
+  // "deleted/forged id" and "not allowed" are indistinguishable by design.
+  const [deepLinkNotFound, setDeepLinkNotFound] = useState(false);
   const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
     source: workspaceName,
     value: workspaceName,
@@ -495,7 +505,7 @@ function App({
   // ends up on-context; an out-of-extent capture clamps gracefully with a
   // non-blocking notice. An annotation with NO captured view falls back to the
   // gentle recenter (today's behavior — no regression).
-  const restoreCapturedView = useCallback((pin: Annotation) => {
+  const restoreCapturedView = useCallback((pin: Annotation, datasetIdOverride?: string) => {
     const ws = scene.wasmSceneRef.current;
     if (!ws || !pin.view) {
       // No view (older pin) or no scene: degrade to exactly today's gentle path,
@@ -521,8 +531,12 @@ function App({
     // captured Z to plane 0 (the #814 class). When no dataset is resolvable we
     // pass `undefined`, so `restoreAnnotationView` SKIPS the clamp (the captured
     // z/t/c pass through) rather than collapsing.
+    // A deep-link (`#a=`) passes the pin's OWN dataset explicitly (the pin may
+    // live on a dataset that isn't the selected one), so the clamp targets the
+    // right extents even before selection settles. Otherwise resolve the SAME
+    // way the pin set was read.
     const pinDatasetId =
-      resolveAnnotationDatasetId(ws, selectedDatasetId) ?? undefined;
+      datasetIdOverride ?? resolveAnnotationDatasetId(ws, selectedDatasetId) ?? undefined;
     const result = restoreAnnotationView({
       scene: ws,
       view: pin.view,
@@ -604,6 +618,58 @@ function App({
     if (!pin) return;
     restoreCapturedView(pin);
   }, [currentAnnotations, restoreCapturedView]);
+
+  // ANNOTATION DEEP-LINK (`#a=<annotationId>`) — slice 3. Resolve+restore+focus
+  // the linked pin against the LOADED workspace document. Runs from the
+  // post-document-load effect below (keyed on `remoteDocumentVersion`), NOT at
+  // scene bootstrap: the pin exists only after the doc snapshot lands, so
+  // resolving earlier would focus an unloaded pin (the #802 class).
+  //
+  // The pin may live on a dataset that isn't currently selected; selecting it
+  // first mounts that dataset's overlay so `focusPin` (inside restoreCapturedView)
+  // can actually open the thread. When selection changes we defer the restore one
+  // frame so the overlay's imperative ref exists before we focus.
+  const restoreAnnotationDeepLinkPin = useCallback(
+    (pin: Annotation, datasetId: string, onRestored: () => void) => {
+      // Collapse `#a=`→`#view=` only AFTER the restore has applied, so the URL
+      // captures the restored camera, not the pre-restore one. When the pin is
+      // on a not-yet-selected dataset the restore is deferred a frame (the
+      // overlay must mount first); the collapse must ride the SAME frame, else a
+      // copy/refresh in that window grabs the stale view.
+      const run = () => {
+        restoreCapturedView(pin, datasetId);
+        onRestored();
+      };
+      if (selectedDatasetId !== datasetId) {
+        setSelectedDatasetId(datasetId);
+        requestAnimationFrame(run);
+      } else {
+        run();
+      }
+    },
+    [restoreCapturedView, selectedDatasetId],
+  );
+
+  // Resolve the `#a=<id>` deep-link AFTER the workspace document's annotations
+  // have loaded (annotation-views slice 3). The TIMING lives in the hook: it
+  // re-checks on every `remoteDocumentVersion` bump (the bridge bumps it once a
+  // snapshot/command lands), so the FIRST tick where the pin is actually
+  // readable triggers the restore — NOT at scene bootstrap, where the doc is
+  // still empty and `focusPin` would no-op on an unloaded pin (the #802 class).
+  // On success it reuses the slice-2 LIGHT restore + focus and collapses `#a=`
+  // to the live `#view=` (like `#b=`); a missing id surfaces the graceful
+  // not-found notice rather than a silent no-op.
+  const collapseDeepLinkHash = savedViewSync.collapseDeepLinkHash;
+  const handleDeepLinkCollapse = useCallback(() => {
+    void collapseDeepLinkHash();
+  }, [collapseDeepLinkHash]);
+  useAnnotationDeepLink({
+    getScene: () => scene.wasmSceneRef.current,
+    docVersion: remoteDocumentVersion,
+    onRestore: restoreAnnotationDeepLinkPin,
+    onCollapseHash: handleDeepLinkCollapse,
+    onNotFound: setDeepLinkNotFound,
+  });
 
   // Populate callback refs — runs during render, before effects fire.
   // See the comment block above (savedViewHooksRef) for the rationale.
@@ -1147,6 +1213,57 @@ function App({
                 }}
               >
                 {restoreNotice}
+              </div>
+            )}
+            {/* Annotation DEEP-LINK not-found notice (slice 3): the `#a=<id>`
+                couldn't be resolved against the loaded workspace document
+                (deleted, or a wrong/forged id). Non-blocking + dismissible — a
+                clear message rather than a silent no-op. NEVER-LEAK: a recipient
+                without workspace access never reaches here (the load fails at the
+                gate first), so this is the SAME UX as a genuinely missing pin —
+                it never confirms the annotation existed. */}
+            {deepLinkNotFound && (
+              <div
+                role="status"
+                data-testid="annotation-deeplink-notfound"
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  background: "rgba(48,54,61,0.97)",
+                  color: "#e6edf3",
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  fontSize: "0.85rem",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+                  zIndex: 41,
+                  maxWidth: 420,
+                }}
+              >
+                <span>
+                  This annotation couldn&rsquo;t be found — it may have been
+                  deleted.
+                </span>
+                <button
+                  data-testid="annotation-deeplink-notfound-dismiss"
+                  onClick={() => setDeepLinkNotFound(false)}
+                  aria-label="Dismiss"
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "#8b949e",
+                    cursor: "pointer",
+                    fontSize: 16,
+                    lineHeight: 1,
+                    padding: 0,
+                  }}
+                >
+                  ×
+                </button>
               </div>
             )}
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />

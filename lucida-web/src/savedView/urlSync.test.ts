@@ -3,6 +3,8 @@ import {
   UrlSync,
   parseViewHash,
   parseBookmarkHash,
+  parseAnnotationHash,
+  buildAnnotationLink,
   parseViewerProfileSearch,
   type ResolvedSavedView,
 } from "./urlSync.ts";
@@ -650,6 +652,128 @@ describe("UrlSync — last view bootstrap (#700)", () => {
     await sync.bootstrap();
 
     expect(applier.applied[0].view.t).toBe(8);
+    sync.destroy();
+  });
+});
+
+describe("parseAnnotationHash (#a=<annotation-id>, slice 3)", () => {
+  it("returns null for empty hash", () => {
+    expect(parseAnnotationHash("")).toBeNull();
+    expect(parseAnnotationHash("#")).toBeNull();
+  });
+
+  it("extracts the annotation id from #a=<id>", () => {
+    expect(parseAnnotationHash("#a=pin-123")).toBe("pin-123");
+    expect(parseAnnotationHash("a=pin-123")).toBe("pin-123");
+  });
+
+  it("returns null for non-a keys (doesn't collide with #view= / #b=)", () => {
+    expect(parseAnnotationHash("#view=xxx")).toBeNull();
+    expect(parseAnnotationHash("#b=abc")).toBeNull();
+    expect(parseAnnotationHash("#foo=bar")).toBeNull();
+  });
+
+  it("accepts UUID-like annotation ids (client-minted)", () => {
+    expect(parseAnnotationHash("#a=550e8400-e29b-41d4-a716-446655440000")).toBe(
+      "550e8400-e29b-41d4-a716-446655440000",
+    );
+  });
+
+  it("rejects junk: special chars, spaces, empty value (defense against forged links)", () => {
+    expect(parseAnnotationHash("#a=abc/def")).toBeNull();
+    expect(parseAnnotationHash("#a=abc def")).toBeNull();
+    expect(parseAnnotationHash("#a=<script>")).toBeNull();
+    expect(parseAnnotationHash("#a=")).toBeNull();
+  });
+
+  it("decodes URI-encoded ids before validating", () => {
+    // "pin-123" percent-encoded round-trips back to the same id.
+    expect(parseAnnotationHash("#a=pin%2D123")).toBe("pin-123");
+    // …but decoding to a junk char still rejects.
+    expect(parseAnnotationHash("#a=pin%2F123")).toBeNull();
+  });
+
+  it("extracts #a= when coexisting with other params", () => {
+    expect(parseAnnotationHash("#foo=bar&a=pin-9&baz=1")).toBe("pin-9");
+  });
+});
+
+describe("buildAnnotationLink (#a= round-trip, slice 3)", () => {
+  it("builds <workspace-url>#a=<pinId> from the location", () => {
+    const link = buildAnnotationLink("pin-123", {
+      origin: "https://lucida.example",
+      pathname: "/w/ws-1",
+      search: "",
+    });
+    expect(link).toBe("https://lucida.example/w/ws-1#a=pin-123");
+  });
+
+  it("preserves an existing query string", () => {
+    const link = buildAnnotationLink("pin-9", {
+      origin: "https://lucida.example",
+      pathname: "/w/ws-1",
+      search: "?debug=1",
+    });
+    expect(link).toBe("https://lucida.example/w/ws-1?debug=1#a=pin-9");
+  });
+
+  it("round-trips: parseAnnotationHash recovers the id buildAnnotationLink wrote", () => {
+    const id = "550e8400-e29b-41d4-a716-446655440000";
+    const link = buildAnnotationLink(id, {
+      origin: "https://lucida.example",
+      pathname: "/w/ws-1",
+      search: "",
+    });
+    const hash = link.slice(link.indexOf("#"));
+    expect(parseAnnotationHash(hash)).toBe(id);
+  });
+});
+
+describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () => {
+  it("recognizes #a= and applies NOTHING at bootstrap (resolve is the host's post-doc-load job)", async () => {
+    const win = makeFakeWindow("#a=pin-123", "/w/ws-1");
+    const applier = new FakeApplier();
+    // Wire a default + last view + bookmark fetcher: NONE must fire — a #a=
+    // link must not be mistaken for a bare workspace open (which would apply the
+    // default/last view over the link's target).
+    const fetchDefault = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "default",
+      view: emptyView(),
+    }));
+    const fetchLastView = vi.fn(async (): Promise<ResolvedSavedView | null> => ({
+      id: "last-view",
+      view: emptyView(),
+    }));
+    const fetchBookmark = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
+    const sync = new UrlSync(() => emptyView(), applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchDefaultSavedView: fetchDefault,
+      fetchLastView,
+      fetchBookmark,
+      restoreLastViewEnabled: () => true,
+    });
+
+    await sync.bootstrap();
+
+    expect(applier.apply).not.toHaveBeenCalled();
+    expect(fetchDefault).not.toHaveBeenCalled();
+    expect(fetchLastView).not.toHaveBeenCalled();
+    expect(fetchBookmark).not.toHaveBeenCalled();
+    // The hash is left intact for the host to resolve post-doc-load.
+    expect(win.location.hash).toBe("#a=pin-123");
+    sync.destroy();
+  });
+
+  it("collapseToLiveView() rewrites the #a= hash to the live #view= form", async () => {
+    const win = makeFakeWindow("#a=pin-123", "/w/ws-1");
+    const applier = new FakeApplier();
+    const sync = new UrlSync(() => emptyView(), applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+
+    await sync.collapseToLiveView();
+
+    expect(win.location.hash.startsWith("#view=")).toBe(true);
     sync.destroy();
   });
 });

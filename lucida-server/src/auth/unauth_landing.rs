@@ -139,6 +139,27 @@ mod tests {
         assert!(UNAUTH_LANDING_HTML.contains("/auth/start"));
     }
 
+    /// Annotation deep-links (`/w/<id>#a=<annotationId>`, annotation-views
+    /// slice 3) ride the SAME hash-capture the shim already does — it forwards
+    /// the WHOLE `location.hash`, not a specific key (`#view=`/`#b=`/`#a=` all
+    /// ride identically). Assert the capture is key-agnostic so the `#a=` link
+    /// survives the logged-out OAuth round trip with no shim change.
+    #[test]
+    fn captures_full_hash_so_annotation_deeplink_survives_oauth() {
+        // The shim reads the entire hash, strips only the leading '#', and
+        // forwards it URL-encoded — it never inspects which key is present.
+        assert!(UNAUTH_LANDING_HTML.contains("window.location.hash"));
+        assert!(UNAUTH_LANDING_HTML.contains("encodeURIComponent(hash)"));
+        // It must not special-case a hash key (that would drop `#a=`).
+        assert!(
+            !UNAUTH_LANDING_HTML.contains("#view="),
+            "the shim forwards the whole hash; it must not key off #view=",
+        );
+        // Same for the signed-out landing's link rewrite.
+        assert!(SIGNED_OUT_LANDING_HTML.contains("window.location.hash"));
+        assert!(SIGNED_OUT_LANDING_HTML.contains("encodeURIComponent(hash)"));
+    }
+
     #[test]
     fn signed_out_landing_renders_static_signin_link_no_auto_bounce() {
         // Deliberately must NOT auto-redirect. The whole point of this

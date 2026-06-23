@@ -10,12 +10,22 @@
 //   - **Inbound** (URL → scene): on initial load, parse `window.location.hash`;
 //     on `popstate`, re-parse and re-apply. Both routed through the
 //     SavedViewApplier so the same step-ordered logic runs in both cases.
-//     Two recognized payload shapes:
+//     Three recognized payload shapes:
 //       * `#view=<inline base64+gzip>` — inline payload
 //       * `#b=<saved-view-id>` — fetched via the configured resolver then
 //         handed to the applier; the URL is then collapsed to its live
 //         `#view=…` form so further pans don't drift the recipient
 //         back to a stale snapshot.
+//       * `#a=<annotation-id>` — a workspace-scoped annotation DEEP-LINK
+//         (annotation-views slice 3). UrlSync only RECOGNIZES it here so it
+//         never mistakes it for a bare workspace open (and so doesn't apply the
+//         default/last view over it). The actual resolve+restore+focus is the
+//         host's job (App.tsx) and is deliberately deferred until AFTER the
+//         workspace document — and thus its annotations — has loaded: an
+//         annotation exists only after the doc snapshot lands, so resolving at
+//         scene-bootstrap time would focus an unloaded pin (the #802 class).
+//         Like `#b=`, the host collapses the hash to the live `#view=…` form
+//         after applying via {@link UrlSync.collapseToLiveView}.
 //
 // The debounce timing is configurable via the constructor for tests.
 
@@ -148,6 +158,15 @@ export class UrlSync {
     if (this.applier.isInProgress()) return;
 
     const hash = this.win.location.hash;
+
+    // `#a=<annotation-id>` is a workspace-scoped annotation deep-link
+    // (annotation-views slice 3). It is resolved by the HOST (App.tsx) AFTER
+    // the workspace document's annotations have loaded — not here — because the
+    // pin doesn't exist at scene-bootstrap time. We only RECOGNIZE it so the
+    // bootstrap doesn't fall through to `applyInitialViewForEmptyHash` and apply
+    // the default/last view over the link's target. No fetch, no apply here.
+    if (parseAnnotationHash(hash) !== null) return;
+
     const bookmarkId = parseBookmarkHash(hash);
     if (bookmarkId !== null) {
       let savedView: ResolvedSavedView | null;
@@ -265,6 +284,20 @@ export class UrlSync {
     await this.applier.apply(savedView.view);
   }
 
+  /**
+   * Collapse a resolved `#a=<annotation-id>` (or `#b=`) hash to the live
+   * `#view=…` form — the SAME tail `#b=` runs after its apply, exposed
+   * publicly so the host (App.tsx) can call it after the slice-2 LIGHT restore
+   * of an annotation deep-link. Keeping the URL on the annotation id would
+   * re-trigger the restore on every popstate / re-bootstrap and drift the
+   * recipient back to the author's frozen snapshot after they pan; collapsing
+   * to the live `#view=` makes the URL track the recipient's own scene from
+   * here on. A no-op when there's no capturable scene yet (the link's restore
+   * already positioned the live view; the next change tick will write it). */
+  async collapseToLiveView(): Promise<void> {
+    await this.flushAfterSavedViewApply();
+  }
+
   /** Encode and write `#view=…` immediately after a saved-view apply.
    *  Bypasses the in-progress guard because `apply` has already returned;
    *  the dedupe-against-lastWritten branch keeps this from looping. */
@@ -366,6 +399,59 @@ export function parseBookmarkHash(hash: string): string | null {
     return raw;
   }
   return null;
+}
+
+/** Parse a `#a=<annotation-id>` URL hash and return the annotation id, or null
+ *  when the hash isn't of that shape (annotation-views slice 3). Mirrors
+ *  {@link parseBookmarkHash}'s conservative character class
+ *  (`[A-Za-z0-9._-]+`) — annotation ids are client-minted UUID-v4s, which
+ *  qualify — so a `#a=<%-encoded-junk>` link never drives a lookup against an
+ *  attacker-chosen string. The link is the workspace URL + this hash; the
+ *  workspace path itself still governs access (see the never-leak note in
+ *  {@link buildAnnotationLink}). */
+export function parseAnnotationHash(hash: string): string | null {
+  if (!hash || hash === "#") return null;
+  const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
+  for (const part of stripped.split("&")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const key = part.slice(0, eq);
+    if (key !== "a") continue;
+    let raw: string;
+    try {
+      raw = decodeURIComponent(part.slice(eq + 1));
+    } catch {
+      // Malformed percent-encoding — reject rather than throw.
+      return null;
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(raw)) return null;
+    return raw;
+  }
+  return null;
+}
+
+/**
+ * Build a shareable annotation deep-link: the CURRENT workspace URL (origin +
+ * pathname + search) with the hash replaced by `#a=<annotationId>`
+ * (annotation-views slice 3).
+ *
+ * This is a deep-link, NOT an access grant: it carries no capability token and
+ * widens nothing. The recipient still loads the workspace through the existing
+ * gate (membership or the workspace's anyone-with-link), and annotation access
+ * == workspace access because the annotation lives in the workspace document. A
+ * recipient without access sees the SAME not-found UX as a missing annotation —
+ * the link never confirms the annotation (or workspace) exists.
+ *
+ * `loc` defaults to `window.location`; injectable for tests. The annotation id
+ * is `encodeURIComponent`-escaped for safety even though minted ids are already
+ * URL-safe. The existing path+search are preserved so a workspace route like
+ * `/w/ws-1` stays intact.
+ */
+export function buildAnnotationLink(
+  annotationId: string,
+  loc: { origin: string; pathname: string; search: string } = window.location,
+): string {
+  return `${loc.origin}${loc.pathname}${loc.search}#a=${encodeURIComponent(annotationId)}`;
 }
 
 export function parseViewerProfileSearch(search: string): string | null {

@@ -117,3 +117,74 @@ describe("ThreadPopover — Go to author's view affordance (slice 2)", () => {
     expect(calls).toEqual(["pin-o"]);
   });
 });
+
+describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
+  it("builds <workspace-url>#a=<pinId> and copies it to the clipboard", async () => {
+    const copied: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: async (t: string) => void copied.push(t) },
+      configurable: true,
+    });
+    // Pin the workspace location the link is built from.
+    window.history.replaceState({}, "", "/w/ws-42");
+
+    const anyPin: Annotation = {
+      id: "pin-share",
+      position: [1, 2],
+      author: "anyone",
+      kind: "point",
+      comments: [],
+      // No captured view needed — the share affordance is always present.
+    };
+    renderThread(anyPin);
+
+    const btn = screen.getByTestId("pin-copy-link-pin-share");
+    fireEvent.click(btn);
+
+    // The clipboard write is awaited inside the handler; let microtasks drain.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(copied).toHaveLength(1);
+    expect(copied[0]).toBe(`${window.location.origin}/w/ws-42#a=pin-share`);
+    // Transient "Copied!" feedback replaces the label.
+    expect(screen.getByTestId("pin-copy-link-pin-share").textContent).toBe("Copied!");
+  });
+
+  it("is available to ANY viewer (a pin authored by someone else still shows it)", () => {
+    const othersPin: Annotation = {
+      id: "pin-other",
+      position: [1, 2],
+      author: "not-me",
+      kind: "point",
+      comments: [],
+    };
+    renderThread(othersPin);
+    expect(screen.getByTestId("pin-copy-link-pin-other")).toBeTruthy();
+  });
+
+  it("shows a non-throwing 'Copy failed' when the clipboard write rejects", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: async () => {
+          throw new Error("denied");
+        },
+      },
+      configurable: true,
+    });
+    window.history.replaceState({}, "", "/w/ws-1");
+
+    const anyPin: Annotation = {
+      id: "pin-fail",
+      position: [1, 2],
+      author: "anyone",
+      kind: "point",
+      comments: [],
+    };
+    renderThread(anyPin);
+
+    fireEvent.click(screen.getByTestId("pin-copy-link-pin-fail"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByTestId("pin-copy-link-pin-fail").textContent).toBe("Copy failed");
+  });
+});
