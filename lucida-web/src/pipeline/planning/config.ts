@@ -68,6 +68,20 @@ export const IMPORTANCE_WEIGHT = 500;
 export const DISTANCE_WEIGHT = 10;
 
 /**
+ * Depth bias for the 3-D center-out chunk-spawn origin, expressed as a
+ * fraction of the visible region's half-depth along the near↔far (Z)
+ * axis. `-1` biases the spawn origin to the near plane, `+1` to the far
+ * plane, `0` keeps it centered.
+ *
+ * **Safety property (issue #532):** the default is exactly `0`, which
+ * adds a `0 * halfDepth = 0` offset to the focal Z used by
+ * `chunkDistanceFromCenter`. At the default the priority computation is
+ * therefore byte-identical to the pre-bias behavior — proven by
+ * `planning.test.ts` ("depth bias 0 reproduces unbiased ordering").
+ */
+export const DEPTH_BIAS_VIEW = 0;
+
+/**
  * Bump on the parent-well `WellProxy3D` request inside
  * `fields-with-proxy-fallback` — pushes it below per-field proxies so
  * the well proxy is only a coarse fallback while those are in flight.
@@ -93,6 +107,15 @@ export interface PlanningConfig {
   importanceWeight: number;
   /** Coefficient on chunk distance from the view center. */
   distanceWeight: number;
+  /**
+   * Depth bias for the 3-D center-out spawn origin along the near↔far
+   * (Z) axis, as a fraction of the visible region's half-depth. `0`
+   * (default) keeps the spawn origin centered — byte-identical to the
+   * unbiased behavior. Negative biases toward near, positive toward
+   * far. Clamped to `[-1, 1]`; the resulting focal Z is clamped to the
+   * visible Z range. See {@link DEPTH_BIAS_VIEW}.
+   */
+  depthBiasView: number;
   /**
    * Bump applied to the parent-well `WellProxy3D` request emitted inside
    * `fields-with-proxy-fallback`. Pushes it below per-field proxies.
@@ -143,6 +166,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   prefetchDepth: PREFETCH_DEPTH,
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
+  depthBiasView: DEPTH_BIAS_VIEW,
   wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
   proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   coarseDetailEnabled: true,

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
+import { FocalDepthControl } from "./components/FocalDepthControl.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
@@ -1359,6 +1360,14 @@ function App({
               </div>
             )}
             <DimensionControls label="T" value={dims.t} max={dims.dimT} onChange={dims.handleTChange} />
+            {/* Focal-depth control (issue #532): a USER-facing near↔far
+                bias for the 3-D center-out chunk-spawn origin. 3-D-only —
+                the bias is meaningless on a 2-D slice — so it appears here
+                (alongside the Z slider, which is itself disabled in 3-D)
+                only when the viewer is in 3-D mode. Binds straight to
+                configStore.depthBiasView (one source of truth); this is the
+                discoverable home, replacing the old Debug→Config entry. */}
+            {dims.viewMode === "3d" && <FocalDepthControl />}
           </div>
         )}
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", width: "100%", maxWidth: layout.canvasWidth }}>

@@ -77,6 +77,11 @@ const PRIORITY_WEIGHTS: TunableSpec[] = [
   },
 ];
 
+// Note: the 3-D chunk-spawn focal-depth control (issue #532,
+// `depthBiasView`) is a USER-facing knob and lives in the main 3-D view
+// UI (see components/FocalDepthControl.tsx), not here among the
+// developer planning tunables. It binds to the same configStore field.
+
 const RESIDENCY_BUDGETS: TunableSpec[] = [
   {
     field: "detailRenderRadiusView",

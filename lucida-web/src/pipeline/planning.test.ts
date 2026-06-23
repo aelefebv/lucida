@@ -25,6 +25,7 @@ import {
   PREFETCH_DEPTH,
   IMPORTANCE_WEIGHT,
   DISTANCE_WEIGHT,
+  DEPTH_BIAS_VIEW,
   WELL_PROXY_PRIORITY_BUMP,
   RENDER_RADIUS_DISABLED_VIEW,
   DEFAULT_PLANNING_CONFIG,
@@ -1249,6 +1250,117 @@ describe("plan()", () => {
   });
 });
 
+describe("plan() — depth-bias focal plane (#532)", () => {
+  // A single entity whose detail grid is 1x1x4 along Z (X/Y are one
+  // chunk each), so the only thing that varies between detail chunks is
+  // depth. chunkWorldZ = 128; Z-chunk world centers are 64, 192, 320,
+  // 448 for z = 0..3. The visible Z range covers all four.
+  function makeDepthSnapshot(
+    sortCenterVox: [number, number, number] | null,
+  ): PlanningSnapshot {
+    const level0 = makeLevelGeo(0, [1, 1, 512, 256, 256], [1, 1, 128, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      imageId: "img0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      levels: [level0],
+      importance: 1.0,
+      layoutPositionVox: [0, 0],
+    });
+    return createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 512],
+        effectiveZoom: 1,
+        sortCenterVox,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "volume",
+        interactionState: "idle",
+      },
+    });
+  }
+
+  /** Map of detail-chunk z-index → priority, for ordering assertions. */
+  function detailPriorityByZ(config: PlanningConfig): Map<number, number> {
+    // centerZ = 256 sits exactly between the z=1 (192) and z=2 (320)
+    // chunk centers, so the unbiased ordering is symmetric.
+    const snapshot = makeDepthSnapshot([128, 128, 256]);
+    const result = plan(snapshot, createSyntheticState(), config);
+    const byZ = new Map<number, number>();
+    for (const req of result.requests.filter((r) => r.lane === "detail")) {
+      byZ.set(req.z, req.priority);
+    }
+    return byZ;
+  }
+
+  it("emits one detail chunk per Z cell along the depth axis", () => {
+    const result = plan(
+      makeDepthSnapshot([128, 128, 256]),
+      createSyntheticState(),
+    );
+    const detail = result.requests.filter((r) => r.lane === "detail");
+    expect(detail.map((r) => r.z).sort()).toEqual([0, 1, 2, 3]);
+  });
+
+  it("SAFETY: depth bias 0 reproduces the unbiased center-out ordering byte-for-byte", () => {
+    // Golden = the priorities the planner produces with the default
+    // config, whose depthBiasView is 0. The bias is implemented as an
+    // additive term that is exactly 0 at the default and short-circuits
+    // before any arithmetic, so an explicit `depthBiasView: 0` must
+    // reproduce the same numbers, and they must match the hand-computed
+    // unbiased priority: detailLaneOffset + dist * distanceWeight
+    // (importance 1 ⇒ the importance term is 0).
+    const golden = detailPriorityByZ(DEFAULT_PLANNING_CONFIG);
+    const explicitZero = detailPriorityByZ(mergeConfig({ depthBiasView: 0 }));
+    expect(explicitZero).toEqual(golden);
+
+    // Hand-computed unbiased priorities. centerZ = 256; chunk centers
+    // 64/192/320/448 ⇒ |Δ| = 192/64/64/192.
+    const lane = DEFAULT_PLANNING_CONFIG.detailLaneOffset;
+    const w = DEFAULT_PLANNING_CONFIG.distanceWeight;
+    expect(golden.get(0)).toBeCloseTo(lane + 192 * w, 6);
+    expect(golden.get(1)).toBeCloseTo(lane + 64 * w, 6);
+    expect(golden.get(2)).toBeCloseTo(lane + 64 * w, 6);
+    expect(golden.get(3)).toBeCloseTo(lane + 192 * w, 6);
+  });
+
+  it("biasing toward NEAR makes near-plane chunks more urgent than far-plane chunks", () => {
+    // Unbiased, z=0 and z=3 tie (both 192 from center). Bias toward the
+    // near plane (negative) shifts the focal Z down, so z=0/z=1 get
+    // closer (lower priority) and z=2/z=3 farther.
+    const biased = detailPriorityByZ(mergeConfig({ depthBiasView: -1 }));
+    expect(biased.get(0)!).toBeLessThan(biased.get(3)!);
+    expect(biased.get(1)!).toBeLessThan(biased.get(2)!);
+
+    // And it actually changed the order vs. the unbiased tie.
+    const unbiased = detailPriorityByZ(DEFAULT_PLANNING_CONFIG);
+    expect(biased.get(0)!).toBeLessThan(unbiased.get(0)!);
+  });
+
+  it("biasing toward FAR makes far-plane chunks more urgent than near-plane chunks", () => {
+    const biased = detailPriorityByZ(mergeConfig({ depthBiasView: 1 }));
+    expect(biased.get(3)!).toBeLessThan(biased.get(0)!);
+    expect(biased.get(2)!).toBeLessThan(biased.get(1)!);
+  });
+
+  it("clamps the biased focal Z to the visible Z range (|bias| beyond 1 saturates)", () => {
+    // bias = -1 already lands the focal Z on the near plane (z=0);
+    // an out-of-range bias must not push it past the near plane.
+    const atNear = detailPriorityByZ(mergeConfig({ depthBiasView: -1 }));
+    const beyondNear = detailPriorityByZ(mergeConfig({ depthBiasView: -5 }));
+    expect(beyondNear).toEqual(atNear);
+  });
+});
+
 describe("plan() — coarse/detail bridge", () => {
   it("is the default planner path and emits no proxy requests or proxy modes", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
@@ -2203,6 +2315,10 @@ describe("PlanningConfig", () => {
     expect(DEFAULT_PLANNING_CONFIG.prefetchDepth).toBe(PREFETCH_DEPTH);
     expect(DEFAULT_PLANNING_CONFIG.importanceWeight).toBe(IMPORTANCE_WEIGHT);
     expect(DEFAULT_PLANNING_CONFIG.distanceWeight).toBe(DISTANCE_WEIGHT);
+    expect(DEFAULT_PLANNING_CONFIG.depthBiasView).toBe(DEPTH_BIAS_VIEW);
+    // The default focal-depth bias must be exactly 0 (centered) — this
+    // is the #532 safety property at the constant level.
+    expect(DEPTH_BIAS_VIEW).toBe(0);
     expect(DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump).toBe(
       WELL_PROXY_PRIORITY_BUMP,
     );

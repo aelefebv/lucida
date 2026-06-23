@@ -70,6 +70,10 @@ describe("ConfigTab — rendering", () => {
   });
 });
 
+// NOTE: the 3-D focal-depth control (issue #532) moved out of the Debug
+// Config tab into the main 3-D view UI. Its tests now live in
+// components/FocalDepthControl.test.tsx.
+
 describe("ConfigTab — slider + number input edits", () => {
   it("dragging the FAR slider updates the configStore", () => {
     render(<ConfigTab />);
