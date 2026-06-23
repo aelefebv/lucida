@@ -102,6 +102,13 @@ interface Props {
    * each carrying a stable @handle; a test injects them. Optional + defaulted to
    * `[]`, so omitting it just means no mention picker. */
   mentionCandidates?: MentionCandidate[];
+  /** Jump to a pin's captured author view (annotation-views slice 2) — the SAME
+   * prop the 2D overlay takes, threaded to the shared {@link ThreadPopover} as
+   * its "Go to author's view" affordance, so the behavior is identical in 2D and
+   * 3D. The host performs the full LIGHT restore (camera + z/t/c + display, no
+   * dataset opening/hiding, no layout broadcast). Optional + defaulted to a
+   * no-op. */
+  onGoToAuthorView?: (pinId: string) => void;
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click rather
@@ -144,7 +151,7 @@ function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation
   }
 }
 
-export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [] }: Props, ref) {
+export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per line/box, re-projected each frame through the SAME
   // `project_annotation` call the dots use — so a line/box tracks the volume as
@@ -729,6 +736,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                 onDocumentChanged={onDocumentChanged}
                 onClose={() => setOpenPinId(null)}
                 mentionCandidates={mentionCandidates}
+                onGoToAuthorView={onGoToAuthorView}
               />
             )}
           </div>

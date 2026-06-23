@@ -38,6 +38,40 @@ export interface AnnotationScene {
 }
 
 /**
+ * Resolve WHICH dataset the mention machinery (and, crucially, the annotation
+ * navigation) should treat as "current": `selectedDatasetId` if truthy, else the
+ * first dataset that actually HAS annotations. Returns `null` when there is no
+ * scene, nothing is selected, and no dataset has annotations (or the scene
+ * returns malformed JSON).
+ *
+ * This is the SAME id the pin set below was read from, so a caller that found a
+ * pin in `currentDatasetAnnotations(scene, selectedDatasetId)` can recover the
+ * pin's OWNING dataset id with `resolveAnnotationDatasetId(scene,
+ * selectedDatasetId)` — even in the null-selection window (multi-/zero-dataset
+ * snapshots) where `selectedDatasetId` is null but a peer's pin has already
+ * landed via the inbox. Restore uses this to clamp a captured Z/T/C against the
+ * pin's real extents instead of `""` (whose WASM `dataset_volume_shape` is the
+ * `[1,1,1]` sentinel — clamping against it collapses a deep slab to plane 0, the
+ * #814 regression class).
+ */
+export function resolveAnnotationDatasetId(
+  scene: AnnotationScene | null,
+  selectedDatasetId: string | null,
+): string | null {
+  if (selectedDatasetId) return selectedDatasetId;
+  if (!scene) return null;
+  try {
+    const annotated = JSON.parse(scene.annotation_dataset_ids()) as unknown;
+    if (Array.isArray(annotated) && typeof annotated[0] === "string") {
+      return annotated[0];
+    }
+  } catch {
+    // annotation_dataset_ids unreadable — no resolvable dataset.
+  }
+  return null;
+}
+
+/**
  * The annotations for the mention indicator/candidate builder, given the live
  * scene (or `null` before it exists) and the user's selected dataset (or `null`
  * before one is selected).
@@ -53,17 +87,7 @@ export function currentDatasetAnnotations(
 ): Annotation[] {
   if (!scene) return [];
 
-  let datasetId = selectedDatasetId;
-  if (!datasetId) {
-    try {
-      const annotated = JSON.parse(scene.annotation_dataset_ids()) as unknown;
-      if (Array.isArray(annotated) && typeof annotated[0] === "string") {
-        datasetId = annotated[0];
-      }
-    } catch {
-      // annotation_dataset_ids unreadable — fall through to [].
-    }
-  }
+  const datasetId = resolveAnnotationDatasetId(scene, selectedDatasetId);
   if (!datasetId) return [];
 
   try {

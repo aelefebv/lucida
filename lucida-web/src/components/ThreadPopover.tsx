@@ -72,6 +72,14 @@ interface Props {
    * Optional + defaulted to `[]` so the thread works with no candidates (the
    * picker simply never opens). */
   mentionCandidates?: MentionCandidate[];
+  /** Jump to the author's captured view for this pin (annotation-views slice 2).
+   * Rendered as a "Go to author's view" affordance ONLY when the pin carries a
+   * captured `view` (older pins have none → no button). The host performs the
+   * full LIGHT restore (camera + z/t/c + display, no dataset opening/hiding, no
+   * layout broadcast). This is how a pin selected PASSIVELY on the canvas (which
+   * stays a gentle recenter) opts into the author's framing on demand. Optional
+   * + defaulted to a no-op so the thread works unwired (e.g. a test harness). */
+  onGoToAuthorView?: (pinId: string) => void;
 }
 
 /** Stable client-supplied id so the local apply and peers' broadcast converge. */
@@ -90,6 +98,7 @@ export function ThreadPopover({
   onDocumentChanged,
   onClose,
   mentionCandidates = [],
+  onGoToAuthorView,
 }: Props) {
   // Draft text for a NEW comment in this thread.
   const [draft, setDraft] = useState("");
@@ -279,6 +288,35 @@ export function ThreadPopover({
       >
         <span>Thread{comments.length > 0 ? ` (${comments.length})` : ""}</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* "Go to author's view" — the explicit, on-demand full restore of the
+              view the author had when they dropped this pin (annotation-views
+              slice 2). Rendered ONLY when the pin carries a captured `view`
+              (older view-less pins show nothing here). Clicking it asks the host
+              to restore the author's camera/z-t-c/display (LIGHT tier: local
+              only, no dataset opening/hiding, no shared-layout broadcast). This
+              is how a pin selected passively on the canvas — which stays a gentle
+              recenter — opts into the author's framing. Anyone (not just the
+              author) can use it. */}
+          {pin.view && (
+            <button
+              data-testid={`pin-goto-author-view-${pin.id}`}
+              onClick={() => onGoToAuthorView?.(pin.id)}
+              title="Go to the view the author had when they placed this pin"
+              aria-label="Go to author's view"
+              style={{
+                background: "none",
+                border: "none",
+                color: "#58a6ff",
+                cursor: "pointer",
+                fontSize: 12,
+                lineHeight: 1,
+                padding: 0,
+                fontWeight: 600,
+              }}
+            >
+              Go to author&rsquo;s view
+            </button>
+          )}
           {/* Delete trigger — author-only. Activating it arms the confirm below
               (it does NOT emit), so a pin and its whole thread can never be
               removed in one click. A peer's pin renders no pin-delete-* control. */}

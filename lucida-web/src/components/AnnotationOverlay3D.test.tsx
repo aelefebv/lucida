@@ -580,3 +580,76 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
     expect(screen.getByText("still works")).toBeTruthy();
   });
 });
+
+describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author's view (slice 2)", () => {
+  const VIEW = {
+    v: 1,
+    datasets: [],
+    active_layouts: {},
+    camera: {
+      mode: "arcball",
+      target: [1, 2, 3],
+      theta: 0.5,
+      phi: 1.0,
+      distance: 100,
+      fov: 45,
+      viewport: [800, 600],
+      near: 0.1,
+      far: 1000,
+    },
+    view: { z_range: { start: 7, end: 8 }, t: 2, c: 1 },
+    display: { contrast_min: 0, contrast_max: 1234, gamma: 2.2 },
+    dataset_order: [],
+    dataset_settings: {},
+  } as const;
+
+  function renderWithGoTo(pin: Annotation) {
+    const { scene, applied } = makeScene([pin]);
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = scene;
+    const goToCalls: string[] = [];
+    const { canvas } = makeCanvas();
+    render(
+      <AnnotationOverlay3D
+        datasetId="wds-1"
+        wasmSceneRef={sceneRef}
+        canvas={canvas}
+        version={0}
+        viewContext={{ z: 3, t: 0, c: 0 }}
+        myId={MY_ID}
+        sendCommand={() => {}}
+        onDocumentChanged={() => {}}
+        onViewportChanged={() => {}}
+        onGoToAuthorView={(id) => goToCalls.push(id)}
+      />,
+    );
+    return { applied, goToCalls };
+  }
+
+  it("a plain click on a pin opens its thread but does NOT restore the author's view (gentle)", () => {
+    const pin = ownPin({ id: "pin-v", view: JSON.parse(JSON.stringify(VIEW)) });
+    const { applied } = renderWithGoTo(pin);
+
+    fireEvent.pointerDown(screen.getByTestId("annot-pin-pin-v"), { pointerId: 1, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(screen.getByTestId("annot-pin-pin-v"), { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.click(screen.getByTestId("annot-pin-pin-v"));
+    expect(screen.getByTestId("annot-thread-pin-v")).toBeTruthy();
+
+    const types = applied.map((c) => c.type);
+    expect(types).not.toContain("set_contrast");
+    expect(types).not.toContain("set_z_range");
+    expect(types).not.toContain("set_mode_arcball");
+    expect(types).not.toContain("arcball_center_on_voxel"); // no recenter on passive select
+  });
+
+  it("exposes 'Go to author's view' in the 3D thread and fires it on click", () => {
+    const pin = ownPin({ id: "pin-v", view: JSON.parse(JSON.stringify(VIEW)) });
+    const { goToCalls } = renderWithGoTo(pin);
+
+    fireEvent.pointerDown(screen.getByTestId("annot-pin-pin-v"), { pointerId: 1, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(screen.getByTestId("annot-pin-pin-v"), { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.click(screen.getByTestId("annot-pin-pin-v"));
+    fireEvent.click(screen.getByTestId("pin-goto-author-view-pin-v"));
+    expect(goToCalls).toEqual(["pin-v"]);
+  });
+});

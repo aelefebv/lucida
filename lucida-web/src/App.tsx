@@ -8,7 +8,10 @@ import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { AnnotationOverlay, type Annotation, type AnnotationOverlayHandle } from "./components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { MentionsOfMe } from "./components/MentionsOfMe.tsx";
-import { currentDatasetAnnotations } from "./components/currentDatasetAnnotations.ts";
+import {
+  currentDatasetAnnotations,
+  resolveAnnotationDatasetId,
+} from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
@@ -17,6 +20,7 @@ import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
+import { bumpSettingsGeneration } from "./tickCommon.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
@@ -36,6 +40,7 @@ import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
+import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
 import {
   getWorkspaceSavedView,
   getWorkspaceViewerProfile,
@@ -118,6 +123,13 @@ function App({
   // can @-mention a collaborator before they've touched the document.
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
+  // A transient, non-blocking notice from the LIGHT annotation-view restore
+  // (slice 2): when an author's captured z/t/c had to be clamped to fit the
+  // pin's own dataset (different extents), we show a brief "Z adjusted to fit
+  // this dataset" line rather than blocking. Auto-cleared after a few seconds.
+  // Distinct from the heavy applier's LoadingViewBanner (the light path never
+  // goes through the applier — no dataset opening/hiding, no layout broadcast).
+  const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
   const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
     source: workspaceName,
     value: workspaceName,
@@ -415,80 +427,183 @@ function App({
     });
   }, [currentAnnotations, annotationAuthor, workspaceMembers, authSession.principal.email]);
 
-  // Jump to a mentioning comment (issue #526): reveal the owning pin and open its
-  // thread in whichever overlay is mounted (2D vs 3D, by view mode). Three things
-  // must happen for the pin to actually be VISIBLE after the jump:
+  // ANNOTATION NAVIGATION — the TWO TIERS (annotation-views slice 2).
   //
-  //  1. Bring it ON-CONTEXT. A pin carries its own Z/T/C (issue #779) and may
-  //     live off the current view — off-context it renders dimmed in 2D and, in
-  //     3D, a behind-camera pin's wrapper is `display:none` (its thread would open
-  //     invisibly). So set the view's Z/T/C to the pin's FIRST, in BOTH views
-  //     (in 3D the volume ignores the Z slab, but the off-context dim keys off the
-  //     same Z/T/C, so this still un-dims the marker). Mirrors the dimension
-  //     handlers: apply the scene command per changed axis, break follow, and emit
-  //     presence once.
-  //  2. RECENTER + open the thread, via the mounted overlay's `focusPin` — which
-  //     moves the right camera (2D `set_center`; 3D `arcball_center_on_voxel`) and
-  //     marks the render loop dirty. The ref guard makes a missing overlay a safe
-  //     no-op.
-  //  3. If annotations are HIDDEN, re-show them first (navigating to a mention you
-  //     can't see is a dead end), then defer the focus one frame so the re-mounted
-  //     overlay's imperative ref exists before we call into it. The on-context
-  //     step can run immediately — it doesn't need the overlay.
+  //  - GENTLE (passive canvas pin-select): clicking a pin's dot on the canvas
+  //    keeps today's behavior — the overlay opens the thread and, when the host
+  //    drives it, recenters via `focusPin` (2D `set_center` / 3D
+  //    `arcball_center_on_voxel`). It NEVER yanks the camera/contrast/zoom. The
+  //    `gentleOnContext` helper below is the on-context part of that path.
+  //  - EXPLICIT (mention navigation / "Go to author's view"): performs the FULL
+  //    restore of the author's captured view via `restoreCapturedView` →
+  //    `restoreAnnotationView` (camera incl. 2D<->3D mode switch, z/t/c, display).
+  //    This is the LIGHT restore tier: local ViewportCommands only — no dataset
+  //    opening/hiding, no SetActiveLayout broadcast (the heavy `applier.apply` is
+  //    reserved for the cold share-link open in the next slice). A pin without a
+  //    captured view falls back to the gentle path (no regression).
   //
-  // The deps are the primitives/values actually read (the view's Z/T/C + view
-  // mode, the visibility flag, the pin set); the rest — `dims`'s stable setters,
-  // `bridge.breakFollow`, `emitPresenceWithUrl`, and the `scene.wasmSceneRef` ref
-  // — are stable across renders, so listing them would only churn this click
-  // handler's identity for no benefit. The manual deps are intentional (same
-  // stance as the current-dataset read above).
-  const handleNavigateToMention = useCallback((pinId: string) => {
-    // Move the view to the pin's Z/T/C so it is on-context (and thus undimmed /
-    // not hidden) after the jump. Pre-depth pins default each axis to 0, matching
-    // the overlays' read. Only issue a command per axis that actually changes, so
-    // an already-on-context jump stays a pure recenter.
-    const pin = currentAnnotations.find((p) => p.id === pinId);
-    if (pin) {
-      const ws = scene.wasmSceneRef.current;
-      const targetZ = pin.z ?? 0;
-      const targetT = pin.t ?? 0;
-      const targetC = pin.c ?? 0;
-      let contextChanged = false;
-      if (targetZ !== dims.z) {
-        dims.setZ(targetZ);
-        if (ws) applyViewportCommand(ws, { type: "set_z", z: targetZ });
-        contextChanged = true;
-      }
-      if (targetT !== dims.t) {
-        dims.setT(targetT);
-        if (ws) applyViewportCommand(ws, { type: "set_t", t: targetT });
-        contextChanged = true;
-      }
-      if (targetC !== dims.c) {
-        dims.setC(targetC);
-        if (ws) applyViewportCommand(ws, { type: "set_c", c: targetC });
-        contextChanged = true;
-      }
-      if (contextChanged) {
-        bridge.breakFollow();
-        emitPresenceWithUrl();
-      }
+  // GENTLE recenter to a pin (today's behavior, issue #779): bring the pin
+  // on-context by matching its Z/T/C, break follow, emit presence. Does NOT
+  // touch the camera/contrast/zoom — that's the explicit-restore tier's job.
+  // Returns whether anything changed (for the caller's emit bookkeeping is
+  // handled internally). Reused by both the no-view fallback AND the passive
+  // canvas pin-select (which stays gentle by design).
+  const gentleOnContext = useCallback((pin: Annotation) => {
+    const ws = scene.wasmSceneRef.current;
+    const targetZ = pin.z ?? 0;
+    const targetT = pin.t ?? 0;
+    const targetC = pin.c ?? 0;
+    let contextChanged = false;
+    if (targetZ !== dims.z) {
+      dims.setZ(targetZ);
+      if (ws) applyViewportCommand(ws, { type: "set_z", z: targetZ });
+      contextChanged = true;
     }
+    if (targetT !== dims.t) {
+      dims.setT(targetT);
+      if (ws) applyViewportCommand(ws, { type: "set_t", t: targetT });
+      contextChanged = true;
+    }
+    if (targetC !== dims.c) {
+      dims.setC(targetC);
+      if (ws) applyViewportCommand(ws, { type: "set_c", c: targetC });
+      contextChanged = true;
+    }
+    if (contextChanged) {
+      bridge.breakFollow();
+      emitPresenceWithUrl();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/scene ref; see note above.
+  }, [dims.z, dims.t, dims.c]);
 
-    const focus = () => {
-      const handle = dims.viewMode === "3d" ? overlay3dRef.current : overlay2dRef.current;
-      handle?.focusPin(pinId);
-    };
-    if (!annotationsVisible) {
-      setAnnotationsVisible(true);
-      // The overlay mounts on the re-show; defer the focus one frame so its
-      // imperative ref exists before we call into it.
-      requestAnimationFrame(focus);
+  // Focus a pin in whichever overlay is mounted for a GIVEN view mode (2D vs
+  // 3D). Pass the mode explicitly because a just-restored 3D camera may have
+  // flipped the view mode out from under the live `dims.viewMode` this render.
+  const focusPinForMode = useCallback((pinId: string, mode: "2d" | "3d") => {
+    const handle = mode === "3d" ? overlay3dRef.current : overlay2dRef.current;
+    handle?.focusPin(pinId);
+  }, []);
+
+  // The FULL (light) restore of an annotation's captured view — the
+  // explicit-navigation tier. Restores the author's camera (incl. switching the
+  // 2D<->3D camera MODE before focusing), z-slab/t/c, and display
+  // (contrast/gamma), then recenters on the pin so it's actually on-screen.
+  //
+  // LIGHT, not heavy: routed through `restoreAnnotationView`, which issues ONLY
+  // recipient-local ViewportCommands (no dataset opening, no hiding, no
+  // SetActiveLayout broadcast). The pin's own dataset is the clamp target +
+  // ends up on-context; an out-of-extent capture clamps gracefully with a
+  // non-blocking notice. An annotation with NO captured view falls back to the
+  // gentle recenter (today's behavior — no regression).
+  const restoreCapturedView = useCallback((pin: Annotation) => {
+    const ws = scene.wasmSceneRef.current;
+    if (!ws || !pin.view) {
+      // No view (older pin) or no scene: degrade to exactly today's gentle path,
+      // then focus in the current mode.
+      gentleOnContext(pin);
+      const focus = () => focusPinForMode(pin.id, dims.viewMode);
+      if (!annotationsVisible) {
+        setAnnotationsVisible(true);
+        requestAnimationFrame(focus);
+      } else {
+        focus();
+      }
       return;
     }
-    focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- omitted deps (dims setters, bridge, emitPresenceWithUrl, scene ref) are stable; see note above.
-  }, [dims.viewMode, dims.z, dims.t, dims.c, annotationsVisible, currentAnnotations]);
+
+    // The pin's OWN dataset is the clamp target — resolved the SAME way the pin
+    // set was read (`selectedDatasetId` if selected, else the first annotated
+    // dataset; see resolveAnnotationDatasetId). This matters in the
+    // null-selection window — the Mentions inbox reaches restore with
+    // `selectedDatasetId === null` (0 datasets, or >=2 with none clicked), and
+    // `selectedDatasetId ?? ""` would clamp against `""`, whose WASM
+    // `dataset_volume_shape` is the `[1,1,1]` sentinel — collapsing a deep
+    // captured Z to plane 0 (the #814 class). When no dataset is resolvable we
+    // pass `undefined`, so `restoreAnnotationView` SKIPS the clamp (the captured
+    // z/t/c pass through) rather than collapsing.
+    const pinDatasetId =
+      resolveAnnotationDatasetId(ws, selectedDatasetId) ?? undefined;
+    const result = restoreAnnotationView({
+      scene: ws,
+      view: pin.view,
+      datasetId: pinDatasetId,
+      dimensionExtentsFor: dims.dimensionExtentsFor,
+    });
+
+    // Mirror the restored scene state into React (the restore wrote to WASM
+    // only — without this the Z/T/C sliders + mode toggles stay stale). Push the
+    // clamped indices and the resolved view mode / camera mode.
+    dims.setZ(result.applied.zStart);
+    dims.setT(result.applied.t);
+    dims.setC(result.applied.c);
+    if (pin.view.view.multi_channel !== undefined) {
+      dims.setMultiChannel(pin.view.view.multi_channel);
+    }
+    if (result.cameraModeChanged) {
+      dims.setViewMode(result.viewMode);
+      try {
+        setCameraMode(ws.camera_mode());
+      } catch {
+        // best-effort mirror; the scene command already switched the mode.
+      }
+    }
+    bridge.breakFollow();
+    emitPresenceWithUrl();
+    bumpSettingsGeneration();
+    render.loopRef.current?.markInteractiveDirty("annotation_view_restore");
+    render.loopRef.current?.markResidencyDirty("annotation_view_restore");
+
+    // Surface the graceful-degrade notice (auto-clears below).
+    setRestoreNotice(result.notice);
+
+    // Focus the pin AFTER the restore. If the camera MODE flipped (a different
+    // overlay must mount) OR annotations were hidden, defer one frame so the
+    // correct overlay's imperative ref exists before we call into it. Focus uses
+    // the RESTORED mode, not the (possibly stale) live `dims.viewMode`.
+    const focus = () => focusPinForMode(pin.id, result.viewMode);
+    const needsRemount = result.cameraModeChanged || !annotationsVisible;
+    if (!annotationsVisible) setAnnotationsVisible(true);
+    if (needsRemount) {
+      requestAnimationFrame(focus);
+    } else {
+      focus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/render refs/scene ref; reactive deps listed.
+  }, [dims.viewMode, dims.dimensionExtentsFor, annotationsVisible, selectedDatasetId, gentleOnContext, focusPinForMode]);
+
+  // Explicit navigation to a mentioning comment (issue #526) now performs the
+  // FULL restore when the pin carries the author's captured view, and falls back
+  // to today's gentle recenter when it doesn't (older pins). This is the user's
+  // core intent for an explicit jump: "go to the view the author had."
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- the compiler infers the stable `setAnnotationsVisible` setter as a dep; the manual deps are the reactive values actually read.
+  const handleNavigateToMention = useCallback((pinId: string) => {
+    const pin = currentAnnotations.find((p) => p.id === pinId);
+    if (!pin) {
+      // Unknown pin: keep the old safe focus attempt (no-op if the overlay lacks
+      // it) so a stale id never wedges navigation.
+      const focus = () => focusPinForMode(pinId, dims.viewMode);
+      if (!annotationsVisible) {
+        setAnnotationsVisible(true);
+        requestAnimationFrame(focus);
+      } else {
+        focus();
+      }
+      return;
+    }
+    restoreCapturedView(pin);
+  }, [currentAnnotations, restoreCapturedView, focusPinForMode, dims.viewMode, annotationsVisible]);
+
+  // The pin thread/popover's "Go to author's view" affordance (slice 2): the
+  // EXPLICIT, on-demand full restore for a pin selected passively on the canvas.
+  // Passive canvas pin-select stays gentle; THIS button is how a user opts into
+  // the author's framing from a pin's own thread. Same full-restore path as an
+  // explicit mention navigation. Looks the pin up in the current set so the
+  // overlays only need to pass an id.
+  const handleGoToAuthorView = useCallback((pinId: string) => {
+    const pin = currentAnnotations.find((p) => p.id === pinId);
+    if (!pin) return;
+    restoreCapturedView(pin);
+  }, [currentAnnotations, restoreCapturedView]);
 
   // Populate callback refs — runs during render, before effects fire.
   // See the comment block above (savedViewHooksRef) for the rationale.
@@ -616,6 +731,16 @@ function App({
     setCursorLabels(result.labels);
     render.loopRef.current?.markInteractiveDirty();
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
+
+  // Auto-clear the light-restore graceful-degrade notice a few seconds after it
+  // appears, so it reads as a transient "FYI we adjusted to fit" rather than a
+  // persistent banner. Re-arms on each new notice (the timer keys off the notice
+  // identity); clearing to null is inert.
+  useEffect(() => {
+    if (!restoreNotice) return;
+    const timer = setTimeout(() => setRestoreNotice(null), 4000);
+    return () => clearTimeout(timer);
+  }, [restoreNotice]);
 
   const handleCameraModeChange = useCallback((mode: string) => {
     setCameraMode(mode);
@@ -900,6 +1025,7 @@ function App({
                 onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
+                onGoToAuthorView={handleGoToAuthorView}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
@@ -966,6 +1092,7 @@ function App({
                 onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
+                onGoToAuthorView={handleGoToAuthorView}
               />
             )}
             {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
@@ -995,6 +1122,33 @@ function App({
             />
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
+            {/* Non-blocking graceful-degrade notice from the LIGHT annotation
+                -view restore (slice 2): shown when an author's captured z/t/c had
+                to be clamped to fit the pin's own dataset. Auto-clears (effect
+                below). Separate from LoadingViewBanner — the light restore never
+                runs the heavy applier. */}
+            {restoreNotice && (
+              <div
+                role="status"
+                data-testid="annotation-restore-notice"
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  background: "rgba(31,111,235,0.95)",
+                  color: "#fff",
+                  padding: "6px 12px",
+                  borderRadius: 6,
+                  fontSize: "0.8rem",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                  zIndex: 40,
+                  pointerEvents: "none",
+                }}
+              >
+                {restoreNotice}
+              </div>
+            )}
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
           </div>
           {showDebug && (
