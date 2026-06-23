@@ -19,6 +19,23 @@ pub enum DocumentCommand {
     RemoveDataset {
         id: DatasetId,
     },
+    /// Rename a dataset's display label by `id`. Overwrites
+    /// `manifests[id].name` in the shared document — the single source of
+    /// truth the viewer reads (`scene.dataset_name(id)` →
+    /// `document.manifests[id].name`). Because it is an ordinary document
+    /// command, it sequences, broadcasts to co-present peers, and persists
+    /// through `document_json` exactly like every other live edit, so the
+    /// new name survives reopen for free. No-op if `id` is unknown (a
+    /// rename of a dataset that has since been removed is harmless). Does
+    /// not touch the dataset's source URL or any saved view (saved views
+    /// reference dataset ids, not names). Bumps `epochs.content` — the
+    /// layer label is content state, mirroring `RemoveDataset`. The server
+    /// authorizes it editor-only and keeps the DB `display_name` in sync;
+    /// see `lucida-server`'s `WorkspaceManager::rename_dataset`.
+    RenameDataset {
+        id: DatasetId,
+        name: String,
+    },
     RegisterLayout {
         dataset_id: DatasetId,
         layout: LayoutSpec,
@@ -477,6 +494,15 @@ impl Scene {
 
                         self.epochs.content += 1;
                         self.epochs.layout += 1;
+                    }
+                    DocumentCommand::RenameDataset { .. } => {
+                        // A rename only changes the manifest's display label
+                        // (applied below via self.document.apply). No derived
+                        // state, ordering, or per-dataset settings depend on the
+                        // name, so nothing to rebuild — just bump the content
+                        // epoch so name-reading consumers (the layer panel)
+                        // re-read promptly.
+                        self.epochs.content += 1;
                     }
                     DocumentCommand::RegisterLayout { .. } => {
                         // Document state update happens below via self.document.apply().
@@ -1234,6 +1260,83 @@ mod tests {
     }
 
     #[test]
+    fn rename_dataset_command_round_trips() {
+        let cmd = DocumentCommand::RenameDataset {
+            id: DatasetId("ds1".into()),
+            name: "Renamed".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"rename_dataset\""));
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::RenameDataset { id, name } => {
+                assert_eq!(id, DatasetId("ds1".into()));
+                assert_eq!(name, "Renamed");
+            }
+            _ => panic!("expected RenameDataset"),
+        }
+    }
+
+    #[test]
+    fn apply_rename_dataset_updates_manifest_name() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "original", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(
+            scene.document.manifests[&DatasetId("ds1".into())].name,
+            "original"
+        );
+        scene.apply(
+            DocumentCommand::RenameDataset {
+                id: DatasetId("ds1".into()),
+                name: "renamed".into(),
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.document.manifests[&DatasetId("ds1".into())].name,
+            "renamed"
+        );
+    }
+
+    #[test]
+    fn rename_dataset_is_noop_for_unknown_id() {
+        // Renaming a dataset that does not exist must not mint a phantom
+        // manifest — a rename racing a removal is harmless.
+        let mut doc = crate::scene::DocumentState::default();
+        let reg = test_helpers::make_dataset_opened("ds1", "original", 1);
+        doc.apply(DocumentCommand::DatasetOpened(reg));
+        doc.apply(DocumentCommand::RenameDataset {
+            id: DatasetId("ghost".into()),
+            name: "nope".into(),
+        });
+        assert_eq!(doc.manifests.len(), 1);
+        assert!(!doc.manifests.contains_key(&DatasetId("ghost".into())));
+        assert_eq!(doc.manifests[&DatasetId("ds1".into())].name, "original");
+    }
+
+    #[test]
+    fn rename_dataset_preserves_dataset_identity_and_images() {
+        // The rename touches only `name` — dataset_id and the image graph
+        // (and hence the source binding) are unchanged.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "original", 2);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let before = scene.document.manifests[&DatasetId("ds1".into())].clone();
+        scene.apply(
+            DocumentCommand::RenameDataset {
+                id: DatasetId("ds1".into()),
+                name: "renamed".into(),
+            }
+            .into(),
+        );
+        let after = &scene.document.manifests[&DatasetId("ds1".into())];
+        assert_eq!(after.dataset_id, before.dataset_id);
+        assert_eq!(after.images().len(), before.images().len());
+        assert_eq!(after.name, "renamed");
+    }
+
+    #[test]
     fn viewport_commands_are_not_document_commands() {
         // These should all deserialize as ViewportCommand, not DocumentCommand
         let cmds = vec![
@@ -1560,6 +1663,27 @@ mod tests {
         );
         assert_eq!(scene.epochs.content, 2);
         assert_eq!(scene.epochs.layout, 2);
+    }
+
+    #[test]
+    fn rename_dataset_bumps_only_content_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "original", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        // DatasetOpened bumped content+layout to 1.
+        let layout_before = scene.epochs.layout;
+        scene.apply(
+            DocumentCommand::RenameDataset {
+                id: DatasetId("ds1".into()),
+                name: "renamed".into(),
+            }
+            .into(),
+        );
+        // A rename is a content-only change; layout/view/selection are untouched.
+        assert_eq!(scene.epochs.content, 2);
+        assert_eq!(scene.epochs.layout, layout_before);
+        assert_eq!(scene.epochs.view, 0);
+        assert_eq!(scene.epochs.selection, 0);
     }
 
     #[test]

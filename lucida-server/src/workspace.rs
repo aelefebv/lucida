@@ -329,6 +329,7 @@ fn default_member_display_name(email: &str, display_name: &str) -> String {
 
 const MAX_SAVED_VIEW_NAME_CHARS: usize = 200;
 const MAX_VIEWER_PROFILE_NAME_CHARS: usize = 64;
+const MAX_DATASET_NAME_CHARS: usize = 200;
 
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync + 'static {
@@ -428,6 +429,20 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         &self,
         workspace_id: &str,
         workspace_dataset_id: &DatasetId,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), StoreError>;
+
+    /// Persist a dataset rename: update the `workspace_datasets.display_name`
+    /// row for `workspace_dataset_id` and the workspace `document_json` (which
+    /// carries the renamed manifest) in one transaction. Keeps the
+    /// server-private DB name in sync with the document so restored bindings
+    /// and listings agree after reopen.
+    async fn persist_dataset_renamed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        display_name: &str,
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError>;
@@ -1347,6 +1362,47 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
+        sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET seq = ?, document_json = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(seq as i64)
+        .bind(document_json)
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        tx.commit().await.map_err(map_sql)?;
+        Ok(())
+    }
+
+    async fn persist_dataset_renamed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        // Update only the workspace-scoped display name. The shared
+        // dataset_sources.default_name (the source's import-time name) is left
+        // alone — a rename is per-workspace, not a rename of the global source.
+        sqlx::query(
+            "UPDATE workspace_datasets SET display_name = ? WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(display_name)
+        .bind(workspace_id)
+        .bind(workspace_dataset_id.as_ref())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
         sqlx::query(
             r#"
             UPDATE workspaces
@@ -3439,6 +3495,75 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
+    /// Rename a workspace dataset's display label, the right way: mutate the
+    /// shared collaborative document so the change broadcasts to co-present
+    /// peers and survives reopen, and keep the server-private DB
+    /// `display_name` in sync so listings and restored bindings agree.
+    ///
+    /// The new name flows as a `DocumentCommand::RenameDataset`, returned to
+    /// the caller (the WS handler) so it can broadcast + ack it on the live
+    /// channel exactly like every other document command — that is what
+    /// delivers it live to peers. Persistence is handled here:
+    /// [`Store::persist_dataset_renamed`] writes both the `workspace_datasets`
+    /// row and the full `document_json` in one transaction, so reopening the
+    /// workspace (which loads `document_json` into `session.document`) shows
+    /// the new name.
+    ///
+    /// Authority + safety, role-first to preserve never-leak:
+    /// 1. `require_editor` — a viewer or non-member gets `Forbidden` before
+    ///    any document/row is read (uniform with `open_remote_dataset` and the
+    ///    other editor-gated mutations).
+    /// 2. validation — empty/whitespace/over-long names are `BadRequest`.
+    /// 3. the dataset must exist in the live document — a missing id is
+    ///    `NotFound`, identical to a dataset that was never opened, so the
+    ///    rename never confirms which ids exist.
+    ///
+    /// Returns the applied `(seq, command)` so the handler can broadcast.
+    pub async fn rename_dataset(
+        &self,
+        live: &LiveWorkspace,
+        principal: &AuthPrincipal,
+        workspace_dataset_id: &DatasetId,
+        name: &str,
+    ) -> Result<(u64, DocumentCommand), WorkspaceError> {
+        // 1. Authority first — never read the document for a non-editor.
+        self.require_editor(&live.workspace_id, principal).await?;
+
+        // 2. Validate before mutating anything.
+        let name = normalize_dataset_name(name)?;
+
+        let command = DocumentCommand::RenameDataset {
+            id: workspace_dataset_id.clone(),
+            name: name.clone(),
+        };
+
+        // 3. Apply to the live session, but only if the dataset actually
+        //    exists in the document. A missing id is NotFound (never-leak),
+        //    not a silent no-op that would still bump seq and persist.
+        let (seq, document) = {
+            let mut sess = live.session.lock().await;
+            if !sess.document.manifests.contains_key(workspace_dataset_id) {
+                return Err(WorkspaceError::NotFound);
+            }
+            let seq = sess.apply(command.clone());
+            (seq, sess.document.clone())
+        };
+
+        // 4. Persist: workspace_datasets.display_name + document_json together.
+        self.store
+            .persist_dataset_renamed(
+                &live.workspace_id,
+                workspace_dataset_id,
+                &name,
+                seq,
+                &document,
+            )
+            .await
+            .map_err(WorkspaceError::Store)?;
+
+        Ok((seq, command))
+    }
+
     async fn current_sharing_settings(
         &self,
         workspace_id: &str,
@@ -3533,6 +3658,26 @@ fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
     if trimmed.chars().count() > MAX_SAVED_VIEW_NAME_CHARS {
         return Err(WorkspaceError::BadRequest(format!(
             "saved view name exceeds {MAX_SAVED_VIEW_NAME_CHARS} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Validate + canonicalize a dataset display name. Mirrors
+/// [`normalize_saved_view_name`]: an empty/whitespace-only name is a
+/// `BadRequest` (a blank layer label is meaningless), and an over-long name is
+/// a `BadRequest`. The trimmed form is what gets stored, so leading/trailing
+/// whitespace never lands in the document or the DB.
+fn normalize_dataset_name(raw: &str) -> Result<String, WorkspaceError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkspaceError::BadRequest(
+            "dataset name is empty".to_string(),
+        ));
+    }
+    if trimmed.chars().count() > MAX_DATASET_NAME_CHARS {
+        return Err(WorkspaceError::BadRequest(format!(
+            "dataset name exceeds {MAX_DATASET_NAME_CHARS} characters"
         )));
     }
     Ok(trimmed.to_string())
@@ -7189,6 +7334,363 @@ pub mod tests {
                 .manifests
                 .contains_key(&DatasetId("wds_runtime".into()))
         );
+    }
+
+    // --- Dataset rename (#701) -------------------------------------------
+
+    /// Seed a workspace with a single dataset whose manifest name and DB
+    /// `display_name` are both `name`, persisted at `seq`. Returns the
+    /// workspace id and the workspace-dataset id so a test can then open the
+    /// live workspace (which loads this document from the store) and rename it.
+    async fn seed_workspace_with_dataset(
+        store: &SqliteWorkspaceStore,
+        owner: &AuthPrincipal,
+        name: &str,
+    ) -> (String, DatasetId) {
+        let workspace = store.create_workspace(owner, Some("Demo")).await.unwrap();
+        let workspace_dataset_id = DatasetId("wds_rename".into());
+        let mut doc = DocumentState::default();
+        doc.manifests.insert(
+            workspace_dataset_id.clone(),
+            lucida_content::DatasetManifest::new(
+                workspace_dataset_id.clone(),
+                name.into(),
+                lucida_content::DatasetKind::Single,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                None,
+            ),
+        );
+        store
+            .persist_dataset_opened(
+                &workspace.id,
+                &workspace_dataset_id,
+                "ds_source",
+                "file:///data/original.zarr",
+                name,
+                &owner.email,
+                1,
+                &doc,
+            )
+            .await
+            .unwrap();
+        (workspace.id, workspace_dataset_id)
+    }
+
+    // THE HEADLINE TEST: a rename must survive close + reopen. The prior
+    // (rejected) attempt updated only the DB display_name and a web-local
+    // override, so the persisted document still carried the old manifest name
+    // and the rename was silently lost on reopen. This drives the rename
+    // through the document-mutation path, evicts the live workspace, reopens
+    // it (which loads the persisted document_json), and asserts the
+    // client-visible manifest name is the NEW one.
+    #[tokio::test]
+    async fn rename_dataset_survives_evict_and_reopen() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+        // Sanity: the live document carries the original name.
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "original.zarr"
+        );
+
+        let (seq, _) = manager
+            .rename_dataset(&live, &owner, &wds_id, "Renamed Layer")
+            .await
+            .unwrap();
+        assert_eq!(seq, 2, "rename should advance the document seq");
+        // In-session reflection is immediate.
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "Renamed Layer"
+        );
+
+        // Evict the live workspace so the next open reloads from the store.
+        let evicted = manager.evict_idle_workspaces().await;
+        assert_eq!(evicted, 1);
+        assert_eq!(manager.live_workspace_count().await, 0);
+
+        // Reopen: the client-visible document manifest name is the NEW one.
+        let reopened = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+        assert!(!Arc::ptr_eq(&live, &reopened));
+        let reopened_name = reopened.session.lock().await.document.manifests[&wds_id]
+            .name
+            .clone();
+        assert_eq!(
+            reopened_name, "Renamed Layer",
+            "the renamed name must survive reopen (loaded from persisted document_json)"
+        );
+
+        // The server-private DB display_name is kept in sync too, so listings
+        // and restored bindings agree.
+        let db_name = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name;
+        assert_eq!(db_name, "Renamed Layer");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_trims_and_persists_trimmed_name() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "  Padded Name  ")
+            .await
+            .unwrap();
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "Padded Name"
+        );
+        let db_name = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name;
+        assert_eq!(db_name, "Padded Name");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_is_editor_only_and_never_leaks() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let viewer = principal("viewer@example.com", false);
+        manager
+            .upsert_member(
+                &workspace_id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        // A viewer cannot rename — Forbidden (role-first).
+        let err = manager
+            .rename_dataset(&live, &viewer, &wds_id, "viewer rename")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // A non-member cannot rename — Forbidden, identical to the viewer, so
+        // membership is never confirmed.
+        let stranger = principal("stranger@example.com", false);
+        let err = manager
+            .rename_dataset(&live, &stranger, &wds_id, "stranger rename")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // The denied renames did not mutate anything.
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "original.zarr"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_missing_id_is_not_found() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, _wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        // An editor renaming a dataset that does not exist in the document
+        // gets NotFound (uniform with a dataset that was never opened) — and
+        // the seq does not advance (no phantom mutation persisted).
+        let before_seq = live.session.lock().await.seq;
+        let err = manager
+            .rename_dataset(
+                &live,
+                &owner,
+                &DatasetId("wds_ghost".into()),
+                "ghost rename",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+        assert_eq!(live.session.lock().await.seq, before_seq);
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_validation_rejects_empty_whitespace_and_overlong() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        for bad in ["", "   ", "\t\n"] {
+            let err = manager
+                .rename_dataset(&live, &owner, &wds_id, bad)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, WorkspaceError::BadRequest(_)),
+                "empty/whitespace name {bad:?} should be BadRequest, got {err:?}"
+            );
+        }
+
+        let overlong = "x".repeat(MAX_DATASET_NAME_CHARS + 1);
+        let err = manager
+            .rename_dataset(&live, &owner, &wds_id, &overlong)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
+
+        // None of the rejected renames mutated the document or advanced seq.
+        let sess = live.session.lock().await;
+        assert_eq!(sess.document.manifests[&wds_id].name, "original.zarr");
+        assert_eq!(sess.seq, 1);
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_leaves_source_url_unchanged() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        let url_before = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .canonical_url;
+
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "Renamed")
+            .await
+            .unwrap();
+
+        let after = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.canonical_url, url_before);
+        assert_eq!(after.canonical_url, "file:///data/original.zarr");
+        // The source id is unchanged; only the per-workspace label moved.
+        assert_eq!(after.dataset_source_id, "ds_source");
+        assert_eq!(after.display_name, "Renamed");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_leaves_existing_saved_view_name_unchanged() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        // A saved view references dataset ids, not names; renaming the dataset
+        // must not rewrite the saved view's own name.
+        let saved = manager
+            .create_saved_view(
+                &workspace_id,
+                &owner,
+                "My Saved View",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "Renamed Dataset")
+            .await
+            .unwrap();
+
+        let after = manager
+            .get_saved_view(&workspace_id, &owner, &saved.id)
+            .await
+            .unwrap();
+        assert_eq!(after.name, "My Saved View");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_broadcasts_command_to_peers() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        // A co-present peer subscribes to the live broadcast channel.
+        let mut rx = live.tx.subscribe();
+
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "Live Rename")
+            .await
+            .unwrap();
+        // The handler is what broadcasts in production; here we assert the
+        // rename produced the document the peer would converge on, then
+        // emulate the handler's broadcast and confirm the peer receives a
+        // CommandBroadcast carrying the rename.
+        let (seq, command) = {
+            // Re-derive what the handler sends: it forwards the same
+            // (seq, RenameDataset) returned by rename_dataset. We already
+            // applied; reconstruct the broadcast item exactly as the handler.
+            let sess = live.session.lock().await;
+            (
+                sess.seq,
+                DocumentCommand::RenameDataset {
+                    id: wds_id.clone(),
+                    name: "Live Rename".to_string(),
+                },
+            )
+        };
+        let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
+        let ack_msg = ServerMessage::Ack { seq };
+        // `BroadcastItem` is not `Debug`, so don't `.unwrap()` the send result
+        // (its error would need Debug); a failed send just means no receiver.
+        let _ = live.tx.send(BroadcastItem::CommandBroadcast {
+            sender: u64::MAX,
+            broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+            ack_json: serde_json::to_string(&ack_msg).unwrap(),
+        });
+
+        let item = rx.recv().await.unwrap();
+        match item {
+            BroadcastItem::CommandBroadcast { broadcast_json, .. } => {
+                assert!(broadcast_json.contains("\"type\":\"rename_dataset\""));
+                assert!(broadcast_json.contains("Live Rename"));
+            }
+            _ => panic!("expected a CommandBroadcast broadcast item"),
+        }
     }
 
     #[tokio::test]

@@ -967,6 +967,8 @@ function App({
         onFullRangeToggle={layers.handleLayerFullRangeToggle}
         onMoveLayer={layers.handleLayerMove}
         onRemoveLayer={layers.handleRemoveLayer}
+        onRenameLayer={layers.handleLayerRename}
+        canEdit={canEditWorkspace}
         onChannelSetVisible={layers.handleChannelSetVisible}
         onChannelSetColormap={layers.handleChannelSetColormap}
         onChannelSetContrast={layers.handleChannelSetContrast}

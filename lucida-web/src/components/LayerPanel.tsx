@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
@@ -45,7 +46,10 @@ interface Props {
   onFullRangeToggle: (id: string) => void;
   onMoveLayer: (id: string, direction: "up" | "down") => void;
   onRemoveLayer: (id: string) => void;
+  onRenameLayer: (id: string, name: string) => void;
   onAddLayer: () => void;
+  /** Editor-only affordances (rename) are shown only when true. */
+  canEdit: boolean;
   onChannelSetVisible?: (id: string, ch: number, visible: boolean) => void;
   onChannelSetColormap?: (id: string, ch: number, colormap: string) => void;
   onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
@@ -80,7 +84,9 @@ export function LayerPanel({
   onFullRangeToggle,
   onMoveLayer,
   onRemoveLayer,
+  onRenameLayer,
   onAddLayer,
+  canEdit,
   onChannelSetVisible,
   onChannelSetColormap,
   onChannelSetContrast,
@@ -94,6 +100,8 @@ export function LayerPanel({
   onLayoutChange,
   style,
 }: Props) {
+  // Which layer row's name is currently being edited inline (editor-only).
+  const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
   return (
     <div className="layer-panel" style={style}>
       <div className="layer-panel-header">
@@ -153,7 +161,34 @@ export function LayerPanel({
                 >
                   {layer.visible ? "\u25C9" : "\u25CB"}
                 </button>
-                <span className="layer-name" title={layer.name}>{layer.name}</span>
+                {canEdit && renamingLayerId === layer.id ? (
+                  <LayerNameInput
+                    initial={layer.name}
+                    onCommit={(name) => {
+                      setRenamingLayerId(null);
+                      onRenameLayer(layer.id, name);
+                    }}
+                    onCancel={() => setRenamingLayerId(null)}
+                  />
+                ) : (
+                  <span
+                    className="layer-name"
+                    title={canEdit ? "Double-click to rename" : layer.name}
+                    onDoubleClick={canEdit ? (e) => { e.stopPropagation(); setRenamingLayerId(layer.id); } : undefined}
+                  >
+                    {layer.name}
+                  </span>
+                )}
+                {canEdit && renamingLayerId !== layer.id && (
+                  <button
+                    className="layer-rename-btn"
+                    title={`Rename layer ${layer.name}`}
+                    aria-label={`Rename layer ${layer.name}`}
+                    onClick={(e) => { e.stopPropagation(); setRenamingLayerId(layer.id); }}
+                  >
+                    {"✎"}
+                  </button>
+                )}
                 <input
                   type="range"
                   className="layer-opacity-slider"
@@ -342,5 +377,49 @@ export function LayerPanel({
         })}
       </div>
     </div>
+  );
+}
+
+/**
+ * Inline rename input for a layer name. Auto-focuses and selects on mount;
+ * Enter (or blur) commits, Escape cancels. Stops click propagation so editing
+ * the name does not select/collapse the row. Mirrors the saved-view rename
+ * affordance for a consistent feel.
+ */
+function LayerNameInput({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  return (
+    <input
+      ref={ref}
+      type="text"
+      className="layer-name-input"
+      aria-label="Layer name"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={() => onCommit(value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onCommit(value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    />
   );
 }

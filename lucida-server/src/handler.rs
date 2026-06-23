@@ -396,6 +396,46 @@ async fn handle_client_inner(
                                     );
                                     continue;
                                 }
+                                // A dataset rename has its own authorize +
+                                // validate + exists-check + DB-sync path. Route
+                                // it through `rename_dataset` (which does
+                                // require_editor itself), then broadcast the
+                                // resulting command exactly like the generic
+                                // path below — peers apply it live, and the new
+                                // name is already persisted (document + DB row).
+                                if let DocumentCommand::RenameDataset { id: ds_id, name } = &command
+                                {
+                                    match ctx
+                                        .manager
+                                        .rename_dataset(&ctx.live, &ctx.principal, ds_id, name)
+                                        .await
+                                    {
+                                        Ok((seq, applied)) => {
+                                            let broadcast_msg = ServerMessage::CommandBroadcast {
+                                                seq,
+                                                command: applied,
+                                            };
+                                            let ack_msg = ServerMessage::Ack { seq };
+                                            let _ = tx.send(BroadcastItem::CommandBroadcast {
+                                                sender: id,
+                                                broadcast_json: serde_json::to_string(
+                                                    &broadcast_msg,
+                                                )
+                                                .unwrap(),
+                                                ack_json: serde_json::to_string(&ack_msg).unwrap(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                client_id = %id,
+                                                workspace_id = %ctx.live.workspace_id,
+                                                error = %e,
+                                                "workspace.command.rename_dataset_rejected"
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Err(e) = ctx
                                     .manager
                                     .require_editor(&ctx.live.workspace_id, &ctx.principal)
@@ -1603,9 +1643,19 @@ async fn handle_open_remote_dataset(
     // without re-importing.
     {
         let sess = session.lock().await;
-        if let Some((existing_dataset_id, existing)) =
+        if let Some((existing_dataset_id, mut existing)) =
             find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
         {
+            // Re-broadcast the CURRENT document manifest, not the stale
+            // import-time one cached on the binding: a `DatasetOpened` apply
+            // does a full manifest replace, so reusing the cached manifest
+            // here would clobber a since-applied rename (the document is the
+            // source of truth for the display name). Other manifest fields
+            // (images/transforms/source layouts) are immutable post-import, so
+            // adopting the document copy is otherwise a no-op.
+            if let Some(doc_manifest) = sess.document.manifests.get(&existing_dataset_id) {
+                existing.manifest = doc_manifest.clone();
+            }
             let opened = existing.clone();
             let command = DocumentCommand::DatasetOpened(existing);
             let seq = sess.seq;
@@ -3105,5 +3155,152 @@ mod tests {
             }
             _ => panic!("expected GeneratedChunkStatus"),
         }
+    }
+
+    /// Build a `DatasetOpened` whose manifest carries `name`, wired to the
+    /// shared `single_image_manifest` shape but renamed. Used to seed both the
+    /// document and a `ServerBinding`'s cached import-time copy.
+    fn dataset_opened_named(name: &str) -> DatasetOpened {
+        let mut manifest = single_image_manifest();
+        manifest.name = name.to_string();
+        let image_id = manifest.images()[0].image_id.clone();
+        DatasetOpened {
+            manifest,
+            fetch: lucida_protocol::FetchSource::Proxied(lucida_protocol::ProxiedFetchDescriptor {
+                images: vec![lucida_protocol::ProxiedImageSpec {
+                    image_id,
+                    wire_format: lucida_protocol::WireFormat::Raw {
+                        data_type: DataType::Uint16,
+                    },
+                }],
+            }),
+            catalog: lucida_protocol::AssetCatalog::default(),
+        }
+    }
+
+    /// Construct a `ServerBinding` carrying `opened` as its cached, import-time
+    /// `dataset_opened`, with inert/stub proxy + generated infrastructure (none
+    /// of it is exercised here). Mirrors the helper in
+    /// `tests/dataset_id_stable.rs`.
+    fn make_test_binding(source_url: &str, opened: &DatasetOpened) -> ServerBinding {
+        let store =
+            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::new(store.clone(), 1024));
+        let resolver = Arc::new(ChunkResolver::new(
+            &lucida_store::import_types::ServerBindingSeed { images: vec![] },
+        ));
+        let url_hash = lucida_content::url::dataset_url_hash16(source_url);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let proxy_cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), url_hash));
+        std::mem::forget(tmp); // keep the dir alive for the test process
+        let proxy_generator = Arc::new(ProxyGenerator::new(
+            proxy_cache.clone(),
+            cache.clone(),
+            resolver.clone(),
+            Arc::new(opened.manifest.clone()),
+            1,
+        ));
+        let derived_chunks = Arc::new(DerivedChunkCache::default());
+        ServerBinding {
+            source_url: source_url.to_string(),
+            store,
+            resolver,
+            cache,
+            dataset_opened: opened.clone(),
+            derived_chunks: derived_chunks.clone(),
+            generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
+            legacy_proxy_enabled: false,
+            proxy_cache,
+            proxy_generator,
+        }
+    }
+
+    /// Regression for the dedup-reuse-after-rename bug (#701): re-opening an
+    /// already-loaded dataset URL must re-broadcast the dataset under its
+    /// CURRENT document name, not the stale import-time name cached on the
+    /// `ServerBinding`.
+    ///
+    /// The bug: `handle_open_remote_dataset`'s reuse short-circuit cloned the
+    /// binding's cached `dataset_opened` (whose manifest is frozen at import
+    /// time) into the re-broadcast `DatasetOpened`. Because applying a
+    /// `DatasetOpened` does a full manifest *replace*, a re-open after a rename
+    /// silently clobbered the new name back to the import-time one for every
+    /// client that received the re-broadcast.
+    ///
+    /// This drives the real reuse-shortcut body: it seeds a `Session` with a
+    /// dataset (real `Session::apply(DatasetOpened)`) and a matching
+    /// `ServerBinding`, renames it through the real document path
+    /// (`Session::apply(RenameDataset)`), then runs the handler's own
+    /// `find_loaded_binding` lookup + the fix's document-manifest adoption, and
+    /// asserts the resulting re-broadcast command carries the renamed name. As
+    /// a guard, it confirms the binding's own cached copy is deliberately left
+    /// stale (proving the document — not the binding — is the source of truth
+    /// for the display name).
+    #[test]
+    fn dedup_reuse_after_rename_rebroadcasts_renamed_name() {
+        const URL: &str = "gs://lucida-test/datasets/rename-me.zarr";
+        let import_name = "import-time-name.zarr";
+        let renamed = "Renamed By Editor";
+
+        let dataset_id = single_image_manifest().dataset_id;
+        let mut session = Session::new();
+
+        // First open: apply DatasetOpened (import-time name) + register binding.
+        let opened = dataset_opened_named(import_name);
+        session.apply(DocumentCommand::DatasetOpened(opened.clone()));
+        session
+            .server_bindings
+            .insert(dataset_id.clone(), make_test_binding(URL, &opened));
+        assert_eq!(
+            session.document.manifests[&dataset_id].name, import_name,
+            "precondition: document carries the import-time name"
+        );
+
+        // Rename through the real document path.
+        session.apply(DocumentCommand::RenameDataset {
+            id: dataset_id.clone(),
+            name: renamed.to_string(),
+        });
+        assert_eq!(
+            session.document.manifests[&dataset_id].name, renamed,
+            "precondition: rename updated the live document manifest"
+        );
+        // The binding's cached import-time copy is (intentionally) untouched by
+        // a rename — this is exactly the stale state the bug re-broadcast.
+        assert_eq!(
+            session.server_bindings[&dataset_id]
+                .dataset_opened
+                .manifest
+                .name,
+            import_name,
+            "the binding cache stays at the import-time name; the fix must not \
+             rely on it for the display name"
+        );
+
+        // Re-open the SAME URL: run the handler's real reuse short-circuit.
+        // `find_loaded_binding` is the production helper; the manifest adoption
+        // immediately below is the exact fix under test.
+        let (existing_dataset_id, mut existing) =
+            find_loaded_binding(&session, &dataset_id, URL, true)
+                .expect("re-open must find the existing binding (dedup short-circuit)");
+        if let Some(doc_manifest) = session.document.manifests.get(&existing_dataset_id) {
+            existing.manifest = doc_manifest.clone();
+        }
+        let rebroadcast = DocumentCommand::DatasetOpened(existing);
+
+        // The re-broadcast DatasetOpened — what peers re-apply — must carry the
+        // renamed name, NOT the import-time name.
+        let DocumentCommand::DatasetOpened(rebroadcast_opened) = &rebroadcast else {
+            panic!("expected DatasetOpened");
+        };
+        assert_eq!(
+            rebroadcast_opened.manifest.name, renamed,
+            "dedup re-open must re-broadcast the renamed name, not the stale \
+             import-time manifest name"
+        );
+        assert_eq!(
+            rebroadcast_opened.manifest.dataset_id, dataset_id,
+            "dedup re-open must target the same dataset id"
+        );
     }
 }

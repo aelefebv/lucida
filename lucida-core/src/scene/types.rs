@@ -492,6 +492,20 @@ impl DocumentState {
         self.annotations.shift_remove(id);
     }
 
+    /// Rename a dataset's display label in place by id. Overwrites only the
+    /// manifest's `name`; the manifest's `dataset_id`, images, transforms,
+    /// and the dataset's asset catalog / annotations are untouched. No-op if
+    /// `id` is unknown, so a rename racing a removal is harmless and never
+    /// mints a phantom manifest. The viewer reads this `name` via
+    /// `scene.dataset_name(id)`, so an in-place edit here is what the layer
+    /// panel shows — and, because the manifest lives in the persisted
+    /// document, what reopen restores.
+    pub fn rename_dataset(&mut self, id: &DatasetId, name: String) {
+        if let Some(manifest) = self.manifests.get_mut(id) {
+            manifest.name = name;
+        }
+    }
+
     /// Add (or replace) an annotation under `dataset_id`.
     ///
     /// Idempotent / last-write-wins on a repeated `id`: re-applying a command
@@ -815,6 +829,9 @@ impl DocumentState {
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);
+            }
+            DocumentCommand::RenameDataset { id, name } => {
+                self.rename_dataset(&id, name);
             }
             DocumentCommand::RegisterLayout { dataset_id, layout } => {
                 let layouts = self.registered_layouts.entry(dataset_id).or_default();
