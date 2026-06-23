@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -264,5 +264,179 @@ describe("WorkspaceSavedViewsSidebar — save modal (viewer)", () => {
     });
 
     expect(postBody).toMatchObject({ visibility: "personal" });
+  });
+});
+
+// --- Coverage ported from the deleted BookmarkSidebar.test.tsx ---------------
+// These four behavior groups (rename, delete-with-confirm, copy link, filter)
+// were exercised only by the now-removed BookmarkSidebar test. They are still
+// live in WorkspaceSavedViewsSidebar, so they are re-asserted here against the
+// successor component's real API and DOM (menu via "Saved view actions" ->
+// role="menu"; rename via .bookmark-name-input; delete via a role="alertdialog"
+// ConfirmModal; PATCH/DELETE to /api/workspaces/<ws>/saved-views/<id>).
+
+describe("WorkspaceSavedViewsSidebar — inline rename", () => {
+  it("Enter commits the new name via PATCH", async () => {
+    let patchBody: Record<string, unknown> | null = null;
+    let patchUrl: string | null = null;
+    let patchMethod: string | null = null;
+    responder = (url, init) => {
+      if (init?.method === "PATCH") {
+        patchMethod = init.method;
+        patchUrl = url;
+        patchBody = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse(200, savedViewRow({ id: "p1", name: "renamed", visibility: "personal" }));
+      }
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "old", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "old" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
+
+    // The rename input renders in place of the name (class set by RenameInput);
+    // pick it by class so the search box isn't grabbed instead.
+    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    await userEvent.clear(input);
+    await act(async () => {
+      await userEvent.type(input, "renamed{Enter}");
+    });
+
+    expect(patchMethod).toBe("PATCH");
+    expect(patchUrl).toBe("/api/workspaces/ws-1/saved-views/p1");
+    expect(patchBody).toEqual({ name: "renamed" });
+  });
+
+  it("Esc cancels the rename without PATCHing", async () => {
+    responder = (_url, init) => {
+      if (init?.method === "PATCH") {
+        return jsonResponse(200, savedViewRow({ id: "p1", visibility: "personal" }));
+      }
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "old", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "old" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
+
+    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    await userEvent.clear(input);
+    await act(async () => {
+      await userEvent.type(input, "won't commit{Escape}");
+    });
+
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    // The rename input closed; the original name is shown again.
+    expect(document.querySelector(".bookmark-name-input")).toBeNull();
+    expect(screen.getByText("old")).toBeTruthy();
+  });
+});
+
+describe("WorkspaceSavedViewsSidebar — delete confirmation", () => {
+  it("requires confirmation, then DELETEs the view", async () => {
+    let deleteUrl: string | null = null;
+    let deleteMethod: string | null = null;
+    responder = (url, init) => {
+      if (init?.method === "DELETE") {
+        deleteMethod = init.method;
+        deleteUrl = url;
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "Doomed", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Doomed" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
+
+    // Confirmation dialog appears naming the view; no DELETE has fired yet.
+    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    expect(within(dialog).getByText(/Doomed/)).toBeTruthy();
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+
+    await act(async () => {
+      await userEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+    });
+
+    expect(deleteMethod).toBe("DELETE");
+    expect(deleteUrl).toBe("/api/workspaces/ws-1/saved-views/p1");
+  });
+
+  it("Cancel from the confirmation modal does NOT DELETE", async () => {
+    responder = (_url, init) => {
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "Doomed", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Doomed" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    await userEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+});
+
+describe("WorkspaceSavedViewsSidebar — copy view link", () => {
+  it("writes the #b=<encoded id> deep link to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    // An id with a character that must be URL-encoded, so the encodeURIComponent
+    // step is actually asserted (not just a passthrough).
+    responder = () =>
+      jsonResponse(200, [savedViewRow({ id: "a b/c", name: "Linkable", visibility: "shared" })]);
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Linkable" });
+    await act(async () => {
+      await userEvent.click(within(menu).getByRole("menuitem", { name: /copy view link/i }));
+    });
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const arg = writeText.mock.calls[0][0] as string;
+    expect(arg).toContain(`#b=${encodeURIComponent("a b/c")}`);
+    expect(arg).toContain("#b=a%20b%2Fc");
+  });
+});
+
+describe("WorkspaceSavedViewsSidebar — filter and search", () => {
+  it("'Mine only' filters the list to the current user's views", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({ id: "b1", name: "alice 1", created_by: "alice@example.com", visibility: "personal" }),
+        savedViewRow({ id: "b2", name: "bob 1", created_by: "bob@example.com", created_by_name: "Bob", visibility: "shared" }),
+      ]);
+    await renderSidebar(true);
+
+    expect(screen.getByText("alice 1")).toBeTruthy();
+    expect(screen.getByText("bob 1")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /mine only/i }));
+
+    expect(screen.getByText("alice 1")).toBeTruthy();
+    expect(screen.queryByText("bob 1")).toBeNull();
+  });
+
+  it("the search box filters the list by name substring", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({ id: "b1", name: "Apoptosis", visibility: "shared" }),
+        savedViewRow({ id: "b2", name: "CYP7A1", visibility: "shared" }),
+      ]);
+    await renderSidebar(true);
+
+    const search = screen.getByPlaceholderText(/search/i);
+    await userEvent.type(search, "Apop");
+
+    expect(screen.getByText("Apoptosis")).toBeTruthy();
+    expect(screen.queryByText("CYP7A1")).toBeNull();
   });
 });
