@@ -483,6 +483,72 @@ impl DocumentState {
         self.manifests.insert(manifest.dataset_id.clone(), manifest);
     }
 
+    /// The **single source of truth** for which fields of a [`DocumentState`]
+    /// are keyed by (or embed) a workspace-local [`DatasetId`] — the one place
+    /// that must be touched when a new id-keyed field is added.
+    ///
+    /// Drives every such field from one walk: for each existing entry it calls
+    /// `fate(&old_key)` and either
+    /// - `Some(new_key)` → **keeps** the entry, rekeyed to `new_key`
+    ///   (insertion order preserved), or
+    /// - `None` → **drops** the entry entirely.
+    ///
+    /// The id-keyed maps it covers are `manifests`, `registered_layouts`,
+    /// `active_layout_ids`, `asset_catalogs`, and `annotations`. It also keeps
+    /// the two *embedded* ids consistent on kept entries: a manifest's own
+    /// `manifest.dataset_id` is rewritten to its entry's new key, and each kept
+    /// annotation list is handed (with its new key) to `on_kept_annotations`
+    /// so a caller can descend into the per-pin captured view
+    /// ([`Annotation::view`]) — which carries its *own* id-keyed maps. Dropped
+    /// entries need no embedded fixup: their manifest and pins (views included)
+    /// go away with them.
+    ///
+    /// Both [`Self::remap_dataset_ids`] (remap = `Some(new)`) and
+    /// [`Self::remove_dataset`] (remove = `None`) are implemented on this, so
+    /// the set of fields they walk can never silently diverge — the exact class
+    /// of bug that previously left `remove_dataset` orphaning layout entries and
+    /// once dropped the embedded-annotation-view remap. A unit test
+    /// (`rekey_dataset_ids_covers_every_id_keyed_field`) asserts a removal
+    /// clears the removed id from every field this walks, so a future id-keyed
+    /// field that isn't wired in here shows up as a failure.
+    fn rekey_dataset_ids(
+        &mut self,
+        fate: impl Fn(&DatasetId) -> Option<DatasetId>,
+        mut on_kept_annotations: impl FnMut(&DatasetId, &mut Vec<Annotation>),
+    ) {
+        // A small helper that rebuilds an id-keyed map, dropping `None`-fated
+        // entries and rekeying the rest, with a per-kept-entry value hook for
+        // any embedded id fixup. Works for both `IndexMap` and `HashMap`
+        // (`FromIterator`), preserving order for the order-bearing `IndexMap`s.
+        fn rekey<M, V>(
+            map: &mut M,
+            fate: &impl Fn(&DatasetId) -> Option<DatasetId>,
+            mut on_kept: impl FnMut(&DatasetId, &mut V),
+        ) where
+            M: Default + IntoIterator<Item = (DatasetId, V)> + FromIterator<(DatasetId, V)>,
+        {
+            *map = std::mem::take(map)
+                .into_iter()
+                .filter_map(|(id, mut value)| {
+                    let new_id = fate(&id)?;
+                    on_kept(&new_id, &mut value);
+                    Some((new_id, value))
+                })
+                .collect();
+        }
+
+        rekey(&mut self.manifests, &fate, |new_id, manifest| {
+            // The manifest carries its own id; keep it equal to the map key.
+            manifest.dataset_id = new_id.clone();
+        });
+        rekey(&mut self.registered_layouts, &fate, |_, _| {});
+        rekey(&mut self.active_layout_ids, &fate, |_, _| {});
+        rekey(&mut self.asset_catalogs, &fate, |_, _| {});
+        rekey(&mut self.annotations, &fate, |new_id, anns| {
+            on_kept_annotations(new_id, anns);
+        });
+    }
+
     /// Rewrite every workspace-local [`DatasetId`] in the document through
     /// `remap` (old id → new id), preserving insertion order.
     ///
@@ -502,32 +568,17 @@ impl DocumentState {
     /// which carries its own workspace-dataset-id-keyed maps, and remaps it with
     /// the same mapping — otherwise a copied pin's "go to author's view" would
     /// dangle against the source workspace's ids in the duplicate.
+    ///
+    /// Implemented on [`Self::rekey_dataset_ids`] (the single source of truth
+    /// for the id-keyed field set) with a `fate` that maps every key to
+    /// `Some(new)` — a remap keeps every entry — so it can never walk a
+    /// different set of fields than [`Self::remove_dataset`].
     pub fn remap_dataset_ids(&mut self, remap: &HashMap<DatasetId, DatasetId>) {
-        let mapped = |id: &DatasetId| remap.get(id).cloned().unwrap_or_else(|| id.clone());
-
-        self.manifests = std::mem::take(&mut self.manifests)
-            .into_iter()
-            .map(|(id, mut manifest)| {
-                let new_id = mapped(&id);
-                manifest.dataset_id = new_id.clone();
-                (new_id, manifest)
-            })
-            .collect();
-        self.registered_layouts = std::mem::take(&mut self.registered_layouts)
-            .into_iter()
-            .map(|(id, layouts)| (mapped(&id), layouts))
-            .collect();
-        self.active_layout_ids = std::mem::take(&mut self.active_layout_ids)
-            .into_iter()
-            .map(|(id, layout)| (mapped(&id), layout))
-            .collect();
-        self.asset_catalogs = std::mem::take(&mut self.asset_catalogs)
-            .into_iter()
-            .map(|(id, catalog)| (mapped(&id), catalog))
-            .collect();
-        self.annotations = std::mem::take(&mut self.annotations)
-            .into_iter()
-            .map(|(id, mut anns)| {
+        self.rekey_dataset_ids(
+            // Remap keeps every entry, rekeyed; an id missing from `remap` maps
+            // to itself (safe no-op).
+            |id| Some(remap.get(id).cloned().unwrap_or_else(|| id.clone())),
+            |_new_id, anns| {
                 // Each annotation may carry the author's captured view
                 // (`Annotation::view: Option<SavedView>`), itself keyed by the
                 // workspace's dataset ids (active_layouts / dataset_order /
@@ -537,7 +588,7 @@ impl DocumentState {
                 // view" would dangle in the duplicate. Descend into the stored
                 // view and remap it with the same mapping (mutating in place so
                 // the change lands on the annotation we keep, not a copy).
-                for ann in &mut anns {
+                for ann in anns {
                     if let Some(view) = ann.view.as_mut() {
                         view.remap_dataset_ids(remap);
                         // Copy-point defense: even though `AddAnnotation` now
@@ -550,18 +601,38 @@ impl DocumentState {
                         view.clear_source_urls();
                     }
                 }
-                (mapped(&id), anns)
-            })
-            .collect();
+            },
+        );
     }
 
-    /// Remove a dataset by id. Drops its annotations along with its
-    /// manifest and asset catalog — annotations are scoped per dataset, so a
-    /// removed dataset's pins must not linger.
+    /// Remove a dataset by id, clearing it from **every** id-keyed field of the
+    /// document: its manifest, registered layouts, active-layout id, asset
+    /// catalog, and annotations. Annotations are scoped per dataset, so a
+    /// removed dataset's pins must not linger; likewise its layout entries —
+    /// leaving `registered_layouts` / `active_layout_ids` behind would orphan
+    /// them against a dataset that no longer exists.
+    ///
+    /// Implemented on [`Self::rekey_dataset_ids`] (the single source of truth
+    /// for the id-keyed field set) with a `fate` that drops the target id
+    /// (`None`) and keeps every other entry unchanged — so it can never walk a
+    /// different set of fields than [`Self::remap_dataset_ids`]. Dropping an
+    /// `active_layout_ids` entry simply removes the active selection for the
+    /// (now gone) dataset; resolution for any *surviving* dataset is unaffected
+    /// (it falls back to that dataset's own manifest default, exactly as for a
+    /// dataset that never had an active id set).
     pub fn remove_dataset(&mut self, id: &DatasetId) {
-        self.manifests.shift_remove(id);
-        self.asset_catalogs.shift_remove(id);
-        self.annotations.shift_remove(id);
+        self.rekey_dataset_ids(
+            |candidate| {
+                if candidate == id {
+                    None
+                } else {
+                    Some(candidate.clone())
+                }
+            },
+            // Surviving annotation lists are untouched by a removal — only the
+            // removed dataset's pins drop (with the whole entry).
+            |_new_id, _anns| {},
+        );
     }
 
     /// Rename a dataset's display label in place by id. Overwrites only the
@@ -1387,5 +1458,211 @@ mod annotation_view_tests {
             .insert(kept.clone(), lucida_content::LayoutId("x".into()));
         doc.remap_dataset_ids(&HashMap::new());
         assert!(doc.active_layout_ids.contains_key(&kept));
+    }
+
+    /// Build a `DocumentState` with `id` present in EVERY dataset-id-keyed
+    /// field — the five id-keyed maps plus the manifest's embedded
+    /// `dataset_id`. Used by the `remove_dataset` coverage tests so a future
+    /// id-keyed field that isn't wired into the single-source walk surfaces as
+    /// a leftover.
+    fn doc_with_id_in_every_field(id: &DatasetId) -> DocumentState {
+        use lucida_content::{DatasetKind, LayoutId, LayoutSpec};
+
+        let mut doc = DocumentState::default();
+        let manifest = lucida_content::DatasetManifest::new(
+            id.clone(),
+            "Sample".into(),
+            DatasetKind::Single,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        doc.register_dataset(manifest);
+        doc.registered_layouts.insert(
+            id.clone(),
+            vec![LayoutSpec {
+                id: LayoutId("img".into()),
+                name: "Image".into(),
+                placements: Vec::new(),
+            }],
+        );
+        doc.active_layout_ids
+            .insert(id.clone(), LayoutId("img".into()));
+        doc.asset_catalogs.insert(id.clone(), AssetCatalog::empty());
+        doc.add_annotation(id.clone(), pin_with_view(None));
+        doc
+    }
+
+    /// `DocumentState::remove_dataset` clears the removed id from **every**
+    /// id-keyed field — including `registered_layouts` and `active_layout_ids`,
+    /// which the pre-refactor implementation left orphaned (the bug this slice
+    /// fixes). A second, unrelated dataset is fully preserved, proving removal
+    /// targets only the requested id.
+    #[test]
+    fn remove_dataset_clears_id_from_all_id_keyed_fields() {
+        use lucida_content::{DatasetKind, LayoutId, LayoutSpec};
+
+        let gone = DatasetId("wds-gone".into());
+        let kept = DatasetId("wds-kept".into());
+
+        let mut doc = doc_with_id_in_every_field(&gone);
+        // A second dataset that must survive the removal untouched.
+        doc.register_dataset(lucida_content::DatasetManifest::new(
+            kept.clone(),
+            "Kept".into(),
+            DatasetKind::Single,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        ));
+        doc.registered_layouts.insert(
+            kept.clone(),
+            vec![LayoutSpec {
+                id: LayoutId("img".into()),
+                name: "Image".into(),
+                placements: Vec::new(),
+            }],
+        );
+        doc.active_layout_ids
+            .insert(kept.clone(), LayoutId("img".into()));
+        doc.asset_catalogs
+            .insert(kept.clone(), AssetCatalog::empty());
+        doc.add_annotation(kept.clone(), pin_with_view(None));
+
+        doc.remove_dataset(&gone);
+
+        // The removed id is gone from every id-keyed field — the previously
+        // ORPHANED `registered_layouts` / `active_layout_ids` are asserted
+        // explicitly (they are the bug fix), alongside the fields removal
+        // already cleared.
+        assert!(!doc.manifests.contains_key(&gone));
+        assert!(
+            !doc.registered_layouts.contains_key(&gone),
+            "remove_dataset must clear registered_layouts (was orphaned)"
+        );
+        assert!(
+            !doc.active_layout_ids.contains_key(&gone),
+            "remove_dataset must clear active_layout_ids (was orphaned)"
+        );
+        assert!(!doc.asset_catalogs.contains_key(&gone));
+        assert!(!doc.annotations.contains_key(&gone));
+
+        // The unrelated dataset is fully intact across every field.
+        assert!(doc.manifests.contains_key(&kept));
+        assert!(doc.registered_layouts.contains_key(&kept));
+        assert!(doc.active_layout_ids.contains_key(&kept));
+        assert!(doc.asset_catalogs.contains_key(&kept));
+        assert!(doc.annotations.contains_key(&kept));
+    }
+
+    /// Coverage guard for the single-source [`DocumentState::rekey_dataset_ids`]
+    /// walk: removing the only dataset present in EVERY id-keyed field must
+    /// leave the whole document empty. If a future id-keyed field is added to
+    /// `DocumentState` but not wired into `rekey_dataset_ids`, that field will
+    /// still reference the removed id and this test fails — making the
+    /// single-source invariant enforced, not just documented.
+    #[test]
+    fn rekey_dataset_ids_covers_every_id_keyed_field() {
+        let id = DatasetId("wds-only".into());
+        let mut doc = doc_with_id_in_every_field(&id);
+
+        doc.remove_dataset(&id);
+
+        assert!(doc.manifests.is_empty());
+        assert!(doc.registered_layouts.is_empty());
+        assert!(doc.active_layout_ids.is_empty());
+        assert!(doc.asset_catalogs.is_empty());
+        assert!(doc.annotations.is_empty());
+    }
+
+    /// DETERMINISM GUARD: a remap (middle rename) and a removal (middle drop)
+    /// must preserve the **iteration order** of the id-keyed `IndexMap` fields
+    /// (`manifests`, `asset_catalogs`, `annotations`) — not merely their
+    /// membership. These maps are `IndexMap` *specifically* to guarantee
+    /// byte-identical serialization order on the collaborative-document wire (a
+    /// determinism invariant); the sibling `remap`/`remove` tests above assert
+    /// only `contains_key`, so a future change that round-tripped one of these
+    /// fields through a `HashMap` would silently scramble wire order yet pass
+    /// every other test. This locks position, not just presence.
+    ///
+    /// Both halves rename/remove a **middle** entry (B) of a known A, B, C
+    /// insertion order so the assertion is non-vacuous: a sorted or
+    /// reordered rebuild would land B (or B') somewhere other than the middle
+    /// slot and fail. A membership-only check could not catch that.
+    #[test]
+    fn rekey_dataset_ids_preserves_index_map_iteration_order() {
+        use lucida_content::DatasetKind;
+
+        let a = DatasetId("wds-a".into());
+        let b = DatasetId("wds-b".into());
+        let c = DatasetId("wds-c".into());
+        let b_prime = DatasetId("wds-b-prime".into());
+
+        // Seed a doc with A, B, C inserted in that exact order across the three
+        // order-bearing IndexMap fields.
+        fn seed(ids: &[&DatasetId]) -> DocumentState {
+            let mut doc = DocumentState::default();
+            for id in ids {
+                doc.register_dataset(lucida_content::DatasetManifest::new(
+                    (*id).clone(),
+                    "Sample".into(),
+                    DatasetKind::Single,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                ));
+                doc.asset_catalogs
+                    .insert((*id).clone(), AssetCatalog::empty());
+                doc.add_annotation((*id).clone(), pin_with_view(None));
+            }
+            doc
+        }
+
+        // --- Remap case: rename the MIDDLE entry B -> B', leave A and C ---
+        let mut doc = seed(&[&a, &b, &c]);
+        let mut remap = HashMap::new();
+        remap.insert(b.clone(), b_prime.clone());
+        doc.remap_dataset_ids(&remap);
+
+        // B is replaced IN PLACE by B' — A and C keep their original slots, so
+        // the order is exactly [A, B', C], not reordered (and not sorted, which
+        // would be [A, B', C] only by accident — see the removal half below for
+        // the order-sensitive check that a sort could not satisfy).
+        let expected = vec![a.clone(), b_prime.clone(), c.clone()];
+        assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            doc.annotations.keys().cloned().collect::<Vec<_>>(),
+            expected,
+        );
+        // The embedded manifest id rode along with its in-place slot.
+        assert_eq!(doc.manifests[&b_prime].dataset_id, b_prime);
+
+        // --- Remove case: drop the MIDDLE entry B from a fresh A, B, C doc ---
+        let mut doc = seed(&[&a, &b, &c]);
+        doc.remove_dataset(&b);
+
+        // The survivors keep their relative order: exactly [A, C]. A reordering
+        // rebuild (e.g. via HashMap) could leave [C, A]; this asserts it does
+        // not.
+        let expected = vec![a.clone(), c.clone()];
+        assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            doc.annotations.keys().cloned().collect::<Vec<_>>(),
+            expected
+        );
     }
 }
