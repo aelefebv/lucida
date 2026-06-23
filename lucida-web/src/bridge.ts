@@ -102,6 +102,29 @@ export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsR
   console.log(`[bridge] ${event}`, payload);
 }
 
+/**
+ * Mirror of `lucida_core::protocol::PeerIdentity`. Server-authored from the
+ * connecting principal and surfaced on the peer's live cursor (#540). All
+ * fields are best-effort: `display_name` may be empty, `picture_url` may be
+ * absent (dev sessions, providers without avatars). The whole object is
+ * absent for sessions without auth (the non-workspace `/ws` path), so peer
+ * rendering must tolerate a missing `identity`.
+ *
+ * Privacy: the raw email is deliberately NOT here — collaborator emails are
+ * owner-only, so presence (seen by every co-present peer, including non-owner
+ * viewers/editors) must not carry it. The server precomputes a single-char
+ * `initial` for the avatar chip from display-name-or-email so no address
+ * crosses the wire.
+ */
+export interface PeerIdentity {
+  display_name: string;
+  picture_url?: string | null;
+  /** Single-grapheme fallback glyph for the avatar chip, computed
+   *  server-side (display name, else email local-part). Never the raw
+   *  email. May be absent/empty for legacy peers. */
+  initial?: string;
+}
+
 export interface PresenceState {
   client_id: ClientId;
   camera: unknown;
@@ -111,6 +134,9 @@ export interface PresenceState {
   cursor: [number, number] | null;
   dataset_order: string[];
   dataset_settings: Record<string, unknown>;
+  /** Presentational identity for this peer's cursor (#540). Optional:
+   *  absent for peers from a session without auth. */
+  identity?: PeerIdentity | null;
 }
 
 export interface BridgeHandlers {

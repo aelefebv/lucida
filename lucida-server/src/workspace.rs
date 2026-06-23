@@ -6069,6 +6069,114 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn presence_identity_is_never_persisted_into_document_json() {
+        // PRIVACY INVARIANT (#540 review): peer identity (display name, avatar,
+        // initial — and certainly any email) is EPHEMERAL session presence. It
+        // must NEVER cross into the persisted workspace document, or a stale
+        // identity / address would leak through `document_json` on every reload
+        // and to anyone the workspace is later shared with. Presence lives only
+        // on `Session::clients`; the document is built solely from sequenced
+        // commands. This guards that separation across a real persist+reload.
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Presence privacy"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+
+        // A connected client carries a fully-populated server-authored identity
+        // — name, avatar URL, and the precomputed initial — on its presence.
+        let identity = lucida_core::protocol::PeerIdentity {
+            display_name: "Grace Hopper".into(),
+            picture_url: Some("https://avatars.example.com/grace.png".into()),
+            initial: "G".into(),
+        };
+        // Apply a real document command too, so the document is non-empty and we
+        // prove identity stays out even alongside genuine document content. The
+        // annotation author is deliberately NOT an identity string.
+        let seq = {
+            let mut sess = live.session.lock().await;
+            sess.add_client(7, Some(identity.clone()));
+            assert!(
+                sess.clients.get(&7).unwrap().identity.is_some(),
+                "presence carries identity on the live session"
+            );
+            sess.apply(DocumentCommand::AddAnnotation {
+                dataset_id: DatasetId("wds-1".into()),
+                id: "pin-1".into(),
+                position: [1.0, 2.0],
+                end: None,
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "anon".into(),
+                kind: lucida_core::scene::AnnotationKind::Point,
+                view: None,
+            })
+        };
+
+        // Persist exactly what the server writes: the session's document.
+        let persisted_json = {
+            let sess = live.session.lock().await;
+            store
+                .persist_document(&workspace.id, seq, &sess.document)
+                .await
+                .unwrap();
+            serde_json::to_string(&sess.document).unwrap()
+        };
+
+        // The bytes that hit `document_json` carry no presence identity at all.
+        let assert_no_identity = |json: &str, where_: &str| {
+            for needle in [
+                "Grace Hopper",
+                "avatars.example.com",
+                "grace.png",
+                "owner@example.com",
+                "display_name",
+                "picture_url",
+                "\"identity\"",
+                "\"initial\"",
+                "@",
+            ] {
+                assert!(
+                    !json.contains(needle),
+                    "{where_}: document_json must not contain presence identity \
+                     ({needle:?}); presence is ephemeral, never persisted: {json}"
+                );
+            }
+            // Sanity: the genuine document content IS there.
+            assert!(json.contains("pin-1"), "{where_}: document content present");
+        };
+        assert_no_identity(&persisted_json, "serialized session document");
+
+        // The client disconnects (presence is ephemeral), leaving the workspace
+        // idle so it can be evicted and rehydrated from the store below.
+        live.session.lock().await.remove_client(7);
+
+        // Reload through the real path: evict the live workspace, reopen it so the
+        // document is rehydrated straight from `document_json`. The reloaded
+        // DocumentState and its re-serialization are equally identity-free, and
+        // presence does not survive — `clients` is empty on the fresh session.
+        assert_eq!(manager.evict_idle_workspaces().await, 1);
+        let reopened = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        let reloaded_json = {
+            let sess = reopened.session.lock().await;
+            assert!(
+                sess.clients.is_empty(),
+                "reloaded session starts with no presence (ephemeral)"
+            );
+            serde_json::to_string(&sess.document).unwrap()
+        };
+        assert_no_identity(&reloaded_json, "reloaded document");
+    }
+
+    #[tokio::test]
     async fn active_live_workspace_is_not_idle_evicted() {
         let store = fresh_store().await;
         let owner = principal("owner@example.com", false);
@@ -6082,7 +6190,7 @@ pub mod tests {
             idle_eviction_config(),
         );
         let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
-        live.session.lock().await.add_client(42);
+        live.session.lock().await.add_client(42, None);
 
         let evicted = manager.evict_idle_workspaces().await;
         assert_eq!(evicted, 0);

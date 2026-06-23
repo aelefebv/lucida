@@ -8,7 +8,7 @@ use lucida_content::url::{
 use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
+use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, PeerIdentity, ServerMessage};
 use lucida_protocol::{
     AssetCatalog, AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -277,11 +277,30 @@ async fn handle_client_inner(
     let (unicast_tx, mut unicast_rx) = mpsc::unbounded_channel::<Message>();
     unicast_routes.lock().await.insert(id, unicast_tx);
 
+    // Presentational identity for this peer's cursor (#540), authored from
+    // the connection's authenticated principal. The non-workspace `/ws`
+    // path has no principal, so anonymous peers join with `None` and render
+    // via the numeric-id fallback. Sourced server-side (never client-sent)
+    // so it can't be spoofed and is only shown to co-present peers.
+    //
+    // Privacy: the raw email is NOT broadcast — collaborator emails are
+    // owner-only. `from_principal_parts` computes a single-grapheme
+    // `initial` from the display name (or email local-part when blank)
+    // server-side, so only the non-identifying name/avatar/initial cross
+    // the wire to co-present (possibly non-owner) peers.
+    let identity = workspace.as_ref().map(|ctx| {
+        PeerIdentity::from_principal_parts(
+            ctx.principal.display_name.clone(),
+            ctx.principal.picture_url.clone(),
+            &ctx.principal.email,
+        )
+    });
+
     // Lock session, subscribe (before unlock — no gap), add client, snapshot, unlock.
     let (snapshot_json, mut rx, peer_joined_json) = {
         let mut sess = session.lock().await;
         let rx = tx.subscribe();
-        let presence = sess.add_client(id);
+        let presence = sess.add_client(id, identity);
         let snapshot = sess.snapshot(id);
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
         let peer_joined = ServerMessage::PeerJoined {
