@@ -2893,14 +2893,39 @@ impl WorkspaceManager {
     /// `Proposed`: approving an already-shared (or anyone's personal) view is a
     /// `BadRequest`, not a silent no-op — except that another member's personal
     /// view stays `NotFound` even to an editor, preserving the never-leak rule.
+    ///
+    /// **Self-approve guard (#817):** a proposer cannot be their own reviewer.
+    /// The whole point of the review queue is that a *second* party signs off, so
+    /// even an editor/owner who created the proposal may not approve it — that
+    /// would reach `Proposed->Shared` with no reviewer, the exact transition the
+    /// `/visibility` allow-list (`ensure_saved_view_rescopable`) forbids for the
+    /// creator. The guard is placed here (the approve path), *after* the shared
+    /// review gate, so (a) the readability/role checks in
+    /// `ensure_proposal_reviewable` still run first — a stranger keeps getting
+    /// `Forbidden`/`NotFound` and never learns the view exists — and (b) it does
+    /// NOT apply to `reject_saved_view`: a creator self-rejecting is just
+    /// withdrawing their own proposal (Proposed->Personal), which is already
+    /// legal via `/visibility`. A sole editor wanting to share their own view
+    /// uses the legal `Personal->Shared` re-scope directly; the queue is for a
+    /// *different* editor. The denial is `Forbidden` (an authorization act on the
+    /// view, like the creator-only re-scope gate), not `BadRequest` (a state
+    /// error).
     pub async fn approve_saved_view(
         &self,
         workspace_id: &str,
         principal: &AuthPrincipal,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
-        self.ensure_proposal_reviewable(workspace_id, principal, saved_view_id)
+        let saved_view = self
+            .ensure_proposal_reviewable(workspace_id, principal, saved_view_id)
             .await?;
+        // Creator != reviewer: a proposer cannot self-approve. Reached only after
+        // the shared gate has confirmed the caller may see and review the view,
+        // so never-leak ordering is intact; scoped to approve so reject/withdraw
+        // by the creator stays legal.
+        if saved_view.created_by == normalize_email(&principal.email) {
+            return Err(WorkspaceError::Forbidden);
+        }
         self.store
             .set_saved_view_visibility(workspace_id, saved_view_id, SavedViewVisibility::Shared)
             .await
@@ -3019,21 +3044,33 @@ impl WorkspaceManager {
     /// 1. `require_viewer` — a non-member is denied (`Forbidden`) before any
     ///    row is read, so membership is never disclosed by a re-scope attempt.
     /// 2. fetch + `ensure_saved_view_readable` — never-leak in one place: a
-    ///    personal view the caller cannot see yields `NotFound` (identical to a
-    ///    missing row), so even editors/owners/admins never learn it exists.
+    ///    personal (or pending proposed) view the caller cannot see yields
+    ///    `NotFound` (identical to a missing row), so even editors/owners/admins
+    ///    never learn it exists.
     /// 3. **creator-only** — a shared view is readable by everyone, but only
     ///    the original creator may re-scope it; anyone else gets `Forbidden`.
-    /// 4. **target-visibility authority** — making a view `Shared` is a
+    /// 4. **transition allow-list** — the source→target re-scope must be one of
+    ///    the legal creator transitions (`saved_view_transition_allowed`); any
+    ///    other pair is `BadRequest`. This is the structural gate (#817): it
+    ///    rejects `Shared→Proposed` and, crucially, `Proposed→Shared` — the
+    ///    self-approve bypass — so sharing a proposal stays exclusively the
+    ///    editor review queue's job (`approve_saved_view`), never `/visibility`.
+    ///    A same-state request is an idempotent no-op and falls through to a
+    ///    (value-preserving) persist by the caller.
+    /// 5. **target-visibility authority** — making a view `Shared` is a
     ///    shared-state mutation (exactly like creating a `Shared` view), so it
-    ///    additionally requires editor; demoting back to `Personal` needs no
-    ///    editor (the creator is merely making their own view private again).
+    ///    additionally requires editor; demoting back to `Personal`, or
+    ///    proposing, needs no editor (the creator is acting on their own view).
+    ///    Checked last so an illegal transition is `BadRequest` regardless of
+    ///    the caller's role — the deny is by construction, not role-dependent.
     ///
     /// Returns the (now-confirmed-visible) view so callers can persist without
-    /// re-fetching. This is the gate #702 (approve/reject a proposed view)
-    /// reuses verbatim: "approve" is exactly a creator/authorized re-scope to
-    /// `Shared`, so it can call this with `target_visibility = Shared` and
-    /// inherit the same never-leak + creator-only + editor boundary rather than
-    /// re-deriving it.
+    /// re-fetching. The #702 review actions (`approve_saved_view` /
+    /// `reject_saved_view`, the Proposed→Shared / Proposed→Personal review
+    /// queue) deliberately do NOT route through this creator-only gate: their
+    /// authority is an *editor acting on another member's* proposal, so they use
+    /// `ensure_proposal_reviewable` instead — keeping the review queue the only
+    /// path that shares a proposal.
     async fn ensure_saved_view_rescopable(
         &self,
         workspace_id: &str,
@@ -3054,6 +3091,17 @@ impl WorkspaceManager {
         // content edit. A non-creator (even of a shared view) cannot re-scope.
         if saved_view.created_by != normalize_email(&principal.email) {
             return Err(WorkspaceError::Forbidden);
+        }
+        // Transition allow-list: close the gate by construction. Anything not on
+        // the creator allow-list — notably Shared→Proposed and the
+        // Proposed→Shared self-approve bypass — is rejected here, before the
+        // role check, so the deny is structural rather than role-dependent.
+        if !saved_view_transition_allowed(saved_view.visibility, target_visibility) {
+            return Err(WorkspaceError::BadRequest(format!(
+                "cannot change saved view visibility from {} to {}",
+                saved_view.visibility.as_str(),
+                target_visibility.as_str()
+            )));
         }
         // Target-visibility authority: promoting to Shared mutates shared
         // state, so it needs editor; demoting to Personal does not.
@@ -3439,6 +3487,40 @@ fn ensure_saved_view_readable(
             }
         }
     }
+}
+
+/// The creator-driven `/visibility` transition allow-list — the *only* source→
+/// target re-scopes the direct REST endpoint may perform, closed by
+/// construction so an illegal transition is unreachable rather than merely
+/// unsent by today's web UI.
+///
+/// Allowed (all by the creator; the `→Shared` editor authority is enforced
+/// separately by the caller, not here):
+/// - `Personal → Shared`  (creator shares; caller additionally requires editor)
+/// - `Shared   → Personal` (creator makes their own shared view private again)
+/// - `Personal → Proposed` (creator proposes their view for review)
+/// - `Proposed → Personal` (creator withdraws their own pending proposal)
+/// - a same-state request (`X → X`) — an idempotent no-op (`Ok`), so a benign
+///   "set it to what it already is" never errors.
+///
+/// Everything else is `BadRequest`. In particular this is what closes the gate
+/// on the two illegal direct transitions #817 calls out:
+/// - `Shared   → Proposed` — a shared view cannot be demoted into the review
+///   queue.
+/// - `Proposed → Shared` — the self-approve bypass: a creator (even an editor)
+///   cannot move their OWN proposal straight to shared and skip the editor
+///   review queue. Sharing a proposal is exclusively `approve_saved_view`'s job
+///   (editor authority over *another member's* bid), never `/visibility`.
+fn saved_view_transition_allowed(source: SavedViewVisibility, target: SavedViewVisibility) -> bool {
+    use SavedViewVisibility::{Personal, Proposed, Shared};
+    // Same-state is always an idempotent no-op.
+    if source == target {
+        return true;
+    }
+    matches!(
+        (source, target),
+        (Personal, Shared) | (Shared, Personal) | (Personal, Proposed) | (Proposed, Personal)
+    )
 }
 
 fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
@@ -6080,6 +6162,239 @@ pub mod tests {
     }
 
     #[test]
+    fn saved_view_transition_allow_list_is_closed_by_construction() {
+        use SavedViewVisibility::{Personal, Proposed, Shared};
+        // The four legal creator transitions.
+        assert!(saved_view_transition_allowed(Personal, Shared));
+        assert!(saved_view_transition_allowed(Shared, Personal));
+        assert!(saved_view_transition_allowed(Personal, Proposed));
+        assert!(saved_view_transition_allowed(Proposed, Personal));
+        // Same-state is an idempotent no-op for every state.
+        assert!(saved_view_transition_allowed(Personal, Personal));
+        assert!(saved_view_transition_allowed(Shared, Shared));
+        assert!(saved_view_transition_allowed(Proposed, Proposed));
+        // The illegal transitions #817 closes: Shared cannot be demoted into the
+        // review queue, and a proposal cannot self-approve straight to shared.
+        assert!(!saved_view_transition_allowed(Shared, Proposed));
+        assert!(!saved_view_transition_allowed(Proposed, Shared));
+    }
+
+    /// #817: the `/visibility` endpoint may only perform the creator
+    /// transition allow-list. This proves the gate is closed by construction:
+    /// the two illegal transitions (`Shared→Proposed`, and the
+    /// `Proposed→Shared` self-approve bypass attempted by an editor-creator) are
+    /// `BadRequest`; every legal transition succeeds; `→Shared` by a non-editor
+    /// creator keeps the existing authority error; never-leak and `created_by`
+    /// are preserved.
+    #[tokio::test]
+    async fn set_saved_view_visibility_enforces_transition_allow_list() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Transition gate"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+
+        // --- never-leak: a member who is not the creator of a Personal view
+        // gets NotFound, uniform with a missing id (the view's existence is
+        // never confirmed via the visibility endpoint). ---
+        let viewer_personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer private",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let leak_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &viewer_personal.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(leak_err, WorkspaceError::NotFound),
+            "non-creator rescope of a personal view must be NotFound, got {leak_err:?}"
+        );
+        let missing_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                "does-not-exist",
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(missing_err, WorkspaceError::NotFound),
+            "missing id must be NotFound, identical to the hidden personal view"
+        );
+
+        // --- legal: Personal -> Proposed (creator proposes their own view). ---
+        let proposing = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "to propose",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &proposing.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+        assert_eq!(proposed.created_by, normalize_email(&editor.email));
+
+        // --- illegal: Proposed -> Shared by the editor-creator (the
+        // self-approve bypass) MUST be BadRequest, NOT a silent share. Sharing a
+        // proposal is exclusively the editor review queue (`approve_saved_view`).
+        let bypass_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &proposed.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(bypass_err, WorkspaceError::BadRequest(_)),
+            "Proposed->Shared self-approve bypass must be BadRequest, got {bypass_err:?}"
+        );
+        // It is genuinely still Proposed in the store — the bypass changed
+        // nothing.
+        let still_proposed = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_proposed.visibility, SavedViewVisibility::Proposed);
+
+        // --- legal: Proposed -> Personal (creator withdraws their proposal). ---
+        let withdrawn = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &proposed.id,
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(withdrawn.visibility, SavedViewVisibility::Personal);
+        assert_eq!(withdrawn.created_by, normalize_email(&editor.email));
+
+        // --- legal: Personal -> Shared by an editor-creator; created_by is
+        // preserved across the rescope (authorship is never reassigned). ---
+        let to_share = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "to share",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let shared = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &to_share.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+        assert_eq!(shared.visibility, SavedViewVisibility::Shared);
+        assert_eq!(
+            shared.created_by,
+            normalize_email(&editor.email),
+            "created_by must be preserved across a legal rescope"
+        );
+        assert_eq!(shared.created_by_name, to_share.created_by_name);
+
+        // --- illegal: Shared -> Proposed (a shared view cannot be demoted into
+        // the review queue) MUST be BadRequest. ---
+        let demote_to_queue_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &shared.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(demote_to_queue_err, WorkspaceError::BadRequest(_)),
+            "Shared->Proposed must be BadRequest, got {demote_to_queue_err:?}"
+        );
+
+        // --- legal: Shared -> Personal by the creator (make it private again). ---
+        let private_again = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &shared.id,
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(private_again.visibility, SavedViewVisibility::Personal);
+        assert_eq!(private_again.created_by, normalize_email(&editor.email));
+
+        // --- authority preserved: ->Shared by a creator who is NOT an editor
+        // (a viewer) is the existing authority error (Forbidden), even though
+        // Personal->Shared is itself on the allow-list. ---
+        let viewer_to_share = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer wants to share",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let authority_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &viewer,
+                &viewer_to_share.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(authority_err, WorkspaceError::Forbidden),
+            "non-editor creator promoting to Shared must be Forbidden, got {authority_err:?}"
+        );
+    }
+
+    #[test]
     fn saved_view_visibility_proposed_round_trips_text() {
         assert_eq!(SavedViewVisibility::Proposed.as_str(), "proposed");
         assert_eq!(
@@ -6991,5 +7306,459 @@ pub mod tests {
                 .registered_layouts
                 .contains_key(&DatasetId("ds-a".into()))
         );
+    }
+    // ===================================================================
+    // RED TEAM (#817 issue-sweep): probe the new transition allow-list and
+    // the surrounding never-leak / self-approve invariants.
+    // ===================================================================
+
+    /// RED TEAM #1 — the self-approve bypass via `approve_saved_view`.
+    ///
+    /// The #817 change closes Proposed->Shared on `/visibility`
+    /// (`set_saved_view_visibility`) "so sharing a proposal stays exclusively
+    /// the editor review queue's job (`approve_saved_view`)". The whole point
+    /// of a *review queue* is that someone OTHER than the proposer signs off.
+    /// This test drives the entire creator-only path the change permits
+    /// (Personal -> Proposed on /visibility, which is on the allow-list) and
+    /// then has the SAME principal approve their OWN proposal. If that yields
+    /// Shared, the editor-creator has achieved Proposed->Shared on their own
+    /// view with no second party — the exact outcome the allow-list was added
+    /// to forbid, simply routed through approve instead of /visibility.
+    #[tokio::test]
+    async fn redteam_editor_self_approves_own_proposal_proposed_to_shared() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("self approve"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        // Editor creates a Personal view, then proposes it via the very
+        // /visibility transition the allow-list blesses (Personal -> Proposed).
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "my view",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        // The SAME editor now approves their OWN proposal.
+        let approve_result = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await;
+
+        // The review-queue intent: a proposer cannot be their own reviewer, so
+        // self-approval is denied (Forbidden — an authorization act on the view,
+        // like the creator-only re-scope gate) and must NOT share the view.
+        assert!(
+            matches!(approve_result, Err(WorkspaceError::Forbidden)),
+            "self-approve must be Forbidden (creator != reviewer), got {approve_result:?}"
+        );
+        let shared_in_store = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            shared_in_store.visibility,
+            SavedViewVisibility::Shared,
+            "SELF-APPROVE BYPASS: editor-creator drove their own proposal \
+             Proposed->Shared via approve_saved_view. The /visibility allow-list \
+             forbids Proposed->Shared for the creator, and approve must enforce \
+             the same reviewer!=creator rule so the same person cannot both \
+             propose and approve — preserving the review queue.",
+        );
+        // The proposal is untouched: still Proposed, still the editor's, free for
+        // a *different* editor to review.
+        assert_eq!(shared_in_store.visibility, SavedViewVisibility::Proposed);
+    }
+
+    /// RED TEAM #2 — single-editor (owner-only) workspace: the proposer is the
+    /// only person who CAN review. The review queue is structurally a no-op
+    /// rubber stamp. Owner creates -> proposes -> self-approves -> Shared.
+    #[tokio::test]
+    async fn redteam_single_owner_self_approves_in_solo_workspace() {
+        let store = fresh_store().await;
+        let owner = principal("solo@example.com", false);
+        let workspace = store.create_workspace(&owner, Some("solo")).await.unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "solo view",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        let approve_result = manager
+            .approve_saved_view(&workspace.id, &owner, &proposed.id)
+            .await;
+        assert!(
+            matches!(approve_result, Err(WorkspaceError::Forbidden)),
+            "solo self-approve must be Forbidden (creator != reviewer), got {approve_result:?}"
+        );
+        let after = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            after.visibility,
+            SavedViewVisibility::Shared,
+            "SELF-APPROVE BYPASS (solo): the sole owner proposed and approved \
+             their own view, reaching Shared with literally no second party."
+        );
+        // The view is not stranded: it stays Proposed (and the owner can still
+        // withdraw it via the legal Proposed->Personal /visibility path, or share
+        // their own view directly via Personal->Shared — the queue is for a
+        // *different* reviewer).
+        assert_eq!(after.visibility, SavedViewVisibility::Proposed);
+    }
+
+    /// RED TEAM #3 — confirm the /visibility allow-list itself holds for the
+    /// two illegal direct transitions, even attempted by an owner (highest
+    /// role). These SHOULD be BadRequest (this is the part the change gets
+    /// right; included so the report is grounded).
+    #[tokio::test]
+    async fn redteam_visibility_endpoint_rejects_illegal_transitions_for_owner() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("owner gate"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        // Proposed -> Shared (self-approve) via /visibility must be BadRequest.
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "p1",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        let err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &proposed.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WorkspaceError::BadRequest(_)),
+            "Proposed->Shared via /visibility must be BadRequest, got {err:?}"
+        );
+
+        // Shared -> Proposed via /visibility must be BadRequest.
+        let p2 = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "p2",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let shared = manager
+            .set_saved_view_visibility(&workspace.id, &owner, &p2.id, SavedViewVisibility::Shared)
+            .await
+            .unwrap();
+        let err2 = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &shared.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err2, WorkspaceError::BadRequest(_)),
+            "Shared->Proposed via /visibility must be BadRequest, got {err2:?}"
+        );
+    }
+
+    /// RED TEAM #4 — never-leak ordering on the NEW allow-list deny.
+    ///
+    /// A workspace MEMBER who is not the creator attempts an ILLEGAL transition
+    /// (Proposed->Shared) on another member's *Proposed* view. Because Proposed
+    /// is creator-private (ensure_saved_view_readable treats Proposed like
+    /// Personal), the readability check must fire FIRST and yield NotFound —
+    /// identical to a missing id — so the BadRequest allow-list error never
+    /// leaks the view's existence. If this ever returned BadRequest, a stranger
+    /// could distinguish "exists but illegal" from "absent".
+    #[tokio::test]
+    async fn redteam_illegal_transition_does_not_leak_hidden_proposed_view() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let other_editor = principal("other-editor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("leak gate"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for p in [&editor, &other_editor] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, WorkspaceRole::Editor)
+                .await
+                .unwrap();
+        }
+
+        // `editor` owns a Proposed view (creator-private until reviewed).
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "hidden",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+
+        // `other_editor` (a non-creator member) attempts the illegal
+        // Proposed->Shared transition on a view they cannot read.
+        let leak_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &other_editor,
+                &proposed.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        let missing_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &other_editor,
+                "does-not-exist",
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+
+        // Both must be NotFound (indistinguishable). A BadRequest here would be
+        // a never-leak hole: it confirms the hidden Proposed view exists.
+        assert!(
+            matches!(leak_err, WorkspaceError::NotFound),
+            "NEVER-LEAK: illegal transition on a hidden Proposed view must be \
+             NotFound (uniform with a missing id), got {leak_err:?}"
+        );
+        assert!(matches!(missing_err, WorkspaceError::NotFound));
+    }
+
+    /// RED TEAM #5 — created_by preservation across approve (the only
+    /// Proposed->Shared path). Confirms authorship is not reassigned to the
+    /// reviewer. (Sanity guard for the created_by-tampering axis.)
+    #[tokio::test]
+    async fn redteam_approve_preserves_created_by_not_reviewer() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store.create_workspace(&owner, Some("attr")).await.unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+        let proposed = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "bid",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        let approved = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            approved.created_by,
+            normalize_email(&viewer.email),
+            "created_by must stay the proposer, not become the reviewer"
+        );
+    }
+
+    /// The self-approve guard must NOT be over-broad: a *different* editor can
+    /// still approve a proposal whose creator is themselves an editor. This is
+    /// the precise over-reach risk of a creator!=reviewer check — it must gate on
+    /// the *individual*, not the role, so the normal two-party review flow keeps
+    /// working when the proposer happens to be an editor/owner.
+    #[tokio::test]
+    async fn different_editor_can_approve_an_editor_creators_proposal() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let reviewer = principal("reviewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("two editors"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for p in [&editor, &reviewer] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, WorkspaceRole::Editor)
+                .await
+                .unwrap();
+        }
+
+        // An editor creates and proposes their own view (legal Personal->Proposed).
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "shared candidate",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        // The creator-editor still cannot self-approve...
+        let self_err = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(self_err, WorkspaceError::Forbidden));
+
+        // ...but a DIFFERENT editor can — the two-party review flow is intact and
+        // the original author keeps attribution.
+        let approved = manager
+            .approve_saved_view(&workspace.id, &reviewer, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(approved.visibility, SavedViewVisibility::Shared);
+        assert_eq!(approved.created_by, normalize_email(&editor.email));
+    }
+
+    /// The self-approve guard is scoped to APPROVE only: a creator may still
+    /// self-*reject* (withdraw) their own proposal, reverting it to their own
+    /// Personal view (Proposed->Personal). Rejecting is non-destructive and the
+    /// equivalent withdraw is already legal via /visibility, so it must keep
+    /// working for the proposer.
+    #[tokio::test]
+    async fn creator_can_self_reject_to_withdraw_own_proposal() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("withdraw"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "to withdraw",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        // The creator rejects their OWN proposal: allowed (withdraw), reverts to
+        // their Personal view non-destructively.
+        let rejected = manager
+            .reject_saved_view(&workspace.id, &owner, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(rejected.visibility, SavedViewVisibility::Personal);
+        assert_eq!(rejected.created_by, normalize_email(&owner.email));
+        assert_eq!(rejected.name, "to withdraw");
     }
 }
