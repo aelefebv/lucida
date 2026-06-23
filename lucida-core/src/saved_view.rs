@@ -152,6 +152,64 @@ impl SavedView {
             auto_contrast: IndexMap::new(),
         }
     }
+
+    /// Clear the source-URL list (`datasets`), leaving every workspace-local
+    /// id-keyed field (`active_layouts` / `dataset_order` / `dataset_settings`
+    /// / `auto_contrast`) intact.
+    ///
+    /// This is the **workspace-dataset-id form** an embedded view must take:
+    /// membership (which datasets are loaded, by URL) is owned by the workspace
+    /// document, so a view carried *inside* the collaborative document — on a
+    /// pin ([`crate::scene::Annotation::view`]) or as a stored workspace saved
+    /// view — must not also carry source URLs (incl. local `file:///` paths)
+    /// into broadcast/persisted state. See decision 0014
+    /// (`wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`)
+    /// and the `Annotation::view` field doc. The single owner of this
+    /// invariant, so the apply path and the duplicate copy path can both
+    /// enforce it identically.
+    pub fn clear_source_urls(&mut self) {
+        self.datasets.clear();
+    }
+
+    /// Rewrite every workspace-local [`DatasetId`] in this view through
+    /// `remap` (old id → new id), preserving insertion order.
+    ///
+    /// Used when a workspace is duplicated: the copy's datasets get fresh
+    /// workspace-local ids, so a saved view copied verbatim would dangle —
+    /// its `active_layouts` / `dataset_order` / `dataset_settings` /
+    /// `auto_contrast` keys all reference the *source* workspace's ids. This
+    /// remaps them onto the copy's ids so the view resolves against the
+    /// duplicate's datasets. An id missing from `remap` is left as-is (the
+    /// caller guarantees the map covers every dataset the view can reference,
+    /// and leaving unknown ids untouched is the safe no-op). `datasets`
+    /// (source URLs) is untouched — it is cleared before a workspace saved
+    /// view is persisted and is keyed by URL, not by the local id.
+    pub fn remap_dataset_ids(&mut self, remap: &std::collections::HashMap<DatasetId, DatasetId>) {
+        fn mapped(
+            remap: &std::collections::HashMap<DatasetId, DatasetId>,
+            id: &DatasetId,
+        ) -> DatasetId {
+            remap.get(id).cloned().unwrap_or_else(|| id.clone())
+        }
+        self.active_layouts = self
+            .active_layouts
+            .drain(..)
+            .map(|(id, layout)| (mapped(remap, &id), layout))
+            .collect();
+        for id in &mut self.dataset_order {
+            *id = mapped(remap, id);
+        }
+        self.dataset_settings = self
+            .dataset_settings
+            .drain(..)
+            .map(|(id, settings)| (mapped(remap, &id), settings))
+            .collect();
+        self.auto_contrast = self
+            .auto_contrast
+            .drain(..)
+            .map(|(id, flag)| (mapped(remap, &id), flag))
+            .collect();
+    }
 }
 
 /// Stable, content-derived ID for a dataset URL. Thin shim over
@@ -245,6 +303,34 @@ mod tests {
     fn round_trips() {
         let v = sample_view();
         assert_round_trips(&v);
+    }
+
+    /// `remap_dataset_ids` moves every workspace-local id key (active_layouts,
+    /// dataset_order, dataset_settings, auto_contrast) onto the new id — the
+    /// workspace-duplicate contract for a copied saved view. `datasets` (source
+    /// URLs) is left alone.
+    #[test]
+    fn remap_dataset_ids_rewrites_all_id_keyed_fields() {
+        use std::collections::HashMap;
+
+        let old = DatasetId("ds-aaaa".into());
+        let new = DatasetId("ds-copy".into());
+        let mut v = sample_view();
+        v.auto_contrast.insert(old.clone(), false);
+
+        let mut remap = HashMap::new();
+        remap.insert(old.clone(), new.clone());
+        v.remap_dataset_ids(&remap);
+
+        assert!(v.active_layouts.contains_key(&new));
+        assert!(!v.active_layouts.contains_key(&old));
+        assert_eq!(v.dataset_order, vec![new.clone()]);
+        assert!(v.dataset_settings.contains_key(&new));
+        assert!(!v.dataset_settings.contains_key(&old));
+        assert!(v.auto_contrast.contains_key(&new));
+        assert!(!v.auto_contrast.contains_key(&old));
+        // Source URLs are URL-keyed, not id-keyed — untouched by the remap.
+        assert_eq!(v.datasets, vec!["gs://bucket/a.zarr", "/data/b.zarr"]);
     }
 
     #[test]

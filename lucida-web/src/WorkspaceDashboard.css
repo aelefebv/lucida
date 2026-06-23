@@ -130,7 +130,8 @@
 }
 
 .workspace-pin-button,
-.workspace-archive-button {
+.workspace-archive-button,
+.workspace-duplicate-button {
   min-width: 4.75rem;
   padding: 0.45rem 0.65rem;
   border: 1px solid #4a4a4a;
@@ -140,7 +141,8 @@
   font: inherit;
 }
 
-.workspace-archive-button {
+.workspace-archive-button,
+.workspace-duplicate-button {
   min-width: 5.5rem;
 }
 
@@ -151,12 +153,14 @@
 }
 
 .workspace-pin-button:hover:not(:disabled),
-.workspace-archive-button:hover:not(:disabled) {
+.workspace-archive-button:hover:not(:disabled),
+.workspace-duplicate-button:hover:not(:disabled) {
   border-color: #9aa0ff;
 }
 
 .workspace-pin-button:disabled,
-.workspace-archive-button:disabled {
+.workspace-archive-button:disabled,
+.workspace-duplicate-button:disabled {
   opacity: 0.6;
 }
 

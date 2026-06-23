@@ -7,6 +7,7 @@ import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import {
   archiveWorkspace,
   createWorkspace,
+  duplicateWorkspace,
   listArchivedWorkspaces,
   listWorkspaces,
   restoreWorkspace,
@@ -46,6 +47,7 @@ vi.mock("./components/FileBrowser.tsx", () => ({
 vi.mock("./workspaceApi.ts", () => ({
   archiveWorkspace: vi.fn(),
   createWorkspace: vi.fn(),
+  duplicateWorkspace: vi.fn(),
   listArchivedWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
   restoreWorkspace: vi.fn(),
@@ -53,6 +55,7 @@ vi.mock("./workspaceApi.ts", () => ({
 }));
 
 const archiveWorkspaceMock = vi.mocked(archiveWorkspace);
+const duplicateWorkspaceMock = vi.mocked(duplicateWorkspace);
 const listArchivedWorkspacesMock = vi.mocked(listArchivedWorkspaces);
 const listWorkspacesMock = vi.mocked(listWorkspaces);
 const createWorkspaceMock = vi.mocked(createWorkspace);
@@ -175,6 +178,61 @@ describe("WorkspaceDashboard", () => {
     await waitFor(() => {
       expect(onOpenWorkspace).toHaveBeenCalledWith("created");
     });
+  });
+
+  it("duplicates a workspace the user only VIEWS and opens the copy (#698)", async () => {
+    // A viewer-role workspace still shows Duplicate (available for any role);
+    // clicking it makes the user's own copy and navigates straight into it.
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "shared-1", name: "Shared Project", role: "viewer" }),
+    ]);
+    duplicateWorkspaceMock.mockResolvedValue({
+      id: "copy-1",
+      name: "Copy of Shared Project",
+      role: "owner",
+      created_by: "me@example.com",
+      created_at: "2026-06-22T00:00:00Z",
+      updated_at: "2026-06-22T00:00:00Z",
+      archived_at: null,
+      seq: 0,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+    const onOpenWorkspace = vi.fn();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Duplicate Shared Project" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate Shared Project" }));
+
+    await waitFor(() => {
+      expect(duplicateWorkspaceMock).toHaveBeenCalledWith("shared-1");
+      // Navigates into the NEW copy, not the source.
+      expect(onOpenWorkspace).toHaveBeenCalledWith("copy-1");
+    });
+  });
+
+  it("surfaces an error when duplicating fails and stays on the dashboard (#698)", async () => {
+    listWorkspacesMock.mockResolvedValue([
+      workspace({ id: "ws-1", name: "Project", role: "editor" }),
+    ]);
+    duplicateWorkspaceMock.mockRejectedValue(new Error("boom"));
+    const onOpenWorkspace = vi.fn();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Duplicate Project" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate Project" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("boom")).toBeTruthy();
+    });
+    expect(onOpenWorkspace).not.toHaveBeenCalled();
   });
 
   it("creates a workspace FROM A DATASET URL named from the basename and opens it with the seed", async () => {

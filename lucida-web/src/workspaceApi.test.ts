@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   archiveWorkspace,
+  duplicateWorkspace,
   createWorkspaceSavedView,
   deleteWorkspaceSavedView,
   getWorkspaceSavedView,
@@ -243,6 +244,49 @@ describe("workspace saved view API", () => {
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({
       saved_view_id: null,
     });
+  });
+
+  it("POSTs to duplicate a workspace and returns the new copy (#698)", async () => {
+    responder = () => jsonResponse(201, {
+      id: "workspace-copy",
+      name: "Copy of Project",
+      role: "owner",
+      created_by: "alice@example.com",
+      created_at: "2026-06-22T00:00:00Z",
+      updated_at: "2026-06-22T00:00:00Z",
+      archived_at: null,
+      seq: 0,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+
+    const copy = await duplicateWorkspace("workspace/a b");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("/api/workspaces/workspace%2Fa%20b/duplicate");
+    // The caller owns the copy and it is named "Copy of …" by the server.
+    expect(copy.id).toBe("workspace-copy");
+    expect(copy.name).toBe("Copy of Project");
+    expect(copy.role).toBe("owner");
+  });
+
+  it("POSTs duplicate with an explicit name override (#698)", async () => {
+    responder = () => jsonResponse(201, {
+      id: "workspace-copy",
+      name: "My Experiment",
+      role: "owner",
+      created_by: "alice@example.com",
+      created_at: "2026-06-22T00:00:00Z",
+      updated_at: "2026-06-22T00:00:00Z",
+      archived_at: null,
+      seq: 0,
+      default_saved_view_id: null,
+      last_opened_at: null,
+      pinned_at: null,
+    });
+
+    await duplicateWorkspace("workspace-1", "My Experiment");
+    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ name: "My Experiment" });
   });
 
   it("POSTs to open a workspace and record recents", async () => {

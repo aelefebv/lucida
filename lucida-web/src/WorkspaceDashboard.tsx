@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   archiveWorkspace,
   createWorkspace,
+  duplicateWorkspace,
   listArchivedWorkspaces,
   listWorkspaces,
   restoreWorkspace,
@@ -26,6 +27,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [creating, setCreating] = useState(false);
   const [pinningId, setPinningId] = useState<string | null>(null);
   const [archivingId, setArchivingId] = useState<string | null>(null);
+  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -150,6 +152,27 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
     }
   }, []);
 
+  // Make a private copy of any workspace the user can access (#698) and open
+  // it. The copy is owned by the user with default sharing (restricted,
+  // owner-only) — no members/permissions are carried over. On success we
+  // navigate straight into the copy; on failure the error surfaces here and
+  // the user stays on the dashboard.
+  const handleDuplicate = useCallback(
+    async (workspace: WorkspaceSummary) => {
+      setDuplicatingId(workspace.id);
+      setError(null);
+      try {
+        const copy = await duplicateWorkspace(workspace.id);
+        onOpenWorkspace(copy.id);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setDuplicatingId(null);
+      }
+    },
+    [onOpenWorkspace],
+  );
+
   return (
     <div className="workspace-dashboard">
       <ProfileMenu />
@@ -262,6 +285,20 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
                       }}
                     >
                       {workspace.pinned_at ? "Unpin" : "Pin"}
+                    </button>
+                  )}
+                  {/* Duplicate is available for ANY workspace the user can
+                      access (any role) — the copy becomes their own. */}
+                  {!showArchived && (
+                    <button
+                      className="workspace-duplicate-button"
+                      disabled={duplicatingId === workspace.id}
+                      aria-label={`Duplicate ${workspace.name}`}
+                      onClick={() => {
+                        void handleDuplicate(workspace);
+                      }}
+                    >
+                      {duplicatingId === workspace.id ? "Duplicating..." : "Duplicate"}
                     </button>
                   )}
                   {workspace.role === "owner" && (
