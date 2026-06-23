@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.9.0](https://github.com/aelefebv/lucida/compare/v0.8.0...v0.9.0) (2026-06-23)
+
+
+### Features
+
+* **annotations:** capture the author's view when an annotation is created ([8729aea](https://github.com/aelefebv/lucida/commit/8729aea515a59fe8a898222c9bffb3f73a77250c))
+* **annotations:** capture, restore, and share a view per annotation ([7551901](https://github.com/aelefebv/lucida/commit/7551901a0110e81f3c1a3091ae09758021d8a892))
+* **annotations:** restore the author's view when navigating to an annotation ([188d364](https://github.com/aelefebv/lucida/commit/188d36406827eabb8fbec119aa8fe869d2cb16e4))
+* **annotations:** share an annotation by link (deep-link, never-leak) ([4806ff0](https://github.com/aelefebv/lucida/commit/4806ff020808b481eefec70b8f16dc3b9f1a289b))
+* **cli,python:** saved-view sharing parity — visibility, promote, approve, reject ([#699](https://github.com/aelefebv/lucida/issues/699)/[#702](https://github.com/aelefebv/lucida/issues/702)) ([b606363](https://github.com/aelefebv/lucida/commit/b606363c939d23cdc8c83342ad581ca7d16fcea7))
+* **web:** confirm before proposing, withdraw a proposal, and undoable reject ([#702](https://github.com/aelefebv/lucida/issues/702) follow-up) ([7c820a2](https://github.com/aelefebv/lucida/commit/7c820a204e84149ed1581f87abb82b18ff94a89e))
+* **web:** saved-view sidebar UX — Shared chip, default-Personal, position-aware names, viewer manages own views, active-row feedback ([d80e1a7](https://github.com/aelefebv/lucida/commit/d80e1a7e05593e1117352a434451b4b3d9f7a4ee))
+
+
+### Bug Fixes
+
+* **deps:** bump vulnerable lockfile deps; drop stray npm lockfile ([e7dbdcf](https://github.com/aelefebv/lucida/commit/e7dbdcf60fdd8ef5c080e045bf508725d34b8317))
+* **deps:** bump vulnerable lockfile deps; drop stray npm lockfile ([be17f9d](https://github.com/aelefebv/lucida/commit/be17f9d6f7649c0a635a70770e42c17a2413ae61))
+* **deps:** force js-yaml 4.2.0 + @babel/core 7.29.6 via pnpm overrides (lucida-web) ([65b92dd](https://github.com/aelefebv/lucida/commit/65b92dd29f876b5eea53b20c20727f5d17c79dd0))
+* **deps:** js-yaml 4.2.0 + @babel/core 7.29.6 via pnpm overrides (lucida-web) ([37df216](https://github.com/aelefebv/lucida/commit/37df216c0e061a8aa1e65b54401b46f62e1cb28c))
+* **deps:** jsonwebtoken 9 -&gt; 10.3 (auth; aws_lc_rs backend) ([eb5d988](https://github.com/aelefebv/lucida/commit/eb5d988363a628d97d5e45c3f7d213400cc1625e))
+* **deps:** jsonwebtoken 9 -&gt; 10.3 (auth; fixes exp/nbf type-confusion bypass) ([6c60172](https://github.com/aelefebv/lucida/commit/6c601729ef6488563317f59d7aff191785f3efea))
+* **deps:** lru 0.12 -&gt; 0.16 (lucida-store; clears soundness alert) ([1d01db4](https://github.com/aelefebv/lucida/commit/1d01db490543b91645b42f8efd7ec1179a787566))
+* **deps:** lru 0.12 -&gt; 0.16 (lucida-store) ([81537d9](https://github.com/aelefebv/lucida/commit/81537d9634493eebb2ded7794d1ce10520090ba6))
+* **deps:** pyo3 0.24 -&gt; 0.29 (fixes PyList/PyTuple iterator OOB read) ([8b2ec93](https://github.com/aelefebv/lucida/commit/8b2ec935c6667b9309b5f2767e26050bfaeb55eb))
+* **deps:** pyo3 0.24 -&gt; 0.29 (python binding) ([e79574b](https://github.com/aelefebv/lucida/commit/e79574b822d4867b296e2f79b2969eacd8b5e072))
+* **docker:** pin rust-builder to bookworm (glibc match) ([953d63b](https://github.com/aelefebv/lucida/commit/953d63b4297d39f0f9de226788b96f5656469c99))
+* **docker:** pin rust-builder to bookworm so the binary's glibc matches the runtime ([b84f8bd](https://github.com/aelefebv/lucida/commit/b84f8bd1a8ec6e08db75d5c897ae6591c74e34c9))
+* **web:** capture + restore the saved-view Z/T/C plane, clamp to the addressed dataset ([#814](https://github.com/aelefebv/lucida/issues/814)) ([ec5d76d](https://github.com/aelefebv/lucida/commit/ec5d76d19cf2e362403f70e6dbebc3a0447c45a6))
+* **web:** clamp saved-view Z/T/C to the deepest visible dataset, not the shallowest ([#814](https://github.com/aelefebv/lucida/issues/814)) ([7d5cdac](https://github.com/aelefebv/lucida/commit/7d5cdac364d1d60dacd72b1079940feef2079964))
+
 ## [0.8.0](https://github.com/aelefebv/lucida/compare/v0.7.0...v0.8.0) (2026-06-20)
 
 
