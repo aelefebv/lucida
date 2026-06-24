@@ -6,6 +6,7 @@ import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
+import type { AnnotationDraft } from "./annotationDraft.ts";
 
 interface Props {
   z: number;
@@ -37,12 +38,17 @@ interface Props {
   /** Notify the parent that the document changed locally (a pin was dropped)
    * so dependent overlays re-read. Mirrors the remote-document version bump. */
   onDocumentChanged: () => void;
+  /** Shared channel for the live box/line draw preview: the shift-drag writes
+   * the in-progress shape here (screen-space CSS px, relative to the canvas) and
+   * {@link AnnotationDraftOverlay} renders it growing under the cursor. Cleared
+   * on release/cancel, when the real annotation is committed. */
+  annotationDraftRef: RefObject<AnnotationDraft | null>;
 }
 
 /** Max pointer travel (CSS px) for a press+release to count as a click, not a drag. */
 const PIN_CLICK_SLOP = 4;
 
-export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged }: Props) {
+export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -153,6 +159,21 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const worldY = (cursorY - halfH) / zoom + centerArr[1];
       sendCursor([worldX, worldY]);
 
+      // Live box/line draw preview: while a shift-press is drawing a line/box,
+      // publish the in-progress shape (screen-space CSS px, relative to the
+      // canvas) so AnnotationDraftOverlay grows it under the cursor. Below the
+      // click slop it stays null (a sub-slop shift-release drops a point, not a
+      // shape — mirror that so we don't flash a shape that becomes a point).
+      const press = pressStart.current;
+      if (press?.pin) {
+        const drawKind = annotationKindRef.current;
+        const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+        annotationDraftRef.current =
+          (drawKind === "line" || drawKind === "box") && moved > PIN_CLICK_SLOP
+            ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
+            : null;
+      }
+
       if (!dragging) return;
       const dx = (e.clientX - lastPos.current.x) * dpr;
       const dy = (e.clientY - lastPos.current.y) * dpr;
@@ -164,7 +185,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       emitPresence();
       loopRef.current?.markInteractiveDirty();
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor],
+    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
 
   const onPointerUp = useCallback(
@@ -172,6 +193,9 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const press = pressStart.current;
       pressStart.current = null;
       setDragging(false);
+      // The draw is ending — clear the live preview; the committed shape (below)
+      // takes over.
+      annotationDraftRef.current = null;
 
       // Only a shift-press draws, and only when a dataset is selected to scope
       // the annotation to.
@@ -244,14 +268,15 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       onDocumentChangedRef.current();
       loopRef.current?.markInteractiveDirty();
     },
-    [eventToWorld, scene],
+    [eventToWorld, scene, annotationDraftRef],
   );
 
   const onPointerCancel = useCallback(() => {
     // A cancelled gesture never drops a pin.
     pressStart.current = null;
     setDragging(false);
-  }, []);
+    annotationDraftRef.current = null;
+  }, [annotationDraftRef]);
 
   const onPointerLeave = useCallback(() => {
     sendCursor(null);

@@ -10,6 +10,7 @@ import { useKeyState } from "../hooks/useKeyState.ts";
 import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
+import type { AnnotationDraft } from "./annotationDraft.ts";
 
 interface Props {
   session: Session;
@@ -40,6 +41,10 @@ interface Props {
   sendCommand: (json: string) => void;
   /** Notify the parent that the document changed locally (a pin was dropped). */
   onDocumentChanged: () => void;
+  /** Shared channel for the live box/line draw preview (screen-space CSS px,
+   * relative to the canvas), rendered by {@link AnnotationDraftOverlay}; the
+   * shift-drag writes it and clears it on release/cancel. */
+  annotationDraftRef: RefObject<AnnotationDraft | null>;
 }
 
 /** Max pointer travel (CSS px) for a shift press+release to count as a pin
@@ -51,7 +56,7 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged }: Props) {
+export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
@@ -356,6 +361,15 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > PIN_CLICK_SLOP) {
           press.moved = true;
         }
+        // Live draw preview: once past the slop, publish the in-progress shape
+        // (screen-space CSS px relative to the canvas) so AnnotationDraftOverlay
+        // grows it under the cursor — the camera is held still during a draw, so
+        // raw screen coords match where the committed shape lands on release.
+        const drawKind = annotationKindRef.current;
+        annotationDraftRef.current =
+          press.moved && (drawKind === "line" || drawKind === "box")
+            ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
+            : null;
         return;
       }
 
@@ -385,7 +399,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       emitPresence();
       loopRef.current?.markInteractiveDirty();
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor],
+    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
 
   const onArcballPointerUp = useCallback(
@@ -394,6 +408,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       scheduleFullRes();
       const press = pinPressRef.current;
       pinPressRef.current = null;
+      annotationDraftRef.current = null; // draw ended; committed shape takes over
       if (!press) return;
       if (press.shape && press.moved) {
         // A dragged line/box: draw from the press anchor to the release point.
@@ -404,7 +419,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       }
       // A point-kind shift-pan (moved, not a shape) draws nothing — unchanged.
     },
-    [scheduleFullRes, drawAnnotation],
+    [scheduleFullRes, drawAnnotation, annotationDraftRef],
   );
 
   // Fly input handling
@@ -444,9 +459,10 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onPointerCancel = useCallback(() => {
     pinPressRef.current = null;
     setDragging(false);
+    annotationDraftRef.current = null;
     scheduleFullRes();
     if (isFlyMode) fly.onPointerUp();
-  }, [scheduleFullRes, isFlyMode, fly]);
+  }, [scheduleFullRes, isFlyMode, fly, annotationDraftRef]);
 
   // Clear cursor on unmount (e.g. mode switch to 2D)
   useEffect(() => {
