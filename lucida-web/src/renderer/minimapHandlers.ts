@@ -69,6 +69,12 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     // textures — leaving stale handles bound is harmless but signals
     // intent more clearly.
     renderer.setProxyTextures(null, null);
+    // Bind the active channel's colormap LUT for the minimap's own draw. Without
+    // this the minimap reuses whatever LUT the volume renderer last had — set by
+    // the 3D main view (so 3D looks right) but left at the default gray in 2D
+    // mode (where the main view is the slice renderer). Set it BEFORE setVolume,
+    // since setVolume rebuilds the bind group from the current LUT.
+    renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
     renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
     renderer.setMatrices(msg.invViewProj, msg.eye);
     // Bind a transient single-entity descriptor so the shader's
