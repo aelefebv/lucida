@@ -110,7 +110,16 @@ function App({
   // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
-  const layout = useLayout({ loopRef: render.loopRef });
+  // Chrome-free capture surface for `dataset montage` / `viewer render`:
+  // `?render=1` hides all UI chrome and lets the canvas fill the viewport so a
+  // headless screenshot is pure data. Parsed once — the URL is stable per capture.
+  const renderMode = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("render") === "1",
+    [],
+  );
+  const layout = useLayout({ loopRef: render.loopRef, renderMode });
 
   // Shared refs used by multiple hooks
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
@@ -987,11 +996,12 @@ function App({
   // suspicious; they are intentional and load-bearing here.
   /* eslint-disable react-hooks/refs */
   return (
-    <div className="app">
+    <div className={renderMode ? "app render-mode" : "app"}>
       {/* ProfileMenu floats over the bottom-left corner of the app
           chrome. Absolute-positioning keeps it out of the existing
-          flex layout so the LayerPanel + canvas geometry is untouched. */}
-      <ProfileMenu />
+          flex layout so the LayerPanel + canvas geometry is untouched.
+          Gated out of the chrome-free render surface. */}
+      {!renderMode && <ProfileMenu />}
       <LayerPanel
         layers={layers.layerInfos}
         selectedLayerId={selectedDatasetId}
@@ -1103,7 +1113,7 @@ function App({
           </div>
         )}
         <div style={{ display: "flex", flexDirection: "row", width: layout.canvasWidth }}>
-          <div style={{
+          <div className="viewer-canvas-wrap" style={{
             position: "relative",
             display: datasetsVersion > 0 ? "block" : "none",
             flex: 1,
