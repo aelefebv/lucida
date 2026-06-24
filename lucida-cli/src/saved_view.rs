@@ -1331,6 +1331,7 @@ mod tests {
             cursor: None,
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
+            identity: None,
         }
     }
 

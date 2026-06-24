@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   act,
   cleanup,
@@ -163,6 +163,128 @@ describe("FileBrowser — navigation", () => {
       expect(fetchSpy.urls[1]).not.toContain(encodeURIComponent("/c:"));
     },
   );
+});
+
+describe("FileBrowser — create workspace from selection (multi-select)", () => {
+  it("shows create-workspace affordances only when onCreateWorkspace is given", async () => {
+    // Land on a zarr directory so the dataset is detectable.
+    fetchSpy.responder = () => ({
+      path: "/data/a.zarr",
+      entries: [{ name: "zarr.json", type: "file" }],
+    });
+    window.sessionStorage.setItem("lucida-browse-path", "/data/a.zarr");
+
+    // Without onCreateWorkspace: classic single Open, no create button.
+    await act(async () => {
+      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+    });
+    expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /create workspace/i }),
+    ).toBeNull();
+    cleanup();
+
+    // With onCreateWorkspace: create affordance present.
+    await act(async () => {
+      render(<FileBrowser onCreateWorkspace={() => {}} onClose={() => {}} />);
+    });
+    expect(
+      screen.getByRole("button", { name: /create workspace from selection/i }),
+    ).toBeTruthy();
+    // No single-Open button when onSelect is absent.
+    expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
+  });
+
+  it("creates a workspace from the current zarr dir without an explicit Add", async () => {
+    fetchSpy.responder = () => ({
+      path: "/data/solo.zarr",
+      entries: [{ name: "zarr.json", type: "file" }],
+    });
+    window.sessionStorage.setItem("lucida-browse-path", "/data/solo.zarr");
+
+    const onCreateWorkspace = vi.fn();
+    await act(async () => {
+      render(
+        <FileBrowser onCreateWorkspace={onCreateWorkspace} onClose={() => {}} />,
+      );
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /create workspace from selection/i }),
+    );
+    expect(onCreateWorkspace).toHaveBeenCalledWith(["/data/solo.zarr"]);
+  });
+
+  it("accumulates MULTIPLE datasets across directories and creates from all", async () => {
+    // Two zarr dirs reachable by navigating; each browse returns a zarr dir.
+    let call = 0;
+    fetchSpy.responder = () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          path: "/data/a.zarr",
+          entries: [{ name: "zarr.json", type: "file" }],
+        };
+      }
+      return {
+        path: "/data/b.zarr",
+        entries: [{ name: "zarr.json", type: "file" }],
+      };
+    };
+    window.sessionStorage.setItem("lucida-browse-path", "/data/a.zarr");
+
+    const onCreateWorkspace = vi.fn();
+    await act(async () => {
+      render(
+        <FileBrowser onCreateWorkspace={onCreateWorkspace} onClose={() => {}} />,
+      );
+    });
+
+    // Add the first dataset to the selection.
+    fireEvent.click(screen.getByRole("button", { name: "Add to selection" }));
+    expect(screen.getByTestId("file-browser-selection").textContent).toContain(
+      "/data/a.zarr",
+    );
+
+    // Navigate to the home breadcrumb to trigger a second browse → b.zarr.
+    const homeButton = screen.getAllByRole("button", { name: "/" })[0];
+    await act(async () => {
+      fireEvent.click(homeButton);
+    });
+
+    // Add the second dataset, then create.
+    fireEvent.click(screen.getByRole("button", { name: "Add to selection" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /create workspace \(2\)/i }),
+    );
+    expect(onCreateWorkspace).toHaveBeenCalledWith([
+      "/data/a.zarr",
+      "/data/b.zarr",
+    ]);
+  });
+
+  it("removes a dataset from the selection before creating", async () => {
+    fetchSpy.responder = () => ({
+      path: "/data/a.zarr",
+      entries: [{ name: "zarr.json", type: "file" }],
+    });
+    window.sessionStorage.setItem("lucida-browse-path", "/data/a.zarr");
+
+    const onCreateWorkspace = vi.fn();
+    await act(async () => {
+      render(
+        <FileBrowser onCreateWorkspace={onCreateWorkspace} onClose={() => {}} />,
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add to selection" }));
+    // "Added" reflects the current dir is already collected.
+    expect(screen.getByRole("button", { name: "Added" })).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove /data/a.zarr from selection" }),
+    );
+    expect(screen.queryByTestId("file-browser-selection")).toBeNull();
+  });
 });
 
 describe("FileBrowser — root breadcrumb", () => {

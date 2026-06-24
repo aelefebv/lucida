@@ -1,6 +1,6 @@
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { ClientId, PresenceState } from "../bridge.ts";
+import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 
 const PEER_COLORS = [
@@ -16,6 +16,32 @@ const PEER_COLORS = [
 
 function peerColor(clientId: ClientId): string {
   return PEER_COLORS[clientId % PEER_COLORS.length];
+}
+
+/**
+ * Display label for a peer's cursor (#540). The server-authored
+ * `identity.display_name` when present and non-blank; otherwise the numeric
+ * client id (the historic fallback) so anonymous/legacy peers still get a
+ * stable label.
+ */
+function peerLabel(clientId: ClientId, identity?: PeerIdentity | null): string {
+  const name = identity?.display_name?.trim();
+  return name ? name : String(clientId);
+}
+
+/**
+ * Single-character chip glyph for the avatar fallback: the first letter of
+ * the display name, then the server-precomputed `initial` (derived from
+ * display-name-or-email server-side — the raw email never reaches the
+ * client), else "?". Used when there is no avatar image (none supplied, or
+ * it failed to load).
+ */
+function peerInitial(identity?: PeerIdentity | null): string {
+  const name = identity?.display_name?.trim();
+  if (name) return name.charAt(0).toUpperCase();
+  const initial = identity?.initial?.trim();
+  if (initial) return initial.charAt(0).toUpperCase();
+  return "?";
 }
 
 export interface CursorLabel {
@@ -205,7 +231,10 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
             if (chevronEl) { chevronEl.style.display = "none"; }
             if (chevronLabelEl) { chevronLabelEl.style.display = "none"; }
             if (dotEl) { dotEl.style.display = isDefaulted ? "" : "none"; }
-            if (namePillEl) { namePillEl.style.display = ""; }
+            // "flex" (not "") so the avatar + name pill keeps its flex row
+            // layout when the RAF re-shows it (#540 added the avatar/name flex
+            // container; clearing display to "" would fall back to block).
+            if (namePillEl) { namePillEl.style.display = "flex"; }
           }
         }
       }
@@ -264,17 +293,25 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
                 position: "absolute",
                 left: 12,
                 top: -30,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
                 fontSize: 11,
                 fontFamily: "monospace",
                 color: "black",
                 backgroundColor: color,
-                padding: "1px 4px",
-                borderRadius: 3,
+                padding: "1px 4px 1px 1px",
+                borderRadius: 999,
                 whiteSpace: "nowrap",
                 opacity: 0.9,
+                // Keep the pill legible over the bright WebGPU canvas.
+                boxShadow: "0 0 0 1px rgba(0,0,0,0.25)",
               }}
             >
-              {clientId}{badge ? ` ${badge}` : ""}
+              <PeerCursorAvatar identity={peer.identity} color={color} />
+              <span data-testid="peer-cursor-name">
+                {peerLabel(clientId, peer.identity)}{badge ? ` ${badge}` : ""}
+              </span>
             </div>
             <div
               ref={(el) => {
@@ -335,5 +372,76 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
         );
       })}
     </div>
+  );
+}
+
+const AVATAR_SIZE = 16;
+
+/**
+ * Auth icon for a peer's cursor pill (#540). Renders the avatar image from
+ * `identity.picture_url` when present; on a missing or broken image it falls
+ * back to a colored chip showing the peer's initial. The chip is also the
+ * direct render when no `picture_url` was supplied (dev sessions) or when the
+ * peer has no `identity` at all (anonymous/legacy peers).
+ *
+ * Broken remote images are handled with local `errored` state flipped from
+ * the <img>'s onError, so one failed avatar degrades to its chip without
+ * affecting cursor positioning or other peers.
+ */
+function PeerCursorAvatar({
+  identity,
+  color,
+}: {
+  identity?: PeerIdentity | null;
+  color: string;
+}) {
+  const [errored, setErrored] = useState(false);
+  const pictureUrl = identity?.picture_url;
+  const initial = peerInitial(identity);
+
+  if (pictureUrl && !errored) {
+    return (
+      <img
+        src={pictureUrl}
+        alt=""
+        data-testid="peer-cursor-avatar"
+        width={AVATAR_SIZE}
+        height={AVATAR_SIZE}
+        onError={() => setErrored(true)}
+        style={{
+          width: AVATAR_SIZE,
+          height: AVATAR_SIZE,
+          borderRadius: "50%",
+          objectFit: "cover",
+          // White ring keeps the avatar distinct from the colored pill.
+          boxShadow: "0 0 0 1px rgba(255,255,255,0.85)",
+        }}
+      />
+    );
+  }
+
+  return (
+    <span
+      aria-hidden="true"
+      data-testid="peer-cursor-initial"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: AVATAR_SIZE,
+        height: AVATAR_SIZE,
+        borderRadius: "50%",
+        // Solid dark chip with the same per-peer color ring so the initial
+        // stays legible regardless of the pill's background color.
+        background: "rgba(20,20,24,0.9)",
+        color: "#fff",
+        fontWeight: 700,
+        fontSize: 9,
+        lineHeight: `${AVATAR_SIZE}px`,
+        boxShadow: `0 0 0 1px ${color}`,
+      }}
+    >
+      {initial}
+    </span>
   );
 }

@@ -269,7 +269,7 @@ mod tests {
         unicast_routes: &UnicastRoutes,
         id: ClientId,
     ) -> mpsc::UnboundedReceiver<Message> {
-        session.lock().await.add_client(id);
+        session.lock().await.add_client(id, None);
         let (tx, rx) = mpsc::unbounded_channel::<Message>();
         unicast_routes.lock().await.insert(id, tx);
         rx

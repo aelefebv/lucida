@@ -231,7 +231,7 @@ async fn install_dataset(rig: &Rig, url: &str) {
 }
 
 async fn connect_client(rig: &Rig, id: ClientId) -> mpsc::UnboundedReceiver<Message> {
-    rig.session.lock().await.add_client(id);
+    rig.session.lock().await.add_client(id, None);
     let (tx, rx) = mpsc::unbounded_channel::<Message>();
     rig.unicast_routes.lock().await.insert(id, tx);
     rx

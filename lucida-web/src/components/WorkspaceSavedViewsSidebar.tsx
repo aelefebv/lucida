@@ -32,6 +32,12 @@ export interface WorkspaceSavedViewsSidebarProps {
   /** Id of the saved view currently applied to the viewer, if any. The matching
    *  row renders as active so the user can see which view they're looking at. */
   currentOpenSavedViewId?: string | null;
+  /** Called when the saved view that is currently open (`currentOpenSavedViewId`)
+   *  stops existing as the user acts on it — deleted, withdrawn, or its deferred
+   *  reject commits. The host clears its active-row id so the highlight doesn't
+   *  dangle on a view that's gone (#818). Viewport changes are cleared host-side
+   *  off the live-view signal; this covers the "the open view went away" case. */
+  onActiveSavedViewInvalidated?: (savedViewId: string) => void;
   style?: React.CSSProperties;
   visible: boolean;
 }
@@ -42,10 +48,22 @@ interface ToastAction {
 }
 
 interface ToastMessage {
+  /** Stable identity for this toast. Plain status toasts get an auto-generated
+   *  id; an Undo toast for a deferred reject is keyed by `reject:<savedViewId>`
+   *  so each pending reject owns its OWN dismissible toast (the data layer
+   *  already supports independent multi-undo via the per-id timer Map — the
+   *  toast stack is the matching presentation). */
+  id: string;
   text: string;
   kind: "info" | "warn";
   /** Optional inline action (e.g. "Undo") rendered as a button in the toast. */
   action?: ToastAction;
+}
+
+/** Stable toast id for a deferred reject so its Undo toast never collides with
+ *  (or gets clobbered by) another pending reject's toast. */
+function rejectToastId(savedViewId: string): string {
+  return `reject:${savedViewId}`;
 }
 
 interface ConfirmRequest {
@@ -69,6 +87,7 @@ export function WorkspaceSavedViewsSidebar({
   defaultSavedViewId,
   onSetDefaultSavedView,
   currentOpenSavedViewId,
+  onActiveSavedViewInvalidated,
   style,
   visible,
 }: WorkspaceSavedViewsSidebarProps) {
@@ -131,46 +150,89 @@ export function WorkspaceSavedViewsSidebar({
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
   const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [toast, setToast] = useState<ToastMessage | null>(null);
+  // A STACK of toasts, not a single slot: rejecting view B must not evict view
+  // A's still-live "Undo" toast while A's reject timer keeps running (#818).
+  // Newest renders on top of the stack.
+  const [toasts, setToasts] = useState<readonly ToastMessage[]>([]);
   // Ids whose Reject is in its cancelable window: hidden from the review queue
   // optimistically, but NOT yet sent to the server (Undo can still cancel).
   const [pendingReject, setPendingReject] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
 
-  const dismissToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dismissToast = useCallback(() => {
-    if (dismissToastTimer.current) clearTimeout(dismissToastTimer.current);
-    dismissToastTimer.current = null;
-    setToast(null);
+  // One auto-dismiss timer per toast id (toasts are now a stack, so a single
+  // shared timer would let one toast's expiry tear down another's). Cleaned up
+  // on unmount so no timer can setState after the sidebar is gone.
+  const dismissTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const seqRef = useRef(0);
+  const dismissToast = useCallback((id: string) => {
+    const timer = dismissTimers.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      dismissTimers.current.delete(id);
+    }
+    setToasts((prev) => {
+      if (!prev.some((t) => t.id === id)) return prev;
+      return prev.filter((t) => t.id !== id);
+    });
   }, []);
   const showToast = useCallback(
     (
       text: string,
       kind: ToastMessage["kind"] = "info",
-      opts?: { action?: ToastAction; durationMs?: number },
+      opts?: { action?: ToastAction; durationMs?: number; id?: string },
     ) => {
-      setToast({ text, kind, action: opts?.action });
-      if (dismissToastTimer.current) clearTimeout(dismissToastTimer.current);
-      dismissToastTimer.current = setTimeout(
-        () => setToast(null),
-        opts?.durationMs ?? 3000,
-      );
+      // Reject toasts pass a stable id (keyed by saved-view id) so re-issuing
+      // replaces that view's own toast in place; status toasts get a fresh id
+      // so each pushes onto the stack independently.
+      const id = opts?.id ?? `toast:${seqRef.current++}`;
+      const next: ToastMessage = { id, text, kind, action: opts?.action };
+      setToasts((prev) => [...prev.filter((t) => t.id !== id), next]);
+      const existing = dismissTimers.current.get(id);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        dismissTimers.current.delete(id);
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, opts?.durationMs ?? 3000);
+      dismissTimers.current.set(id, timer);
     },
     [],
   );
+
+  // Latest open-view id + invalidation callback, mirrored into refs so the
+  // action handlers can fire "the open view went away" WITHOUT taking these as
+  // deps (which would churn every callback identity each time the active row
+  // changes). Read at call time only (from event handlers / settled async),
+  // never during render — same latest-value-in-a-ref pattern as
+  // useSavedViewSync.ts, so the react-hooks/refs render-write rule is disabled
+  // on the assignment lines.
+  const currentOpenSavedViewIdRef = useRef(currentOpenSavedViewId);
+  // eslint-disable-next-line react-hooks/refs
+  currentOpenSavedViewIdRef.current = currentOpenSavedViewId;
+  const onActiveSavedViewInvalidatedRef = useRef(onActiveSavedViewInvalidated);
+  // eslint-disable-next-line react-hooks/refs
+  onActiveSavedViewInvalidatedRef.current = onActiveSavedViewInvalidated;
+  // If `id` is the view currently flagged active, tell the host it's gone so the
+  // stale highlight clears (#818). No-op otherwise, so it's always safe to call.
+  const invalidateIfOpen = useCallback((id: string) => {
+    if (currentOpenSavedViewIdRef.current === id) {
+      onActiveSavedViewInvalidatedRef.current?.(id);
+    }
+  }, []);
 
   // One timer per deferred reject so a power-user can stack several at once and
   // Undo each independently. Cleaned up on unmount so a pending PATCH never
   // fires after the sidebar is gone.
   const rejectTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => {
-    const timers = rejectTimers.current;
+    const rejects = rejectTimers.current;
+    const dismisses = dismissTimers.current;
     return () => {
-      for (const timer of timers.values()) clearTimeout(timer);
-      timers.clear();
-      // Also clear the toast auto-dismiss timer so it can't setState after unmount.
-      if (dismissToastTimer.current) clearTimeout(dismissToastTimer.current);
+      for (const timer of rejects.values()) clearTimeout(timer);
+      rejects.clear();
+      // Also clear every toast auto-dismiss timer so none can setState after unmount.
+      for (const timer of dismisses.values()) clearTimeout(timer);
+      dismisses.clear();
     };
   }, []);
 
@@ -296,12 +358,15 @@ export function WorkspaceSavedViewsSidebar({
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "personal");
+        // Withdrawing changes the view out from under the active-row claim, so
+        // drop the highlight if this was the open view (#818).
+        invalidateIfOpen(view.id);
         showToast(`Withdrew "${view.name}" — back to your personal views`);
       } catch (e) {
         showToast(`Withdraw failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
       }
     },
-    [setSavedViewVisibility, showToast],
+    [invalidateIfOpen, setSavedViewVisibility, showToast],
   );
 
   const handleApprove = useCallback(
@@ -317,8 +382,9 @@ export function WorkspaceSavedViewsSidebar({
   );
 
   // Cancel a pending reject before it commits: clear its timer, un-hide the
-  // row (it was only hidden locally — never sent), and drop the toast. No
-  // PATCH ever happens, so the rejection simply never occurred.
+  // row (it was only hidden locally — never sent), and drop ONLY this view's
+  // Undo toast (others stay). No PATCH ever happens, so the rejection simply
+  // never occurred.
   const cancelReject = useCallback(
     (id: string) => {
       const timer = rejectTimers.current.get(id);
@@ -332,7 +398,7 @@ export function WorkspaceSavedViewsSidebar({
         next.delete(id);
         return next;
       });
-      dismissToast();
+      dismissToast(rejectToastId(id));
     },
     [dismissToast],
   );
@@ -358,6 +424,13 @@ export function WorkspaceSavedViewsSidebar({
         // drops it from the list and refreshes; clear our local hide once it
         // settles (on failure the refresh restores the row, so it reappears).
         void rejectSavedView(id)
+          .then(() => {
+            // The view is really gone now — if it was the open/active row, tell
+            // the host so the highlight doesn't dangle (#818). Undo never
+            // reaches here (it clears the timer first), so the live view is
+            // still flagged active across the whole cancelable window.
+            invalidateIfOpen(id);
+          })
           .catch((e) => {
             showToast(
               `Reject failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -376,13 +449,16 @@ export function WorkspaceSavedViewsSidebar({
       rejectTimers.current.set(id, timer);
 
       // Keep the toast (and its Undo) alive for the whole cancelable window so
-      // the affordance never vanishes while the reject can still be undone.
+      // the affordance never vanishes while the reject can still be undone. The
+      // toast is keyed by the saved-view id, so rejecting a second view pushes
+      // its OWN Undo toast onto the stack instead of evicting this one (#818).
       showToast(`Rejected "${view.name}"`, "info", {
         durationMs: REJECT_UNDO_WINDOW_MS,
+        id: rejectToastId(id),
         action: { label: "Undo", onClick: () => cancelReject(id) },
       });
     },
-    [cancelReject, rejectSavedView, showToast],
+    [cancelReject, invalidateIfOpen, rejectSavedView, showToast],
   );
 
   const handleSetDefault = useCallback(
@@ -402,6 +478,8 @@ export function WorkspaceSavedViewsSidebar({
     async (view: WorkspaceSavedView) => {
       try {
         await deleteSavedView(view.id);
+        // The view no longer exists — clear the active highlight if it was open (#818).
+        invalidateIfOpen(view.id);
         if (defaultSavedViewId === view.id) {
           await onSetDefaultSavedView(null).catch((e) => {
             console.warn("[WorkspaceSavedViewsSidebar] default clear after delete failed:", e);
@@ -414,7 +492,7 @@ export function WorkspaceSavedViewsSidebar({
         setConfirmDelete(null);
       }
     },
-    [defaultSavedViewId, deleteSavedView, onSetDefaultSavedView, showToast],
+    [defaultSavedViewId, deleteSavedView, invalidateIfOpen, onSetDefaultSavedView, showToast],
   );
 
   const handleCopyLink = useCallback(
@@ -692,22 +770,28 @@ export function WorkspaceSavedViewsSidebar({
         />
       )}
 
-      {toast && (
-        <div
-          role="status"
-          className={`bookmark-toast${toast.kind === "warn" ? " warn" : ""}`}
-        >
-          <span className="bookmark-toast-text">{toast.text}</span>
-          {toast.action && (
-            <button
-              type="button"
-              className="bookmark-toast-action"
-              data-testid="saved-view-toast-action"
-              onClick={toast.action.onClick}
+      {toasts.length > 0 && (
+        <div className="bookmark-toast-stack" data-testid="saved-view-toast-stack">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              role="status"
+              className={`bookmark-toast${t.kind === "warn" ? " warn" : ""}`}
+              data-testid="saved-view-toast"
             >
-              {toast.action.label}
-            </button>
-          )}
+              <span className="bookmark-toast-text">{t.text}</span>
+              {t.action && (
+                <button
+                  type="button"
+                  className="bookmark-toast-action"
+                  data-testid="saved-view-toast-action"
+                  onClick={t.action.onClick}
+                >
+                  {t.action.label}
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>

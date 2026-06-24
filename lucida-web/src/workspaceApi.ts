@@ -167,6 +167,28 @@ export function getWorkspace(id: string): Promise<WorkspaceRecord> {
   return requestJson<WorkspaceRecord>(`/api/workspaces/${encodeURIComponent(id)}`);
 }
 
+/**
+ * Duplicate a workspace into a private copy owned by the caller (#698).
+ *
+ * Anyone who can access the source (any role, viewer included) may duplicate
+ * it. The copy is a NEW workspace owned by the caller, created with the
+ * default sharing (restricted, owner-only, link OFF) — it never inherits the
+ * source's members or any permission. It copies datasets (+ display names),
+ * the source's *shared* saved views (re-attributed to the caller), the
+ * active/default view, and the document, so it opens looking like the
+ * original. Defaults to the name `Copy of <source name>`; pass `name` to
+ * override. Resolves to the new workspace (id/name) to navigate into.
+ */
+export function duplicateWorkspace(id: string, name?: string): Promise<WorkspaceRecord> {
+  return requestJson<WorkspaceRecord>(
+    `/api/workspaces/${encodeURIComponent(id)}/duplicate`,
+    {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    },
+  );
+}
+
 export function openWorkspace(id: string): Promise<WorkspaceRecord> {
   return requestJson<WorkspaceRecord>(`/api/workspaces/${encodeURIComponent(id)}`, {
     method: "POST",

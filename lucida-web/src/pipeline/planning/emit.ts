@@ -146,7 +146,7 @@ export function emitDetailLane(
       if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
         continue;
       }
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
       req.lane = "detail";
       req.tier = "detail";
       req.priority = computePriority(
@@ -252,7 +252,7 @@ export function emitPrefetchLane(
         if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
           continue;
         }
-        const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+        const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
         req.lane = "prefetch";
         req.tier = "detail";
         req.priority = computePriority(
@@ -300,7 +300,7 @@ export function emitCoarseLane(
       if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.coarseRenderRadiusView)) {
         continue;
       }
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
       req.lane = "coarse";
       req.tier = "coarse";
       req.priority = computePriority(
@@ -344,7 +344,7 @@ export function emitOverviewLane(
       datasetId,
     );
     for (const req of chunks) {
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
       req.lane = "overview";
       req.tier = "coarse";
       req.priority = computePriority(
@@ -365,11 +365,18 @@ export function emitOverviewLane(
  * region midpoint — offset by entity position to get local coordinates.
  * Converts grid indices to world-voxel positions using per-level chunk
  * world sizes so that distance is comparable across LODs.
+ *
+ * `depthBiasView` (issue #532) shifts the focal Z — the center-out
+ * spawn origin along the near↔far axis — by a fraction of the visible
+ * region's half-depth. It is `0` by default, which adds exactly nothing
+ * to `centerZ`, so the distance (and thus priority) is byte-identical to
+ * the unbiased computation. See {@link applyDepthBias}.
  */
 function chunkDistanceFromCenter(
   req: ChunkRequest,
   region: VisibleRegion,
   entity: EntitySnapshot,
+  depthBiasView = 0,
 ): number {
   // View center in local (entity-relative) voxel coords.
   let centerX: number;
@@ -390,6 +397,8 @@ function chunkDistanceFromCenter(
     centerZ = (region.zRangeVox[0] + region.zRangeVox[1]) / 2;
   }
 
+  centerZ = applyDepthBias(centerZ, region, depthBiasView);
+
   const level0 = entity.levels[0];
   const geo = entity.levels[req.level];
   let cwX = 1;
@@ -403,6 +412,34 @@ function chunkDistanceFromCenter(
   const dy = (req.y + 0.5) * cwY - centerY;
   const dz = (req.z + 0.5) * cwZ - centerZ;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Shift the focal Z (the center-out spawn origin along the near↔far
+ * axis) by `depthBiasView`, a fraction of the visible region's
+ * half-depth (issue #532).
+ *
+ * The bias is clamped to `[-1, 1]`; `-1` lands the focal Z on the near
+ * plane (`zRangeVox[0]`), `+1` on the far plane (`zRangeVox[1]`). The
+ * shifted value is clamped to the visible Z range.
+ *
+ * **Safety property:** when `depthBiasView === 0` this returns `centerZ`
+ * unchanged — no arithmetic, no clamp — so the caller's distance and
+ * priority are byte-identical to the unbiased path. Only a non-zero
+ * bias ever moves the focal Z.
+ */
+function applyDepthBias(
+  centerZ: number,
+  region: VisibleRegion,
+  depthBiasView: number,
+): number {
+  if (depthBiasView === 0) return centerZ;
+  const bias = Math.min(1, Math.max(-1, depthBiasView));
+  const zMin = region.zRangeVox[0];
+  const zMax = region.zRangeVox[1];
+  const halfDepth = (zMax - zMin) / 2;
+  const shifted = centerZ + bias * halfDepth;
+  return Math.min(zMax, Math.max(zMin, shifted));
 }
 
 function requestWithinRenderRadius(

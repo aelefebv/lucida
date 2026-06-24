@@ -250,6 +250,13 @@
   text-align: right;
 }
 
+/* Focal-depth control end-caps (near / far) — small muted labels that
+   flank the near↔far slider in the 3D dimension-controls row. */
+.dim-endcap {
+  font-size: 0.75rem;
+  color: #888;
+}
+
 /* Contrast controls */
 
 .contrast-controls {

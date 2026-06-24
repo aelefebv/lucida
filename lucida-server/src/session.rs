@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
+use lucida_core::protocol::{ClientId, PeerIdentity, PresenceState, ServerMessage};
 use lucida_core::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use lucida_core::view::ViewState;
 use lucida_protocol::{
@@ -143,7 +143,14 @@ impl Session {
         }
     }
 
-    pub fn add_client(&mut self, id: ClientId) -> PresenceState {
+    /// Register a newly connected client.
+    ///
+    /// `identity` is the server-authored presentational identity for the
+    /// peer's cursor (#540), derived from the connection's authenticated
+    /// principal. The non-workspace `/ws` path has no principal and passes
+    /// `None`, so anonymous peers still join and render via the numeric-id
+    /// fallback.
+    pub fn add_client(&mut self, id: ClientId, identity: Option<PeerIdentity>) -> PresenceState {
         let presence = PresenceState {
             client_id: id,
             camera: Camera::new_2d([800, 600]),
@@ -153,6 +160,7 @@ impl Session {
             cursor: None,
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
+            identity,
         };
         self.clients.insert(id, presence.clone());
         presence
@@ -454,8 +462,8 @@ mod tests {
     #[test]
     fn add_remove_client() {
         let mut session = Session::new();
-        session.add_client(1);
-        session.add_client(2);
+        session.add_client(1, None);
+        session.add_client(2, None);
         assert_eq!(session.clients.len(), 2);
         session.remove_client(1);
         assert_eq!(session.clients.len(), 1);
@@ -463,11 +471,54 @@ mod tests {
     }
 
     #[test]
+    fn add_client_attaches_identity_to_presence_and_snapshot() {
+        // #540: a workspace client connects with a server-authored identity.
+        // It rides on the returned presence (broadcast as PeerJoined) AND on
+        // the snapshot peer list a late joiner receives.
+        let mut session = Session::new();
+        let identity = PeerIdentity {
+            display_name: "Grace Hopper".into(),
+            picture_url: Some("https://example.com/grace.png".into()),
+            initial: "G".into(),
+        };
+        let presence = session.add_client(7, Some(identity.clone()));
+        // Returned presence (the PeerJoined payload) carries identity.
+        assert_eq!(presence.identity.as_ref(), Some(&identity));
+
+        // And a fresh snapshot's peer list carries it too (late-joiner path).
+        match session.snapshot(99) {
+            ServerMessage::Snapshot { peers, .. } => {
+                let peer = peers
+                    .iter()
+                    .find(|p| p.client_id == 7)
+                    .expect("client 7 in snapshot");
+                let got = peer.identity.as_ref().expect("identity on snapshot peer");
+                assert_eq!(got.display_name, "Grace Hopper");
+                assert_eq!(
+                    got.picture_url.as_deref(),
+                    Some("https://example.com/grace.png")
+                );
+            }
+            _ => panic!("expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn add_client_without_identity_leaves_presence_anonymous() {
+        // The non-workspace `/ws` path passes `None`; the peer still joins and
+        // its presence carries no identity (cursor falls back to numeric id).
+        let mut session = Session::new();
+        let presence = session.add_client(3, None);
+        assert_eq!(presence.identity, None);
+        assert!(session.clients.get(&3).unwrap().identity.is_none());
+    }
+
+    #[test]
     fn follow_and_disconnect_clears_followers() {
         let mut session = Session::new();
-        session.add_client(1);
-        session.add_client(2);
-        session.add_client(3);
+        session.add_client(1, None);
+        session.add_client(2, None);
+        session.add_client(3, None);
         // 2 follows 1, 3 follows 1
         session.set_follow(2, Some(1));
         session.set_follow(3, Some(1));
@@ -481,9 +532,9 @@ mod tests {
     #[test]
     fn follow_transitive_chain() {
         let mut session = Session::new();
-        session.add_client(1); // A
-        session.add_client(2); // B
-        session.add_client(3); // C
+        session.add_client(1, None); // A
+        session.add_client(2, None); // B
+        session.add_client(3, None); // C
         // A follows C
         session.set_follow(1, Some(3));
         assert_eq!(session.clients.get(&1).unwrap().following, Some(3));
@@ -497,9 +548,9 @@ mod tests {
     #[test]
     fn cannot_follow_someone_who_is_following() {
         let mut session = Session::new();
-        session.add_client(1);
-        session.add_client(2);
-        session.add_client(3);
+        session.add_client(1, None);
+        session.add_client(2, None);
+        session.add_client(3, None);
         // 2 follows 1
         session.set_follow(2, Some(1));
         // 3 tries to follow 2 (who is following 1) → should fail

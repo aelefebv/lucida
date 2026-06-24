@@ -346,6 +346,26 @@ export function useDatasetSettings({
     datasetCallbacksRef.current.removeDataset(id);
   }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef]);
 
+  // Rename a layer (dataset) by mutating the shared document. Like
+  // handleRemoveLayer, this is a document command: it applies locally for
+  // immediate feedback and sends to the server, which authorizes it
+  // editor-only, broadcasts it to co-present peers, and persists it so the
+  // new name survives reopen. A blank/whitespace name is ignored client-side
+  // (the server also rejects it); the trimmed name is sent.
+  const handleLayerRename = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) return;
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+    if (scene.dataset_name(id) === trimmed) return;
+    applyDocumentCommand(
+      scene,
+      { type: "rename_dataset", id, name: trimmed },
+      bridgeCallbacksRef.current.sendCommand,
+    );
+    setLayerSettingsVersion((v) => v + 1);
+  }, [wasmSceneRef, bridgeCallbacksRef]);
+
   const buildLayerInfos = (): LayerInfo[] => {
     const scene = wasmSceneRef.current;
     if (!scene) return [];
@@ -448,5 +468,6 @@ export function useDatasetSettings({
     handleLayerFullRangeToggle,
     handleLayerMove,
     handleRemoveLayer,
+    handleLayerRename,
   };
 }

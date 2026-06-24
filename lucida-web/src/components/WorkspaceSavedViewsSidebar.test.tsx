@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -264,5 +264,424 @@ describe("WorkspaceSavedViewsSidebar — save modal (viewer)", () => {
     });
 
     expect(postBody).toMatchObject({ visibility: "personal" });
+  });
+});
+
+// --- Coverage ported from the deleted BookmarkSidebar.test.tsx ---------------
+// These four behavior groups (rename, delete-with-confirm, copy link, filter)
+// were exercised only by the now-removed BookmarkSidebar test. They are still
+// live in WorkspaceSavedViewsSidebar, so they are re-asserted here against the
+// successor component's real API and DOM (menu via "Saved view actions" ->
+// role="menu"; rename via .bookmark-name-input; delete via a role="alertdialog"
+// ConfirmModal; PATCH/DELETE to /api/workspaces/<ws>/saved-views/<id>).
+
+describe("WorkspaceSavedViewsSidebar — inline rename", () => {
+  it("Enter commits the new name via PATCH", async () => {
+    let patchBody: Record<string, unknown> | null = null;
+    let patchUrl: string | null = null;
+    let patchMethod: string | null = null;
+    responder = (url, init) => {
+      if (init?.method === "PATCH") {
+        patchMethod = init.method;
+        patchUrl = url;
+        patchBody = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse(200, savedViewRow({ id: "p1", name: "renamed", visibility: "personal" }));
+      }
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "old", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "old" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
+
+    // The rename input renders in place of the name (class set by RenameInput);
+    // pick it by class so the search box isn't grabbed instead.
+    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    await userEvent.clear(input);
+    await act(async () => {
+      await userEvent.type(input, "renamed{Enter}");
+    });
+
+    expect(patchMethod).toBe("PATCH");
+    expect(patchUrl).toBe("/api/workspaces/ws-1/saved-views/p1");
+    expect(patchBody).toEqual({ name: "renamed" });
+  });
+
+  it("Esc cancels the rename without PATCHing", async () => {
+    responder = (_url, init) => {
+      if (init?.method === "PATCH") {
+        return jsonResponse(200, savedViewRow({ id: "p1", visibility: "personal" }));
+      }
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "old", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "old" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
+
+    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    await userEvent.clear(input);
+    await act(async () => {
+      await userEvent.type(input, "won't commit{Escape}");
+    });
+
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    // The rename input closed; the original name is shown again.
+    expect(document.querySelector(".bookmark-name-input")).toBeNull();
+    expect(screen.getByText("old")).toBeTruthy();
+  });
+});
+
+describe("WorkspaceSavedViewsSidebar — delete confirmation", () => {
+  it("requires confirmation, then DELETEs the view", async () => {
+    let deleteUrl: string | null = null;
+    let deleteMethod: string | null = null;
+    responder = (url, init) => {
+      if (init?.method === "DELETE") {
+        deleteMethod = init.method;
+        deleteUrl = url;
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "Doomed", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Doomed" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
+
+    // Confirmation dialog appears naming the view; no DELETE has fired yet.
+    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    expect(within(dialog).getByText(/Doomed/)).toBeTruthy();
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+
+    await act(async () => {
+      await userEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+    });
+
+    expect(deleteMethod).toBe("DELETE");
+    expect(deleteUrl).toBe("/api/workspaces/ws-1/saved-views/p1");
+  });
+
+  it("Cancel from the confirmation modal does NOT DELETE", async () => {
+    responder = (_url, init) => {
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return jsonResponse(200, [savedViewRow({ id: "p1", name: "Doomed", visibility: "personal" })]);
+    };
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Doomed" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    await userEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+});
+
+describe("WorkspaceSavedViewsSidebar — copy view link", () => {
+  it("writes the #b=<encoded id> deep link to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    // An id with a character that must be URL-encoded, so the encodeURIComponent
+    // step is actually asserted (not just a passthrough).
+    responder = () =>
+      jsonResponse(200, [savedViewRow({ id: "a b/c", name: "Linkable", visibility: "shared" })]);
+    await renderSidebar(true);
+
+    const menu = await openRowMenu({ name: "Linkable" });
+    await act(async () => {
+      await userEvent.click(within(menu).getByRole("menuitem", { name: /copy view link/i }));
+    });
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const arg = writeText.mock.calls[0][0] as string;
+    expect(arg).toContain(`#b=${encodeURIComponent("a b/c")}`);
+    expect(arg).toContain("#b=a%20b%2Fc");
+  });
+});
+
+describe("WorkspaceSavedViewsSidebar — filter and search", () => {
+  it("'Mine only' filters the list to the current user's views", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({ id: "b1", name: "alice 1", created_by: "alice@example.com", visibility: "personal" }),
+        savedViewRow({ id: "b2", name: "bob 1", created_by: "bob@example.com", created_by_name: "Bob", visibility: "shared" }),
+      ]);
+    await renderSidebar(true);
+
+    expect(screen.getByText("alice 1")).toBeTruthy();
+    expect(screen.getByText("bob 1")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /mine only/i }));
+
+    expect(screen.getByText("alice 1")).toBeTruthy();
+    expect(screen.queryByText("bob 1")).toBeNull();
+  });
+
+  it("the search box filters the list by name substring", async () => {
+    responder = () =>
+      jsonResponse(200, [
+        savedViewRow({ id: "b1", name: "Apoptosis", visibility: "shared" }),
+        savedViewRow({ id: "b2", name: "CYP7A1", visibility: "shared" }),
+      ]);
+    await renderSidebar(true);
+
+    const search = screen.getByPlaceholderText(/search/i);
+    await userEvent.type(search, "Apop");
+
+    expect(screen.getByText("Apoptosis")).toBeTruthy();
+    expect(screen.queryByText("CYP7A1")).toBeNull();
+  });
+});
+
+// --- Fix A (#818 part 1): deferred reject keeps an independent, reachable Undo
+// per pending view ------------------------------------------------------------
+// Reject is a delayed, cancelable PATCH backed by a per-id timer; the toast used
+// to be a single slot, so rejecting B clobbered A's "Undo" toast while A's timer
+// kept running → A committed with no recourse. The fix is a toast STACK keyed by
+// saved-view id: each pending reject owns its own dismissible Undo for the whole
+// window. These tests use fake timers for the ~6s window and clean them up.
+
+function rejectButton(savedViewId: string): HTMLButtonElement {
+  return screen.getByTestId(`saved-view-reject-${savedViewId}`) as HTMLButtonElement;
+}
+
+function rejectPosts(): FetchCall[] {
+  return calls.filter((c) => c.method === "POST" && c.url.endsWith("/reject"));
+}
+
+describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  async function renderEditorWithTwoProposals() {
+    responder = (_url, init) => {
+      if (init?.method === "POST") {
+        // Reject reverts to personal server-side; the body is irrelevant here.
+        return jsonResponse(200, savedViewRow({ id: "x", visibility: "personal" }));
+      }
+      return jsonResponse(200, [
+        savedViewRow({ id: "pa", name: "Proposal A", visibility: "proposed", created_by: "bob@example.com", created_by_name: "Bob" }),
+        savedViewRow({ id: "pb", name: "Proposal B", visibility: "proposed", created_by: "carol@example.com", created_by_name: "Carol" }),
+      ]);
+    };
+    await act(async () => {
+      render(<WorkspaceSavedViewsSidebar {...baseProps(true)} />);
+    });
+    // Let the initial list fetch settle under fake timers.
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+  }
+
+  it("rejecting A then B within the window leaves BOTH with a reachable Undo (stacked, not clobbered)", async () => {
+    await renderEditorWithTwoProposals();
+
+    // Reject A, then B, both within the cancelable window.
+    await act(async () => {
+      fireEvent.click(rejectButton("pa"));
+    });
+    await act(async () => {
+      fireEvent.click(rejectButton("pb"));
+    });
+
+    // Two distinct toasts, each naming its view and each carrying an Undo — A's
+    // toast was NOT evicted by B's (the bug). No reject has been sent yet.
+    const toasts = screen.getAllByTestId("saved-view-toast");
+    expect(toasts).toHaveLength(2);
+    const aToast = toasts.find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
+    const bToast = toasts.find((t) => within(t).queryByText(/Proposal B/)) as HTMLElement;
+    expect(aToast).toBeTruthy();
+    expect(bToast).toBeTruthy();
+    expect(within(aToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
+    expect(within(bToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
+    expect(rejectPosts()).toHaveLength(0);
+  });
+
+  it("Undo on the first reject cancels ONLY it; the other still commits its reject after the window", async () => {
+    await renderEditorWithTwoProposals();
+
+    await act(async () => {
+      fireEvent.click(rejectButton("pa"));
+    });
+    await act(async () => {
+      fireEvent.click(rejectButton("pb"));
+    });
+
+    // Undo A specifically (via A's own toast's Undo button).
+    const aToast = screen
+      .getAllByTestId("saved-view-toast")
+      .find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
+    await act(async () => {
+      fireEvent.click(within(aToast).getByTestId("saved-view-toast-action"));
+    });
+
+    // A is back in the queue (its row was only hidden, never sent); B is still
+    // pending and hidden.
+    expect(screen.getByTestId(`saved-view-reject-pa`)).toBeTruthy();
+    expect(screen.queryByTestId(`saved-view-reject-pb`)).toBeNull();
+
+    // Let every pending timer (B's reject + the toast auto-dismiss) elapse.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    // The reject PATCH fired for B only — never for the undone A.
+    const posts = rejectPosts();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toContain("/saved-views/pb/reject");
+    expect(posts.some((p) => p.url.includes("/saved-views/pa/reject"))).toBe(false);
+  });
+
+  it("does not leak timers: unmounting mid-window fires no reject and warns nothing", async () => {
+    await renderEditorWithTwoProposals();
+    await act(async () => {
+      fireEvent.click(rejectButton("pa"));
+    });
+
+    // Unmount while the reject is still pending.
+    cleanup();
+
+    // Advancing past the window must NOT fire the reject (timer was cleared on
+    // unmount) — guards against a setState-after-unmount / stray PATCH.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(rejectPosts()).toHaveLength(0);
+  });
+});
+
+// --- Fix B (#818 part 2): the open view going away clears the active highlight
+// ----------------------------------------------------------------------------
+// `currentOpenSavedViewId` highlights the open row. When the user deletes /
+// withdraws that view, or its deferred reject commits, the sidebar tells the
+// host via `onActiveSavedViewInvalidated` so the host can drop the now-dangling
+// highlight. (Viewport-change clearing lives host-side off the live-view signal
+// and is covered by the host wiring, not this component's surface.)
+
+describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
+  it("renders the open row as active (data-active / aria-current)", async () => {
+    responder = () =>
+      jsonResponse(200, [savedViewRow({ id: "v1", name: "Open one", visibility: "shared" })]);
+    await act(async () => {
+      render(
+        <WorkspaceSavedViewsSidebar
+          {...baseProps(true)}
+          currentOpenSavedViewId="v1"
+        />,
+      );
+    });
+
+    const row = screen
+      .getAllByTestId("saved-view-row")
+      .find((r) => within(r).queryByText("Open one")) as HTMLElement;
+    expect(row.getAttribute("data-active")).toBe("true");
+    expect(row.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("deleting the open view invalidates it", async () => {
+    const onInvalidated = vi.fn();
+    responder = (_url, init) => {
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return jsonResponse(200, [savedViewRow({ id: "v1", name: "Doomed", visibility: "personal" })]);
+    };
+    await act(async () => {
+      render(
+        <WorkspaceSavedViewsSidebar
+          {...baseProps(true)}
+          currentOpenSavedViewId="v1"
+          onActiveSavedViewInvalidated={onInvalidated}
+        />,
+      );
+    });
+
+    const menu = await openRowMenu({ name: "Doomed" });
+    await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
+    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    await act(async () => {
+      await userEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+    });
+
+    expect(onInvalidated).toHaveBeenCalledWith("v1");
+  });
+
+  it("withdrawing the open proposal invalidates it", async () => {
+    const onInvalidated = vi.fn();
+    responder = (_url, init) => {
+      if (init?.method === "PATCH") {
+        return jsonResponse(200, savedViewRow({ id: "v1", name: "Mine", visibility: "personal" }));
+      }
+      // A viewer's OWN proposed view exposes "Withdraw proposal".
+      return jsonResponse(200, [savedViewRow({ id: "v1", name: "Mine", visibility: "proposed", created_by: "alice@example.com" })]);
+    };
+    await act(async () => {
+      render(
+        <WorkspaceSavedViewsSidebar
+          {...baseProps(false)}
+          currentOpenSavedViewId="v1"
+          onActiveSavedViewInvalidated={onInvalidated}
+        />,
+      );
+    });
+
+    const menu = await openRowMenu({ name: "Mine" });
+    await act(async () => {
+      await userEvent.click(within(menu).getByTestId("saved-view-withdraw-v1"));
+    });
+
+    expect(onInvalidated).toHaveBeenCalledWith("v1");
+  });
+
+  it("a committed reject of the open view invalidates it (but not before the window, and not if undone)", async () => {
+    vi.useFakeTimers();
+    try {
+      const onInvalidated = vi.fn();
+      responder = (_url, init) => {
+        if (init?.method === "POST") {
+          return jsonResponse(200, savedViewRow({ id: "v1", visibility: "personal" }));
+        }
+        return jsonResponse(200, [
+          savedViewRow({ id: "v1", name: "Open proposal", visibility: "proposed", created_by: "bob@example.com", created_by_name: "Bob" }),
+        ]);
+      };
+      await act(async () => {
+        render(
+          <WorkspaceSavedViewsSidebar
+            {...baseProps(true)}
+            currentOpenSavedViewId="v1"
+            onActiveSavedViewInvalidated={onInvalidated}
+          />,
+        );
+      });
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync();
+      });
+
+      await act(async () => {
+        fireEvent.click(rejectButton("v1"));
+      });
+      // Mid-window: the reject hasn't committed, so the highlight stays.
+      expect(onInvalidated).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(onInvalidated).toHaveBeenCalledWith("v1");
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
   });
 });

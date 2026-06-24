@@ -329,6 +329,7 @@ fn default_member_display_name(email: &str, display_name: &str) -> String {
 
 const MAX_SAVED_VIEW_NAME_CHARS: usize = 200;
 const MAX_VIEWER_PROFILE_NAME_CHARS: usize = 64;
+const MAX_DATASET_NAME_CHARS: usize = 200;
 
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync + 'static {
@@ -337,6 +338,27 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         owner: &AuthPrincipal,
         name: Option<&str>,
     ) -> Result<WorkspaceRecord, StoreError>;
+
+    /// Deep-copy `source_workspace_id` into a brand-new workspace owned by
+    /// `owner`, named `name`, in ONE transaction. The copy COPIES:
+    /// dataset memberships (with their per-workspace display names), the
+    /// **Shared** saved views (re-attributed to `owner`, kept Shared), the
+    /// active/default-view pointer (remapped to the copied view), and the
+    /// document. The copy DOES NOT copy `workspace_members` (only the owner
+    /// row), link access, or any other sharing/permission: it is created with
+    /// the new-workspace defaults (restricted, owner-only, link OFF) so the
+    /// source's membership/permission set can never leak into the duplicate.
+    ///
+    /// Dataset memberships get FRESH workspace-local ids; the document and the
+    /// copied saved views are remapped onto those fresh ids so the copy
+    /// resolves entirely against its own `workspace_datasets` (no dangling
+    /// references to the source). `Ok(None)` if the source row is missing.
+    async fn duplicate_workspace(
+        &self,
+        source_workspace_id: &str,
+        owner: &AuthPrincipal,
+        name: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError>;
 
     async fn list_workspaces(
         &self,
@@ -428,6 +450,20 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         &self,
         workspace_id: &str,
         workspace_dataset_id: &DatasetId,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), StoreError>;
+
+    /// Persist a dataset rename: update the `workspace_datasets.display_name`
+    /// row for `workspace_dataset_id` and the workspace `document_json` (which
+    /// carries the renamed manifest) in one transaction. Keeps the
+    /// server-private DB name in sync with the document so restored bindings
+    /// and listings agree after reopen.
+    async fn persist_dataset_renamed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        display_name: &str,
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError>;
@@ -706,6 +742,63 @@ async fn touch_workspace(
     Ok(())
 }
 
+/// Insert a brand-new, owner-only workspace row plus its owner membership row
+/// inside `tx`. Shared by `create_workspace` and `duplicate_workspace` so the
+/// "blank owned workspace" shape is defined in exactly one place.
+///
+/// `link_access` / `link_role` are deliberately NOT bound: the `workspaces`
+/// columns take their table defaults ('restricted' / 'viewer'), i.e. link
+/// access OFF. A duplicate therefore never inherits the source's sharing, and a
+/// freshly created workspace starts private — the security-critical invariant.
+/// Keeping the INSERT in one place hardens that link-off guarantee against
+/// future drift (a column added with a non-OFF default would otherwise have to
+/// be remembered at every call site). Callers pass pre-normalized values
+/// (`owner_email`, `name`, serialized `document_json`, RFC3339 `now`) so this is
+/// a pure persistence step with no policy of its own; `seq` is initialized to 0.
+async fn insert_blank_owned_workspace(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    id: &str,
+    owner_email: &str,
+    owner_display_name: &str,
+    name: &str,
+    document_json: &str,
+    now: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        r#"
+        INSERT INTO workspaces
+            (id, name, created_by, created_at, updated_at, seq, document_json)
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(owner_email)
+    .bind(now)
+    .bind(now)
+    .bind(document_json)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sql)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO workspace_members
+            (workspace_id, email, role, display_name, added_at)
+        VALUES (?, ?, 'owner', ?, ?)
+        "#,
+    )
+    .bind(id)
+    .bind(owner_email)
+    .bind(owner_display_name)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sql)?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl WorkspaceStore for SqliteWorkspaceStore {
     async fn create_workspace(
@@ -722,38 +815,16 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         let document_json = serde_json::to_string(&document).map_err(map_json_out)?;
 
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
-        sqlx::query(
-            r#"
-            INSERT INTO workspaces
-                (id, name, created_by, created_at, updated_at, seq, document_json)
-            VALUES (?, ?, ?, ?, ?, 0, ?)
-            "#,
+        insert_blank_owned_workspace(
+            &mut tx,
+            &id,
+            &owner_email,
+            &owner.display_name,
+            &name,
+            &document_json,
+            &now_s,
         )
-        .bind(&id)
-        .bind(&name)
-        .bind(&owner_email)
-        .bind(&now_s)
-        .bind(&now_s)
-        .bind(&document_json)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sql)?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO workspace_members
-                (workspace_id, email, role, display_name, added_at)
-            VALUES (?, ?, 'owner', ?, ?)
-            "#,
-        )
-        .bind(&id)
-        .bind(&owner_email)
-        .bind(&owner.display_name)
-        .bind(&now_s)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sql)?;
-
+        .await?;
         tx.commit().await.map_err(map_sql)?;
 
         Ok(WorkspaceRecord {
@@ -767,6 +838,214 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             default_saved_view_id: None,
             document,
         })
+    }
+
+    async fn duplicate_workspace(
+        &self,
+        source_workspace_id: &str,
+        owner: &AuthPrincipal,
+        name: &str,
+    ) -> Result<Option<WorkspaceRecord>, StoreError> {
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let now_s = now.to_rfc3339();
+        let owner_email = normalize_email(&owner.email);
+        let name = default_workspace_name(Some(name));
+
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+
+        // Read the source inside the tx so the copy is a consistent snapshot.
+        // archived_at IS NULL: a duplicate is only meaningful for a live
+        // workspace, and access was already gated by the manager.
+        let Some(source_row) = sqlx::query(
+            r#"
+            SELECT document_json, default_saved_view_id
+            FROM workspaces
+            WHERE id = ? AND archived_at IS NULL
+            "#,
+        )
+        .bind(source_workspace_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sql)?
+        else {
+            return Ok(None);
+        };
+
+        // --- Dataset memberships: copy with FRESH workspace-local ids, and
+        // build the old->new remap that keeps the document + saved views
+        // consistent against the copy's datasets (the id-consistency trap). ---
+        let dataset_rows = sqlx::query(
+            r#"
+            SELECT id, dataset_source_id, display_name, sort_order
+            FROM workspace_datasets
+            WHERE workspace_id = ?
+            ORDER BY sort_order ASC, added_at ASC
+            "#,
+        )
+        .bind(source_workspace_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        let mut remap: HashMap<DatasetId, DatasetId> = HashMap::new();
+        struct CopiedDataset {
+            new_id: String,
+            dataset_source_id: String,
+            display_name: String,
+            sort_order: i64,
+        }
+        let mut copied_datasets = Vec::with_capacity(dataset_rows.len());
+        for row in &dataset_rows {
+            let old_id: String = row.get("id");
+            let new_dataset_id = format!("wds-{}", uuid::Uuid::new_v4().simple());
+            remap.insert(DatasetId(old_id), DatasetId(new_dataset_id.clone()));
+            copied_datasets.push(CopiedDataset {
+                new_id: new_dataset_id,
+                dataset_source_id: row.get("dataset_source_id"),
+                display_name: row.get("display_name"),
+                sort_order: row.get("sort_order"),
+            });
+        }
+
+        // --- Document: remap every dataset-id reference onto the copy's ids. ---
+        let source_document_json: String = source_row.get("document_json");
+        let mut document: DocumentState =
+            serde_json::from_str(&source_document_json).map_err(map_json_in)?;
+        document.remap_dataset_ids(&remap);
+        let document_json = serde_json::to_string(&document).map_err(map_json_out)?;
+
+        // New workspace row + owner-only membership. Shared with
+        // `create_workspace` via `insert_blank_owned_workspace`, which also owns
+        // the link-off guarantee: `link_access`/`link_role` are left to their
+        // table defaults ('restricted' / 'viewer'), so the copy never inherits
+        // the source's sharing, and the source's OTHER members are not copied —
+        // the security-critical invariant.
+        insert_blank_owned_workspace(
+            &mut tx,
+            &new_id,
+            &owner_email,
+            &owner.display_name,
+            &name,
+            &document_json,
+            &now_s,
+        )
+        .await?;
+
+        // Copied dataset memberships (same source + display name, fresh id).
+        for ds in &copied_datasets {
+            sqlx::query(
+                r#"
+                INSERT INTO workspace_datasets
+                    (id, workspace_id, dataset_source_id, display_name, added_by, added_at, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&ds.new_id)
+            .bind(&new_id)
+            .bind(&ds.dataset_source_id)
+            .bind(&ds.display_name)
+            .bind(&owner_email)
+            .bind(&now_s)
+            .bind(ds.sort_order)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+        }
+
+        // --- Shared saved views only, re-attributed to the duplicator and
+        // kept Shared. Personal/Proposed views (anyone's) are NOT copied. The
+        // active/default-view pointer is remapped to the copied view. ---
+        let source_view_rows = sqlx::query(
+            r#"
+            SELECT id, name, view_json
+            FROM workspace_saved_views
+            WHERE workspace_id = ? AND visibility = 'shared'
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(source_workspace_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+
+        let source_default_view_id: Option<String> = source_row.get("default_saved_view_id");
+        let mut new_default_view_id: Option<String> = None;
+        for row in &source_view_rows {
+            let old_view_id: String = row.get("id");
+            let view_name: String = row.get("name");
+            let view_json: String = row.get("view_json");
+            let mut view: SavedView =
+                serde_json::from_str(&view_json).map_err(map_saved_view_json_in)?;
+            view.remap_dataset_ids(&remap);
+            // Copy-point defense: the manager's create/update paths run
+            // `workspace_saved_view_payload` (which clears `datasets`), but a
+            // row inserted by another path — or persisted before that strip
+            // existed — may still carry source URLs. The copy must be clean
+            // regardless of the source row's state, so clear them here too
+            // (decision 0014). `remap_dataset_ids` intentionally leaves
+            // URL-keyed `datasets` alone; this is the explicit strip.
+            view.clear_source_urls();
+            let remapped_view_json =
+                serde_json::to_string(&view).map_err(map_saved_view_json_out)?;
+            let new_view_id = uuid::Uuid::new_v4().to_string();
+
+            sqlx::query(
+                r#"
+                INSERT INTO workspace_saved_views
+                    (id, workspace_id, name, created_by, created_by_name, created_at, updated_at, visibility, view_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'shared', ?)
+                "#,
+            )
+            .bind(&new_view_id)
+            .bind(&new_id)
+            .bind(&view_name)
+            .bind(&owner_email)
+            .bind(&owner.display_name)
+            .bind(&now_s)
+            .bind(&now_s)
+            .bind(&remapped_view_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+
+            if source_default_view_id.as_deref() == Some(old_view_id.as_str()) {
+                new_default_view_id = Some(new_view_id);
+            }
+        }
+
+        // Point the copy's default at the copied view (if the source default
+        // was a Shared view we copied). A source default pointing at a
+        // personal/proposed view we didn't copy resolves to NULL — the copy
+        // simply has no default, which is the safe outcome.
+        if let Some(default_id) = &new_default_view_id {
+            sqlx::query(
+                r#"
+                UPDATE workspaces
+                SET default_saved_view_id = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(default_id)
+            .bind(&new_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+        }
+
+        tx.commit().await.map_err(map_sql)?;
+
+        Ok(Some(WorkspaceRecord {
+            id: new_id,
+            name,
+            created_by: owner_email,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            seq: 0,
+            default_saved_view_id: new_default_view_id,
+            document,
+        }))
     }
 
     async fn list_workspaces(
@@ -1347,6 +1626,47 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
+        sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET seq = ?, document_json = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(seq as i64)
+        .bind(document_json)
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        tx.commit().await.map_err(map_sql)?;
+        Ok(())
+    }
+
+    async fn persist_dataset_renamed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let document_json = serde_json::to_string(document).map_err(map_json_out)?;
+        let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        // Update only the workspace-scoped display name. The shared
+        // dataset_sources.default_name (the source's import-time name) is left
+        // alone — a rename is per-workspace, not a rename of the global source.
+        sqlx::query(
+            "UPDATE workspace_datasets SET display_name = ? WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(display_name)
+        .bind(workspace_id)
+        .bind(workspace_dataset_id.as_ref())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sql)?;
         sqlx::query(
             r#"
             UPDATE workspaces
@@ -2471,6 +2791,43 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
+    /// Duplicate the source workspace into a private copy owned by the caller.
+    ///
+    /// Authorization: ANYONE who can *access* the source (any role, viewer
+    /// included) may duplicate it — the copy becomes their own owned workspace.
+    /// Access is checked via [`get_workspace_for`], so a non-member gets the
+    /// uniform never-leak `NotFound` (byte-identical to a missing workspace):
+    /// duplication must not reveal a workspace the caller can't see.
+    ///
+    /// The copy is named `Copy of <source name>` (an explicit `name` overrides
+    /// this), created with the new-workspace defaults (restricted, owner-only,
+    /// link OFF), and deep-copies datasets + Shared saved views + the document
+    /// in one transaction — never the source's members or any permission. See
+    /// [`WorkspaceStore::duplicate_workspace`].
+    pub async fn duplicate_workspace(
+        &self,
+        source_workspace_id: &str,
+        principal: &AuthPrincipal,
+        name: Option<&str>,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        // Never-leak access check (viewer+ may duplicate; non-member → NotFound,
+        // indistinguishable from missing). Also yields the source name.
+        let (source, _role) = self
+            .get_workspace_for(source_workspace_id, principal)
+            .await?;
+        let copy_name = match name.map(str::trim) {
+            Some(explicit) if !explicit.is_empty() => explicit.to_string(),
+            _ => format!("Copy of {}", source.name),
+        };
+        self.store
+            .duplicate_workspace(source_workspace_id, principal, &copy_name)
+            .await
+            .map_err(WorkspaceError::Store)?
+            // The source existed a moment ago (access check passed); a None here
+            // means it was archived/removed between the check and the copy.
+            .ok_or(WorkspaceError::NotFound)
+    }
+
     pub async fn get_workspace_for(
         &self,
         workspace_id: &str,
@@ -2893,14 +3250,39 @@ impl WorkspaceManager {
     /// `Proposed`: approving an already-shared (or anyone's personal) view is a
     /// `BadRequest`, not a silent no-op — except that another member's personal
     /// view stays `NotFound` even to an editor, preserving the never-leak rule.
+    ///
+    /// **Self-approve guard (#817):** a proposer cannot be their own reviewer.
+    /// The whole point of the review queue is that a *second* party signs off, so
+    /// even an editor/owner who created the proposal may not approve it — that
+    /// would reach `Proposed->Shared` with no reviewer, the exact transition the
+    /// `/visibility` allow-list (`ensure_saved_view_rescopable`) forbids for the
+    /// creator. The guard is placed here (the approve path), *after* the shared
+    /// review gate, so (a) the readability/role checks in
+    /// `ensure_proposal_reviewable` still run first — a stranger keeps getting
+    /// `Forbidden`/`NotFound` and never learns the view exists — and (b) it does
+    /// NOT apply to `reject_saved_view`: a creator self-rejecting is just
+    /// withdrawing their own proposal (Proposed->Personal), which is already
+    /// legal via `/visibility`. A sole editor wanting to share their own view
+    /// uses the legal `Personal->Shared` re-scope directly; the queue is for a
+    /// *different* editor. The denial is `Forbidden` (an authorization act on the
+    /// view, like the creator-only re-scope gate), not `BadRequest` (a state
+    /// error).
     pub async fn approve_saved_view(
         &self,
         workspace_id: &str,
         principal: &AuthPrincipal,
         saved_view_id: &str,
     ) -> Result<WorkspaceSavedView, WorkspaceError> {
-        self.ensure_proposal_reviewable(workspace_id, principal, saved_view_id)
+        let saved_view = self
+            .ensure_proposal_reviewable(workspace_id, principal, saved_view_id)
             .await?;
+        // Creator != reviewer: a proposer cannot self-approve. Reached only after
+        // the shared gate has confirmed the caller may see and review the view,
+        // so never-leak ordering is intact; scoped to approve so reject/withdraw
+        // by the creator stays legal.
+        if saved_view.created_by == normalize_email(&principal.email) {
+            return Err(WorkspaceError::Forbidden);
+        }
         self.store
             .set_saved_view_visibility(workspace_id, saved_view_id, SavedViewVisibility::Shared)
             .await
@@ -3019,21 +3401,33 @@ impl WorkspaceManager {
     /// 1. `require_viewer` — a non-member is denied (`Forbidden`) before any
     ///    row is read, so membership is never disclosed by a re-scope attempt.
     /// 2. fetch + `ensure_saved_view_readable` — never-leak in one place: a
-    ///    personal view the caller cannot see yields `NotFound` (identical to a
-    ///    missing row), so even editors/owners/admins never learn it exists.
+    ///    personal (or pending proposed) view the caller cannot see yields
+    ///    `NotFound` (identical to a missing row), so even editors/owners/admins
+    ///    never learn it exists.
     /// 3. **creator-only** — a shared view is readable by everyone, but only
     ///    the original creator may re-scope it; anyone else gets `Forbidden`.
-    /// 4. **target-visibility authority** — making a view `Shared` is a
+    /// 4. **transition allow-list** — the source→target re-scope must be one of
+    ///    the legal creator transitions (`saved_view_transition_allowed`); any
+    ///    other pair is `BadRequest`. This is the structural gate (#817): it
+    ///    rejects `Shared→Proposed` and, crucially, `Proposed→Shared` — the
+    ///    self-approve bypass — so sharing a proposal stays exclusively the
+    ///    editor review queue's job (`approve_saved_view`), never `/visibility`.
+    ///    A same-state request is an idempotent no-op and falls through to a
+    ///    (value-preserving) persist by the caller.
+    /// 5. **target-visibility authority** — making a view `Shared` is a
     ///    shared-state mutation (exactly like creating a `Shared` view), so it
-    ///    additionally requires editor; demoting back to `Personal` needs no
-    ///    editor (the creator is merely making their own view private again).
+    ///    additionally requires editor; demoting back to `Personal`, or
+    ///    proposing, needs no editor (the creator is acting on their own view).
+    ///    Checked last so an illegal transition is `BadRequest` regardless of
+    ///    the caller's role — the deny is by construction, not role-dependent.
     ///
     /// Returns the (now-confirmed-visible) view so callers can persist without
-    /// re-fetching. This is the gate #702 (approve/reject a proposed view)
-    /// reuses verbatim: "approve" is exactly a creator/authorized re-scope to
-    /// `Shared`, so it can call this with `target_visibility = Shared` and
-    /// inherit the same never-leak + creator-only + editor boundary rather than
-    /// re-deriving it.
+    /// re-fetching. The #702 review actions (`approve_saved_view` /
+    /// `reject_saved_view`, the Proposed→Shared / Proposed→Personal review
+    /// queue) deliberately do NOT route through this creator-only gate: their
+    /// authority is an *editor acting on another member's* proposal, so they use
+    /// `ensure_proposal_reviewable` instead — keeping the review queue the only
+    /// path that shares a proposal.
     async fn ensure_saved_view_rescopable(
         &self,
         workspace_id: &str,
@@ -3054,6 +3448,17 @@ impl WorkspaceManager {
         // content edit. A non-creator (even of a shared view) cannot re-scope.
         if saved_view.created_by != normalize_email(&principal.email) {
             return Err(WorkspaceError::Forbidden);
+        }
+        // Transition allow-list: close the gate by construction. Anything not on
+        // the creator allow-list — notably Shared→Proposed and the
+        // Proposed→Shared self-approve bypass — is rejected here, before the
+        // role check, so the deny is structural rather than role-dependent.
+        if !saved_view_transition_allowed(saved_view.visibility, target_visibility) {
+            return Err(WorkspaceError::BadRequest(format!(
+                "cannot change saved view visibility from {} to {}",
+                saved_view.visibility.as_str(),
+                target_visibility.as_str()
+            )));
         }
         // Target-visibility authority: promoting to Shared mutates shared
         // state, so it needs editor; demoting to Personal does not.
@@ -3391,6 +3796,75 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
+    /// Rename a workspace dataset's display label, the right way: mutate the
+    /// shared collaborative document so the change broadcasts to co-present
+    /// peers and survives reopen, and keep the server-private DB
+    /// `display_name` in sync so listings and restored bindings agree.
+    ///
+    /// The new name flows as a `DocumentCommand::RenameDataset`, returned to
+    /// the caller (the WS handler) so it can broadcast + ack it on the live
+    /// channel exactly like every other document command — that is what
+    /// delivers it live to peers. Persistence is handled here:
+    /// [`Store::persist_dataset_renamed`] writes both the `workspace_datasets`
+    /// row and the full `document_json` in one transaction, so reopening the
+    /// workspace (which loads `document_json` into `session.document`) shows
+    /// the new name.
+    ///
+    /// Authority + safety, role-first to preserve never-leak:
+    /// 1. `require_editor` — a viewer or non-member gets `Forbidden` before
+    ///    any document/row is read (uniform with `open_remote_dataset` and the
+    ///    other editor-gated mutations).
+    /// 2. validation — empty/whitespace/over-long names are `BadRequest`.
+    /// 3. the dataset must exist in the live document — a missing id is
+    ///    `NotFound`, identical to a dataset that was never opened, so the
+    ///    rename never confirms which ids exist.
+    ///
+    /// Returns the applied `(seq, command)` so the handler can broadcast.
+    pub async fn rename_dataset(
+        &self,
+        live: &LiveWorkspace,
+        principal: &AuthPrincipal,
+        workspace_dataset_id: &DatasetId,
+        name: &str,
+    ) -> Result<(u64, DocumentCommand), WorkspaceError> {
+        // 1. Authority first — never read the document for a non-editor.
+        self.require_editor(&live.workspace_id, principal).await?;
+
+        // 2. Validate before mutating anything.
+        let name = normalize_dataset_name(name)?;
+
+        let command = DocumentCommand::RenameDataset {
+            id: workspace_dataset_id.clone(),
+            name: name.clone(),
+        };
+
+        // 3. Apply to the live session, but only if the dataset actually
+        //    exists in the document. A missing id is NotFound (never-leak),
+        //    not a silent no-op that would still bump seq and persist.
+        let (seq, document) = {
+            let mut sess = live.session.lock().await;
+            if !sess.document.manifests.contains_key(workspace_dataset_id) {
+                return Err(WorkspaceError::NotFound);
+            }
+            let seq = sess.apply(command.clone());
+            (seq, sess.document.clone())
+        };
+
+        // 4. Persist: workspace_datasets.display_name + document_json together.
+        self.store
+            .persist_dataset_renamed(
+                &live.workspace_id,
+                workspace_dataset_id,
+                &name,
+                seq,
+                &document,
+            )
+            .await
+            .map_err(WorkspaceError::Store)?;
+
+        Ok((seq, command))
+    }
+
     async fn current_sharing_settings(
         &self,
         workspace_id: &str,
@@ -3441,6 +3915,40 @@ fn ensure_saved_view_readable(
     }
 }
 
+/// The creator-driven `/visibility` transition allow-list — the *only* source→
+/// target re-scopes the direct REST endpoint may perform, closed by
+/// construction so an illegal transition is unreachable rather than merely
+/// unsent by today's web UI.
+///
+/// Allowed (all by the creator; the `→Shared` editor authority is enforced
+/// separately by the caller, not here):
+/// - `Personal → Shared`  (creator shares; caller additionally requires editor)
+/// - `Shared   → Personal` (creator makes their own shared view private again)
+/// - `Personal → Proposed` (creator proposes their view for review)
+/// - `Proposed → Personal` (creator withdraws their own pending proposal)
+/// - a same-state request (`X → X`) — an idempotent no-op (`Ok`), so a benign
+///   "set it to what it already is" never errors.
+///
+/// Everything else is `BadRequest`. In particular this is what closes the gate
+/// on the two illegal direct transitions #817 calls out:
+/// - `Shared   → Proposed` — a shared view cannot be demoted into the review
+///   queue.
+/// - `Proposed → Shared` — the self-approve bypass: a creator (even an editor)
+///   cannot move their OWN proposal straight to shared and skip the editor
+///   review queue. Sharing a proposal is exclusively `approve_saved_view`'s job
+///   (editor authority over *another member's* bid), never `/visibility`.
+fn saved_view_transition_allowed(source: SavedViewVisibility, target: SavedViewVisibility) -> bool {
+    use SavedViewVisibility::{Personal, Proposed, Shared};
+    // Same-state is always an idempotent no-op.
+    if source == target {
+        return true;
+    }
+    matches!(
+        (source, target),
+        (Personal, Shared) | (Shared, Personal) | (Personal, Proposed) | (Proposed, Personal)
+    )
+}
+
 fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3451,6 +3959,26 @@ fn normalize_saved_view_name(raw: &str) -> Result<String, WorkspaceError> {
     if trimmed.chars().count() > MAX_SAVED_VIEW_NAME_CHARS {
         return Err(WorkspaceError::BadRequest(format!(
             "saved view name exceeds {MAX_SAVED_VIEW_NAME_CHARS} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Validate + canonicalize a dataset display name. Mirrors
+/// [`normalize_saved_view_name`]: an empty/whitespace-only name is a
+/// `BadRequest` (a blank layer label is meaningless), and an over-long name is
+/// a `BadRequest`. The trimmed form is what gets stored, so leading/trailing
+/// whitespace never lands in the document or the DB.
+fn normalize_dataset_name(raw: &str) -> Result<String, WorkspaceError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkspaceError::BadRequest(
+            "dataset name is empty".to_string(),
+        ));
+    }
+    if trimmed.chars().count() > MAX_DATASET_NAME_CHARS {
+        return Err(WorkspaceError::BadRequest(format!(
+            "dataset name exceeds {MAX_DATASET_NAME_CHARS} characters"
         )));
     }
     Ok(trimmed.to_string())
@@ -3636,6 +4164,10 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
             get(get_workspace_user_state),
         )
         .route(
+            "/api/workspaces/{workspace_id}/duplicate",
+            post(duplicate_workspace),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/archive",
             post(archive_workspace),
         )
@@ -3657,6 +4189,13 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct CreateWorkspaceRequest {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DuplicateWorkspaceRequest {
+    /// Optional name override for the copy. When absent (or blank) the copy is
+    /// named `Copy of <source name>`.
     pub name: Option<String>,
 }
 
@@ -3884,6 +4423,28 @@ async fn create_workspace(
 ) -> Response {
     let name = body.as_ref().and_then(|Json(body)| body.name.as_deref());
     match state.manager.create_workspace(&principal, name).await {
+        Ok(record) => (
+            StatusCode::CREATED,
+            Json(WorkspaceResponse::from_record(record, WorkspaceRole::Owner)),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn duplicate_workspace(
+    State(state): State<WorkspacesState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(workspace_id): Path<String>,
+    body: Option<Json<DuplicateWorkspaceRequest>>,
+) -> Response {
+    let name = body.as_ref().and_then(|Json(body)| body.name.as_deref());
+    match state
+        .manager
+        .duplicate_workspace(&workspace_id, &principal, name)
+        .await
+    {
+        // The caller always owns the copy.
         Ok(record) => (
             StatusCode::CREATED,
             Json(WorkspaceResponse::from_record(record, WorkspaceRole::Owner)),
@@ -4432,6 +4993,54 @@ pub mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, workspace.id);
         assert_eq!(rows[0].role, WorkspaceRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Routed"))
+            .await
+            .unwrap();
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+        ));
+
+        // Owner POSTs /duplicate → 201 Created, owns the copy named "Copy of …".
+        let app = workspace_router_with_principal(Arc::clone(&manager), owner);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/workspaces/{}/duplicate", workspace.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = response_json(res).await;
+        assert_eq!(body["name"], "Copy of Routed");
+        assert_eq!(body["role"], "owner");
+        assert_ne!(body["id"], serde_json::Value::String(workspace.id.clone()));
+
+        // A non-member POSTing /duplicate gets 404 — byte-identical to a missing
+        // workspace (never-leak). Duplication must not reveal it.
+        let stranger = principal("mallory@example.com", false);
+        let app2 = workspace_router_with_principal(Arc::clone(&manager), stranger);
+        let res2 = app2
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/workspaces/{}/duplicate", workspace.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -5460,6 +6069,114 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn presence_identity_is_never_persisted_into_document_json() {
+        // PRIVACY INVARIANT (#540 review): peer identity (display name, avatar,
+        // initial — and certainly any email) is EPHEMERAL session presence. It
+        // must NEVER cross into the persisted workspace document, or a stale
+        // identity / address would leak through `document_json` on every reload
+        // and to anyone the workspace is later shared with. Presence lives only
+        // on `Session::clients`; the document is built solely from sequenced
+        // commands. This guards that separation across a real persist+reload.
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Presence privacy"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+
+        // A connected client carries a fully-populated server-authored identity
+        // — name, avatar URL, and the precomputed initial — on its presence.
+        let identity = lucida_core::protocol::PeerIdentity {
+            display_name: "Grace Hopper".into(),
+            picture_url: Some("https://avatars.example.com/grace.png".into()),
+            initial: "G".into(),
+        };
+        // Apply a real document command too, so the document is non-empty and we
+        // prove identity stays out even alongside genuine document content. The
+        // annotation author is deliberately NOT an identity string.
+        let seq = {
+            let mut sess = live.session.lock().await;
+            sess.add_client(7, Some(identity.clone()));
+            assert!(
+                sess.clients.get(&7).unwrap().identity.is_some(),
+                "presence carries identity on the live session"
+            );
+            sess.apply(DocumentCommand::AddAnnotation {
+                dataset_id: DatasetId("wds-1".into()),
+                id: "pin-1".into(),
+                position: [1.0, 2.0],
+                end: None,
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: "anon".into(),
+                kind: lucida_core::scene::AnnotationKind::Point,
+                view: None,
+            })
+        };
+
+        // Persist exactly what the server writes: the session's document.
+        let persisted_json = {
+            let sess = live.session.lock().await;
+            store
+                .persist_document(&workspace.id, seq, &sess.document)
+                .await
+                .unwrap();
+            serde_json::to_string(&sess.document).unwrap()
+        };
+
+        // The bytes that hit `document_json` carry no presence identity at all.
+        let assert_no_identity = |json: &str, where_: &str| {
+            for needle in [
+                "Grace Hopper",
+                "avatars.example.com",
+                "grace.png",
+                "owner@example.com",
+                "display_name",
+                "picture_url",
+                "\"identity\"",
+                "\"initial\"",
+                "@",
+            ] {
+                assert!(
+                    !json.contains(needle),
+                    "{where_}: document_json must not contain presence identity \
+                     ({needle:?}); presence is ephemeral, never persisted: {json}"
+                );
+            }
+            // Sanity: the genuine document content IS there.
+            assert!(json.contains("pin-1"), "{where_}: document content present");
+        };
+        assert_no_identity(&persisted_json, "serialized session document");
+
+        // The client disconnects (presence is ephemeral), leaving the workspace
+        // idle so it can be evicted and rehydrated from the store below.
+        live.session.lock().await.remove_client(7);
+
+        // Reload through the real path: evict the live workspace, reopen it so the
+        // document is rehydrated straight from `document_json`. The reloaded
+        // DocumentState and its re-serialization are equally identity-free, and
+        // presence does not survive — `clients` is empty on the fresh session.
+        assert_eq!(manager.evict_idle_workspaces().await, 1);
+        let reopened = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        let reloaded_json = {
+            let sess = reopened.session.lock().await;
+            assert!(
+                sess.clients.is_empty(),
+                "reloaded session starts with no presence (ephemeral)"
+            );
+            serde_json::to_string(&sess.document).unwrap()
+        };
+        assert_no_identity(&reloaded_json, "reloaded document");
+    }
+
+    #[tokio::test]
     async fn active_live_workspace_is_not_idle_evicted() {
         let store = fresh_store().await;
         let owner = principal("owner@example.com", false);
@@ -5473,7 +6190,7 @@ pub mod tests {
             idle_eviction_config(),
         );
         let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
-        live.session.lock().await.add_client(42);
+        live.session.lock().await.add_client(42, None);
 
         let evicted = manager.evict_idle_workspaces().await;
         assert_eq!(evicted, 0);
@@ -6077,6 +6794,239 @@ pub mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reread.visibility, SavedViewVisibility::Shared);
+    }
+
+    #[test]
+    fn saved_view_transition_allow_list_is_closed_by_construction() {
+        use SavedViewVisibility::{Personal, Proposed, Shared};
+        // The four legal creator transitions.
+        assert!(saved_view_transition_allowed(Personal, Shared));
+        assert!(saved_view_transition_allowed(Shared, Personal));
+        assert!(saved_view_transition_allowed(Personal, Proposed));
+        assert!(saved_view_transition_allowed(Proposed, Personal));
+        // Same-state is an idempotent no-op for every state.
+        assert!(saved_view_transition_allowed(Personal, Personal));
+        assert!(saved_view_transition_allowed(Shared, Shared));
+        assert!(saved_view_transition_allowed(Proposed, Proposed));
+        // The illegal transitions #817 closes: Shared cannot be demoted into the
+        // review queue, and a proposal cannot self-approve straight to shared.
+        assert!(!saved_view_transition_allowed(Shared, Proposed));
+        assert!(!saved_view_transition_allowed(Proposed, Shared));
+    }
+
+    /// #817: the `/visibility` endpoint may only perform the creator
+    /// transition allow-list. This proves the gate is closed by construction:
+    /// the two illegal transitions (`Shared→Proposed`, and the
+    /// `Proposed→Shared` self-approve bypass attempted by an editor-creator) are
+    /// `BadRequest`; every legal transition succeeds; `→Shared` by a non-editor
+    /// creator keeps the existing authority error; never-leak and `created_by`
+    /// are preserved.
+    #[tokio::test]
+    async fn set_saved_view_visibility_enforces_transition_allow_list() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("Transition gate"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+
+        // --- never-leak: a member who is not the creator of a Personal view
+        // gets NotFound, uniform with a missing id (the view's existence is
+        // never confirmed via the visibility endpoint). ---
+        let viewer_personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer private",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let leak_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &viewer_personal.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(leak_err, WorkspaceError::NotFound),
+            "non-creator rescope of a personal view must be NotFound, got {leak_err:?}"
+        );
+        let missing_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                "does-not-exist",
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(missing_err, WorkspaceError::NotFound),
+            "missing id must be NotFound, identical to the hidden personal view"
+        );
+
+        // --- legal: Personal -> Proposed (creator proposes their own view). ---
+        let proposing = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "to propose",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &proposing.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+        assert_eq!(proposed.created_by, normalize_email(&editor.email));
+
+        // --- illegal: Proposed -> Shared by the editor-creator (the
+        // self-approve bypass) MUST be BadRequest, NOT a silent share. Sharing a
+        // proposal is exclusively the editor review queue (`approve_saved_view`).
+        let bypass_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &proposed.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(bypass_err, WorkspaceError::BadRequest(_)),
+            "Proposed->Shared self-approve bypass must be BadRequest, got {bypass_err:?}"
+        );
+        // It is genuinely still Proposed in the store — the bypass changed
+        // nothing.
+        let still_proposed = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_proposed.visibility, SavedViewVisibility::Proposed);
+
+        // --- legal: Proposed -> Personal (creator withdraws their proposal). ---
+        let withdrawn = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &proposed.id,
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(withdrawn.visibility, SavedViewVisibility::Personal);
+        assert_eq!(withdrawn.created_by, normalize_email(&editor.email));
+
+        // --- legal: Personal -> Shared by an editor-creator; created_by is
+        // preserved across the rescope (authorship is never reassigned). ---
+        let to_share = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "to share",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let shared = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &to_share.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+        assert_eq!(shared.visibility, SavedViewVisibility::Shared);
+        assert_eq!(
+            shared.created_by,
+            normalize_email(&editor.email),
+            "created_by must be preserved across a legal rescope"
+        );
+        assert_eq!(shared.created_by_name, to_share.created_by_name);
+
+        // --- illegal: Shared -> Proposed (a shared view cannot be demoted into
+        // the review queue) MUST be BadRequest. ---
+        let demote_to_queue_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &shared.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(demote_to_queue_err, WorkspaceError::BadRequest(_)),
+            "Shared->Proposed must be BadRequest, got {demote_to_queue_err:?}"
+        );
+
+        // --- legal: Shared -> Personal by the creator (make it private again). ---
+        let private_again = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &shared.id,
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        assert_eq!(private_again.visibility, SavedViewVisibility::Personal);
+        assert_eq!(private_again.created_by, normalize_email(&editor.email));
+
+        // --- authority preserved: ->Shared by a creator who is NOT an editor
+        // (a viewer) is the existing authority error (Forbidden), even though
+        // Personal->Shared is itself on the allow-list. ---
+        let viewer_to_share = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "viewer wants to share",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let authority_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &viewer,
+                &viewer_to_share.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(authority_err, WorkspaceError::Forbidden),
+            "non-editor creator promoting to Shared must be Forbidden, got {authority_err:?}"
+        );
     }
 
     #[test]
@@ -6876,6 +7826,363 @@ pub mod tests {
         );
     }
 
+    // --- Dataset rename (#701) -------------------------------------------
+
+    /// Seed a workspace with a single dataset whose manifest name and DB
+    /// `display_name` are both `name`, persisted at `seq`. Returns the
+    /// workspace id and the workspace-dataset id so a test can then open the
+    /// live workspace (which loads this document from the store) and rename it.
+    async fn seed_workspace_with_dataset(
+        store: &SqliteWorkspaceStore,
+        owner: &AuthPrincipal,
+        name: &str,
+    ) -> (String, DatasetId) {
+        let workspace = store.create_workspace(owner, Some("Demo")).await.unwrap();
+        let workspace_dataset_id = DatasetId("wds_rename".into());
+        let mut doc = DocumentState::default();
+        doc.manifests.insert(
+            workspace_dataset_id.clone(),
+            lucida_content::DatasetManifest::new(
+                workspace_dataset_id.clone(),
+                name.into(),
+                lucida_content::DatasetKind::Single,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                None,
+            ),
+        );
+        store
+            .persist_dataset_opened(
+                &workspace.id,
+                &workspace_dataset_id,
+                "ds_source",
+                "file:///data/original.zarr",
+                name,
+                &owner.email,
+                1,
+                &doc,
+            )
+            .await
+            .unwrap();
+        (workspace.id, workspace_dataset_id)
+    }
+
+    // THE HEADLINE TEST: a rename must survive close + reopen. The prior
+    // (rejected) attempt updated only the DB display_name and a web-local
+    // override, so the persisted document still carried the old manifest name
+    // and the rename was silently lost on reopen. This drives the rename
+    // through the document-mutation path, evicts the live workspace, reopens
+    // it (which loads the persisted document_json), and asserts the
+    // client-visible manifest name is the NEW one.
+    #[tokio::test]
+    async fn rename_dataset_survives_evict_and_reopen() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new_with_runtime_config(
+            Arc::new(store.clone()),
+            ProxyConfig::defaults(),
+            idle_eviction_config(),
+        );
+
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+        // Sanity: the live document carries the original name.
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "original.zarr"
+        );
+
+        let (seq, _) = manager
+            .rename_dataset(&live, &owner, &wds_id, "Renamed Layer")
+            .await
+            .unwrap();
+        assert_eq!(seq, 2, "rename should advance the document seq");
+        // In-session reflection is immediate.
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "Renamed Layer"
+        );
+
+        // Evict the live workspace so the next open reloads from the store.
+        let evicted = manager.evict_idle_workspaces().await;
+        assert_eq!(evicted, 1);
+        assert_eq!(manager.live_workspace_count().await, 0);
+
+        // Reopen: the client-visible document manifest name is the NEW one.
+        let reopened = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+        assert!(!Arc::ptr_eq(&live, &reopened));
+        let reopened_name = reopened.session.lock().await.document.manifests[&wds_id]
+            .name
+            .clone();
+        assert_eq!(
+            reopened_name, "Renamed Layer",
+            "the renamed name must survive reopen (loaded from persisted document_json)"
+        );
+
+        // The server-private DB display_name is kept in sync too, so listings
+        // and restored bindings agree.
+        let db_name = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name;
+        assert_eq!(db_name, "Renamed Layer");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_trims_and_persists_trimmed_name() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "  Padded Name  ")
+            .await
+            .unwrap();
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "Padded Name"
+        );
+        let db_name = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name;
+        assert_eq!(db_name, "Padded Name");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_is_editor_only_and_never_leaks() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let viewer = principal("viewer@example.com", false);
+        manager
+            .upsert_member(
+                &workspace_id,
+                &owner,
+                &viewer.email,
+                None,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        // A viewer cannot rename — Forbidden (role-first).
+        let err = manager
+            .rename_dataset(&live, &viewer, &wds_id, "viewer rename")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // A non-member cannot rename — Forbidden, identical to the viewer, so
+        // membership is never confirmed.
+        let stranger = principal("stranger@example.com", false);
+        let err = manager
+            .rename_dataset(&live, &stranger, &wds_id, "stranger rename")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::Forbidden));
+
+        // The denied renames did not mutate anything.
+        assert_eq!(
+            live.session.lock().await.document.manifests[&wds_id].name,
+            "original.zarr"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_missing_id_is_not_found() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, _wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        // An editor renaming a dataset that does not exist in the document
+        // gets NotFound (uniform with a dataset that was never opened) — and
+        // the seq does not advance (no phantom mutation persisted).
+        let before_seq = live.session.lock().await.seq;
+        let err = manager
+            .rename_dataset(
+                &live,
+                &owner,
+                &DatasetId("wds_ghost".into()),
+                "ghost rename",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+        assert_eq!(live.session.lock().await.seq, before_seq);
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_validation_rejects_empty_whitespace_and_overlong() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        for bad in ["", "   ", "\t\n"] {
+            let err = manager
+                .rename_dataset(&live, &owner, &wds_id, bad)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, WorkspaceError::BadRequest(_)),
+                "empty/whitespace name {bad:?} should be BadRequest, got {err:?}"
+            );
+        }
+
+        let overlong = "x".repeat(MAX_DATASET_NAME_CHARS + 1);
+        let err = manager
+            .rename_dataset(&live, &owner, &wds_id, &overlong)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::BadRequest(_)));
+
+        // None of the rejected renames mutated the document or advanced seq.
+        let sess = live.session.lock().await;
+        assert_eq!(sess.document.manifests[&wds_id].name, "original.zarr");
+        assert_eq!(sess.seq, 1);
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_leaves_source_url_unchanged() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        let url_before = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .canonical_url;
+
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "Renamed")
+            .await
+            .unwrap();
+
+        let after = store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.canonical_url, url_before);
+        assert_eq!(after.canonical_url, "file:///data/original.zarr");
+        // The source id is unchanged; only the per-workspace label moved.
+        assert_eq!(after.dataset_source_id, "ds_source");
+        assert_eq!(after.display_name, "Renamed");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_leaves_existing_saved_view_name_unchanged() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        // A saved view references dataset ids, not names; renaming the dataset
+        // must not rewrite the saved view's own name.
+        let saved = manager
+            .create_saved_view(
+                &workspace_id,
+                &owner,
+                "My Saved View",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap();
+
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "Renamed Dataset")
+            .await
+            .unwrap();
+
+        let after = manager
+            .get_saved_view(&workspace_id, &owner, &saved.id)
+            .await
+            .unwrap();
+        assert_eq!(after.name, "My Saved View");
+    }
+
+    #[tokio::test]
+    async fn rename_dataset_broadcasts_command_to_peers() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let (workspace_id, wds_id) =
+            seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+        // A co-present peer subscribes to the live broadcast channel.
+        let mut rx = live.tx.subscribe();
+
+        manager
+            .rename_dataset(&live, &owner, &wds_id, "Live Rename")
+            .await
+            .unwrap();
+        // The handler is what broadcasts in production; here we assert the
+        // rename produced the document the peer would converge on, then
+        // emulate the handler's broadcast and confirm the peer receives a
+        // CommandBroadcast carrying the rename.
+        let (seq, command) = {
+            // Re-derive what the handler sends: it forwards the same
+            // (seq, RenameDataset) returned by rename_dataset. We already
+            // applied; reconstruct the broadcast item exactly as the handler.
+            let sess = live.session.lock().await;
+            (
+                sess.seq,
+                DocumentCommand::RenameDataset {
+                    id: wds_id.clone(),
+                    name: "Live Rename".to_string(),
+                },
+            )
+        };
+        let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
+        let ack_msg = ServerMessage::Ack { seq };
+        // `BroadcastItem` is not `Debug`, so don't `.unwrap()` the send result
+        // (its error would need Debug); a failed send just means no receiver.
+        let _ = live.tx.send(BroadcastItem::CommandBroadcast {
+            sender: u64::MAX,
+            broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+            ack_json: serde_json::to_string(&ack_msg).unwrap(),
+        });
+
+        let item = rx.recv().await.unwrap();
+        match item {
+            BroadcastItem::CommandBroadcast { broadcast_json, .. } => {
+                assert!(broadcast_json.contains("\"type\":\"rename_dataset\""));
+                assert!(broadcast_json.contains("Live Rename"));
+            }
+            _ => panic!("expected a CommandBroadcast broadcast item"),
+        }
+    }
+
     #[tokio::test]
     async fn same_source_can_have_distinct_workspace_dataset_ids() {
         let store = fresh_store().await;
@@ -6991,5 +8298,1656 @@ pub mod tests {
                 .registered_layouts
                 .contains_key(&DatasetId("ds-a".into()))
         );
+    }
+    // ===================================================================
+    // RED TEAM (#817 issue-sweep): probe the new transition allow-list and
+    // the surrounding never-leak / self-approve invariants.
+    // ===================================================================
+
+    /// RED TEAM #1 — the self-approve bypass via `approve_saved_view`.
+    ///
+    /// The #817 change closes Proposed->Shared on `/visibility`
+    /// (`set_saved_view_visibility`) "so sharing a proposal stays exclusively
+    /// the editor review queue's job (`approve_saved_view`)". The whole point
+    /// of a *review queue* is that someone OTHER than the proposer signs off.
+    /// This test drives the entire creator-only path the change permits
+    /// (Personal -> Proposed on /visibility, which is on the allow-list) and
+    /// then has the SAME principal approve their OWN proposal. If that yields
+    /// Shared, the editor-creator has achieved Proposed->Shared on their own
+    /// view with no second party — the exact outcome the allow-list was added
+    /// to forbid, simply routed through approve instead of /visibility.
+    #[tokio::test]
+    async fn redteam_editor_self_approves_own_proposal_proposed_to_shared() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("self approve"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        manager
+            .upsert_member(
+                &workspace.id,
+                &owner,
+                &editor.email,
+                None,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        // Editor creates a Personal view, then proposes it via the very
+        // /visibility transition the allow-list blesses (Personal -> Proposed).
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "my view",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        // The SAME editor now approves their OWN proposal.
+        let approve_result = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await;
+
+        // The review-queue intent: a proposer cannot be their own reviewer, so
+        // self-approval is denied (Forbidden — an authorization act on the view,
+        // like the creator-only re-scope gate) and must NOT share the view.
+        assert!(
+            matches!(approve_result, Err(WorkspaceError::Forbidden)),
+            "self-approve must be Forbidden (creator != reviewer), got {approve_result:?}"
+        );
+        let shared_in_store = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            shared_in_store.visibility,
+            SavedViewVisibility::Shared,
+            "SELF-APPROVE BYPASS: editor-creator drove their own proposal \
+             Proposed->Shared via approve_saved_view. The /visibility allow-list \
+             forbids Proposed->Shared for the creator, and approve must enforce \
+             the same reviewer!=creator rule so the same person cannot both \
+             propose and approve — preserving the review queue.",
+        );
+        // The proposal is untouched: still Proposed, still the editor's, free for
+        // a *different* editor to review.
+        assert_eq!(shared_in_store.visibility, SavedViewVisibility::Proposed);
+    }
+
+    /// RED TEAM #2 — single-editor (owner-only) workspace: the proposer is the
+    /// only person who CAN review. The review queue is structurally a no-op
+    /// rubber stamp. Owner creates -> proposes -> self-approves -> Shared.
+    #[tokio::test]
+    async fn redteam_single_owner_self_approves_in_solo_workspace() {
+        let store = fresh_store().await;
+        let owner = principal("solo@example.com", false);
+        let workspace = store.create_workspace(&owner, Some("solo")).await.unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "solo view",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        let approve_result = manager
+            .approve_saved_view(&workspace.id, &owner, &proposed.id)
+            .await;
+        assert!(
+            matches!(approve_result, Err(WorkspaceError::Forbidden)),
+            "solo self-approve must be Forbidden (creator != reviewer), got {approve_result:?}"
+        );
+        let after = store
+            .get_saved_view(&workspace.id, &proposed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            after.visibility,
+            SavedViewVisibility::Shared,
+            "SELF-APPROVE BYPASS (solo): the sole owner proposed and approved \
+             their own view, reaching Shared with literally no second party."
+        );
+        // The view is not stranded: it stays Proposed (and the owner can still
+        // withdraw it via the legal Proposed->Personal /visibility path, or share
+        // their own view directly via Personal->Shared — the queue is for a
+        // *different* reviewer).
+        assert_eq!(after.visibility, SavedViewVisibility::Proposed);
+    }
+
+    /// RED TEAM #3 — confirm the /visibility allow-list itself holds for the
+    /// two illegal direct transitions, even attempted by an owner (highest
+    /// role). These SHOULD be BadRequest (this is the part the change gets
+    /// right; included so the report is grounded).
+    #[tokio::test]
+    async fn redteam_visibility_endpoint_rejects_illegal_transitions_for_owner() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("owner gate"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        // Proposed -> Shared (self-approve) via /visibility must be BadRequest.
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "p1",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        let err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &proposed.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WorkspaceError::BadRequest(_)),
+            "Proposed->Shared via /visibility must be BadRequest, got {err:?}"
+        );
+
+        // Shared -> Proposed via /visibility must be BadRequest.
+        let p2 = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "p2",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let shared = manager
+            .set_saved_view_visibility(&workspace.id, &owner, &p2.id, SavedViewVisibility::Shared)
+            .await
+            .unwrap();
+        let err2 = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &shared.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err2, WorkspaceError::BadRequest(_)),
+            "Shared->Proposed via /visibility must be BadRequest, got {err2:?}"
+        );
+    }
+
+    /// RED TEAM #4 — never-leak ordering on the NEW allow-list deny.
+    ///
+    /// A workspace MEMBER who is not the creator attempts an ILLEGAL transition
+    /// (Proposed->Shared) on another member's *Proposed* view. Because Proposed
+    /// is creator-private (ensure_saved_view_readable treats Proposed like
+    /// Personal), the readability check must fire FIRST and yield NotFound —
+    /// identical to a missing id — so the BadRequest allow-list error never
+    /// leaks the view's existence. If this ever returned BadRequest, a stranger
+    /// could distinguish "exists but illegal" from "absent".
+    #[tokio::test]
+    async fn redteam_illegal_transition_does_not_leak_hidden_proposed_view() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let other_editor = principal("other-editor@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("leak gate"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for p in [&editor, &other_editor] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, WorkspaceRole::Editor)
+                .await
+                .unwrap();
+        }
+
+        // `editor` owns a Proposed view (creator-private until reviewed).
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "hidden",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+
+        // `other_editor` (a non-creator member) attempts the illegal
+        // Proposed->Shared transition on a view they cannot read.
+        let leak_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &other_editor,
+                &proposed.id,
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+        let missing_err = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &other_editor,
+                "does-not-exist",
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap_err();
+
+        // Both must be NotFound (indistinguishable). A BadRequest here would be
+        // a never-leak hole: it confirms the hidden Proposed view exists.
+        assert!(
+            matches!(leak_err, WorkspaceError::NotFound),
+            "NEVER-LEAK: illegal transition on a hidden Proposed view must be \
+             NotFound (uniform with a missing id), got {leak_err:?}"
+        );
+        assert!(matches!(missing_err, WorkspaceError::NotFound));
+    }
+
+    /// RED TEAM #5 — created_by preservation across approve (the only
+    /// Proposed->Shared path). Confirms authorship is not reassigned to the
+    /// reviewer. (Sanity guard for the created_by-tampering axis.)
+    #[tokio::test]
+    async fn redteam_approve_preserves_created_by_not_reviewer() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let viewer = principal("viewer@example.com", false);
+        let workspace = store.create_workspace(&owner, Some("attr")).await.unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for (p, role) in [
+            (&editor, WorkspaceRole::Editor),
+            (&viewer, WorkspaceRole::Viewer),
+        ] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, role)
+                .await
+                .unwrap();
+        }
+        let proposed = manager
+            .create_saved_view(
+                &workspace.id,
+                &viewer,
+                "bid",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        let approved = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            approved.created_by,
+            normalize_email(&viewer.email),
+            "created_by must stay the proposer, not become the reviewer"
+        );
+    }
+
+    /// The self-approve guard must NOT be over-broad: a *different* editor can
+    /// still approve a proposal whose creator is themselves an editor. This is
+    /// the precise over-reach risk of a creator!=reviewer check — it must gate on
+    /// the *individual*, not the role, so the normal two-party review flow keeps
+    /// working when the proposer happens to be an editor/owner.
+    #[tokio::test]
+    async fn different_editor_can_approve_an_editor_creators_proposal() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let editor = principal("editor@example.com", false);
+        let reviewer = principal("reviewer@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("two editors"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+        for p in [&editor, &reviewer] {
+            manager
+                .upsert_member(&workspace.id, &owner, &p.email, None, WorkspaceRole::Editor)
+                .await
+                .unwrap();
+        }
+
+        // An editor creates and proposes their own view (legal Personal->Proposed).
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &editor,
+                "shared candidate",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &editor,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        // The creator-editor still cannot self-approve...
+        let self_err = manager
+            .approve_saved_view(&workspace.id, &editor, &proposed.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(self_err, WorkspaceError::Forbidden));
+
+        // ...but a DIFFERENT editor can — the two-party review flow is intact and
+        // the original author keeps attribution.
+        let approved = manager
+            .approve_saved_view(&workspace.id, &reviewer, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(approved.visibility, SavedViewVisibility::Shared);
+        assert_eq!(approved.created_by, normalize_email(&editor.email));
+    }
+
+    /// The self-approve guard is scoped to APPROVE only: a creator may still
+    /// self-*reject* (withdraw) their own proposal, reverting it to their own
+    /// Personal view (Proposed->Personal). Rejecting is non-destructive and the
+    /// equivalent withdraw is already legal via /visibility, so it must keep
+    /// working for the proposer.
+    #[tokio::test]
+    async fn creator_can_self_reject_to_withdraw_own_proposal() {
+        let store = fresh_store().await;
+        let owner = principal("owner@example.com", false);
+        let workspace = store
+            .create_workspace(&owner, Some("withdraw"))
+            .await
+            .unwrap();
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+        let personal = manager
+            .create_saved_view(
+                &workspace.id,
+                &owner,
+                "to withdraw",
+                SavedView::empty([800, 600]),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        let proposed = manager
+            .set_saved_view_visibility(
+                &workspace.id,
+                &owner,
+                &personal.id,
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposed.visibility, SavedViewVisibility::Proposed);
+
+        // The creator rejects their OWN proposal: allowed (withdraw), reverts to
+        // their Personal view non-destructively.
+        let rejected = manager
+            .reject_saved_view(&workspace.id, &owner, &proposed.id)
+            .await
+            .unwrap();
+        assert_eq!(rejected.visibility, SavedViewVisibility::Personal);
+        assert_eq!(rejected.created_by, normalize_email(&owner.email));
+        assert_eq!(rejected.name, "to withdraw");
+    }
+
+    // ===================================================================
+    // Duplicate workspace (#698): a private copy that never transfers the
+    // source's members or any permission. Security-sensitive — see the
+    // headline `..._never_copies_members_or_link_access` test.
+    // ===================================================================
+
+    /// Open a dataset into a workspace via the store the way the runtime does:
+    /// a fresh workspace-local id, a manifest in the document, and a
+    /// `workspace_datasets` membership row. Returns the workspace-local id.
+    async fn open_dataset_into(
+        store: &SqliteWorkspaceStore,
+        workspace_id: &str,
+        owner: &AuthPrincipal,
+        source_id: &str,
+        url: &str,
+        display_name: &str,
+        seq: u64,
+    ) -> DatasetId {
+        let wds_id = DatasetId(format!("wds-{}", uuid::Uuid::new_v4().simple()));
+        // Carry the prior document forward so multiple opens accumulate.
+        let mut doc = store
+            .get_workspace(workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .document;
+        doc.manifests.insert(
+            wds_id.clone(),
+            lucida_content::DatasetManifest::new(
+                wds_id.clone(),
+                display_name.into(),
+                lucida_content::DatasetKind::Single,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                None,
+            ),
+        );
+        store
+            .persist_dataset_opened(
+                workspace_id,
+                &wds_id,
+                source_id,
+                url,
+                display_name,
+                &owner.email,
+                seq,
+                &doc,
+            )
+            .await
+            .unwrap();
+        wds_id
+    }
+
+    fn view_over(order: &[DatasetId]) -> SavedView {
+        let mut v = SavedView::empty([800, 600]);
+        for id in order {
+            v.dataset_order.push(id.clone());
+            v.active_layouts
+                .insert(id.clone(), lucida_content::LayoutId("default".into()));
+        }
+        v
+    }
+
+    /// Seed a collaborative pin on `dataset_id` carrying the author's captured
+    /// view (`Annotation::view`), keyed by `dataset_id` across every id-keyed
+    /// field of the embedded view. Applies the same `AddAnnotation` command the
+    /// runtime does and persists the document, so a later duplicate must remap
+    /// the embedded view onto the copy's ids (the regression this guards).
+    async fn seed_pin_with_view(
+        store: &SqliteWorkspaceStore,
+        workspace_id: &str,
+        owner: &AuthPrincipal,
+        dataset_id: &DatasetId,
+        seq: u64,
+    ) {
+        // A captured view whose every id-keyed map references `dataset_id`.
+        let mut view = SavedView::empty([1024, 768]);
+        view.dataset_order.push(dataset_id.clone());
+        view.active_layouts.insert(
+            dataset_id.clone(),
+            lucida_content::LayoutId("default".into()),
+        );
+        view.dataset_settings.insert(
+            dataset_id.clone(),
+            lucida_core::scene::DatasetDisplaySettings::default(),
+        );
+        view.auto_contrast.insert(dataset_id.clone(), false);
+
+        let mut doc = store
+            .get_workspace(workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .document;
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: dataset_id.clone(),
+            id: "pin-with-view".into(),
+            position: [3.0, 4.0],
+            end: None,
+            z: 1.0,
+            t: 0,
+            c: 0,
+            author: owner.email.clone(),
+            kind: lucida_core::scene::AnnotationKind::Point,
+            view: Some(Box::new(view)),
+        });
+        store
+            .persist_document(workspace_id, seq, &doc)
+            .await
+            .unwrap();
+    }
+
+    /// Seed a "rich" source workspace owned by `owner`:
+    /// 2 datasets (custom display names), a Shared view (set as default), a
+    /// Personal view by `other`, a Proposed view by `other`, an extra member,
+    /// and link access turned ON with a non-default (editor) role.
+    /// Returns (workspace_id, [dataset ids], shared_view_id).
+    async fn seed_rich_source(
+        store: &SqliteWorkspaceStore,
+        owner: &AuthPrincipal,
+        other: &AuthPrincipal,
+    ) -> (String, Vec<DatasetId>, String) {
+        let ws = store
+            .create_workspace(owner, Some("My Project"))
+            .await
+            .unwrap();
+        let a = open_dataset_into(
+            store,
+            &ws.id,
+            owner,
+            "src-a",
+            "file:///data/a.zarr",
+            "Alpha",
+            1,
+        )
+        .await;
+        let b = open_dataset_into(
+            store,
+            &ws.id,
+            owner,
+            "src-b",
+            "file:///data/b.zarr",
+            "Beta",
+            2,
+        )
+        .await;
+
+        let shared = store
+            .create_saved_view(
+                &ws.id,
+                "Team view",
+                owner,
+                view_over(&[a.clone(), b.clone()]),
+                SavedViewVisibility::Shared,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .create_saved_view(
+                &ws.id,
+                "Bob private",
+                other,
+                view_over(std::slice::from_ref(&a)),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap();
+        store
+            .create_saved_view(
+                &ws.id,
+                "Bob proposal",
+                other,
+                view_over(std::slice::from_ref(&b)),
+                SavedViewVisibility::Proposed,
+            )
+            .await
+            .unwrap();
+        store
+            .set_default_saved_view(&ws.id, Some(&shared.id))
+            .await
+            .unwrap();
+
+        // Extra member + link access ON with a non-default role.
+        store
+            .upsert_member(
+                &ws.id,
+                &other.email,
+                &other.display_name,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+        store
+            .update_link_access(
+                &ws.id,
+                WorkspaceLinkAccess::AnyoneWithLink,
+                WorkspaceRole::Editor,
+            )
+            .await
+            .unwrap();
+
+        (ws.id, vec![a, b], shared.id)
+    }
+
+    fn manager_for(store: &SqliteWorkspaceStore) -> WorkspaceManager {
+        WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults())
+    }
+
+    #[tokio::test]
+    async fn duplicate_is_owned_by_caller_named_copy_of_and_restricted_owner_only() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &bob).await;
+        let manager = manager_for(&store);
+
+        // The owner duplicates their own workspace.
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        assert_ne!(copy.id, source_id, "the copy is a new workspace");
+        assert_eq!(copy.name, "Copy of My Project");
+        assert_eq!(copy.created_by, "alice@example.com");
+        assert_eq!(copy.seq, 0);
+        assert!(copy.archived_at.is_none());
+
+        // Restricted, owner-only, link access OFF (the new-workspace defaults).
+        let sharing = store.sharing_settings(&copy.id).await.unwrap().unwrap();
+        assert_eq!(sharing.link_access, WorkspaceLinkAccess::Restricted);
+        assert_eq!(sharing.members.len(), 1);
+        assert_eq!(sharing.members[0].email, "alice@example.com");
+        assert_eq!(sharing.members[0].role, WorkspaceRole::Owner);
+    }
+
+    /// THE KEY SECURITY TEST. The source has extra members + link access ON +
+    /// a non-default link role; the duplicate must carry NONE of it — only the
+    /// duplicator as a member, link access OFF. Members/permissions never
+    /// transfer.
+    #[tokio::test]
+    async fn duplicate_never_copies_members_or_link_access() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &bob).await;
+
+        // Sanity: the SOURCE really does have the extra member + link sharing.
+        let src_sharing = store.sharing_settings(&source_id).await.unwrap().unwrap();
+        assert_eq!(src_sharing.members.len(), 2);
+        assert_eq!(src_sharing.link_access, WorkspaceLinkAccess::AnyoneWithLink);
+        assert_eq!(src_sharing.link_role, WorkspaceRole::Editor);
+
+        let manager = manager_for(&store);
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        let copy_sharing = store.sharing_settings(&copy.id).await.unwrap().unwrap();
+        // ONLY the duplicator is a member.
+        assert_eq!(
+            copy_sharing.members.len(),
+            1,
+            "no source member may carry over"
+        );
+        assert_eq!(copy_sharing.members[0].email, "alice@example.com");
+        assert!(
+            !copy_sharing
+                .members
+                .iter()
+                .any(|m| m.email == "bob@example.com"),
+            "the source's other member must NOT appear in the copy"
+        );
+        // Link access is the default OFF — the source's AnyoneWithLink/editor
+        // settings did not transfer.
+        assert_eq!(copy_sharing.link_access, WorkspaceLinkAccess::Restricted);
+        assert_eq!(copy_sharing.link_role, WorkspaceRole::Viewer);
+
+        // And bob, an editor on the source, has NO access to the copy at all
+        // (the manager's never-leak check returns NotFound).
+        let err = manager.get_workspace_for(&copy.id, &bob).await.unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn duplicate_copies_datasets_with_display_names() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &bob).await;
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        let mut copied = store.list_dataset_sources(&copy.id).await.unwrap();
+        copied.sort_by(|x, y| x.display_name.cmp(&y.display_name));
+        assert_eq!(copied.len(), 2);
+        assert_eq!(copied[0].display_name, "Alpha");
+        assert_eq!(copied[1].display_name, "Beta");
+        // Same GLOBAL source ids (datasets are shared by source), but FRESH
+        // workspace-local ids (independent membership).
+        let src = store.list_dataset_sources(&source_id).await.unwrap();
+        let src_source_ids: std::collections::HashSet<_> =
+            src.iter().map(|d| d.dataset_source_id.clone()).collect();
+        let copy_source_ids: std::collections::HashSet<_> =
+            copied.iter().map(|d| d.dataset_source_id.clone()).collect();
+        assert_eq!(src_source_ids, copy_source_ids, "global source ids reused");
+        for d in &copied {
+            assert!(
+                !src.iter()
+                    .any(|s| s.workspace_dataset_id == d.workspace_dataset_id),
+                "copied datasets must get fresh workspace-local ids"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_copies_only_shared_views_attributed_to_duplicator() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &bob).await;
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        // List as the duplicator (an editor would see proposed views too; we
+        // list as the owner, who can edit, to PROVE no proposed view exists).
+        let copied_views = store
+            .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+            .await
+            .unwrap();
+        assert_eq!(copied_views.len(), 1, "only the Shared view is copied");
+        let copied = &copied_views[0];
+        assert_eq!(copied.name, "Team view");
+        assert_eq!(copied.visibility, SavedViewVisibility::Shared);
+        // Re-attributed to the duplicator (not bob, not the original author if
+        // it differed) — the assumed-default attribution.
+        assert_eq!(copied.created_by, "alice@example.com");
+        // Neither bob's personal nor bob's proposed view crossed over.
+        assert!(
+            !copied_views.iter().any(|v| v.name.starts_with("Bob")),
+            "no personal/proposed view of another user may be copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_sets_default_view_to_the_copied_view() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &bob).await;
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        let default_id = copy
+            .default_saved_view_id
+            .clone()
+            .expect("the copy should have a default view (source default was Shared)");
+        let copied_views = store
+            .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+            .await
+            .unwrap();
+        // The default points at the COPIED view (a new id in the copy), not the
+        // source's view id.
+        assert_eq!(copied_views.len(), 1);
+        assert_eq!(default_id, copied_views[0].id);
+        assert_ne!(
+            Some(default_id),
+            store
+                .get_workspace(&source_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .default_saved_view_id,
+            "the copy's default must be the copied view, not the source's"
+        );
+    }
+
+    /// The id-consistency contract end-to-end: the copied document and the
+    /// copied saved view must resolve against the COPY's datasets, with no
+    /// dangling reference to the source's ids. Proven by reopening the copy and
+    /// checking its live document's dataset ids match its membership rows and
+    /// the copied saved view's `dataset_order`.
+    #[tokio::test]
+    async fn duplicate_document_and_views_resolve_to_copied_datasets() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, source_dataset_ids, _shared) = seed_rich_source(&store, &owner, &bob).await;
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        // The copy's membership ids — the ground truth set of dataset ids the
+        // copy's document/views are allowed to reference.
+        let copy_members = store.list_dataset_sources(&copy.id).await.unwrap();
+        let copy_ids: std::collections::HashSet<DatasetId> = copy_members
+            .iter()
+            .map(|d| d.workspace_dataset_id.clone())
+            .collect();
+        assert_eq!(copy_ids.len(), 2);
+        // None of the copy's ids are the source's ids.
+        for src in &source_dataset_ids {
+            assert!(!copy_ids.contains(src), "copy must not reuse source ids");
+        }
+
+        // (a) Document: every manifest key resolves to a copied membership id,
+        // and the embedded manifest.dataset_id agrees.
+        for (id, manifest) in &copy.document.manifests {
+            assert!(
+                copy_ids.contains(id),
+                "document manifest key must be a copied id"
+            );
+            assert_eq!(&manifest.dataset_id, id, "embedded manifest id remapped");
+        }
+        assert_eq!(copy.document.manifests.len(), 2);
+
+        // (b) Copied saved view: dataset_order/active_layouts reference copied
+        // ids only — no dangling source id.
+        let copied_views = store
+            .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+            .await
+            .unwrap();
+        let copied_view = &copied_views[0].view;
+        assert_eq!(copied_view.dataset_order.len(), 2);
+        for id in &copied_view.dataset_order {
+            assert!(
+                copy_ids.contains(id),
+                "saved-view dataset_order must resolve to a copied dataset id"
+            );
+        }
+        for id in copied_view.active_layouts.keys() {
+            assert!(
+                copy_ids.contains(id),
+                "saved-view layout key must be a copied id"
+            );
+        }
+
+        // (c) Reopen the copy: the live document loaded from persisted JSON
+        // carries exactly the copy's dataset ids (a broken copy would dangle).
+        let live = manager.live_workspace(&copy.id, &owner).await.unwrap();
+        let live_ids: std::collections::HashSet<DatasetId> = live
+            .session
+            .lock()
+            .await
+            .document
+            .manifests
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            live_ids, copy_ids,
+            "reopened copy resolves to its own datasets"
+        );
+    }
+
+    /// End-to-end proof for the embedded-author-view remap (the carrier missed
+    /// in the first cut of #698): a pin carries the author's captured view
+    /// (`Annotation::view`), itself keyed by the workspace's dataset ids. After
+    /// a duplicate, that embedded view must resolve to the COPY's ids — never
+    /// the source's — or a copied pin's "go to author's view" would dangle and
+    /// silently lose its per-channel colors/contrast. Seeds a pin-with-view on a
+    /// source dataset, duplicates, and asserts the copied document's
+    /// `annotations[].view` references copied ids only, with NO source id left in
+    /// any of active_layouts / dataset_order / dataset_settings / auto_contrast.
+    #[tokio::test]
+    async fn duplicate_remaps_pin_captured_view_to_copied_datasets() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, source_dataset_ids, _shared) = seed_rich_source(&store, &owner, &bob).await;
+
+        // Drop a pin carrying a captured view on the first source dataset.
+        let source_pin_dataset = source_dataset_ids[0].clone();
+        seed_pin_with_view(&store, &source_id, &owner, &source_pin_dataset, 3).await;
+
+        // Sanity: the SOURCE document really carries the embedded view keyed by
+        // the source dataset id (so a no-op remap couldn't vacuously pass).
+        let src_doc = store.get_workspace(&source_id).await.unwrap().unwrap();
+        let src_pins = src_doc
+            .document
+            .annotations
+            .get(&source_pin_dataset)
+            .expect("source must have a pin under the seeded dataset");
+        let src_view = src_pins[0]
+            .view
+            .as_ref()
+            .expect("seeded pin must carry a captured view");
+        assert!(src_view.dataset_order.contains(&source_pin_dataset));
+        assert!(src_view.active_layouts.contains_key(&source_pin_dataset));
+
+        let manager = manager_for(&store);
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        // Ground truth: the copy's membership ids.
+        let copy_members = store.list_dataset_sources(&copy.id).await.unwrap();
+        let copy_ids: std::collections::HashSet<DatasetId> = copy_members
+            .iter()
+            .map(|d| d.workspace_dataset_id.clone())
+            .collect();
+        let source_ids: std::collections::HashSet<DatasetId> =
+            source_dataset_ids.iter().cloned().collect();
+
+        // Find the copied pin (under one of the copy's dataset ids) and pull its
+        // embedded captured view.
+        let copied_pin = copy
+            .document
+            .annotations
+            .iter()
+            .find_map(|(ds_id, anns)| {
+                anns.iter()
+                    .find(|a| a.id == "pin-with-view")
+                    .map(|a| (ds_id.clone(), a))
+            })
+            .expect("copied document must still carry the pin");
+        let (copied_pin_ds, copied_pin) = copied_pin;
+        // The annotations-map KEY itself moved onto a copied id (existing
+        // contract — the pin must hang off the copy's dataset).
+        assert!(
+            copy_ids.contains(&copied_pin_ds),
+            "copied pin must be keyed under a copied dataset id, not the source's"
+        );
+        let copied_view = copied_pin
+            .view
+            .as_ref()
+            .expect("copied pin must still carry its captured view");
+
+        // Every id-keyed field of the embedded view resolves to a COPIED id, and
+        // NO source id remains anywhere in it.
+        assert_eq!(copied_view.dataset_order.len(), 1);
+        for id in &copied_view.dataset_order {
+            assert!(
+                copy_ids.contains(id),
+                "embedded view dataset_order must resolve to a copied id"
+            );
+            assert!(
+                !source_ids.contains(id),
+                "embedded view dataset_order must not retain a source id"
+            );
+        }
+        for id in copied_view.active_layouts.keys() {
+            assert!(copy_ids.contains(id), "embedded active_layouts key copied");
+            assert!(
+                !source_ids.contains(id),
+                "embedded active_layouts must not retain a source id"
+            );
+        }
+        for id in copied_view.dataset_settings.keys() {
+            assert!(
+                copy_ids.contains(id),
+                "embedded dataset_settings key copied"
+            );
+            assert!(
+                !source_ids.contains(id),
+                "embedded dataset_settings must not retain a source id"
+            );
+        }
+        for id in copied_view.auto_contrast.keys() {
+            assert!(copy_ids.contains(id), "embedded auto_contrast key copied");
+            assert!(
+                !source_ids.contains(id),
+                "embedded auto_contrast must not retain a source id"
+            );
+        }
+        // The view did carry real id-keyed content (not a vacuous empty-map pass).
+        assert!(!copied_view.active_layouts.is_empty());
+        assert!(!copied_view.dataset_settings.is_empty());
+        assert!(!copied_view.auto_contrast.is_empty());
+    }
+
+    #[tokio::test]
+    async fn viewer_of_source_can_duplicate_into_their_own_owned_copy() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let viewer = principal("carol@example.com", false);
+        let (source_id, _datasets, _shared) = seed_rich_source(&store, &owner, &viewer).await;
+        // Re-grant carol as a plain VIEWER (seed_rich_source made `other` an
+        // editor); we want to prove a viewer specifically can duplicate.
+        store
+            .update_member_role(
+                &source_id,
+                &normalize_email(&viewer.email),
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        let manager = manager_for(&store);
+
+        // Sanity: carol is a viewer on the source.
+        let (_rec, role) = manager
+            .get_workspace_for(&source_id, &viewer)
+            .await
+            .unwrap();
+        assert_eq!(role, WorkspaceRole::Viewer);
+
+        let copy = manager
+            .duplicate_workspace(&source_id, &viewer, None)
+            .await
+            .unwrap();
+        // It is carol's OWN owned copy.
+        assert_eq!(copy.created_by, "carol@example.com");
+        let sharing = store.sharing_settings(&copy.id).await.unwrap().unwrap();
+        assert_eq!(sharing.members.len(), 1);
+        assert_eq!(sharing.members[0].email, "carol@example.com");
+        assert_eq!(sharing.members[0].role, WorkspaceRole::Owner);
+        // Datasets + the Shared view came along, attributed to carol.
+        assert_eq!(store.list_dataset_sources(&copy.id).await.unwrap().len(), 2);
+        let views = store
+            .list_saved_views(&copy.id, &normalize_email(&viewer.email), true)
+            .await
+            .unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].created_by, "carol@example.com");
+    }
+
+    #[tokio::test]
+    async fn non_member_duplicate_gets_uniform_never_leak_not_found() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        // Restricted source (default), bob is NOT a member.
+        let ws = store
+            .create_workspace(&owner, Some("Secret"))
+            .await
+            .unwrap();
+        let stranger = principal("mallory@example.com", false);
+        let manager = manager_for(&store);
+
+        // Duplicating an inaccessible workspace is byte-identical to a missing
+        // one: NotFound, never Forbidden — duplication must not reveal it.
+        let err = manager
+            .duplicate_workspace(&ws.id, &stranger, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound), "got {err:?}");
+
+        // A truly missing workspace yields the SAME error.
+        let missing = manager
+            .duplicate_workspace("does-not-exist", &stranger, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, WorkspaceError::NotFound));
+
+        // No copy leaked into existence for the stranger.
+        assert!(store.list_workspaces(&stranger).await.unwrap().is_empty());
+        let _ = bob;
+    }
+
+    #[tokio::test]
+    async fn duplicate_empty_workspace_yields_empty_copy() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let ws = store.create_workspace(&owner, Some("Empty")).await.unwrap();
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&ws.id, &owner, None)
+            .await
+            .unwrap();
+        assert_eq!(copy.name, "Copy of Empty");
+        assert!(
+            store
+                .list_dataset_sources(&copy.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(copy.default_saved_view_id.is_none());
+        assert!(copy.document.manifests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_with_multiple_datasets_and_multiple_shared_views() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let ws = store.create_workspace(&owner, Some("Multi")).await.unwrap();
+        let a = open_dataset_into(&store, &ws.id, &owner, "s-a", "file:///a.zarr", "A", 1).await;
+        let b = open_dataset_into(&store, &ws.id, &owner, "s-b", "file:///b.zarr", "B", 2).await;
+        let c = open_dataset_into(&store, &ws.id, &owner, "s-c", "file:///c.zarr", "C", 3).await;
+        for (n, order) in [
+            ("v1", vec![a.clone()]),
+            ("v2", vec![a.clone(), b.clone()]),
+            ("v3", vec![b.clone(), c.clone()]),
+        ] {
+            store
+                .create_saved_view(
+                    &ws.id,
+                    n,
+                    &owner,
+                    view_over(&order),
+                    SavedViewVisibility::Shared,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&ws.id, &owner, None)
+            .await
+            .unwrap();
+
+        assert_eq!(store.list_dataset_sources(&copy.id).await.unwrap().len(), 3);
+        let copy_ids: std::collections::HashSet<DatasetId> = store
+            .list_dataset_sources(&copy.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|d| d.workspace_dataset_id.clone())
+            .collect();
+        let views = store
+            .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+            .await
+            .unwrap();
+        assert_eq!(views.len(), 3, "all three Shared views copied");
+        // Every dataset id referenced by every copied view resolves to a copied
+        // membership — no dangling references across the whole fan-out.
+        for v in &views {
+            for id in &v.view.dataset_order {
+                assert!(
+                    copy_ids.contains(id),
+                    "{} references a copied dataset",
+                    v.name
+                );
+            }
+        }
+    }
+
+    /// An explicit name override is honored (and trimmed); attribution and the
+    /// restricted-owner-only invariant still hold.
+    #[tokio::test]
+    async fn duplicate_honors_explicit_name_override() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let ws = store.create_workspace(&owner, Some("Orig")).await.unwrap();
+        let manager = manager_for(&store);
+
+        let copy = manager
+            .duplicate_workspace(&ws.id, &owner, Some("  My Experiment  "))
+            .await
+            .unwrap();
+        assert_eq!(copy.name, "My Experiment");
+    }
+
+    // ===================================================================
+    // RED-TEAM adversarial probes for #698 (added by red-team; do not
+    // weaken). Each asserts the *observed* behavior so a regression in the
+    // duplicate's never-copy / never-leak contract trips a test.
+    // ===================================================================
+
+    /// Seed a pin whose captured author view embeds SOURCE dataset *URLs* in
+    /// its `datasets` Vec — simulating a document PERSISTED BEFORE the apply-path
+    /// strip existed (a genuinely DIRTY source). `DocumentState::apply` now
+    /// strips such URLs, so we deliberately bypass it: `add_annotation` stores
+    /// the view verbatim and `persist_document` serializes the `DocumentState`
+    /// as-is (no apply). This is the dirty carrier the duplicate's copy-point
+    /// defense must clean — `remap_dataset_ids` remaps ids but the explicit
+    /// `clear_source_urls` at the copy point drops the URLs.
+    async fn seed_pin_with_view_urls(
+        store: &SqliteWorkspaceStore,
+        workspace_id: &str,
+        owner: &AuthPrincipal,
+        dataset_id: &DatasetId,
+        urls: &[&str],
+        seq: u64,
+    ) {
+        let mut view = SavedView::empty([1024, 768]);
+        view.dataset_order.push(dataset_id.clone());
+        view.active_layouts.insert(
+            dataset_id.clone(),
+            lucida_content::LayoutId("default".into()),
+        );
+        // The smuggled payload: source dataset URLs on the embedded view.
+        for u in urls {
+            view.datasets.push((*u).to_string());
+        }
+
+        let mut doc = store
+            .get_workspace(workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .document;
+        // Bypass `apply` (which now strips) to write a dirty pin straight into
+        // the document, exactly as a pre-fix persisted document would carry it.
+        doc.add_annotation(
+            dataset_id.clone(),
+            lucida_core::scene::Annotation {
+                id: "pin-url-leak".into(),
+                position: [1.0, 2.0],
+                end: None,
+                z: 0.0,
+                t: 0,
+                c: 0,
+                author: owner.email.clone(),
+                kind: lucida_core::scene::AnnotationKind::Point,
+                comments: Vec::new(),
+                anchor: None,
+                view: Some(view),
+            },
+        );
+        store
+            .persist_document(workspace_id, seq, &doc)
+            .await
+            .unwrap();
+    }
+
+    /// ROOT-CAUSE FIX: `DocumentState::apply(AddAnnotation { view })` now
+    /// enforces the documented `Annotation::view` invariant — the embedded
+    /// captured view's `datasets` Vec is stripped to EMPTY before the pin is
+    /// stored, so embedding a view on a pin never leaks dataset source URLs
+    /// (incl. local `file:///` paths, per decision 0014) into the persisted /
+    /// broadcast document. (Was the red-team's observed-leak test; flipped to
+    /// assert the fix.)
+    #[tokio::test]
+    async fn apply_add_annotation_strips_embedded_view_datasets() {
+        let mut doc = DocumentState::default();
+        let ds = DatasetId("wds-x".into());
+        let mut view = SavedView::empty([800, 600]);
+        view.datasets.push("file:///private/secret.zarr".into());
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: ds.clone(),
+            id: "p".into(),
+            position: [0.0, 0.0],
+            end: None,
+            z: 0.0,
+            t: 0,
+            c: 0,
+            author: "alice@example.com".into(),
+            kind: lucida_core::scene::AnnotationKind::Point,
+            view: Some(Box::new(view)),
+        });
+        let stored = doc.annotations[&ds][0].view.as_ref().unwrap();
+        assert!(
+            stored.datasets.is_empty(),
+            "apply must strip the embedded view's source URLs — the \
+             'left EMPTY' guarantee in Annotation::view is now enforced \
+             (got {:?})",
+            stored.datasets
+        );
+    }
+
+    /// DUPLICATE IS CLEAN even for a pre-existing DIRTY source: a SOURCE dataset
+    /// URL smuggled into a pin's captured view (`Annotation::view.datasets`) of
+    /// the source document is NOT carried into the copy. The duplicate's
+    /// document remap clears `datasets` on every copied embedded view (the
+    /// copy-point defense), so even a source persisted before the apply-path
+    /// fix yields a clean copy. (A local `file://` URL here is exactly what
+    /// decision 0014 keeps out of shared/persisted state.) The pin itself is
+    /// still copied — only its leaked URLs are dropped. (Was the red-team's
+    /// observed-leak test; flipped to assert the fix.)
+    #[tokio::test]
+    async fn duplicate_strips_source_urls_embedded_in_pin_view() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, source_dataset_ids, _shared) = seed_rich_source(&store, &owner, &bob).await;
+
+        let leak_url = "file:///home/alice/unshared/private.zarr";
+        seed_pin_with_view_urls(
+            &store,
+            &source_id,
+            &owner,
+            &source_dataset_ids[0],
+            &[leak_url],
+            3,
+        )
+        .await;
+
+        let manager = manager_for(&store);
+        let copy = manager
+            .duplicate_workspace(&source_id, &owner, None)
+            .await
+            .unwrap();
+
+        // The pin survived the copy, and its embedded view carries NO source
+        // URLs (the duplicate stripped them at the copy point).
+        let copied_view_datasets: Vec<String> = copy
+            .document
+            .annotations
+            .values()
+            .flatten()
+            .find(|a| a.id == "pin-url-leak")
+            .and_then(|a| a.view.as_ref())
+            .map(|v| v.datasets.clone())
+            .expect("copied document must still carry the pin + its view");
+
+        assert!(
+            copied_view_datasets.is_empty(),
+            "the source URL must NOT survive into the copy's embedded pin view \
+             (datasets={copied_view_datasets:?}); the duplicate strips \
+             embedded-view source URLs"
+        );
+    }
+
+    /// The duplicate has its OWN URL-strip defense for copied shared views,
+    /// independent of the manager's create path: even when a shared-view row
+    /// carries source URLs (e.g. inserted store-level, bypassing the manager's
+    /// `workspace_saved_view_payload` strip, or persisted before that strip
+    /// existed), the duplicate clears `datasets` on the copied view at the copy
+    /// point. So the copy's shared views carry NO source URLs regardless of the
+    /// source row's state (decision 0014). (Was the red-team's observed-leak
+    /// test; flipped to assert the fix.)
+    #[tokio::test]
+    async fn duplicate_strips_datasets_from_copied_shared_view() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let ws = store.create_workspace(&owner, Some("S")).await.unwrap();
+        let a = open_dataset_into(&store, &ws.id, &owner, "s-a", "file:///a.zarr", "A", 1).await;
+
+        // Persist a SHARED view that still carries source URLs (store-level
+        // insert bypasses the manager's strip; this is the exact JSON the
+        // duplicate will read + re-emit).
+        let mut view = view_over(std::slice::from_ref(&a));
+        view.datasets.push("file:///a.zarr".into());
+        view.datasets
+            .push("gs://corp-bucket/restricted.zarr".into());
+        store
+            .create_saved_view(&ws.id, "leaky", &owner, view, SavedViewVisibility::Shared)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let manager = manager_for(&store);
+        let copy = manager
+            .duplicate_workspace(&ws.id, &owner, None)
+            .await
+            .unwrap();
+
+        let copied = store
+            .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+            .await
+            .unwrap();
+        assert_eq!(copied.len(), 1);
+        assert!(
+            copied[0].view.datasets.is_empty(),
+            "copied shared view must carry NO source URLs — the duplicate \
+             re-strips datasets at the copy point (got {:?})",
+            copied[0].view.datasets
+        );
+    }
+
+    /// NEVER-LEAK (HTTP, byte-level): a non-member POSTing /duplicate against
+    /// an EXISTING restricted workspace must get a response byte-identical to
+    /// duplicating a MISSING id — same status AND same body bytes. Confirms the
+    /// access check leaks nothing distinguishing through the route.
+    #[tokio::test]
+    async fn duplicate_route_non_member_byte_identical_to_missing() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        // A RESTRICTED source (default link access OFF) with a real dataset, so
+        // the stranger is a genuine non-member (no anyone-with-link grant).
+        let ws = store
+            .create_workspace(&owner, Some("Restricted"))
+            .await
+            .unwrap();
+        let _ = open_dataset_into(&store, &ws.id, &owner, "s-a", "file:///a.zarr", "A", 1).await;
+        let source_id = ws.id;
+
+        let stranger = principal("mallory@example.com", false);
+
+        let manager = manager_for(&store);
+        let app = workspace_router_with_principal(Arc::new(manager), stranger.clone());
+        let existing = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/workspaces/{source_id}/duplicate"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let existing_status = existing.status();
+        let existing_body = to_bytes(existing.into_body(), 64 * 1024).await.unwrap();
+
+        // Rebuild the manager/app (oneshot consumes the router).
+        let manager2 = manager_for(&store);
+        let app2 = workspace_router_with_principal(Arc::new(manager2), stranger);
+        let missing = app2
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workspaces/00000000-0000-0000-0000-000000000000/duplicate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let missing_status = missing.status();
+        let missing_body = to_bytes(missing.into_body(), 64 * 1024).await.unwrap();
+
+        assert_eq!(existing_status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            existing_status, missing_status,
+            "status must match between existing-but-denied and missing"
+        );
+        assert_eq!(
+            existing_body, missing_body,
+            "body bytes must be identical between existing-but-denied and missing"
+        );
+    }
+
+    /// NEVER-LEAK boundary: a MEMBER of an ARCHIVED source gets 410 Gone
+    /// (Archived) from /duplicate, NOT 404 — i.e. archive-state is disclosed to
+    /// a member through the duplicate route. A non-member still gets 404. This
+    /// documents that the duplicate route inherits `get_workspace_for`'s
+    /// member-only archive disclosure; acceptable under the never-leak doctrine
+    /// (only members, who already know it exists, see Gone), but recorded here
+    /// so any change is deliberate.
+    #[tokio::test]
+    async fn duplicate_archived_source_member_gets_gone_nonmember_not_found() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let ws = store.create_workspace(&owner, Some("A")).await.unwrap();
+        store.archive_workspace(&ws.id).await.unwrap();
+        let manager = manager_for(&store);
+
+        // Member (owner) of the archived source.
+        let member_err = manager
+            .duplicate_workspace(&ws.id, &owner, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(member_err, WorkspaceError::Archived),
+            "member of archived source gets Archived (410), got {member_err:?}"
+        );
+
+        // Non-member sees the uniform NotFound (indistinguishable from missing).
+        let stranger = principal("mallory@example.com", false);
+        let stranger_err = manager
+            .duplicate_workspace(&ws.id, &stranger, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(stranger_err, WorkspaceError::NotFound),
+            "non-member of archived source gets NotFound, got {stranger_err:?}"
+        );
+    }
+
+    /// PRIVILEGE-VIA-COPY (negative / confirms NO hole): a pin authored by a
+    /// DIFFERENT member carries that author's email in the source document. A
+    /// viewer duplicating gets that email in their copy — but they could
+    /// already read it as a viewer of the source document, so it is not a new
+    /// disclosure. This test pins the *expected* behavior: annotation authorship
+    /// (content) rides along, while it is NOT a workspace member grant on the
+    /// copy (sharing stays owner-only).
+    #[tokio::test]
+    async fn duplicate_carries_annotation_author_as_content_not_membership() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let bob = principal("bob@example.com", false);
+        let (source_id, source_dataset_ids, _s) = seed_rich_source(&store, &owner, &bob).await;
+
+        // Bob (an editor on the source) authors a pin.
+        let mut doc = store
+            .get_workspace(&source_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .document;
+        doc.apply(DocumentCommand::AddAnnotation {
+            dataset_id: source_dataset_ids[0].clone(),
+            id: "bobs-pin".into(),
+            position: [0.0, 0.0],
+            end: None,
+            z: 0.0,
+            t: 0,
+            c: 0,
+            author: bob.email.clone(),
+            kind: lucida_core::scene::AnnotationKind::Point,
+            view: None,
+        });
+        store.persist_document(&source_id, 3, &doc).await.unwrap();
+
+        // Carol, a plain viewer, duplicates.
+        let carol = principal("carol@example.com", false);
+        store
+            .upsert_member(
+                &source_id,
+                &carol.email,
+                &carol.display_name,
+                WorkspaceRole::Viewer,
+            )
+            .await
+            .unwrap();
+        let manager = manager_for(&store);
+        let copy = manager
+            .duplicate_workspace(&source_id, &carol, None)
+            .await
+            .unwrap();
+
+        // Bob's authorship rides along as document CONTENT...
+        let author = copy
+            .document
+            .annotations
+            .values()
+            .flatten()
+            .find(|a| a.id == "bobs-pin")
+            .map(|a| a.author.clone())
+            .expect("copied document keeps the pin");
+        assert_eq!(author, "bob@example.com");
+
+        // ...but bob is NOT a member of carol's copy, and sharing is owner-only.
+        let sharing = store.sharing_settings(&copy.id).await.unwrap().unwrap();
+        assert_eq!(sharing.members.len(), 1);
+        assert_eq!(sharing.members[0].email, "carol@example.com");
+        assert_eq!(sharing.link_access, WorkspaceLinkAccess::Restricted);
+        // Bob cannot access carol's copy.
+        let err = manager.get_workspace_for(&copy.id, &bob).await.unwrap_err();
+        assert!(matches!(err, WorkspaceError::NotFound));
+    }
+
+    /// DANGLING-DEFAULT (confirms NO hole): if the source's default view is a
+    /// PERSONAL view (not copied), the copy's `default_saved_view_id` must be
+    /// NULL — never the source's view id (which would be a cross-workspace
+    /// dangling pointer to a view the copy doesn't own and the duplicator may
+    /// not be allowed to see).
+    #[tokio::test]
+    async fn duplicate_default_pointing_at_personal_view_resolves_to_null() {
+        let store = fresh_store().await;
+        let owner = principal("alice@example.com", false);
+        let ws = store.create_workspace(&owner, Some("D")).await.unwrap();
+        let a = open_dataset_into(&store, &ws.id, &owner, "s-a", "file:///a.zarr", "A", 1).await;
+
+        // Owner's PERSONAL view, set as the workspace default.
+        let personal = store
+            .create_saved_view(
+                &ws.id,
+                "my personal",
+                &owner,
+                view_over(std::slice::from_ref(&a)),
+                SavedViewVisibility::Personal,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .set_default_saved_view(&ws.id, Some(&personal.id))
+            .await
+            .unwrap();
+
+        let manager = manager_for(&store);
+        let copy = manager
+            .duplicate_workspace(&ws.id, &owner, None)
+            .await
+            .unwrap();
+
+        // No shared view existed → nothing copied → default is NULL, and in
+        // particular NOT the source's personal-view id.
+        assert!(
+            copy.default_saved_view_id.is_none(),
+            "copy default must be NULL when the source default was a non-copied \
+             (personal) view; got {:?}",
+            copy.default_saved_view_id
+        );
+        assert_ne!(
+            copy.default_saved_view_id.as_deref(),
+            Some(personal.id.as_str())
+        );
+        // And the personal view itself did not cross over.
+        let copied_views = store
+            .list_saved_views(&copy.id, &normalize_email(&owner.email), true)
+            .await
+            .unwrap();
+        assert!(copied_views.is_empty(), "no personal view may be copied");
     }
 }

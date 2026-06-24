@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
+import { FocalDepthControl } from "./components/FocalDepthControl.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
@@ -36,6 +37,7 @@ import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from 
 import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
+import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
@@ -58,9 +60,22 @@ interface AppProps {
   workspaceRole: WorkspaceRole;
   defaultSavedViewId: string | null;
   canRenameWorkspace: boolean;
+  /** Dataset URLs/paths to auto-open once the viewer connects (#697). Set by
+   *  the "create workspace from dataset(s)" flow (dashboard / file browser):
+   *  the workspace is created and navigated into first, then these are opened
+   *  here via the same path as the in-viewer "Open" flow. A failed open
+   *  surfaces through the normal open-failed banner and LEAVES the workspace in
+   *  place (it already exists and we're already in it). Already canonicalized
+   *  by the caller. Empty/undefined in the normal open-existing-workspace
+   *  case, so this is a no-op there. */
+  initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
+  /** Create a NEW workspace from dataset(s) chosen in the in-viewer file
+   *  browser and navigate into it (#697). Mirrors the dashboard entry point so
+   *  the "create workspace from selection" action is reachable from both. */
+  onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
 }
 
 function App({
@@ -69,9 +84,11 @@ function App({
   workspaceRole,
   defaultSavedViewId,
   canRenameWorkspace,
+  initialDatasetUrls,
   onBackToDashboard,
   onRenameWorkspace,
   onSetDefaultSavedView,
+  onCreateWorkspaceFromDatasets,
 }: AppProps) {
   // Authenticated principal — provided by <AuthGate> above us; throws if
   // accessed unauthenticated. We forward the email to saved-view UI for
@@ -347,6 +364,28 @@ function App({
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
   });
 
+  // Auto-open the seed dataset(s) for a "create workspace from dataset(s)" flow
+  // (#697). The workspace was created and navigated into by the dashboard /
+  // file browser; here we open the dataset(s) over the websocket exactly as the
+  // in-viewer "Open" affordance does (`datasets.handleUrlSubmit` →
+  // `trackedSendOpen` → `sendOpenRemoteDataset`), so dedup, URL→DatasetId
+  // tracking, the loading banner, and the open-failed error path all apply
+  // unchanged. Gated on `bridge.sessionReady` — the REAL transport-readiness
+  // signal (WS open AND first snapshot applied), NOT `Boolean(bridge.bridge)`,
+  // which flips synchronously while the socket is still CONNECTING. With the
+  // weaker gate the seed send could fire against a CONNECTING socket and be
+  // SILENTLY DROPPED by `Bridge.send` (no queue), leaving the new workspace
+  // stuck on "dataset open request sent" forever (the one-shot guard had
+  // already latched). `useSeedDatasetOpens` only latches AFTER it actually
+  // sends, so until `sessionReady` it simply waits, then fires exactly once. A
+  // FAILED import leaves the workspace in place and surfaces through the
+  // existing `remoteDatasetError` banner below; we don't unwind.
+  useSeedDatasetOpens({
+    initialDatasetUrls,
+    ready: bridge.sessionReady,
+    openDataset: datasets.handleUrlSubmit,
+  });
+
   // Layout registry — null until WasmScene is set up; subscribe so the
   // PlateSelector and LayoutSwitcher re-derive on layout changes (local or
   // peer). The version counter is the stable snapshot for useSyncExternalStore.
@@ -357,6 +396,14 @@ function App({
     () => 0,
   );
 
+  // Id of the saved view currently applied to the viewer, if any. The sidebar
+  // highlights the matching row so the user sees which view they're looking at.
+  // Set on a successful open (below); CLEARED the moment the live view diverges
+  // from it — see `emitPresenceWithUrl`, the single signal every viewport
+  // mutation funnels through — so the highlight means "the view on screen",
+  // not "the last row I clicked" (#818).
+  const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
+
   // Wrapped emitPresence/emitDatasetPresence — every viewport mutation
   // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
   // changeTick alone doesn't bump on viewport-only mutations like
@@ -366,6 +413,11 @@ function App({
   const emitPresenceWithUrl = useCallback(() => {
     bridge.emitPresence();
     savedViewSync.notifyChange();
+    // A viewport mutation (pan / zoom / Z / T / C / mode / multi-channel) means
+    // the live view no longer equals the opened saved view, so drop the active
+    // -row highlight (#818). Functional + guarded so it's a no-op (no re-render)
+    // when nothing is highlighted — this fires on every pan frame.
+    setCurrentOpenSavedViewId((prev) => (prev === null ? prev : null));
   }, [bridge, savedViewSync]);
   const emitDatasetPresenceWithUrl = useCallback(() => {
     bridge.emitDatasetPresence();
@@ -853,7 +905,6 @@ function App({
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
-  const [currentOpenSavedViewId, setCurrentOpenSavedViewId] = useState<string | null>(null);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
 
@@ -896,6 +947,14 @@ function App({
     // active row. Set it only after a successful apply.
     setCurrentOpenSavedViewId(savedViewId);
   }, [savedViewApplier, notifySavedViewChange]);
+
+  // The sidebar tells us when the open saved view stops existing as the user
+  // acts on it (deleted / withdrawn / its deferred reject committed); drop the
+  // active-row highlight so it doesn't dangle on a view that's gone (#818).
+  // Guard on the id so a stale invalidation can't clear a newer open view.
+  const handleActiveSavedViewInvalidated = useCallback((savedViewId: string) => {
+    setCurrentOpenSavedViewId((prev) => (prev === savedViewId ? null : prev));
+  }, []);
 
   const commitWorkspaceName = useCallback(() => {
     const next = workspaceNameDraft.trim();
@@ -947,6 +1006,8 @@ function App({
         onFullRangeToggle={layers.handleLayerFullRangeToggle}
         onMoveLayer={layers.handleLayerMove}
         onRemoveLayer={layers.handleRemoveLayer}
+        onRenameLayer={layers.handleLayerRename}
+        canEdit={canEditWorkspace}
         onChannelSetVisible={layers.handleChannelSetVisible}
         onChannelSetColormap={layers.handleChannelSetColormap}
         onChannelSetContrast={layers.handleChannelSetContrast}
@@ -1299,6 +1360,14 @@ function App({
               </div>
             )}
             <DimensionControls label="T" value={dims.t} max={dims.dimT} onChange={dims.handleTChange} />
+            {/* Focal-depth control (issue #532): a USER-facing near↔far
+                bias for the 3-D center-out chunk-spawn origin. 3-D-only —
+                the bias is meaningless on a 2-D slice — so it appears here
+                (alongside the Z slider, which is itself disabled in 3-D)
+                only when the viewer is in 3-D mode. Binds straight to
+                configStore.depthBiasView (one source of truth); this is the
+                discoverable home, replacing the old Debug→Config entry. */}
+            {dims.viewMode === "3d" && <FocalDepthControl />}
           </div>
         )}
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", width: "100%", maxWidth: layout.canvasWidth }}>
@@ -1403,6 +1472,14 @@ function App({
         {showFileBrowser && (
           <FileBrowser
             onSelect={handleFileBrowserSelect}
+            onCreateWorkspace={
+              onCreateWorkspaceFromDatasets
+                ? (paths) => {
+                    setShowFileBrowser(false);
+                    onCreateWorkspaceFromDatasets(paths);
+                  }
+                : undefined
+            }
             onClose={() => setShowFileBrowser(false)}
           />
         )}
@@ -1424,6 +1501,7 @@ function App({
         defaultSavedViewId={defaultSavedViewId}
         onSetDefaultSavedView={onSetDefaultSavedView}
         currentOpenSavedViewId={currentOpenSavedViewId}
+        onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />

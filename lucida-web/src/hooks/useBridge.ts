@@ -84,6 +84,16 @@ export function useBridge({
    *  once inside the wasm-ready effect; we set this state immediately
    *  after assigning `sessionRef.current`. */
   const [bridge, setBridge] = useState<Bridge | null>(null);
+  // REAL transport-readiness signals, distinct from `Boolean(bridge)` (which
+  // flips synchronously when the Bridge is constructed, while its WebSocket is
+  // still CONNECTING — and `Bridge.send` silently drops frames sent before
+  // OPEN). `connected` flips on the WS `onopen`; `sessionReady` flips on the
+  // first snapshot (the session is fully established and the document loaded).
+  // Consumers that must not lose a one-shot send (e.g. the #697 seed open) gate
+  // on `sessionReady` so the open reliably reaches the server. Both reset on
+  // disconnect so a reconnect re-arms them.
+  const [connected, setConnected] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
@@ -216,6 +226,10 @@ export function useBridge({
           bumpRemoteDocumentVersion();
           bumpDatasetsVersion();
           setWasmScene(scene);
+          // The session is fully established (WS open + first snapshot applied):
+          // an open sent now reliably reaches the server. Gate one-shot sends
+          // (the #697 seed open) on this rather than `Boolean(bridge)`.
+          setSessionReady(true);
         } catch (e) {
           console.warn("[Bridge] bad snapshot:", e);
         }
@@ -503,13 +517,23 @@ export function useBridge({
           message,
         );
       },
+      onConnected: () => {
+        setConnected(true);
+      },
       onWorkspaceArchived: () => {
+        setConnected(false);
+        setSessionReady(false);
         setRemoteDatasetLoading(false);
         setRemoteDatasetProgress(null);
         contentSource.rejectAll();
         onWorkspaceArchived?.();
       },
       onDisconnect: () => {
+        // The transport dropped: re-arm both readiness signals so a reconnect's
+        // `onopen` + fresh snapshot must re-establish them before gated work
+        // (e.g. a still-pending seed open) fires.
+        setConnected(false);
+        setSessionReady(false);
         setRemoteDatasetLoading(false);
         setRemoteDatasetProgress(null);
         contentSource.rejectAll();
@@ -715,8 +739,17 @@ export function useBridge({
   return {
     sessionRef,
     /** Live bridge once the WS is constructed. `null` until the
-     *  wasm-ready effect has run. */
+     *  wasm-ready effect has run. NOTE: this flips true while the WebSocket is
+     *  still CONNECTING — it is NOT a transport-readiness signal. Use
+     *  `connected` / `sessionReady` to know a send won't be dropped. */
     bridge,
+    /** True once the WebSocket is OPEN (`onopen`) — `bridge.send` no longer
+     *  silently drops. Resets on disconnect. */
+    connected,
+    /** True once the first snapshot has been applied: the session is fully
+     *  established and an open reliably reaches the server. The robust gate for
+     *  one-shot sends like the #697 seed open. Resets on disconnect. */
+    sessionReady,
     peers,
     myId,
     followTarget,

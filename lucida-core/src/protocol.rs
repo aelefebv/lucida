@@ -16,6 +16,68 @@ use crate::view::ViewState;
 
 pub type ClientId = u64;
 
+/// Presentational identity of a connected peer, surfaced on their live
+/// cursor in collaborative mode (issue #540). Server-authored from the
+/// session's authenticated `AuthPrincipal` — clients never send this, so
+/// it can't be spoofed and is only ever shown to co-present peers.
+///
+/// Privacy: the raw email address is NEVER carried here. Collaborator
+/// emails are owner-only (the `/sharing` endpoint is `require_owner`-gated),
+/// so presence — which every co-present peer receives, including non-owner
+/// link-access viewers/editors — must not leak them. Only the
+/// non-identifying `display_name`, `picture_url`, and a single-grapheme
+/// `initial` cross the wire.
+///
+/// All fields are best-effort: an unauthenticated/legacy session leaves
+/// `identity` as `None` on `PresenceState`, and within an identity a
+/// provider may omit `picture_url`. Consumers fall back name → initial
+/// chip → numeric id/color.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerIdentity {
+    /// Human-facing name (`AuthPrincipal::display_name`). May be empty if
+    /// the provider supplied none.
+    pub display_name: String,
+    /// Avatar URL (`AuthPrincipal::picture_url`). `None` for dev sessions
+    /// and providers without a picture — the cursor falls back to an
+    /// initial chip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_url: Option<String>,
+    /// Single-grapheme fallback glyph for the avatar chip, computed
+    /// server-side from the display name (or, when blank, the email
+    /// local-part) so the cursor has a stable initial WITHOUT the raw
+    /// email crossing the wire. Empty only when no usable source existed.
+    #[serde(default)]
+    pub initial: String,
+}
+
+impl PeerIdentity {
+    /// Build a wire identity from the connection's authenticated principal,
+    /// computing the fallback `initial` server-side from the display name —
+    /// or, when that is blank, the email local-part — so the raw `email`
+    /// never crosses the wire. The returned `PeerIdentity` carries no email.
+    pub fn from_principal_parts(
+        display_name: String,
+        picture_url: Option<String>,
+        email: &str,
+    ) -> Self {
+        let initial = Self::compute_initial(&display_name, email);
+        Self {
+            display_name,
+            picture_url,
+            initial,
+        }
+    }
+
+    /// First uppercased character of the display name, falling back to the
+    /// email local-part (the bit before `@`), else empty. Only this single
+    /// grapheme — never the full address — is exposed to peers.
+    fn compute_initial(display_name: &str, email: &str) -> String {
+        let from = |s: &str| s.trim().chars().next();
+        let ch = from(display_name).or_else(|| from(email.split('@').next().unwrap_or("")));
+        ch.map(|c| c.to_uppercase().to_string()).unwrap_or_default()
+    }
+}
+
 /// Per-client ephemeral state broadcast to other clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceState {
@@ -30,6 +92,12 @@ pub struct PresenceState {
     pub dataset_order: Vec<DatasetId>,
     #[serde(default)]
     pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    /// Presentational identity for the peer's cursor (#540). Server-set
+    /// from the authed principal; `None` for sessions without auth (the
+    /// non-workspace `/ws` path) so older/anonymous peers still render
+    /// via the numeric-id fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<PeerIdentity>,
 }
 
 /// Messages sent from a client to the server.
@@ -816,12 +884,114 @@ mod tests {
             cursor: Some([100.0, 200.0]),
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
+            identity: None,
         };
         let json = serde_json::to_string(&ps).unwrap();
         let parsed: PresenceState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.client_id, 1);
         assert_eq!(parsed.cursor, Some([100.0, 200.0]));
         assert_eq!(parsed.following, None);
+        assert_eq!(parsed.identity, None);
+    }
+
+    #[test]
+    fn presence_state_carries_identity_round_trip() {
+        // #540: a peer's presence carries the server-authored display name +
+        // avatar URL so the cursor overlay can render them.
+        let ps = PresenceState {
+            client_id: 9,
+            camera: Camera::new_2d([800, 600]),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+            following: None,
+            cursor: Some([1.0, 2.0]),
+            dataset_order: vec![],
+            dataset_settings: HashMap::new(),
+            identity: Some(PeerIdentity {
+                display_name: "Ada Lovelace".into(),
+                picture_url: Some("https://example.com/ada.png".into()),
+                initial: "A".into(),
+            }),
+        };
+        let json = serde_json::to_string(&ps).unwrap();
+        assert!(json.contains("\"display_name\":\"Ada Lovelace\""));
+        assert!(json.contains("\"picture_url\":\"https://example.com/ada.png\""));
+        let parsed: PresenceState = serde_json::from_str(&json).unwrap();
+        let identity = parsed.identity.expect("identity present");
+        assert_eq!(identity.display_name, "Ada Lovelace");
+        assert_eq!(
+            identity.picture_url.as_deref(),
+            Some("https://example.com/ada.png")
+        );
+        assert_eq!(identity.initial, "A");
+    }
+
+    #[test]
+    fn peer_identity_never_carries_raw_email_on_the_wire() {
+        // Privacy invariant (#540 review): collaborator emails are owner-only,
+        // so the identity broadcast to every co-present peer must NOT contain
+        // the raw address. The server computes a single-grapheme `initial`
+        // from display-name-or-email instead; the email itself never crosses.
+        let identity =
+            PeerIdentity::from_principal_parts("Ada Lovelace".into(), None, "ada@example.com");
+        assert_eq!(identity.initial, "A");
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(
+            !json.contains("ada@example.com"),
+            "raw email must not appear in the identity JSON: {json}"
+        );
+        assert!(
+            !json.contains("email"),
+            "no email field on the wire: {json}"
+        );
+        assert!(
+            !json.contains('@'),
+            "no address local-part@domain leaks: {json}"
+        );
+
+        // Blank display name → initial falls back to the email local-part's
+        // first letter, but STILL never exposes the address.
+        let blank = PeerIdentity::from_principal_parts("   ".into(), None, "zoe@example.com");
+        assert_eq!(blank.initial, "Z");
+        let blank_json = serde_json::to_string(&blank).unwrap();
+        assert!(!blank_json.contains("zoe@example.com"));
+        assert!(!blank_json.contains('@'));
+    }
+
+    #[test]
+    fn presence_state_without_identity_is_backward_tolerant() {
+        // A peer (older client, or the anonymous `/ws` path) sends presence
+        // with no `identity` key. It must still parse, with `identity = None`,
+        // so the cursor falls back to the numeric-id rendering.
+        let legacy = r#"{
+            "client_id": 4,
+            "camera": {"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[800,600]},
+            "view": {"z_range":{"start":0,"end":1},"t":0,"c":0},
+            "display": {"contrast_min":0.0,"contrast_max":1.0,"gamma":1.0},
+            "following": null,
+            "cursor": null
+        }"#;
+        let parsed: PresenceState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.client_id, 4);
+        assert_eq!(parsed.identity, None);
+        assert!(parsed.dataset_order.is_empty());
+    }
+
+    #[test]
+    fn peer_identity_without_picture_url_round_trips() {
+        // Dev sessions / providers with no avatar: `picture_url` is omitted on
+        // the wire (skip_serializing_if) and parses back to None.
+        let identity = PeerIdentity {
+            display_name: "Dev User".into(),
+            picture_url: None,
+            initial: "D".into(),
+        };
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(!json.contains("picture_url"));
+        let parsed: PeerIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.display_name, "Dev User");
+        assert_eq!(parsed.picture_url, None);
+        assert_eq!(parsed.initial, "D");
     }
 
     #[test]
@@ -835,6 +1005,7 @@ mod tests {
             cursor: None,
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
+            identity: None,
         };
         let msg = ServerMessage::PeerJoined {
             client_id: 3,
@@ -867,6 +1038,7 @@ mod tests {
             cursor: Some([0.5, 0.5]),
             dataset_order: vec![],
             dataset_settings: HashMap::new(),
+            identity: None,
         };
         let json = serde_json::to_string(&ps).unwrap();
         assert!(
