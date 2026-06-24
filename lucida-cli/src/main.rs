@@ -5,6 +5,7 @@ mod credentials;
 mod dataset;
 mod error;
 mod layout;
+mod montage;
 mod output;
 mod saved_view;
 mod status;
