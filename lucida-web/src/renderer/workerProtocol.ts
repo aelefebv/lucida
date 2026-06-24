@@ -193,6 +193,9 @@ export interface MinimapLayerParams {
   contrastMin: number;
   contrastMax: number;
   gamma: number;
+  /** Active channel's colormap name (snake_case, e.g. "magenta"); the minimap
+   * binds its own LUT so 2D matches 3D instead of rendering gray. */
+  colormap: string;
 }
 
 export interface MinimapInitMessage {

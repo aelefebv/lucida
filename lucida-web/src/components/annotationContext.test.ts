@@ -36,6 +36,16 @@ describe("annotationContext — isOffContext (pure decision)", () => {
     // is the integer 3 — they must compare equal, not as 3.0 !== 3-by-epsilon.
     expect(isOffContext(pin(3.0, 0, 0), { z: 3, t: 0, c: 0 })).toBe(false);
   });
+
+  it("ignoreZ (3D): a Z-only mismatch is on-context, since the volume shows all Z", () => {
+    // In 3D the whole volume is rendered, so a pin on a different slice is still
+    // visible — it must NOT dim for Z alone (a 3D-created pin's picked depth is
+    // rarely the slider's z, so otherwise it would always read off-context).
+    expect(isOffContext(pin(187, 0, 0), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(false);
+    // …but T/C still count even with ignoreZ.
+    expect(isOffContext(pin(187, 2, 0), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(true);
+    expect(isOffContext(pin(187, 0, 3), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(true);
+  });
 });
 
 describe("annotationContext — offContextLabel (exact contract form)", () => {

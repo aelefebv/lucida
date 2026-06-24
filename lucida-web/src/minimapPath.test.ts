@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { intersectSliceViewWithMember, minimapCoarseLevelIndex, resolveMinimapLayerContrast } from "./minimapPath.ts";
+import { intersectSliceViewWithMember, minimapCoarseLevelIndex, resolveMinimapLayerContrast, resolveMinimapLayerColormap } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 
 function multiscale(coarseLevelIndex?: number | null): Pick<MultiscaleInfo, "levels" | "coarse_level_index"> {
@@ -74,6 +74,25 @@ describe("resolveMinimapLayerContrast", () => {
   it("falls back to dataset-level when the active channel index is out of range", () => {
     const settings = { ...dataset, channel_settings: [{ contrast_min: 0, contrast_max: 148, gamma: 0.8 }] };
     expect(resolveMinimapLayerContrast(settings, 3)).toEqual({ contrastMin: 0, contrastMax: 65535, gamma: 1 });
+  });
+});
+
+describe("resolveMinimapLayerColormap", () => {
+  const ch = (colormap: string) => ({ contrast_min: 0, contrast_max: 1, gamma: 1, colormap });
+
+  it("uses the active channel's colormap (so 2D matches 3D, not gray)", () => {
+    const settings = { contrast_min: 0, contrast_max: 65535, gamma: 1, channel_settings: [ch("magenta"), ch("green")] };
+    expect(resolveMinimapLayerColormap(settings, 0)).toBe("magenta");
+    expect(resolveMinimapLayerColormap(settings, 1)).toBe("green");
+  });
+
+  it("falls back to gray when there are no channel settings", () => {
+    expect(resolveMinimapLayerColormap({ contrast_min: 0, contrast_max: 65535, gamma: 1 }, 0)).toBe("gray");
+  });
+
+  it("falls back to gray when the active channel index is out of range", () => {
+    const settings = { contrast_min: 0, contrast_max: 65535, gamma: 1, channel_settings: [ch("magenta")] };
+    expect(resolveMinimapLayerColormap(settings, 5)).toBe("gray");
   });
 });
 

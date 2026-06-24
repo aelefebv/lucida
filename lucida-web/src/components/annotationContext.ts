@@ -38,14 +38,26 @@ function pinZTC(pin: Annotation): { z: number; t: number; c: number } {
   };
 }
 
+/** Off-context options. `ignoreZ` drops Z from the comparison for the 3D view,
+ * where the volume renders ALL slices at once — so a pin on a different Z is
+ * still visible and must not dim for Z alone (only T/C take it off-context).
+ * Without this, a 3D-created pin — whose picked voxel depth is rarely the
+ * slider's current z — would always read off-context. The 2D slice view leaves
+ * `ignoreZ` unset: there Z is a real selector. */
+export interface OffContextOptions {
+  ignoreZ?: boolean;
+}
+
 /**
  * Whether `pin` is off-context for `view`: it differs from the current view in
- * ANY of Z, T, or C. All-equal → on-context (today's normal look, no marker);
- * any difference → off-context (dimmed + the "where it lives" helptext).
+ * ANY of Z, T, or C (Z skipped when {@link OffContextOptions.ignoreZ}). All
+ * compared fields equal → on-context (today's normal look, no marker); any
+ * difference → off-context (dimmed + the "where it lives" helptext).
  */
-export function isOffContext(pin: Annotation, view: ViewContext): boolean {
+export function isOffContext(pin: Annotation, view: ViewContext, opts?: OffContextOptions): boolean {
   const { z, t, c } = pinZTC(pin);
-  return z !== Math.round(view.z) || t !== Math.round(view.t) || c !== Math.round(view.c);
+  const zOff = opts?.ignoreZ ? false : z !== Math.round(view.z);
+  return zOff || t !== Math.round(view.t) || c !== Math.round(view.c);
 }
 
 /**

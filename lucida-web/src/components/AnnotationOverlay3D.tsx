@@ -616,7 +616,10 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         // point projects behind the camera); off-context only adjusts the look
         // (dim + dashed dot + helptext), never the visibility — a visible pin
         // that lives elsewhere reads as off-view, like a peer cursor.
-        const offCtx = isOffContext(pin, viewContext);
+        // In 3D the volume renders every slice, so a pin on another Z is still
+        // visible — ignore Z for off-context (only T/C dim a pin here). The 2D
+        // overlay keeps Z, where it is a real slice selector.
+        const offCtx = isOffContext(pin, viewContext, { ignoreZ: true });
         return (
           <div
             key={pin.id}

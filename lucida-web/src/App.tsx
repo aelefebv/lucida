@@ -8,6 +8,8 @@ import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { AnnotationOverlay, type Annotation, type AnnotationOverlayHandle } from "./components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
+import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
+import type { AnnotationDraft } from "./components/annotationDraft.ts";
 import { MentionsOfMe } from "./components/MentionsOfMe.tsx";
 import {
   currentDatasetAnnotations,
@@ -131,6 +133,10 @@ function App({
   // and view-specific without leaking overlay internals into App.
   const overlay2dRef = useRef<AnnotationOverlayHandle | null>(null);
   const overlay3dRef = useRef<AnnotationOverlayHandle | null>(null);
+  // Shared channel for the live box/line draw preview (issue: shapes only
+  // appeared on release). The canvas gesture handlers (SliceViewer/VolumeViewer)
+  // write the in-progress shape here; AnnotationDraftOverlay renders it.
+  const annotationDraftRef = useRef<AnnotationDraft | null>(null);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
   // Workspace member roster for @-mention candidates (issue #526). Best-effort:
@@ -1136,7 +1142,11 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
+                annotationDraftRef={annotationDraftRef}
               />
+            )}
+            {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
+              <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
               <AnnotationOverlay
@@ -1203,7 +1213,11 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
+                annotationDraftRef={annotationDraftRef}
               />
+            )}
+            {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
+              <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
               <AnnotationOverlay3D

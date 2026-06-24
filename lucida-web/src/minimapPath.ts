@@ -48,7 +48,21 @@ export interface MinimapDatasetSettings {
   contrast_min: number;
   contrast_max: number;
   gamma: number;
-  channel_settings?: { contrast_min: number; contrast_max: number; gamma: number }[];
+  channel_settings?: { contrast_min: number; contrast_max: number; gamma: number; colormap?: string }[];
+}
+
+/**
+ * Resolve the colormap the minimap renders a layer with for the active channel.
+ *
+ * The colormap is per-channel (`channel_settings[c].colormap`). The minimap
+ * render reuses the shared volume renderer, whose LUT is only set as a side
+ * effect of the 3D main view — so without this the 2D minimap renders gray
+ * (the renderer's default LUT) while 3D happens to show the channel colormap.
+ * Resolve it here (mirroring `useDatasetSettings.buildLayerInfos`) and bind it
+ * for the minimap's own draw so 2D and 3D match.
+ */
+export function resolveMinimapLayerColormap(settings: MinimapDatasetSettings, activeC: number): string {
+  return settings.channel_settings?.[activeC]?.colormap ?? "gray";
 }
 
 /**
@@ -329,6 +343,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
         contrastMin,
         contrastMax,
         gamma,
+        colormap: resolveMinimapLayerColormap(settings, activeC),
       });
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
