@@ -278,6 +278,14 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const shape = kind === "line" || kind === "box";
       const anchor = pickVoxel(shape ? startX : endX, shape ? startY : endY);
       if (!anchor) return; // anchor ray missed → don't draw
+      // Clamp the picked depth to a valid slice index. The pick can return the
+      // ray's far-face depth (== full depth, e.g. 339.999 for a 340-deep volume),
+      // which rounds to 340 — OUT of the slice range [0, depth-1] — so the pin
+      // could never match any slider Z and read permanently off-context in 2D.
+      // Clamp so 2D navigation can reach its slice (issue: 3D annotations always
+      // off-context).
+      const depth = scene.dataset_volume_shape(datasetId)[0];
+      const z = depth > 0 ? Math.max(0, Math.min(anchor[2], depth - 1)) : anchor[2];
       let end: [number, number] | null = null;
       if (shape) {
         const far = pickVoxel(endX, endY);
@@ -306,7 +314,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           id,
           position: [anchor[0], anchor[1]],
           end,
-          z: anchor[2],
+          z,
           // Stamp the view's current T/C so the pin belongs to this timepoint/
           // channel (issue #779). In 3D `z` is the picked voxel depth (the
           // geometric anchor), while T/C are the discrete view selectors.
