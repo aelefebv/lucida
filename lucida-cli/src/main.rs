@@ -562,6 +562,31 @@ enum DatasetCommand {
         #[arg(long, default_value_t = 60)]
         timeout_seconds: u64,
     },
+    /// Render an agent overview: a contact-sheet montage sampling the dataset
+    /// (Z / T / fields), each cell a re-openable view. Writes a labeled PNG and,
+    /// with --json, a sidecar mapping each cell to its z/t/c + a `#view=` URL.
+    Montage {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// PNG output path for the montage
+        #[arg(long)]
+        out: String,
+        /// Maximum number of cells to sample
+        #[arg(long, default_value_t = 16)]
+        cells: usize,
+        /// Grid width (max columns)
+        #[arg(long, default_value_t = 4)]
+        cols: u32,
+        /// Per-cell thumbnail size in pixels (square)
+        #[arg(long, default_value_t = 256)]
+        cell_px: u32,
+        /// Also write a JSON sidecar at <out>.json
+        #[arg(long)]
+        json: bool,
+        /// Seconds to wait for the workspace snapshot and each render
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2034,6 +2059,94 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     format_dataset_remove_human(&output_payload)
                 })?;
             }
+            DatasetCommand::Montage {
+                dataset,
+                out,
+                cells,
+                cols,
+                cell_px,
+                json,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let wait = Duration::from_secs(*timeout_seconds);
+                let dataset_client =
+                    DatasetWorkspaceClient::new(target.ws_url.clone(), token.clone());
+                let (_seq, info) = dataset_client.info(dataset, wait).await?;
+                let dims = info.summary.dimensions.ok_or_else(|| {
+                    CliError::new(ErrorKind::Protocol, "dataset has no dimensions to montage")
+                })?;
+                let ds_id = info.summary.workspace_dataset_id.clone();
+                let full_x = dims[4];
+                let full_y = dims[3];
+                // MVP samples the Z / T / single axis with a whole-image fit.
+                // Per-field plate montage (which needs member positions) is a
+                // follow-up slice, so plan as a single image here.
+                let plan = montage::plan_montage(dims, 1, *cells, *cols);
+                let viewport = [*cell_px, *cell_px];
+
+                let mut urls: Vec<String> = Vec::with_capacity(plan.cells.len());
+                let mut cell_json: Vec<serde_json::Value> = Vec::with_capacity(plan.cells.len());
+                for (index, cell) in plan.cells.iter().enumerate() {
+                    let saved = montage::build_cell_view(&ds_id, cell, full_x, full_y, viewport);
+                    let url = viewer_inline_view_web_url(&target, &saved)?;
+                    cell_json.push(serde_json::json!({
+                        "index": index,
+                        "z": cell.z, "t": cell.t, "c": cell.c, "field": cell.field,
+                        "label": cell.label,
+                        "url": url,
+                    }));
+                    // Capture through the chrome-free render surface; the sidecar
+                    // keeps the clean interactive URL above for drill-in.
+                    urls.push(montage::with_render_param(&url));
+                }
+
+                let pngs =
+                    capture_montage_pngs(&urls, token.as_ref(), *cell_px, *cell_px, wait).await?;
+                let montage_png = montage::stitch_grid(&pngs, plan.cols)
+                    .map_err(|message| CliError::new(ErrorKind::Protocol, message))?;
+                if let Some(parent) = Path::new(out).parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::write(out, &montage_png).await?;
+                let axis = format!("{:?}", plan.axis);
+                let json_path = format!("{out}.json");
+                let sidecar = serde_json::json!({
+                    "dataset": ds_id,
+                    "out": out,
+                    "axis": axis,
+                    "cols": plan.cols,
+                    "rows": plan.rows,
+                    "cell_px": cell_px,
+                    "cells": cell_json,
+                });
+                if *json {
+                    tokio::fs::write(&json_path, serde_json::to_vec_pretty(&sidecar)?).await?;
+                }
+                let n = plan.cells.len();
+                let (cols_n, rows_n, json_written) = (plan.cols, plan.rows, *json);
+                output.print_either(&sidecar, || {
+                    let mut human =
+                        format!("Wrote montage: {out} ({n} cells, {cols_n}x{rows_n}, axis {axis})");
+                    if json_written {
+                        human.push_str(&format!("\nSidecar: {json_path}"));
+                    }
+                    human
+                })?;
+            }
         },
         Command::View {
             viewer_profile,
@@ -3175,6 +3288,66 @@ async fn capture_viewer_screenshot(
         }
         tokio::fs::write(output_path, png).await?;
         Ok::<(), CliError>(())
+    }
+    .await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
+    result
+}
+
+/// Render many view URLs in ONE headless browser session and return a PNG per
+/// URL (in order). Reuses the single-shot screenshot spawn + DevTools discovery,
+/// then drives `capture_cdp_png` once per URL (it creates a fresh target each
+/// time) — much cheaper than relaunching the browser per montage cell.
+async fn capture_montage_pngs(
+    urls: &[String],
+    token: Option<&EffectiveToken>,
+    width: u32,
+    height: u32,
+    wait: Duration,
+) -> Result<Vec<Vec<u8>>, CliError> {
+    if urls.is_empty() {
+        return Err(CliError::config("montage has no cells to render"));
+    }
+    let browser = find_browser_binary()?;
+    let user_data_dir = chrome_user_data_dir();
+    tokio::fs::create_dir_all(&user_data_dir).await?;
+    let mut child = TokioCommand::new(&browser)
+        .arg("--headless=new")
+        .arg("--enable-unsafe-webgpu")
+        .arg("--ignore-gpu-blocklist")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", user_data_dir.display()))
+        .arg(format!("--window-size={width},{height}"))
+        .arg("about:blank")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            CliError::new(
+                ErrorKind::Config,
+                format!("failed to launch browser {browser:?}: {error}"),
+            )
+        })?;
+
+    let result = async {
+        let stderr = child.stderr.take().ok_or_else(|| {
+            CliError::new(
+                ErrorKind::Protocol,
+                "browser stderr was not available for DevTools discovery",
+            )
+        })?;
+        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
+        let mut pngs = Vec::with_capacity(urls.len());
+        for url in urls {
+            pngs.push(capture_cdp_png(&endpoint, url, token, width, height, wait).await?);
+        }
+        Ok::<Vec<Vec<u8>>, CliError>(pngs)
     }
     .await;
 

@@ -1,9 +1,20 @@
-//! Planning for `lucida dataset montage` — the agent-facing contact sheet.
+//! Planning + composition for `lucida dataset montage` — the agent-facing
+//! contact sheet.
 //!
 //! Pure logic: given a dataset's shape, decide which axis to sample, which
-//! cells (z/t/c) to render, and the montage grid layout. Kept free of I/O and
-//! the browser so it is unit-testable; the command wires this to the headless
-//! render + image stitching.
+//! cells (z/t/c) to render, the montage grid layout, the per-cell view
+//! (`SavedView`), and how to stitch the rendered thumbnails into one image.
+//! Kept free of network/browser I/O so it is unit-testable; the command wires
+//! this to the headless render.
+
+use std::io::Cursor;
+
+use image::{ImageFormat, Rgba, RgbaImage};
+use lucida_content::DatasetId;
+use lucida_core::camera::{Camera, Slice};
+use lucida_core::saved_view::SavedView;
+use lucida_core::scene::DatasetDisplaySettings;
+use lucida_core::view::ViewState;
 
 /// Which dataset axis the montage sweeps. Picked from the dataset's shape: a
 /// multi-field plate samples fields; otherwise a depth stack samples Z, a
@@ -93,30 +104,222 @@ pub fn plan_montage(
     } else if z_n > 1 {
         let cells = even_samples(z_n, max_cells)
             .into_iter()
-            .map(|z| MontageCell { z, t: 0, c: 0, field: 0, label: format!("z={z}") })
+            .map(|z| MontageCell {
+                z,
+                t: 0,
+                c: 0,
+                field: 0,
+                label: format!("z={z}"),
+            })
             .collect();
         (MontageAxis::Z, cells)
     } else if t_n > 1 {
         let cells = even_samples(t_n, max_cells)
             .into_iter()
-            .map(|t| MontageCell { z: 0, t, c: 0, field: 0, label: format!("t={t}") })
+            .map(|t| MontageCell {
+                z: 0,
+                t,
+                c: 0,
+                field: 0,
+                label: format!("t={t}"),
+            })
             .collect();
         (MontageAxis::T, cells)
     } else {
         (
             MontageAxis::Single,
-            vec![MontageCell { z: 0, t: 0, c: 0, field: 0, label: "z=0".into() }],
+            vec![MontageCell {
+                z: 0,
+                t: 0,
+                c: 0,
+                field: 0,
+                label: "z=0".into(),
+            }],
         )
     };
 
     let cols = grid_cols(cells.len(), max_cols);
     let rows = (cells.len() as u32).div_ceil(cols.max(1));
-    MontagePlan { axis, cells, cols, rows }
+    MontagePlan {
+        axis,
+        cells,
+        cols,
+        rows,
+    }
+}
+
+/// A 2D slice camera framing the full `full_x × full_y` voxel extent inside
+/// `viewport` pixels (centered, zoomed so the whole image fits). zoom = 1.0 is
+/// native (1 px/voxel); fit picks the smaller per-axis ratio so nothing clips.
+fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
+    let x = full_x.max(1) as f64;
+    let y = full_y.max(1) as f64;
+    let zoom = (viewport[0] as f64 / x)
+        .min(viewport[1] as f64 / y)
+        .max(f64::MIN_POSITIVE);
+    Slice {
+        center: [x / 2.0, y / 2.0],
+        zoom,
+        viewport,
+    }
+}
+
+/// Build the inline `SavedView` for one montage cell: a fit 2D camera at the
+/// cell's z/t/c with the dataset visible and auto-contrast on. Source URLs are
+/// left empty (workspace-dataset-id form — the dataset is already open in the
+/// target workspace); the caller encodes this into a `#view=` URL.
+pub fn build_cell_view(
+    ds_id: &str,
+    cell: &MontageCell,
+    full_x: u64,
+    full_y: u64,
+    viewport: [u32; 2],
+) -> SavedView {
+    let mut view = SavedView::empty(viewport);
+    view.camera = Camera::Slice(fit_slice_camera(full_x, full_y, viewport));
+    view.view = ViewState {
+        z_range: cell.z..cell.z + 1,
+        t: cell.t,
+        c: cell.c,
+        multi_channel: false,
+    };
+    let id = DatasetId(ds_id.to_string());
+    view.dataset_order = vec![id.clone()];
+    view.dataset_settings
+        .insert(id.clone(), DatasetDisplaySettings::default());
+    view.auto_contrast.insert(id, true);
+    view
+}
+
+/// Stitch rendered thumbnail PNGs (row-major, `cols` wide) into one montage
+/// PNG. Cells are sized to the largest thumbnail and laid on a dark backdrop so
+/// ragged sizes (e.g. a final short row) still align. Returns encoded PNG bytes.
+pub fn stitch_grid(thumbs: &[Vec<u8>], cols: u32) -> Result<Vec<u8>, String> {
+    if thumbs.is_empty() {
+        return Err("no thumbnails to stitch".into());
+    }
+    let cols = cols.max(1);
+    let decoded: Vec<RgbaImage> = thumbs
+        .iter()
+        .map(|bytes| {
+            image::load_from_memory(bytes)
+                .map(|img| img.to_rgba8())
+                .map_err(|e| format!("decode thumbnail: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    let cell_w = decoded.iter().map(|t| t.width()).max().unwrap_or(1).max(1);
+    let cell_h = decoded.iter().map(|t| t.height()).max().unwrap_or(1).max(1);
+    let rows = (decoded.len() as u32).div_ceil(cols);
+    let mut canvas = RgbaImage::from_pixel(cols * cell_w, rows * cell_h, Rgba([12, 12, 16, 255]));
+    for (i, thumb) in decoded.iter().enumerate() {
+        let cx = (i as u32 % cols) * cell_w;
+        let cy = (i as u32 / cols) * cell_h;
+        image::imageops::overlay(&mut canvas, thumb, cx as i64, cy as i64);
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(canvas)
+        .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+        .map_err(|e| format!("encode montage: {e}"))?;
+    Ok(out)
+}
+
+/// Add the chrome-free capture flag (`render=1`) to a viewer URL, inserting it
+/// into the query string while preserving any `#view=…` fragment. Cells are
+/// captured through this clean surface (no sidebar/toolbar), but the sidecar
+/// keeps the normal interactive URLs so an agent or human can drill in.
+pub fn with_render_param(url: &str) -> String {
+    let (base, fragment) = match url.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (url, None),
+    };
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let mut out = format!("{base}{separator}render=1");
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImageView;
+
+    #[test]
+    fn render_param_inserts_before_fragment() {
+        // The viewer URL carries the SavedView in the `#view=` fragment; the
+        // render flag must land in the query string ahead of it.
+        assert_eq!(
+            with_render_param("http://h/w/ws#view=ABC"),
+            "http://h/w/ws?render=1#view=ABC"
+        );
+        // Existing query → append with `&`.
+        assert_eq!(
+            with_render_param("http://h/w/ws?x=1#view=ABC"),
+            "http://h/w/ws?x=1&render=1#view=ABC"
+        );
+        // No fragment at all.
+        assert_eq!(with_render_param("http://h/w/ws"), "http://h/w/ws?render=1");
+    }
+
+    /// A tiny solid-color PNG for stitch tests.
+    fn solid_png(w: u32, h: u32, color: [u8; 4]) -> Vec<u8> {
+        let img = RgbaImage::from_pixel(w, h, Rgba(color));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn cell_view_sets_slice_z_and_visible_dataset() {
+        let cell = MontageCell {
+            z: 42,
+            t: 3,
+            c: 1,
+            field: 0,
+            label: "z=42".into(),
+        };
+        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256]);
+        match view.camera {
+            Camera::Slice(s) => {
+                assert_eq!(s.center, [200.0, 100.0]);
+                // fit: min(256/400, 256/200) = 0.64
+                assert!((s.zoom - 0.64).abs() < 1e-9, "zoom {}", s.zoom);
+            }
+            _ => panic!("expected 2D slice camera"),
+        }
+        assert_eq!(view.view.z_range, 42..43);
+        assert_eq!(view.view.t, 3);
+        assert_eq!(view.view.c, 1);
+        let id = DatasetId("wds-abc".into());
+        assert_eq!(view.dataset_order, vec![id.clone()]);
+        assert_eq!(view.auto_contrast.get(&id), Some(&true));
+        assert!(
+            view.datasets.is_empty(),
+            "inline view must be workspace-id form"
+        );
+    }
+
+    #[test]
+    fn stitch_lays_thumbs_in_a_grid() {
+        let thumbs = vec![
+            solid_png(8, 8, [255, 0, 0, 255]),
+            solid_png(8, 8, [0, 255, 0, 255]),
+            solid_png(8, 8, [0, 0, 255, 255]),
+        ];
+        let png = stitch_grid(&thumbs, 2).unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+        // 3 cells, 2 cols → 2x2 grid of 8px cells = 16x16.
+        assert_eq!(img.dimensions(), (16, 16));
+    }
+
+    #[test]
+    fn stitch_rejects_empty() {
+        assert!(stitch_grid(&[], 4).is_err());
+    }
 
     #[test]
     fn samples_z_for_a_3d_volume() {
