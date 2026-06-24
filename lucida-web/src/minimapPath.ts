@@ -44,6 +44,37 @@ export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels
   return null;
 }
 
+export interface MinimapDatasetSettings {
+  contrast_min: number;
+  contrast_max: number;
+  gamma: number;
+  channel_settings?: { contrast_min: number; contrast_max: number; gamma: number }[];
+}
+
+/**
+ * Resolve the contrast/gamma the minimap renders a layer with for the active
+ * channel.
+ *
+ * Auto-contrast (and per-channel user adjustments) are applied at the *channel*
+ * level via the `set_channel_contrast` command, so the dataset-level contrast
+ * stays at its full-range default (e.g. [0, 65535]) while the active channel
+ * holds the data's real range. Rendering the overview with the dataset-level
+ * default makes a low-valued volume invisibly dark. Prefer the active channel's
+ * values and fall back to dataset-level — mirroring
+ * `useDatasetSettings.buildLayerInfos` so the minimap matches the main view.
+ */
+export function resolveMinimapLayerContrast(
+  settings: MinimapDatasetSettings,
+  activeC: number,
+): { contrastMin: number; contrastMax: number; gamma: number } {
+  const ch = settings.channel_settings?.[activeC];
+  return {
+    contrastMin: ch?.contrast_min ?? settings.contrast_min,
+    contrastMax: ch?.contrast_max ?? settings.contrast_max,
+    gamma: ch?.gamma ?? settings.gamma,
+  };
+}
+
 export interface SliceViewBounds {
   minX: number;
   minY: number;
@@ -240,9 +271,14 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // uploadGeneration ensures we re-render when new overview chunks arrive.
   const settingsSnap = scene.all_dataset_settings();
   const orderSnap = scene.dataset_order();
+  // The active channel selects which channel_settings the layer contrast comes
+  // from (resolveMinimapLayerContrast), so it is a minimap render input — keep it
+  // in the key or switching channels leaves the minimap stale (see the
+  // minimap-render-key gotcha).
+  const activeC = scene.c();
   // In volume mode, the main camera position affects the frustum overlay
   const mainCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
-  const renderKey = `${theta}|${phi}|${mode}|${sliceZ}|${mainCamSnap}|${orderSnap}|${settingsSnap}|${state.uploadGeneration}`;
+  const renderKey = `${theta}|${phi}|${mode}|${sliceZ}|${activeC}|${mainCamSnap}|${orderSnap}|${settingsSnap}|${state.uploadGeneration}`;
   if (renderKey === state.lastRenderKey) return;
   state.lastRenderKey = renderKey;
 
@@ -258,11 +294,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const allSettings: Record<string, {
     visible: boolean;
     opacity: number;
-    contrast_min: number;
-    contrast_max: number;
-    gamma: number;
     blend_mode: string;
-  }> = JSON.parse(settingsSnap);
+  } & MinimapDatasetSettings> = JSON.parse(settingsSnap);
 
   const layers: MinimapLayerParams[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
@@ -288,13 +321,14 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
       const level0 = img.multiscale.levels[0];
 
+      const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
       layers.push({
         datasetId: memberId,
         modelMatrix: model,
         invModelMatrix: invModel,
-        contrastMin: settings.contrast_min,
-        contrastMax: settings.contrast_max,
-        gamma: settings.gamma,
+        contrastMin,
+        contrastMax,
+        gamma,
       });
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
