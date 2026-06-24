@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { intersectSliceViewWithMember, minimapCoarseLevelIndex } from "./minimapPath.ts";
+import { intersectSliceViewWithMember, minimapCoarseLevelIndex, resolveMinimapLayerContrast } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 
 function multiscale(coarseLevelIndex?: number | null): Pick<MultiscaleInfo, "levels" | "coarse_level_index"> {
@@ -46,6 +46,34 @@ describe("minimapCoarseLevelIndex", () => {
     const ms = multiscale(1);
     ms.levels = ms.levels.map((level, idx) => ({ ...level, level_index: idx + 10 }));
     expect(minimapCoarseLevelIndex(ms)).toBe(1);
+  });
+});
+
+describe("resolveMinimapLayerContrast", () => {
+  const dataset = { contrast_min: 0, contrast_max: 65535, gamma: 1 };
+
+  it("prefers the active channel's contrast/gamma over the dataset-level default", () => {
+    // The bug: auto-contrast is applied per-channel (set_channel_contrast), so the
+    // dataset-level contrast stays at the full-range default while the channel holds
+    // the real range. The minimap must use the channel's values like the main view.
+    const settings = {
+      ...dataset,
+      channel_settings: [
+        { contrast_min: 0, contrast_max: 148, gamma: 0.8 },
+        { contrast_min: 10, contrast_max: 200, gamma: 1.2 },
+      ],
+    };
+    expect(resolveMinimapLayerContrast(settings, 0)).toEqual({ contrastMin: 0, contrastMax: 148, gamma: 0.8 });
+    expect(resolveMinimapLayerContrast(settings, 1)).toEqual({ contrastMin: 10, contrastMax: 200, gamma: 1.2 });
+  });
+
+  it("falls back to dataset-level contrast when there are no channel settings", () => {
+    expect(resolveMinimapLayerContrast(dataset, 0)).toEqual({ contrastMin: 0, contrastMax: 65535, gamma: 1 });
+  });
+
+  it("falls back to dataset-level when the active channel index is out of range", () => {
+    const settings = { ...dataset, channel_settings: [{ contrast_min: 0, contrast_max: 148, gamma: 0.8 }] };
+    expect(resolveMinimapLayerContrast(settings, 3)).toEqual({ contrastMin: 0, contrastMax: 65535, gamma: 1 });
   });
 });
 
