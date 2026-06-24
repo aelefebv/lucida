@@ -5,6 +5,7 @@ pub mod command;
 pub mod cursor;
 pub mod epoch;
 pub(crate) mod mat4;
+pub mod minimap;
 pub mod protocol;
 pub mod query;
 pub mod ray;
