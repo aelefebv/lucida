@@ -6,6 +6,15 @@ import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState } from "../types.ts";
 
+declare global {
+  interface Window {
+    // The latest auto-contrast data window, exposed so headless tooling (the
+    // `dataset montage` capture) can read a dataset's data range and derive a
+    // shared, background-clipped contrast. Additive — auto behaviour is unchanged.
+    __lucidaAutoContrast?: { min: number; max: number };
+  }
+}
+
 interface Params {
   clientReady: boolean;
   clientRef: React.RefObject<RenderClient | null>;
@@ -51,6 +60,10 @@ export function useIntensityBatcher({
       const existing = pendingIntensityRef.current.get(datasetId);
       const mergedMin = existing ? Math.min(existing.min, min) : min;
       const mergedMax = existing ? Math.max(existing.max, max) : max;
+
+      // A montage view shows a single dataset, so the latest window is its
+      // data range; the headless capture reads this to clip the background.
+      window.__lucidaAutoContrast = { min: mergedMin, max: mergedMax };
 
       const isAuto = autoContrastMapRef.current.get(datasetId) ?? true;
       if (isAuto) {

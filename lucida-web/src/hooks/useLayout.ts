@@ -1,10 +1,36 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { RenderLoop } from "../renderLoop.ts";
 
-export function useLayout({ loopRef }: { loopRef: React.RefObject<RenderLoop | null> }) {
-  const [sidebarWidth, setSidebarWidth] = useState(280);
-  const [canvasWidth, setCanvasWidth] = useState(800);
-  const [canvasHeight, setCanvasHeight] = useState(600);
+export function useLayout({
+  loopRef,
+  renderMode = false,
+}: {
+  loopRef: React.RefObject<RenderLoop | null>;
+  renderMode?: boolean;
+}) {
+  const [sidebarWidth, setSidebarWidth] = useState(renderMode ? 0 : 280);
+  const [canvasWidth, setCanvasWidth] = useState(() =>
+    renderMode && typeof window !== "undefined" ? window.innerWidth : 800,
+  );
+  const [canvasHeight, setCanvasHeight] = useState(() =>
+    renderMode && typeof window !== "undefined" ? window.innerHeight : 600,
+  );
+
+  // The chrome-free render surface (`?render=1`, used by `dataset montage` and
+  // `viewer render`) fills the whole viewport with the canvas so a headless
+  // screenshot is pure data — no sidebar, no toolbar. Mirror the window size
+  // (the capture drives it via CDP device-metrics) and keep it in sync on resize.
+  useEffect(() => {
+    if (!renderMode || typeof window === "undefined") return;
+    const sync = () => {
+      setCanvasWidth(window.innerWidth);
+      setCanvasHeight(window.innerHeight);
+      loopRef.current?.markInteractiveDirty();
+    };
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, [renderMode, loopRef]);
 
   const handleSidebarResizeDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault();

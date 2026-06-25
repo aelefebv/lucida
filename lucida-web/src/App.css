@@ -17,6 +17,37 @@
   overflow: auto;
 }
 
+/* Chrome-free capture surface (`?render=1`), used by `dataset montage` and
+   `viewer render`: hide every piece of UI so a headless screenshot is pure data
+   on the WebGPU canvas, and let the canvas fill the whole viewport. The render
+   loop draws to the canvas independent of the overlay DOM, so hiding overlays
+   never stops rendering. `> :not(canvas)` also sweeps up any future overlay. */
+.app.render-mode {
+  overflow: hidden;
+}
+
+.app.render-mode .layer-panel,
+.app.render-mode .sidebar-resize-handle,
+.app.render-mode .workspace-chrome,
+.app.render-mode .peer-list {
+  display: none !important;
+}
+
+.app.render-mode .main-content {
+  padding: 0;
+  gap: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.app.render-mode .viewer-canvas-wrap > :not(canvas) {
+  display: none !important;
+}
+
+.app.render-mode canvas {
+  border-radius: 0 !important;
+}
+
 .workspace-chrome {
   width: 100%;
   display: grid;
