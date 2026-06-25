@@ -217,3 +217,5 @@
 - feat(collab): show peer name + avatar on cursors in peer mode (#540) (slipway, reversible: git-revert)
 - feat(viewer): configurable 3D chunk-spawn focal depth (#532) (slipway, reversible: git-revert)
 - fix(core): clear all dataset-id-keyed fields on remove_dataset; unify the traversal (slipway, reversible: git-revert)
+- fix(server): decode blosc non-filter-aligned trailing blocks (slipway, reversible: git-revert)
+- fix(server): decode blosc per-block raw-stored (uncompressed) blocks (slipway, reversible: git-revert)
