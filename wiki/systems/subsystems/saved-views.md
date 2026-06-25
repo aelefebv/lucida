@@ -9,7 +9,7 @@ Cross-cutting subsystem spanning [[lucida-core]] (the `SavedView` schema), [[luc
 
 1. **Live URL** (`#view=…`) — debounced `window.history.replaceState` keeps the URL hash a current snapshot of the view. Sharing = copy URL. Refresh preserves view. No server involvement.
 2. **Named bookmarks** (`#b=<id>`) — server-stored entries with name + creator + timestamp; visible in a sidebar filtered to bookmarks for currently-loaded datasets; live cross-peer updates via `BookmarkChanged` broadcast.
-3. **Workspace saved views** — workspace-scoped named entries under `/api/workspaces/:workspace_id/saved-views`. Editors can create/update/rename/delete and set/clear the workspace default view; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
+3. **Workspace saved views** — workspace-scoped named entries under `/api/workspaces/:workspace_id/saved-views`, each carrying a **visibility** (`Shared` / `Personal` / `Proposed`; see below). Editors create/update/rename/delete shared views and set/clear the workspace default; any member (viewer included) can keep `Personal` views and *propose* one for sharing; viewers can list/open/copy. Payloads use workspace-local dataset ids and intentionally omit source URLs.
 
 ## Why two surfaces, one record
 
@@ -27,6 +27,8 @@ Full design rationale in [[decisions/0013-url-as-app-state-for-saved-views]] (th
 - `auto_contrast: IndexMap<DatasetId, bool>` — JS-side preference (lives in `useDatasetSettings.autoContrastMap`, not in WASM) that round-trips explicitly so the recipient's intensity batcher doesn't immediately overwrite captured contrast values. `IndexMap` (not `HashMap`) like every per-dataset map here, so deserialize→serialize preserves key order — load-bearing for deterministic on-the-wire serialization of the collaborative document. Pattern to follow when adding new client-only state — see [[gotchas/saved-view-client-only-state]].
 
 Notable exclusions per [[decisions/0013-url-as-app-state-for-saved-views]]: `selectedDatasetId` (UI focus only — but see "selectedDatasetId wrinkle" below), `following` (sender's follow target irrelevant to recipient), `cursor` (mouse position is noise), `client_id` (not portable).
+
+Beyond the three surfaces above, `SavedView` is also embedded as `Annotation::view: Option<SavedView>` (`saved_view.rs`): an annotation captures its author's view so jump-to-annotation can restore it. This makes `SavedView`'s `PartialEq` derive load-bearing (`Annotation` derives `PartialEq`).
 
 ## Three deep modules on the web side
 
@@ -50,16 +52,27 @@ Bookmarks are the second persistent state added to [[lucida-server]] (after auth
 
 ## Server side: workspace saved views
 
-Workspace saved views live in `lucida-server/src/workspace.rs` alongside workspace authorization and dataset membership. The `workspace_saved_views` table stores `view_json` plus name/creator timestamps, keyed by `workspace_id`; there is no dataset URL side table because source identity belongs to `workspace_datasets`.
+Workspace saved views live in `lucida-server/src/workspace.rs` alongside workspace authorization and dataset membership. The `workspace_saved_views` table stores `view_json` plus name/creator timestamps and a `visibility` TEXT column (migration `...0011`; a partial index on proposed rows in `...0013`), keyed by `workspace_id`; there is no dataset URL side table because source identity belongs to `workspace_datasets`.
 
 All routes are workspace-scoped:
 
 - `GET /api/workspaces/:workspace_id/saved-views`
 - `POST /api/workspaces/:workspace_id/saved-views`
 - `GET/PATCH/DELETE /api/workspaces/:workspace_id/saved-views/:saved_view_id`
+- `PATCH /api/workspaces/:workspace_id/saved-views/:saved_view_id/visibility` — re-scope a view's visibility
+- `POST /api/workspaces/:workspace_id/saved-views/:saved_view_id/approve` / `/reject` — editor disposition of a `Proposed` view
+- `GET/PATCH /api/workspaces/:workspace_id/viewer-profiles/:profile` — per-viewer last-open view (#700), isolated per `principal.email`
 - `PATCH /api/workspaces/:workspace_id/default-saved-view`
 
 The manager enforces viewer-or-better for list/get and editor-or-better for create/update/delete/default changes. On create/update, the server clears `SavedView.datasets` before persistence; workspace saved views are expected to key `dataset_order`, `dataset_settings`, `active_layouts`, and `auto_contrast` by `workspace_dataset_id`.
+
+### Visibility model (`Shared` / `Personal` / `Proposed`, #702)
+
+`SavedViewVisibility` (in `workspace.rs`) governs who can see each workspace saved view:
+
+- **`Shared`** — the collaborative surface (the historical default); visible to every member, editable by editors.
+- **`Personal`** — belongs to exactly one member, never disclosed to anyone else (not even owners).
+- **`Proposed`** — a viewer's *bid to share*: like a `Personal` view it belongs to one member, but it is surfaced to editors as a review queue. An editor can **approve** (→ `Shared`) or **reject** (→ back to the proposer's `Personal`). A proposer cannot be their own reviewer (self-approve guard, #817) — the approve path forbids `created_by == reviewer` even for an editor/owner who authored the proposal; self-*reject*/withdraw is legal via `/visibility`. The whole visibility predicate is resolved in SQL so a denied row is never read. The web side mirrors this with `WorkspaceSavedViewVisibility` and `approveWorkspaceSavedView`/`rejectWorkspaceSavedView` in `workspaceApi.ts`.
 
 `/w/:workspace_id#b=<saved_view_id>` resolves through the workspace-scoped API and collapses to `/w/:workspace_id#view=...` after a successful apply. Bare `/w/:workspace_id` applies `default_saved_view_id` when one is configured and no explicit hash is present.
 
@@ -86,7 +99,7 @@ Resolution (option c per [[queue]]): the applier auto-selects the first *visible
 
 ## Interactions
 
-- **Producer (web)**: every viewport-mutating action triggers urlSync's debounce. The toolbar `ShareToolbarButton` reads the current URL and copies to clipboard with size + local-file warnings. The legacy `BookmarkSidebar` "Save current view" calls `captureBuilder` → POST `/api/bookmarks`; the workspace sidebar calls `captureBuilder` → POST `/api/workspaces/:workspace_id/saved-views`.
+- **Producer (web)**: every viewport-mutating action triggers urlSync's debounce. The toolbar `ShareToolbarButton` reads the current URL and copies to clipboard with size + local-file warnings. The live sidebar is `WorkspaceSavedViewsSidebar` ("Save current view" → `captureBuilder` → POST `/api/workspaces/:workspace_id/saved-views`); the old standalone `BookmarkSidebar.tsx` was removed when workspaces landed, though an orphaned `BookmarkSidebar.css` and the `showBookmarkSidebar` toggle state name in `App.tsx` still carry the old name.
 - **Producer (server)**: REST handlers under `/api/bookmarks` mutate the store; `broadcast.rs` dispatches `BookmarkChanged` after success.
 - **Consumer (web)**: `urlSync` bootstrap recognizes `#view=…` and `#b=<id>` on load and `popstate`. `useBookmarks` lists by current dataset URLs and subscribes to `BookmarkChanged` for live updates. `LoadingViewBanner` subscribes to applier state for recipient-apply progress.
 - **Auth gate**: every `/api/bookmarks/*` route runs through `AuthPrincipal` middleware (the existing `SessionCookieExtractor`). Unauthed `#b=<id>` URLs go through `UnauthLanding`, which preserves the hash through the OAuth flow, so the bookmark loads after sign-in transparently.

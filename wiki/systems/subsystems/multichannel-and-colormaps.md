@@ -41,9 +41,9 @@ Each bumps the `selection` epoch (cheap re-render, no chunk re-fetch).
 The shader path (`slice.wgsl` / `volume.wgsl`):
 
 1. Sample the chunk atlas at the entity's voxel coords → raw intensity.
-2. Apply contrast window: `(intensity - min) / (max - min)`.
-3. Apply gamma: `pow(t, 1/gamma)`.
-4. LUT sample: always `textureSample(lutTex, lutSampler, vec2(normalized, 0.5))` — the v-coordinate is a fixed `0.5`; the bound texture *is* the chosen colormap.
+2. Apply contrast window: `(intensity - min) / (max - min)`, clamped to `[0, 1]`.
+3. Apply gamma: `pow(t, gamma)` — the exponent is `gamma` directly, **not** `1/gamma`. The value is stored un-inverted on the descriptor (`descriptorBuffer.ts`) and used as-is by the shader, so a `gamma > 1` darkens midtones and `gamma < 1` brightens them.
+4. LUT sample: always `textureSampleLevel(lutTex, lutSampler, vec2(normalized, 0.5), 0.0)` — the v-coordinate is a fixed `0.5`; the bound texture *is* the chosen colormap. (It's `textureSampleLevel`, not `textureSample`, so it samples from a fixed mip without needing derivatives.)
 5. Multiply by `opacity`.
 
 ## Compositor and blending
@@ -65,7 +65,7 @@ Composite keys identify which compositor output buffer a render result lands in:
 ## Invariants
 
 - **Channel count is set on `DatasetOpened` from `shape[1]`** (the C dimension of the first image's level 0). It's not renegotiated — datasets with variable channel counts across images aren't supported.
-- **`channel_settings` length always matches the channel count** after `DatasetOpened`. The `ensure_channel(c)` helper in `command.rs` extends the vector lazily on first use, but `DatasetOpened` initializes the full vector up front.
+- **`channel_settings` length always matches the channel count** after `DatasetOpened`. The `ensure_channel(c)` helper is a method on `DatasetDisplaySettings` (`scene/types.rs`) that extends the vector lazily on first use; the `SetChannel*` handlers in `command.rs` call it, but `DatasetOpened` initializes the full vector up front.
 - **Multichannel mode is a global toggle, not per-dataset.** The `ViewState.multi_channel` boolean affects how every dataset is rendered. Single-mode falls back to the per-dataset `view.c` channel selection.
 - **Backward-compat: pre-multichannel `DatasetDisplaySettings` JSON deserializes** with empty `channel_settings` and default `channel_blend_mode` (Additive). Tested in `dataset_display_settings_backward_compat`.
 
@@ -73,5 +73,5 @@ Composite keys identify which compositor output buffer a render result lands in:
 
 - **Default colormap rotation is Magenta, Green, Cyan, repeating.** A 4-channel dataset gets `Magenta, Green, Cyan, Magenta`. Test asserts this in `dataset_opened_initializes_channel_settings`. Don't change without considering the visual regression.
 - **`SetChannelBlendMode` payload is `dataset_id` + `blend_mode`** — no per-channel override. Wanting per-channel blending would require a new variant (or repurposing `channel_blend_mode` differently).
-- **Gamma 0 is allowed by the type system** but explodes in the shader (`pow(t, 1/0)`). UI clamps to a min of ~0.1; if you bypass UI (CLI, Python), be aware.
+- **Gamma 0 is allowed by the type system** and does not crash, but washes the channel out: since the shader applies `pow(t, gamma)` directly, `gamma = 0` yields `pow(t, 0) = 1.0` for every in-range sample — a flat, fully-bright field rather than a divide-by-zero. UI clamps to a min of ~0.1; if you bypass UI (CLI, Python), expect the wash-out, not an error.
 - **Composite key collisions are silent.** Two datasets with the same `imageId` (which shouldn't happen, but…) collide on the bare-imageId key. Multichannel mode adds the `:chN` suffix and avoids this; single-channel mode is unprotected.

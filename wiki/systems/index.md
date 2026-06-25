@@ -20,7 +20,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[lucida-protocol]] — wire types: `DatasetOpened`, `FetchSource`, `AssetCatalog`, `AssetMessage`
 - [[lucida-content]] — pure data model for `DatasetManifest` (entities, transforms, images, layouts)
 - [[lucida-cli]] — workspace-first product CLI for [[lucida-server]]; server/auth/workspace discovery, dataset operations, view/headless viewer commands, collaboration diagnostics, and admin support
-- [[lucida-proxy]] — historical/legacy pure-compute proxy generation algorithm; no I/O, no async
+- [[lucida-proxy]] — pure-compute proxy generation algorithm; fallback path, still wired; no I/O, no async
 - [[lucida-py]] — pure-Python `LucidaClient` plus optional `pyo3` + `maturin` local bindings (`PyScene`, `PyStore`)
 - [[lucida-web]] — React 19 + Vite 7 + WebGPU frontend; thin orchestration over the WASM Scene
 
@@ -37,6 +37,9 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[worker-protocol]] — typed `postMessage` contract for cold/hot/delta state between main thread and GPU worker
 - [[scene-state-and-epochs]] — typed epoch counters drive the tick coordinator's frame fast-path
 - [[presence-and-follow-mode]] — peer-to-peer presence, transitive follow chains, throttling
+- [[annotations]] — point/line/box pins with comment threads and `@mention`s; authoritative state in `lucida-core`, persistence/broadcast in `lucida-server`, overlays/inbox in `lucida-web`
+- [[camera-and-navigation]] — `Slice`/`Arcball`/`Fly` camera models in `lucida-core` plus the web input layer (keybinding registry, RAF loops, mode/focal-depth UI)
+- [[debug-overlays]] — in-app developer surface in `lucida-web/src/debug/`: on-canvas overlays, FPS readout, tabbed config/telemetry panel, `window` globals for headless capture
 - [[layout-system]] — registered layouts, `SetActiveLayout`, derived placement rebuilds
 - [[multichannel-and-colormaps]] — per-channel state, 15 LUTs, composite key naming
 - [[saved-views]] — `#view=…` URL-as-app-state + server-stored `#b=<id>` bookmarks; spans `lucida-core` (schema), `lucida-web` (encoder/applier/sidebar), `lucida-server` (SQLite store + REST + broadcast)

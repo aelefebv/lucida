@@ -1,6 +1,6 @@
 ---
 created: 2026-05-07
-modified: 2026-05-26
+modified: 2026-06-25
 ---
 
 # Local-File Datasets Are Personal-Only in Saved Views
@@ -36,7 +36,7 @@ Three approaches were considered:
 
 ## Consequences
 
-- The web client gains a `url.startsWith('/') || url.startsWith('file://')` check at share time — used to surface the warning, not to gate the action.
+- The web client uses `hasLocalFilePaths(view)`/`localFilePathCount(view)` (in `ShareToolbarButton.tsx`), backed by the canonical `is_local_dataset_url`/`normalize_dataset_url` classifier, at share time — used to surface the warning (and the path count), not to gate the action. (This replaced the original naive `startsWith('/')` check, per the 2026-05-26 amendment above.)
 - Recipients receive `OpenDatasetFailed` for any local-file path that doesn't resolve, handled by the existing partial-apply policy (skip-and-continue with inline indicator).
 - The blake3-collision sharp edge becomes a documented characteristic of `DatasetId` rather than an unstated assumption. Any future feature that *would* rely on `DatasetId` ↔ content-bytes equality (proxy validation across servers, cross-server cache sharing, etc.) needs an explicit content-derived ID — out of scope here, but recorded for future ADRs.
 

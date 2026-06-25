@@ -61,7 +61,7 @@ WASM owns:
 Subdirectories:
 
 - `pipeline/` — planning, tickCoordinator, CpuCache, contentSource, decode pool, asset catalog, layout builders/registry
-- `renderer/` — GPU worker, atlases, indirection, descriptor buffer, wanted-set, three WGSL shaders, residency
+- `renderer/` — GPU worker, atlases, indirection, descriptor buffer, wanted-set, four WGSL shaders (`compositor.wgsl`, `slice.wgsl`, `volume.wgsl`, `cursors.wgsl` for peer-cursor rendering), residency
 - `hooks/` — the React hooks driving App.tsx
 - `components/` — React components: viewers, controls, file browser, plate selector, peer cursors, FPS counter, minimap, layout switcher, layer panel, colormap selector, dimension controls, contrast controls, and the annotation/mentions/thread overlays
 - `config/` — `keyBindings.ts` (keyboard binding map)

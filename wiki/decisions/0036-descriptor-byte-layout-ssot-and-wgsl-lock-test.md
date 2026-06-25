@@ -1,6 +1,6 @@
 ---
 created: 2026-05-16
-modified: 2026-05-16
+modified: 2026-06-25
 ---
 
 # Descriptor byte-layout single source of truth + WGSL ↔ TS lock test
@@ -11,7 +11,7 @@ The byte layout of the `EntityDescriptor` struct lives in exactly one file — `
 
 ## Why this shape
 
-Pre-refactor, the `EntityDescriptor` byte layout was mirrored across four sites: the canonical writer in `descriptorBuffer.ts`, the transient writer in `volumeRenderer.setTransientDescriptor`, and the struct declarations in `slice.wgsl` + `volume.wgsl`. Three were untested; only the canonical writer's outputs were exercised end-to-end. Adding a new field meant editing four places and trusting that no offset drifted — a class of bug that surfaces only as visual corruption (wrong contrast on a layer, wrong proxy slot bound, ray-march producing garbage). Pass 5 of the render-phase dechaos (`wiki/outputs/dechaos-render-2026-05-16/05-contract-scan.md`) ranked this as the highest-risk contract issue in the render module.
+Pre-refactor, the `EntityDescriptor` byte layout was mirrored across four sites: the canonical writer in `descriptorBuffer.ts`, the transient writer in `volumeRenderer.setTransientDescriptor`, and the struct declarations in `slice.wgsl` + `volume.wgsl`. Three were untested; only the canonical writer's outputs were exercised end-to-end. Adding a new field meant editing four places and trusting that no offset drifted — a class of bug that surfaces only as visual corruption (wrong contrast on a layer, wrong proxy slot bound, ray-march producing garbage). The render-phase dechaos contract scan ranked this as the highest-risk contract issue in the render module.
 
 Two well-trodden alternatives were considered and rejected:
 
@@ -55,4 +55,3 @@ The pattern is a generalizable seam for any future cross-language byte-shape con
 - [[gpu-residency]] — descriptor buffer architecture context
 - [[worker-protocol]] — discriminated-union message contract; sibling boundary type protected by `tsc` rather than a lock test
 - PRD #622, Slice 3 (`87bff09`) — the commit that introduced the SSoT + lock test
-- `wiki/outputs/dechaos-render-2026-05-16/05-contract-scan.md` — Contract Issue 1, the source diagnosis

@@ -17,7 +17,7 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 - `LUCIDA_AUTH` — auth mode (`google` or `disabled`). Auto-detected from bind address when unset.
 - `LUCIDA_ALLOWED_HOSTED_DOMAINS` — comma-separated allowlist of `hd` claim values. Empty = no domain restriction.
 - `LUCIDA_ADMIN_EMAILS` — comma-separated allowlist of admin emails. Empty = no admins.
-- `LUCIDA_GOOGLE_{CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` — required when `LUCIDA_AUTH=google`.
+- `LUCIDA_GOOGLE_{CLIENT_ID,CLIENT_SECRET}` and `LUCIDA_OAUTH_REDIRECT_URI` — required when `LUCIDA_AUTH=google`. Note the redirect URI does **not** share the `LUCIDA_GOOGLE_` prefix.
 - `LUCIDA_INSECURE` — explicit acknowledgment for `disabled + non-loopback`.
 - `LUCIDA_DB_PATH` — SQLite file path. Default `./lucida.db` (CWD-relative).
 - `LUCIDA_COOKIE_{NAME,SECURE}` — cookie configuration overrides.

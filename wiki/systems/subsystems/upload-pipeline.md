@@ -19,8 +19,8 @@ Durable collaborators:
 
 - `uploader.ts` — coordinator. The planner-facing surface is `sendColdState`, `sendViewHotStateIfAdvanced`, `deliverToWorker`; worker-feedback and resource-lifecycle methods are wire-boundary delegations.
 - `uploadClient.ts` — `UploadClient`, the narrow facet of `RenderClient` (cold/hot state, tier-labeled chunk dispatch, proxy-fallback dispatch, layer-resource removal, the two feedback callbacks). Render-side methods stay on the full `RenderClient`.
-- `coldState/` — pure builders (`buildColdState`, `buildViewHotState`, `buildRoster` + `synthesizeWellRosterEntry`, `buildDisplayStateByChannel`, `identityMatrix`).
-- `delivery/` — wire-boundary helpers: `dispatch.ts` (`dispatchChunk`/`dispatchProxy` + member-id helpers), `manifestIndex.ts`, `feedback.ts` (delegates to [[cpu-cache]]), `resources.ts` (member-id cleanup tracking).
+- `coldState/` — pure builders, one concern per file: `buildColdState` (`build.ts`), `buildViewHotState` (`hotState.ts`), `buildDisplayStateByChannel` (`displayState.ts`), `buildRoster` + `synthesizeWellRosterEntry` (`roster.ts`), `identityMatrix` (`identity.ts`).
+- `delivery/` — wire-boundary helpers: `dispatch.ts` (the delivery entry point `dispatchChunkDelivery` that `uploader.ts` calls, plus the lower-level `dispatchChunk`/`dispatchProxy` and member-id helpers), `manifestIndex.ts`, `feedback.ts` (delegates to [[cpu-cache]]), `resources.ts` (member-id cleanup tracking).
 - `telemetry/` — `UploadTelemetry`, `ColdStateTelemetry`, and the shared `SustainedCondition`/`ConsecutiveTickDetector`.
 
 Plus `constants.ts` (`MAIN_VIEW_UPLOAD_BUDGET_BYTES` = 8 MB; the budget splits in half per tier when both detail and coarse have demand), `proxyKeys.ts`, `scissor.ts` (`computeScissorRect`), `index.ts` (barrel).

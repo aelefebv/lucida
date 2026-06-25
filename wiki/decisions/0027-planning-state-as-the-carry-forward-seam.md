@@ -21,8 +21,8 @@ Today `nextState = { previousActiveSet: result.activeSet }` would be a trivial d
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts` — `PlanningState` interface, `plan()` accepts state and returns `nextState`.
-- `lucida-web/src/pipeline/orchestrator.ts` — `previousActiveSet: Map<datasetId, ActiveSetEntry[]>` becomes `planningState: Map<datasetId, PlanningState>`; the post-`plan()` write site stores `result.nextState` instead of `result.activeSet`. (`orchestrator.ts` has since been renamed to `pipeline/tickCoordinator.ts`, which now owns this Map.)
+- `lucida-web/src/pipeline/planning/plan.ts` — `plan()` accepts state and returns `nextState`; the `PlanningState` interface lives in `lucida-web/src/pipeline/planning/types.ts` (both re-exported through the `planning` barrel).
+- `lucida-web/src/pipeline/tickCoordinator.ts` (formerly `orchestrator.ts`) — `previousActiveSet: Map<datasetId, ActiveSetEntry[]>` becomes `planningState: Map<datasetId, PlanningState>`; the post-`plan()` write site stores `result.nextState` instead of `result.activeSet`.
 
 ## Related
 

@@ -11,6 +11,7 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 
 ## Start here
 
+- [[workspaces]] — the per-workspace container of collaboration: presence, follow, the sequenced document, and the broadcast channel are all workspace-local (no global shared session)
 - [[decisions/0001-document-vs-viewport-split]] — the foundational split that everything else in collaboration is downstream of
 - [[presence-and-follow-mode]] — peer-to-peer presence model, transitive follow chains, throttling
 - [[saved-views]] — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks, surfaced through the `WorkspaceSavedViewsSidebar` component with live cross-peer updates
@@ -40,3 +41,5 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 - [[gotchas/document-vs-viewport-classification]] — misclassifying a command floods peers (viewport-as-document) or silently desyncs (document-as-viewport). Most common collaboration footgun.
 - [[gotchas/saved-view-credentials-in-urls]] — `#view=…` URLs embed dataset URLs verbatim; presigned URLs and credentialed URLs leak via clipboard, history, screenshots
 - [[gotchas/axum-query-multivalue]] — Axum's default `Query<T>` extractor silently drops repeated query keys; bookmarks list endpoint hand-rolls the multi-value parse
+- [[gotchas/saved-view-client-only-state]] — `SavedView.dataset_settings` mirrors WASM presence; client-only JS/localStorage state won't round-trip without a dedicated field
+- [[gotchas/scene-document-state-json-compat]] — `Scene` `#[serde(flatten)]`s `DocumentState`; field collisions across the two corrupt the wire format

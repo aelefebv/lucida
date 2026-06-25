@@ -1,6 +1,6 @@
 ---
 created: 2026-05-14
-modified: 2026-05-18
+modified: 2026-06-25
 ---
 
 # Wells Are the Planning Unit on Plates
@@ -34,10 +34,10 @@ This decision honors [[principles/planning#3-wells-are-coherent-visual-units]]. 
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts::groupByWell` — bundles field entities by their parent well so the rest of the pipeline operates on well groups.
-- `lucida-web/src/pipeline/planning/index.ts::assignModes` — iterates well groups; calls `chooseEntityMode` once per group with the group's projected diagonal.
-- `lucida-web/src/pipeline/planning/index.ts::iterateChunks` — short-circuits for `well-as-proxy` entries before reading any field-specific data.
-- Test coverage is in `planning.test.ts` under "assignModes — three-tier with catalog," especially the "mixed scene: two wells at different zooms get different modes" case.
+- `lucida-web/src/pipeline/planning/modes.ts::groupByWell` — bundles field entities by their parent well so the rest of the pipeline operates on well groups.
+- `lucida-web/src/pipeline/planning/modes.ts::assignModes` — iterates well groups; calls `chooseEntityMode` once per group with the group's projected diagonal. (Legacy path: the default chunk-only path uses `modes.ts::assignCoarseDetailModes`, which emits one `FieldEntry` per field and no well-as-unit, per the supersession header above.)
+- `lucida-web/src/pipeline/planning/chunks.ts::iterateChunks` — short-circuits for `well-as-proxy` entries before reading any field-specific data.
+- Test coverage for the legacy three-tier-with-catalog behavior (including "two wells at different zooms get different modes") lives in the planning test suite under `pipeline/planning/`.
 
 ## Related
 

@@ -11,7 +11,7 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 ### 1. Planning decides "wanted"
 
-[[planning-domain]] resolves each visible field/image to an explicit `detail` level and optional `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest` with priority `laneOffset + (1-importance)*500 + distance*10`.
+[[planning-domain]] resolves each visible field/image to an explicit `detail` level and optional `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest`. For the detail/proxy/prefetch/overview lanes the priority is `laneOffset + (1-importance)*500 + distance*10` (`computePriority` in `emit.ts`), so the lane offset separates lanes and importance/distance order within a lane. The minimap lane is the exception: it emits each request at bare `minimapLaneOffset` with no importance/distance terms, because minimap chunks are per-dataset rather than per-entity-importance.
 
 ### 2. CPU cache submits + schedules
 
@@ -21,7 +21,7 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 `contentSource.ts::fetch(req)` → `bridge.ts` sends a `chunk_request` JSON over WebSocket. Source chunks route to `serve_chunk_from_store`; generated coarse chunks route to `serve_generated_chunk_request`.
 
-Ready source and generated chunks both use the normal chunk frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `bridge.ts::handleBinary` parses and routes by composite key (`{datasetId}/{imageId}/{chunkKey}`). If a generated chunk is not ready, the server sends `GeneratedChunkStatus`; `pending` clears in-flight state without entering failure tracking.
+Ready source and generated chunks both use the normal chunk frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `bridge.ts::handleBinary` only splits the frame and forwards the `(key, payload)` pair (it doesn't know the chunk-vs-proxy taxonomy); the composite-key dispatch lives in `contentSource.handleBinary`, which sniffs the `proxy/` prefix and otherwise resolves the pending fetch by composite key (`{datasetId}/{imageId}/{chunkKey}`). If a generated chunk is not ready, the server sends `GeneratedChunkStatus`; `pending` clears in-flight state without entering failure tracking.
 
 ### 4. Decode
 

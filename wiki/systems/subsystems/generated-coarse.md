@@ -21,7 +21,7 @@ Generated levels are append-only metadata from the client's point of view. The s
 Generated coarse chunks use the same request key shape as source chunks: `{level}/{t}/{c}/{z}/{y}/{x}`.
 
 - If bytes are ready, `serve_generated_chunk_request` returns the normal chunk frame: `[client_id u32 LE][key_len u16 LE][dataset/image/key][payload]`.
-- If bytes are not ready, the server returns `GeneratedChunkStatus` (`pending`, `failed_transient`, `failed_permanent`, or `unavailable`). The enum has a 5th variant, `Ready(bytes)`, used internally when materialized bytes are available.
+- If bytes are not ready, the server returns `GeneratedChunkStatus` (`pending`, `failed_transient`, `failed_permanent`, or `unavailable`). `GeneratedChunkStatus` (in [[lucida-protocol]] `generated.rs`) is five **unit** variants — the fifth is `Ready`, which carries no payload; it only signals that bytes exist. The materialized bytes themselves ride a *different*, server-only enum: `DerivedChunkLookup::Ready(Vec<u8>)` (`lucida-server/src/generated.rs`), which `serve_generated_chunk_request` matches on to emit the chunk frame. Don't conflate the two.
 - `pending` is not a failure. The CPU cache clears the in-flight request and will re-request on a later submit after readiness changes.
 
 ## Materialization

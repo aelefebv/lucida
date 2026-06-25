@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # Discriminated Active-Set and Entity Types
@@ -23,8 +23,8 @@ The aggressive form would strip `levels` from `WellSnapshot` (well-as-proxy neve
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts` — `ActiveSetEntry` union, `EntitySnapshot` union, `make*Entry` constructors return matching discriminated variants.
-- All consumer sites (`pipeline/orchestrator.ts`, `pipeline/cpuCache.ts`, `pipeline/planning/debug.ts`, tests) narrow on `kind` before reading variant-specific fields.
+- `lucida-web/src/pipeline/planning/types.ts` — `ActiveSetEntry` union and `EntitySnapshot` union (both re-exported through the `planning` barrel); the `make*Entry` constructors live in `planning/modes.ts` and return matching discriminated variants.
+- All consumer sites (`pipeline/tickCoordinator.ts`, `pipeline/planning/debug.ts`, tests) narrow on `kind` before reading variant-specific fields.
 - `groupByWell` and `buildPrevModeByWell` simplify after the discrimination — no more `?? null` fallback on `parentId`.
 
 ## Related

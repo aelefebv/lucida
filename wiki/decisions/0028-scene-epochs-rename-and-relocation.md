@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # `SceneEpochs` Rename and Relocation
@@ -24,7 +24,7 @@ Re-exports add long-term cognitive noise — readers see two import paths for th
 - `lucida-web/src/pipeline/epochs.ts` — new file, holds `SceneEpochs`.
 - `lucida-web/src/pipeline/viewport.ts` — new file, holds `VisibleRegion`.
 - `lucida-web/src/pipeline/planning/index.ts` — both type definitions removed; no re-export.
-- All consumers (`renderLoop.ts`, `slicePath.ts`, `volumePath.ts`, `orchestrator.ts`, `planning/snapshot.ts`, `planning/debug.ts`, tests) import from the new homes.
+- The consumer set has since grown well beyond the original handful. `SceneEpochs` (`pipeline/epochs.ts`) and `VisibleRegion` (`pipeline/viewport.ts`) are now imported across `pipeline/tickCoordinator.ts` (formerly `orchestrator.ts`), `pipeline/renderRadius.ts`, `renderLoop.ts`, `slicePath.ts`, `volumePath.ts`, several `planning/*`, `pipeline/fetch/*`, `pipeline/upload/*`, and `renderer/*` — all importing from the new homes (no re-export through the planning barrel).
 
 ## Related
 

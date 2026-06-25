@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # Pull-Based RAF Render Loop with Typed Dirty Flags
@@ -36,9 +36,9 @@ The typed split lets the loop be aggressive when the user wants snap response (`
 
 ## How this decision shows up in code
 
-- `lucida-web/src/renderLoop.ts` — the loop. Lines `:289-296` document the throttle decision.
+- `lucida-web/src/renderLoop.ts` — the loop. The `residencyDirty` throttle gate lives at ~`:515-548` (the interval check against `RESIDENCY_RENDER_INTERVAL_MS`).
 - `lucida-web/src/renderLoopTypes.ts` — type definitions for the dirty flags.
-- Every place that mutates state calls `loopRef.current.markInteractiveDirty()` or `markResidencyDirty()`. Producers include the WebSocket bridge (presence updates from peers), the orchestrator (chunk arrivals), and viewport command handlers.
+- Every place that mutates state calls `loopRef.current.markInteractiveDirty()` or `markResidencyDirty()`. Producers include the WebSocket bridge (presence updates from peers), the `tickCoordinator` (chunk arrivals), and viewport command handlers.
 
 ## Alternatives considered (inferred)
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-05-14
-modified: 2026-05-18
+modified: 2026-06-25
 ---
 
 # Catalog Degradation Steps One Tier at a Time
@@ -32,9 +32,9 @@ The one-tier-at-a-time rule honors [[principles/planning#1-visual-smoothness-ove
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts::degradeForCatalog` (after the PRD #545 refactor) — owns the one-tier-at-a-time logic; the function is called once per well group during `assignModes`.
+- `lucida-web/src/pipeline/planning/modes.ts::degradeForCatalog` — owns the one-tier-at-a-time logic; the function is called once per well group during `assignModes` (same file). It is now reached only on the legacy `coarseDetailEnabled: false` branch (`plan.ts`); the default chunk-only path (`config.ts` default `true`, per the supersession header) does not call it.
 - `PlanStats.catalogDegradations` — incremented inside `degradeForCatalog` whenever a step occurs.
-- Test coverage is in `planning.test.ts` under "assignModes — three-tier with catalog," which exercises every degrade transition with stats counter assertions.
+- Test coverage for the legacy three-tier-with-catalog degrade transitions lives in the planning test suite under `pipeline/planning/`, with stats counter assertions.
 
 ## Related
 
