@@ -77,7 +77,7 @@ deliberate click) without forcing a full password re-entry.
 The simpler design would be to always send `prompt=select_account` on
 every `/auth/start`. Rejected because it adds an extra click to every
 cold visit and every saved-view link click from Slack — exactly the
-friction-free flow ADR-0016 was designed to preserve. Calico is small,
+friction-free flow ADR-0016 was designed to preserve. The team is small,
 all users have one work account; on cold paths, silent pass-through is
 the correct UX.
 

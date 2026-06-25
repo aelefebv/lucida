@@ -52,7 +52,7 @@ So refresh tokens would matter only if we wanted to:
 
 For v1, none of these are immediate. Skipping refresh tokens keeps the OAuth scope minimal (`openid email profile`, no `access_type=offline`) and removes the entire token-refresh code path.
 
-The trade-off: if someone leaves the org mid-session, they retain access until their session expires (up to 30 days worst case). Acceptable for an internal research tool; if Calico's posture later demands faster revocation, v2 adds refresh + periodic re-check.
+The trade-off: if someone leaves the org mid-session, they retain access until their session expires (up to 30 days worst case). Acceptable for an internal research tool; if the deployment's posture later demands faster revocation, v2 adds refresh + periodic re-check.
 
 ## Alternatives considered
 

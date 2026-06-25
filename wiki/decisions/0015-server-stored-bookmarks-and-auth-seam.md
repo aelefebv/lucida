@@ -35,7 +35,7 @@ A pure URL-hash approach ([URL-as-App-State for Saved Views](0013-url-as-app-sta
 Server-stored bookmarks fill those gaps without disturbing the URL-hash side. Both surfaces share the same underlying capture record (`SavedView`). Sharing is now bimodal: copy-the-live-URL for ephemeral, or copy-the-bookmark-link (`#b=<id>`) for stable.
 
 The cost is real: `lucida-server` was deliberately stateless outside session memory, and breaking that property is hard to reverse. Considered:
-- **Don't add bookmarks; live with URL-only sharing.** Loses discoverability and curation, which are the highest-value features for the Calico use case.
+- **Don't add bookmarks; live with URL-only sharing.** Loses discoverability and curation, which are the highest-value features for the team's use case.
 - **Bookmarks live in browser localStorage only (per-user).** Doesn't enable cross-user discovery; loses the "see what others saved for this dataset" feature.
 - **Bookmarks live in a third-party store (Notion-like).** Adds an external dependency and a federation boundary; awful for a research-tool deployment.
 

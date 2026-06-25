@@ -46,7 +46,7 @@ Concrete benefits:
 
 - **Onboarding is friction-free.** A new contributor runs `cargo run --bin lucida-server` and lucida starts immediately, with stub auth, fully functional. No Google OAuth app setup required for local development.
 - **CI is happy.** Tests run against localhost-bound servers; auth is stubbed without env-var rituals.
-- **Production deploy is forced to think about it.** A Calico operator deploying with `LUCIDA_BIND=0.0.0.0:9876` is told "you need Google credentials" — they cannot accidentally run the stub on a network-reachable port.
+- **Production deploy is forced to think about it.** An operator deploying with `LUCIDA_BIND=0.0.0.0:9876` is told "you need Google credentials" — they cannot accidentally run the stub on a network-reachable port.
 - **The `LUCIDA_INSECURE=1` escape hatch covers legitimate cases** (private network deployments where the operator deliberately doesn't want auth), but requires an explicit acknowledgment so it's never accidental.
 
 ## Why change `LUCIDA_BIND` default
@@ -59,7 +59,7 @@ The change does have consequences:
 - Existing deployment scripts that relied on the `0.0.0.0` default break unless updated.
 - A user running lucida and trying to reach it from another device on their LAN will be confused by "connection refused" until they discover `LUCIDA_BIND`.
 
-Both are acceptable trade-offs given the safety win. Documented in the OSS quickstart and Calico runbook.
+Both are acceptable trade-offs given the safety win. Documented in the OSS quickstart and operator runbook.
 
 ## Alternatives considered
 

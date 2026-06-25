@@ -10,7 +10,7 @@ modified: 2026-06-25
 
 # Topic: Auth and Deployment
 
-How lucida decides *who you are* and how it *ships and runs* — one hub because the two concerns are entangled. The cookie design forces a same-origin deploy shape, the bind address auto-selects the auth mode, and the whole `LUCIDA_*` env-var contract is the seam both halves read. The recurring theme is **OSS-from-day-one**: every Calico-specific value is configuration, never a literal in code, so a self-hoster reconfigures rather than forks.
+How lucida decides *who you are* and how it *ships and runs* — one hub because the two concerns are entangled. The cookie design forces a same-origin deploy shape, the bind address auto-selects the auth mode, and the whole `LUCIDA_*` env-var contract is the seam both halves read. The recurring theme is **OSS-from-day-one**: every organization-specific value is configuration, never a literal in code, so a self-hoster reconfigures rather than forks.
 
 This page is a curated index. Articles live in their canonical homes (`systems/`, `decisions/`, `flows/`, `gotchas/`); follow the links for the content.
 
@@ -32,7 +32,7 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 ## Why decisions were made
 
 - [Backend-Mediated OAuth with Session Cookies](../decisions/0016-backend-mediated-oauth-with-session-cookies.md) — tokens never reach JS; WebSocket auth is automatic via cookies; the same-origin requirement that motivates the single image
-- [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md) — env-driven config; no `calicolabs.com` literal anywhere; the provider seam is a single-PR extension point
+- [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md) — env-driven config; no hardcoded domain literal anywhere; the provider seam is a single-PR extension point
 - [Auth Mode Auto-Detect by Bind Address](../decisions/0018-auth-mode-auto-detect-by-bind-address.md) — loopback → `disabled`, non-loopback → `google`; "disabled + non-loopback" requires explicit `LUCIDA_INSECURE=1`
 - [Post-Logout Marker Cookie + `prompt=select_account`](../decisions/0019-post-logout-marker-cookie-and-prompt-select-account.md) — `lucida_signed_out` marker + `prompt=select_account` on re-sign-in
 - [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../decisions/0020-single-image-with-servedir.md) — one container carries both API binary and SPA dist; `ServeDir` serves the dist

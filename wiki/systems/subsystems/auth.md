@@ -40,7 +40,7 @@ All persistent auth stores are SQLite-backed under one connection pool, with in-
 
 ## Configuration model
 
-Every Calico-specific value is an env var. The code has no `calicolabs.com` literal anywhere — Calico's deployment is one configuration of the system, not the system itself. See [Configurable From Day One for OSS Release](../../decisions/0017-configurable-from-day-one-for-oss-release.md) and [OSS Config Defaults and the LUCIDA_* Env Var Contract](../../gotchas/oss-config-defaults.md).
+Every organization-specific value is an env var. The code has no hardcoded domain literal anywhere — a hosted deployment is one configuration of the system, not the system itself. See [Configurable From Day One for OSS Release](../../decisions/0017-configurable-from-day-one-for-oss-release.md) and [OSS Config Defaults and the LUCIDA_* Env Var Contract](../../gotchas/oss-config-defaults.md).
 
 `AuthConfig::from_env_map` (in `auth/config.rs`) consolidates all `LUCIDA_*` env-var reading and validation. Auto-detect logic from [Auth Mode Auto-Detect by Bind Address](../../decisions/0018-auth-mode-auto-detect-by-bind-address.md) uses the bind address as the safety signal: loopback bind defaults to `LUCIDA_AUTH=disabled`, non-loopback defaults to `LUCIDA_AUTH=google`. The dangerous combination "disabled + non-loopback" requires explicit `LUCIDA_INSECURE=1` opt-in.
 

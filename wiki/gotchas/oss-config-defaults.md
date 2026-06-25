@@ -10,7 +10,7 @@ modified: 2026-06-25
 
 # OSS Config Defaults and the LUCIDA_* Env Var Contract
 
-Lucida is open-source and intentionally has zero Calico-specific literals in code. Every Calico-specific value lives in environment variables. This is a deliberate posture (see [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md)) and shapes a few non-obvious behaviors.
+Lucida is open-source and intentionally has zero organization-specific literals in code. Every deployment-specific value lives in environment variables. This is a deliberate posture (see [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md)) and shapes a few non-obvious behaviors.
 
 ## The contract
 
@@ -58,13 +58,13 @@ We deliberately do NOT trust `X-Forwarded-Proto` (forgeable; documented inline i
 
 ### "Email format issues with hosted domain check"
 
-`LUCIDA_ALLOWED_HOSTED_DOMAINS` and `LUCIDA_ADMIN_EMAILS` are both lowercased at parse time AND when matched against incoming claims. So `LUCIDA_ADMIN_EMAILS="AuStin@CalicoLabs.com"` correctly matches a JWT with `email: "austin@calicolabs.com"`. Whitespace around commas is tolerated.
+`LUCIDA_ALLOWED_HOSTED_DOMAINS` and `LUCIDA_ADMIN_EMAILS` are both lowercased at parse time AND when matched against incoming claims. So `LUCIDA_ADMIN_EMAILS="AdMin@Example.com"` correctly matches a JWT with `email: "admin@example.com"`. Whitespace around commas is tolerated.
 
-The hosted domain check uses the JWT `hd` claim, NOT email suffix matching. A user with `email: someone@calico-alias.com` but `hd: calicolabs.com` is allowed when the allowlist contains `calicolabs.com`. Personal Gmail accounts (no `hd` claim at all) are rejected when any allowlist is set.
+The hosted domain check uses the JWT `hd` claim, NOT email suffix matching. A user with `email: someone@other-alias.com` but `hd: example.com` is allowed when the allowlist contains `example.com`. Personal Gmail accounts (no `hd` claim at all) are rejected when any allowlist is set.
 
 ### "Empty allowed_hosted_domains accepts everyone — is this intentional?"
 
-Yes. Empty list = OSS-permissive default. Self-hosters may want any verified Google email; Calico's deployment sets `LUCIDA_ALLOWED_HOSTED_DOMAINS=calicolabs.com` to restrict.
+Yes. Empty list = OSS-permissive default. Self-hosters may want any verified Google email; a hosted deployment sets `LUCIDA_ALLOWED_HOSTED_DOMAINS=example.com` to restrict.
 
 ### "I want to add an admin without restarting"
 
