@@ -1,11 +1,11 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-06-25
 ---
 
 # Configurable From Day One for OSS Release
 
-> Status: Proposed (in design — feature not yet implemented; PRD #455).
+> Status: Accepted (implemented; PRD #455). Every `LUCIDA_*` env var below is live.
 
 ## Decision
 
@@ -53,10 +53,8 @@ This also benefits Calico — if Calico ever migrates from Google Workspace to a
 
 ## How this decision shows up in code
 
-To be filled in during implementation. Anchors:
-
-- `lucida-server::auth::config` — `AuthConfig` struct, env var reading + validation + defaults. Single source of truth for "what's configured."
-- `lucida-server::auth::principal` — `PrincipalExtractor` trait. Provider implementations register here.
+- `lucida-server::auth::config::AuthConfig` — env var reading + validation + defaults. Single source of truth for "what's configured."
+- `lucida-server::auth::principal::PrincipalExtractor` — the trait. Provider implementations register here.
 - README / quickstart documentation — public-facing description of `LUCIDA_*` env vars.
 
 ## Related

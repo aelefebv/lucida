@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-26
+modified: 2026-06-25
 ---
 
 
@@ -31,6 +31,7 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 - `layout.rs` — `ChunkByteLayout { canonical_byte_size, on_disk_byte_size, byte_stride_t, byte_stride_c, chunk_size_t, chunk_size_c }` plus `slice_range(wire_t, wire_c) -> (offset, size)` and `compute_chunk_byte_layout`. The single seam for "given a decoded on-disk chunk, what byte range is the wire chunk?" — handles both pinned-axis bundling (PRD #447) and canonical-indexed bundling (PRD #451) uniformly. For canonical 5D datasets `slice_range` returns `(0, canonical_byte_size)`, equivalent to the old "no slicing needed" path. See [[gotchas/non-canonical-axes#post-decode-byte-slicing]].
 - `parse.rs` — Zarr v3 metadata parsing helpers
 - `ingest/` — plate scanner, plate reader, TIFF reader, OME-Zarr writer, pyramid generation. Used by ingest tooling.
+- `main.rs` — the `lucida-store` ingest CLI binary (`Convert` for TIFF → OME-Zarr, `Plate` for HCS TIFF directory → OME-Zarr plate).
 
 ## Interactions
 
@@ -55,8 +56,6 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 `chunk_shape` parallels `ImageBindingSeed.axes_names` (one entry per on-disk axis) and is consumed by the resolver to translate wire `t/c` voxel coords into disk-grid coords. `chunk_byte_layout` carries the precomputed strides + chunk sizes used by the slice step. Consumers (`ChunkResolver::level_info(image_id, level)`, `serve_chunk_from_store`, `build_server_proxy_source`) take the level index and read all fields off one record.
 
 The seed remains server-private — never broadcast. See [[decisions/0005-three-output-import-model]] for why.
-
-`LevelBindingInfo` is `Clone` (not `Copy`) since the introduction of `chunk_shape: Vec<u64>`.
 
 ## Gotchas
 

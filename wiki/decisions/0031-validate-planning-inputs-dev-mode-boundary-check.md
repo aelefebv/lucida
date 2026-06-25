@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # `validatePlanningInputs` as the Dev-Mode Boundary Check
@@ -71,15 +71,7 @@ Both checks were withdrawn post-ship for the same root reason: **producer scope 
 
 ### Check 6 — assetCatalog refs
 
-The original "every `assetCatalog.byEntity` key must be a known `entityId` from `snapshot.entities`" check was withdrawn after PRD #578 / Slice 3 shipped, when a real-app trace produced:
-
-```
-Error: validatePlanningInputs: assetCatalog references unknown entityId
-       ds-b5a7a1d65f96a456:well:D/3
-       at checkAssetCatalogRefs (validate.ts:199)
-       at validatePlanningInputs (validate.ts:329)
-       at plan (plan.ts:65)
-```
+The original "every `assetCatalog.byEntity` key must be a known `entityId` from `snapshot.entities`" check was withdrawn after PRD #578 / Slice 3 shipped, when a real-app trace produced `Error: validatePlanningInputs: assetCatalog references unknown entityId ds-b5a7a1d65f96a456:well:D/3` (thrown from `checkAssetCatalogRefs` via `plan()`).
 
 Investigation traced the cause to a fundamental misreading of `AssetCatalogSnapshot`. The catalog is built by `pipeline/assetCatalog.ts::snapshot()`, which walks `byDataset` (every dataset the catalog has ever seen) and flattens entries into a single cross-dataset `byEntity` map. The planning snapshot, in contrast, carries `entities` for ONE dataset's current tick. The two will routinely diverge — the catalog can hold entries for entities not currently visible in this tick's snapshot, for entities of other datasets, or for entities of datasets that have since been closed.
 

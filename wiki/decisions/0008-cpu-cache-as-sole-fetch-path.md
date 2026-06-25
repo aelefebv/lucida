@@ -1,13 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-06-25
 ---
 
 # CpuCache as Sole Fetch Path
 
 ## Decision
 
-After S5 (PRD #378 / project memory entry `project_cpu_cache_s1s2.md`), `CpuCache` (`lucida-web/src/pipeline/cpuCache.ts`) is the **only** path through which chunks are fetched. The previous parallel path, `SharedChunkQueue`, was deleted entirely.
+After S5 (PRD #378 / project memory entry `project_cpu_cache_s1s2.md`), `CpuCache` (`lucida-web/src/pipeline/fetch/cpuCache.ts`) is the **only** path through which chunks are fetched. The previous parallel path, `SharedChunkQueue`, was deleted entirely.
 
 ## Why
 
@@ -22,11 +22,11 @@ Merging into one path resolved all three. The cache's **tiered LRU** (`prefetch 
 ## Tradeoffs
 
 - **One bug ruins everything.** A bug in `cpuCache.ts` no longer has a fallback path. Tests in `cpuCache.test.ts` were prioritized for this reason — they cover the eviction tier ordering specifically.
-- **Code surface concentrated.** `cpuCache.ts` is large (~900 lines) and dense. Future changes risk touching unrelated concerns. Mitigated by the [[chunk-pipeline]]'s clear phase boundaries (`submit → schedule → decode → drain`).
+- **Code surface concentrated.** The fetch path is dense, and future changes risk touching unrelated concerns. Mitigated two ways: the [[chunk-lifecycle]]'s clear phase boundaries (`submit → schedule → decode → drain`), and the split of the path across `lucida-web/src/pipeline/fetch/` ([[decisions/0032-cpucache-split-into-pipeline-fetch|ADR 0032]]) so the once-monolithic cache no longer lives in a single file.
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/cpuCache.ts` — sole fetch path.
+- `lucida-web/src/pipeline/fetch/cpuCache.ts` — sole fetch path (the `fetch/` dir holds the rest of the split-out modules).
 - `lucida-web/src/pipeline/tickCoordinator.ts::planAndFetch` — calls `cpuCache.onPlanRebuildStart()` once per cold-state rebuild and `cpuCache.submit(plan)` once per dataset.
 - `lucida-web/src/pipeline/upload/uploader.ts::deliverToWorker` — feeds the GPU worker by walking `cpuCache.getDeliverable()`; this is the delivery-state extension captured in [[decisions/0037-delivery-state-as-cpucache-sidecar]].
 - No remaining references to `SharedChunkQueue` (deleted in S5).
@@ -34,5 +34,5 @@ Merging into one path resolved all three. The cache's **tiered LRU** (`prefetch 
 ## Related
 
 - [[cpu-cache]]
-- [[chunk-pipeline]]
+- [[chunk-lifecycle]]
 - [[planning-domain]] — produces the `RequestPlan` consumed by `submit`

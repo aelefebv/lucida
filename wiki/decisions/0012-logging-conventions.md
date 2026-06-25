@@ -1,6 +1,6 @@
 ---
 created: 2026-04-20
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # Logging Conventions
@@ -21,46 +21,7 @@ Cross-process conventions for debug logging. Trial-run on the dataset-opening fl
 - **A central client helper enforces `wsReadyState` capture.** Most "I clicked but nothing happened" bugs are silent socket drops (`bridge.ts::send` no-ops if `readyState !== OPEN`). Centralizing the helper makes it impossible to forget the readyState field.
 - **Naming convention is cheap to agree on, expensive to retrofit.** Picking it once means future log call sites slot in without bikeshedding.
 
-## How to apply
-
-**Server**, when adding logging to a handler:
-
-```rust
-#[tracing::instrument(skip_all, fields(url = %url, client_id = %client_id))]
-async fn handle_open_remote_dataset(...) {
-    tracing::info!("open_remote_dataset.received");
-    // ... events inside auto-tagged with url + client_id ...
-}
-```
-
-Or use `let _enter = tracing::info_span!("dataset_open", url = %url).entered();` if `#[instrument]` doesn't fit (e.g. closures, generic types).
-
-**Client**, when adding a new bridge call site:
-
-```ts
-bridgeLog("open_remote_dataset.send", { url });
-this.send(JSON.stringify({ type: "open_remote_dataset", url }));
-```
-
-**WASM**, when adding a log inside Rust code that runs in the browser:
-
-```rust
-crate::wasm_log!("scene.dataset_opened.applied", {
-    "dataset_id": dataset_id.0,
-    "n_entities": event.manifest.entities().len(),
-});
-```
-
-The macro builds the JSON payload only if the `wasm` category is currently enabled (cost when disabled: one `HashSet` lookup). Native (non-WASM) builds compile the call to a no-op so the same code runs on the server.
-
-Three ways to enable:
-- **DebugPanel "Logging" tab** — checkbox per category, persists across reloads. Best for live toggling once the app is up. Toggling the `wasm` category propagates into WASM via `set_debug_categories` without a reload.
-- **DevTools console**: `localStorage.setItem("debug", "bridge,wasm")` (or `"*"`). Reload to capture startup events; `useWasmScene` pushes the set into WASM after `init()`.
-- **Programmatic**: `setDebugEnabled("bridge", true)` from `debug/logging.ts`.
-
-Adding a new client category: append to `DEBUG_CATEGORIES` in `lucida-web/src/debug/logging.ts` and add a description to `LOGGING_CATEGORY_DESCRIPTIONS` in `DebugPanel.tsx`. The panel renders it automatically.
-
-### Event-prefix rule
+## Event-prefix rule
 
 The first segment of an event name picks one of three sources, in this priority order:
 
@@ -72,31 +33,6 @@ The first segment of an event name picks one of three sources, in this priority 
 
 When in doubt: **the prefix should be the most useful word to grep for.** If you're debugging the open flow as a whole, `open_remote_dataset` covers 1a; `setup_fetch_pipeline` covers 1b. Two greps, but each prefix is honest about what generated it.
 
-### Timing patterns
-
-- **Server-side total time per handler**: free with `FmtSpan::CLOSE` — every `#[tracing::instrument]` function emits `time.busy` / `time.idle` on close. No code change needed.
-- **Client-side multi-step time**: capture `performance.now()` between steps, fold into the `*.complete` event as a `stepsMs` map plus `totalMs`. Example: `setup_fetch_pipeline.complete` reports per-step time for all six 1b setup steps.
-- **Client-side round-trip**: store the start timestamp in a ref on send, compute delta on receipt, include as `roundTripMs` in the receive event. Approximate when concurrent requests are in flight (later sends overwrite the ref) — fine for the typical interactive case of one in-flight open at a time.
-
-### Anomaly checks
-
-When a happy-path log has predictable shape (counts, IDs, structural facts), pair it with a separate `<scope>.shape_anomaly`-style event that fires **only** if something is off. The pattern:
-
-1. Compute structural facts in a single pass (orphan counts, missing references, empty containers).
-2. Emit them as fields on the existing happy-path event so they're visible at a glance.
-3. Run a cheap predicate suite on the same facts. If anything fails, emit a separate anomaly event with an `issues: [...]` array describing each problem.
-
-Example: `scene.dataset_opened.applied` carries `n_wells`, `n_fields`, `n_orphans`, etc.; `manifest.shape_anomaly` fires only if a Plate has zero fields, a Field references a non-existent parent, or `default_layout_id` doesn't resolve. Healthy datasets emit one log; broken ones emit two — and the second one names the problem.
-
-### Hot-path instrumentation
-
-The render loop runs at ~60Hz, so per-tick logging would flood the console. Two patterns make the `render` category readable while still useful:
-
-- **Source attribution with per-(kind,source) rate limiting.** `markInteractiveDirty(source)` and `markResidencyDirty(source)` flow into a private `setDirty(kind, source)` helper that emits `render_loop.dirty_set` at most once per second per `(kind, source)` key. Bursts collapse into a single log + a `suppressedSince` count. Lets a debugger answer "what woke up the loop?" without 60 logs/sec. Existing external callers default to `source = "external"`; label individually as needed when you're chasing a specific wakeup.
-- **Aggregated burst events.** `render_loop.residency_throttled` fires only when the 33ms gate suppresses a render. Rate-limited to once per second, with a `skipCount` showing how many renders were dropped in the window. Quiet on the happy path; noisy only when chunks are arriving faster than the throttle allows.
-
-In general: **anything that fires faster than once per second should aggregate or rate-limit before logging.** The DebugPanel "Render" tab is the right place for live per-frame state; logs are for discrete events and historical audit.
-
 ## Tradeoffs
 
 - **Inconsistency persists in untouched flows.** Old `eprintln!`s in chunk-serve, proxy-generate, etc. aren't actively wrong — they just don't benefit from spans/levels. Replacing them all in one go is a refactor with no functional payoff; the convention propagates as each flow gets touched.
@@ -104,8 +40,6 @@ In general: **anything that fires faster than once per second should aggregate o
 - **Event names are not enforced.** The dot-scope naming is convention, not type-checked. Reviewers should flag drift.
 - **DebugPanel toggle has a bootstrap gap.** Events that fire before the panel mounts (initial WS connect, first frame) aren't captured by a freshly-flicked toggle. Workaround: enable, reload, then capture the next session.
 - **WASM logger holds its own copy of the enabled set.** WASM can't read `localStorage` directly. JS pushes via `set_debug_categories(csv)` on init (in `useWasmScene`) and on every panel toggle (via `onDebugCategoriesChanged`). Out-of-band changes to `localStorage` (e.g., DevTools console without reload) only update the JS-side gate; WASM stays stale until JS calls the setter.
-- **Round-trip timing is approximate under concurrent sends.** A second `sendOpenRemoteDataset` before the first's response overwrites the start timestamp; the first's response then reports the *second* send's roundtrip. Acceptable for the interactive 1-at-a-time case; revisit when batch opens become common.
-- **Render-loop source attribution is opt-in for external callers.** The renderLoop's internal sites (cache subscribe, eviction, tick continuation, lifecycle) are labeled, but external callers of `markInteractiveDirty()` / `markResidencyDirty()` default to `source: "external"` to avoid touching ~30 callsites in App.tsx and the hooks. Label individually when chasing a specific wakeup; the convention's value is local to the file you're debugging.
 
 ## How this decision shows up in code
 
@@ -123,4 +57,4 @@ In general: **anything that fires faster than once per second should aggregate o
 ## Related
 
 - [[flows/dataset-opening]] — the flow this was first applied to
-- [[chunk-pipeline]] — next candidate for instrumentation when debugged
+- [[chunk-lifecycle]] — next candidate for instrumentation when debugged

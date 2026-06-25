@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-06-25
 ---
 
 # Proxy Generator Priority Is Not Honored Yet
@@ -27,9 +27,11 @@ Symptoms of relying on priority:
 
 ## Where the comment lives
 
-`lucida-server/src/proxy/mod.rs` has the explicit comment:
+`lucida-server/src/proxy/generator.rs` has the explicit module comment:
 
-> The MVP exposes a `priority: u8` parameter on `ProxyGenerator::request` for API stability but does not yet order requests by priority. The tokio `Semaphore` provides bounded concurrency in FIFO order. A real priority scheduler is a follow-up — see PRD #397 S5.
+> `priority` is accepted for API stability but **not yet used to order requests**. The semaphore awakes waiters in roughly FIFO order; a real priority scheduler is deferred. See module docs.
+
+The `request` method's `priority` argument is bound as `_priority: u8` (currently unused). The module-level overview in `lucida-server/src/proxy/mod.rs` likewise notes the MVP "does not yet order requests by priority" and that "a real priority scheduler is a future enhancement."
 
 ## Related
 

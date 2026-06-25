@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-06-10
+modified: 2026-06-25
 ---
 
 # lucida-cli
@@ -21,96 +21,37 @@ The CLI should remain a reference client for the HTTP control plane and WebSocke
 
 ## Subcommands
 
-Current product commands:
+The command tree mirrors the web app's nouns. `lucida --help` (and `<noun> --help`) is the authoritative listing; the source of truth is the clap derive in `lucida-cli/src/main.rs`. Below is one bullet per noun, calling out only the non-obvious bits.
 
-- `lucida status` — summarize effective server, health/readiness/version, and auth status.
-- `lucida server status` — same server-oriented health check surface.
-- `lucida server version` — print server version.
-- `lucida auth login` — start browser-assisted CLI bearer credential provisioning.
-- `lucida auth whoami` — print the authenticated principal using `LUCIDA_TOKEN` or the stored token.
-- `lucida auth logout` — revoke the current server-side bearer token and remove the local token; `--local-only` skips server revocation.
-- `lucida workspace list [--archived]` — list active or archived workspaces visible to the current principal.
-- `lucida workspace create [name]` — create a workspace.
-- `lucida workspace info [id-or-name] [--archived]` — show workspace details and derived target URLs.
-- `lucida workspace use <id-or-name>` — persist the default workspace.
-- `lucida workspace open [id-or-name] [--no-browser]` — mark the workspace as opened and print/open `/w/:workspace_id`.
-- `lucida workspace pin|unpin [id-or-name]` — update the current user's personal workspace pin state.
-- `lucida workspace archive|restore [id-or-name]` — archive or restore an owned workspace.
-- `lucida workspace share show [id-or-name]` — show link sharing and explicit members.
-- `lucida workspace share link <off|viewer|editor> [id-or-name]` — disable link sharing or grant viewer/editor link access.
-- `lucida workspace member list [id-or-name]` — list explicit workspace members.
-- `lucida workspace member add <email> <viewer|editor|owner> [id-or-name] [--display-name <name>]` — add or update a member.
-- `lucida workspace member set-role <email> <viewer|editor|owner> [id-or-name]` — update a member role.
-- `lucida workspace member remove <email> [id-or-name]` — remove an explicit member.
-- `lucida dataset browse [path]` — browse server-visible filesystem roots and directories.
-- `lucida dataset open <path-or-url>` — open a dataset in the selected workspace, wait for completion, and report server-authored progress stages in structured output.
-- `lucida dataset list` — list loaded datasets in the selected workspace.
-- `lucida dataset info <dataset>` — show manifest/image/channel/layout summary for a loaded dataset.
-- `lucida dataset health [dataset]` — show server-authored binding/backend/source-cache pressure and generated-coarse cache/readiness health.
-- `lucida dataset retry <dataset>` — retry rebuilding a loaded workspace dataset's server binding from its persisted source.
-- `lucida dataset remove <dataset>` — remove a loaded workspace dataset.
-- `lucida view pan|zoom|set-zoom|center|slice|z-range|viewport-size` — update the selected durable viewer profile's 2D slice view.
-- `lucida camera mode|rotate|pan|zoom|fly-tick` — update slice/arcball/fly camera state.
-- `lucida layer list|order|show|hide|opacity|contrast|gamma|colormap|blend-mode|render-mode|detail-level` — inspect or update dataset display state.
-- `lucida channel mode|show|hide|colormap|contrast|gamma|blend-mode` — update multichannel display state.
-- `lucida viewer state [--from-peer <client-id>]` — inspect a durable headless viewer profile or a live peer's current view source.
-- `lucida viewer link` — print a browser URL that opens the durable viewer profile.
-- `lucida viewer adopt --from-peer <client-id>` — copy a live peer's current view into the selected durable viewer profile.
-- `lucida viewer screenshot|overview [--from-peer <client-id>] <path>` — render a durable headless viewer profile or a live peer's current view through the web renderer.
-- `lucida layout list|active|set` — inspect or change shared dataset layouts.
-- `lucida saved-view list|show|apply|capture|rename|update|delete|set-default|clear-default|link` — manage workspace saved views.
-- `lucida peer list` — list live workspace clients from the WebSocket snapshot, including follow state and compact presence summaries.
-- `lucida peer follow <client-id>` — start a long-lived CLI follow session against a live client. The command stays connected until Ctrl-C, then clears follow state before exiting.
-- `lucida peer cursor set|clear` — explicit diagnostic/test cursor presence updates.
-- `lucida plan visible-chunks [dataset]` — inspect lower-level `lucida-core` scene chunk diagnostics for the selected viewer profile or explicit peer.
-- `lucida debug state` — print read-only workspace snapshot, selected viewer state, peer, dataset, active-member, and generated-availability diagnostics.
-- `lucida admin workspace search [query]` — search remote admin workspace metadata by id, name, creator, or member email.
-- `lucida admin workspace info|archive|restore <workspace-id>` — inspect or mutate one workspace through the authenticated remote admin API.
-- `lucida admin workspace owner add|promote <workspace-id> <email>` — add or promote a workspace owner through the remote admin API.
-- `lucida admin clear-proxy-cache [--dataset <url>]` — clear the remote server proxy cache via `/admin/clear-proxy-cache`.
-- `lucida config set server <base-url>` — persist the default server.
-- `lucida config get server` — print the effective default server.
-- `lucida config get workspace` — print the effective default workspace.
-- `lucida config path` — print the config file path.
+- `status` / `server` / `auth` — effective-server + health/readiness/version + auth status; `auth login` provisions a CLI bearer credential via the browser; `auth logout --local-only` skips server revocation.
+- `workspace` — list/create/info/use/open/pin/archive/restore + `share` (link tier off/viewer/editor) + `member` (add/set-role/remove with viewer/editor/owner).
+- `dataset` — browse/open/list/info/health/retry/remove, plus `montage` (see below). `open` waits and reports server-authored progress stages; `health` surfaces binding/backend/source-cache/generated-coarse pressure.
+- `view` / `camera` / `layer` / `channel` — mutate the selected durable viewer profile's slice view, camera, and per-layer/per-channel display state.
+- `viewer` — `state`/`link`/`adopt`/`screenshot`/`overview`; `--from-peer <client-id>` targets a live peer instead of the durable profile (`adopt` persists it, screenshot/overview render it without persisting).
+- `layout` — list/active/set shared dataset layouts.
+- `saved-view` — see the saved-view workflow below.
+- `peer` — `list`/`follow`/`cursor`; `follow` is long-lived (stays connected until Ctrl-C, then clears follow state).
+- `plan visible-chunks` / `debug state` — read-only scene-chunk and workspace-snapshot diagnostics.
+- `admin workspace` (search/info/archive/restore/owner) + `admin clear-proxy-cache` — authenticated remote admin API, labeled `remote_admin`, distinct from local server-process ops.
+- `config` — get/set default server, get default workspace, print config path.
 
-Global visible flags:
+Global flags: `--server`, `--workspace` (one-shot overrides), `--json` (stable machine output), `--quiet`.
 
-- `--server <base-url>` — override the configured/default server for one invocation.
-- `--workspace <id-or-name>` — override the configured/default workspace for one invocation.
-- `--json` — emit stable machine-readable JSON.
-- `--quiet` — suppress success output.
+### `dataset montage`
+
+`lucida dataset montage <dataset> --out <png> [--cells 16] [--cols 4] [--cell-px 320] [--json] [--timeout-seconds 30]` renders a labeled contact-sheet PNG that samples the dataset's primary axis (Z / T / field / single), filling cells row-major with a text label per cell. With `--json` it also writes a sidecar at `<out>.json` describing the grid (axis, cols/rows, `cell_px`, shared `contrast` window) and, per cell, its `z`/`t`/`c`/`field`/`label`/grid position plus a re-openable `#view=`-encoded saved-view URL for drilling into that exact cell. Implemented in `montage.rs` (the `Montage` variant + `mod montage` in `main.rs`).
+
+### Saved-view workflow
+
+`saved-view list|show|apply|capture|rename|update|delete|set-default|clear-default|link|promote|approve|reject`. Views carry a visibility tier — `shared` (default), `personal`, or `proposed`. `proposed` is a bid to share surfaced to editors as a review queue: `capture`/`promote` can set `--visibility proposed`, and an editor resolves it with `approve` (→ shared) or `reject` (→ personal). `update` requires `--from-current` (capturing live state into the view; it refuses without it); `capture`/`update` also accept `--from-peer <client-id>`.
 
 ## Browser verification flow
 
-Use `lucida workspace open [workspace]` to print/open the browser route for the selected workspace. Keep that browser tab open, then run `lucida dataset open <path-or-url>`. The CLI targets the same `/ws/workspaces/:id` session and waits for request-correlated dataset-open progress plus the final result, so the browser should show the new dataset without manually constructing WebSocket URLs. The same visible verification path applies to shared document mutations such as layout changes and saved-view apply.
-
-For headless profile verification, `lucida viewer screenshot <path>` and `lucida viewer overview <path>` drive the web renderer through Chrome/Chromium. Capture waits for the web app's explicit render-ready signal and validates that CDP returned PNG bytes before writing the file. To capture a live browser peer instead of the durable profile, use `lucida peer list` to find its client id, then pass `--from-peer <client-id>` to `viewer state`, `viewer screenshot`, or `viewer overview`. Use `viewer adopt --from-peer <client-id>` when the peer's current view should become the durable headless profile state.
+The durable verification fact: the CLI targets the same `/ws/workspaces/:id` session the browser uses and waits on request-correlated dataset-open progress, so a `dataset open` shows up in an open browser tab without hand-constructing WebSocket URLs (the same holds for shared mutations like layout changes and saved-view apply). `viewer screenshot`/`overview` render through headless Chrome/Chromium and wait for the web app's render-ready signal; `--from-peer <client-id>` captures a live peer instead of the durable profile.
 
 ## Smoke workflows
 
-Run `scripts/smoke_lucida_cli.sh` from the repo root against an already-running `lucida-server` to exercise the common CLI client workflow. It uses a temp `LUCIDA_CONFIG_PATH`, creates a throwaway workspace, opens `LUCIDA_SMOKE_DATASET`, checks `dataset health`, verifies structured JSON diagnostics for missing-path and malformed-metadata opens, runs workspace/dataset/view/layer/channel/debug/plan commands, and validates screenshot/overview PNGs with `scripts/assert_png_nonblank.py`.
-
-Required inputs:
-
-- `LUCIDA_SMOKE_SERVER` — server base URL; defaults to `http://127.0.0.1:9876`.
-- `LUCIDA_SMOKE_DATASET` — server-visible OME-Zarr path or URL. On Austin's laptop the script falls back to the CPPX test dataset if present.
-
-Useful overrides:
-
-- `LUCIDA_SMOKE_CLI="target/debug/lucida"` — use a prebuilt binary instead of `cargo run -p lucida-cli --`.
-- `LUCIDA_SMOKE_OUTPUT_DIR=/path/to/artifacts` — keep JSON and PNG artifacts somewhere specific.
-- `LUCIDA_SMOKE_CAPTURE=0` — skip screenshot/overview when Chrome/Chromium is unavailable.
-
-The matching Python smoke entry point is `uv run --project lucida-py python scripts/smoke_python_client.py`. It creates a throwaway workspace, opens the same dataset, checks dataset health, asserts structured diagnostics for missing-path and malformed-metadata opens, applies view/layer/channel changes through `LucidaClient`, and writes a structured summary artifact.
-
-For fixture-backed dataset reliability coverage, run:
-
-```bash
-uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
-  --server http://127.0.0.1:9876
-```
-
-That smoke expects the server to see `/Users/austin/local_data/lucida_test_zarrs` by default. It opens every configured fixture present there, checks required dataset-open progress stages, compares CLI/Python health, and records negative diagnostics for missing and malformed sources.
+Smoke scripts live in `scripts/` and run against an already-running `lucida-server`: `smoke_lucida_cli.sh` (CLI), `smoke_python_client.py` and `smoke_dataset_reliability.py` (Python, via `uv run --project lucida-py`). They are parameterized by `LUCIDA_SMOKE_*` env vars — read the script headers for the current set.
 
 ## Interactions
 

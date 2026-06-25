@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # Minimap Skip-When-Stationary via Render Key
@@ -13,12 +13,16 @@ The footgun: **adding a new input to minimap rendering without updating the rend
 
 ## Where the key lives
 
-`lucida-web/src/components/Minimap.tsx` (and friends in `renderer/minimapHandlers.ts`) compute and compare the render key. The key is a stringified concatenation of:
+`tickMinimap` in `lucida-web/src/minimapPath.ts` computes and compares the render key (`renderKey` vs `state.lastRenderKey`). The key is a stringified concatenation of:
 
-- Camera center, zoom, viewport size
-- Dataset list (added/removed)
-- Visible region bounds
-- Active layout id (if applicable)
+- `theta`, `phi` — camera orientation
+- `mode` — slice vs volume
+- `sliceZ` — current Z slice
+- `activeC` — active channel
+- main-camera snapshot
+- dataset-order snapshot
+- `all_dataset_settings` snapshot
+- `uploadGeneration` — bumped when new overview chunks arrive
 
 If you add a new input that affects the minimap visually — e.g. a new "show entity outlines" toggle — you must include it in the render-key computation. Otherwise toggling the option doesn't repaint the minimap until *some other* key-affecting input changes.
 
@@ -34,6 +38,6 @@ The minimap renders are cheap individually but add up: each frame's render is on
 
 ## Related
 
-- [[chunk-pipeline]] — minimap is one of four phases per tick
+- [[chunk-lifecycle]] — minimap is one of four phases per tick
 - [[lucida-web]]
 - [[decisions/0009-pull-based-raf-with-typed-dirty]] — related render-skip mechanism

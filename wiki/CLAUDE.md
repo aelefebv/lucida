@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # CLAUDE.md — Lucida Repo Wiki
@@ -41,8 +41,9 @@ Skills auto-stamp `modified:` on edit. The lint pass cross-checks against git ti
 
 ## Categories
 
-- **`systems/`** — major modules and runtime-architecture concepts. Split into two sub-folders: `crates/` (one article per Cargo workspace member: `lucida-core`, `lucida-server`, `lucida-web`, `lucida-store`, `lucida-protocol`, `lucida-content`, `lucida-cli`, `lucida-proxy`, `lucida-py`) and `subsystems/` (web-internal modules and cross-cutting runtime concepts: chunk pipeline, planning domain, GPU residency, CPU cache, worker protocol, scene state and epochs, presence and follow, layout system, multichannel and colormaps). Wiki-link resolution is by basename, so `[[lucida-core]]` and `[[chunk-pipeline]]` work unqualified.
+- **`systems/`** — major modules and runtime-architecture concepts. Split into two sub-folders: `crates/` (one article per Cargo workspace member: `lucida-core`, `lucida-server`, `lucida-web`, `lucida-store`, `lucida-protocol`, `lucida-content`, `lucida-cli`, `lucida-proxy`, `lucida-py`) and `subsystems/` (web-internal modules and cross-cutting runtime concepts: chunk pipeline, planning domain, GPU residency, CPU cache, worker protocol, scene state and epochs, presence and follow, layout system, multichannel and colormaps). Wiki-link resolution is by basename, so `[[lucida-core]]` and `[[chunk-lifecycle]]` work unqualified.
 - **`decisions/`** — ADR-style records. Files are sequentially numbered (`0001-slug.md`, `0002-slug.md`, …). Each ADR records *that* a decision was made and *why*; optional `Status` / `Considered Options` / `Consequences` sections appear only when they add genuine value. Especially valuable for non-obvious calls (epoch model, atlas pools, "won't implement" decisions).
+- **`principles/`** — stable per-subsystem claims about what each subsystem optimizes for. The framework ADRs cite as justification (`principles/index.md`, `principles/planning.md`); principles never cite ADRs back.
 - **`flows/`** — end-to-end traces. How a chunk gets from disk → CPU cache → GPU atlas → shader sample. How a presence message propagates. How a follow chain resolves.
 - **`gotchas/`** — tribal knowledge, footguns, "we tried X, it broke Y." Examples: TS type-check gotcha (`tsc --noEmit -p tsconfig.app.json`), `npm run build` pre-existing TS errors, Rust 2024 edition binding mode quirks.
 

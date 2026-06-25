@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-06-25
 ---
 
 # Layout System
@@ -27,6 +27,7 @@ When `SetActiveLayout` references an unknown layout ID, derived state falls back
 
 - **Producers**: [[lucida-store]] `import.rs` builds the source layout(s). Web-client UI (`LayoutSwitcher.tsx`) emits `SetActiveLayout`; some derived layouts are computed in `pipeline/layoutBuilders.ts` and published via `RegisterLayout`.
 - **Consumers**: [[lucida-core]] `Scene::apply` rebuilds `DerivedState` (member positions, projected transforms) on layout change. [[planning-domain]] reads from derived state.
+- **Annotation re-anchoring**: `SetActiveLayout` also re-anchors collaborative annotations — each anchored pin translates by its anchor entity's displacement between the old and new layouts (`DocumentState::reanchor_for_layout` in `scene/types.rs`; unanchored pins are left alone).
 - **Storage**: `document.registered_layouts` and `document.active_layout_ids` in [[scene-state-and-epochs|DocumentState]]. Both serialized and re-broadcast on `Snapshot`.
 
 ## Invariants

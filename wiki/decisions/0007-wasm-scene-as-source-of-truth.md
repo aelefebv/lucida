@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # WASM Scene as Source of Truth
@@ -45,11 +45,7 @@ The visibility math (matrix transforms, frustum culling, projected sizes for hun
 **WASM never pushes; JS always pulls.** WASM has no callback into JS — it only responds to JS calls. So all communication is JS-initiated, in two flavors:
 
 ### JS → WASM, on every external event (mutation)
-```
-JS receives event → builds command JSON → scene.apply_command(json)
-→ WASM mutates state, bumps an epoch counter
-```
-Examples: user moves camera → `apply_command(SetCamera)`. Dataset opened broadcast arrives → `apply_command(DatasetOpened)`. User toggles a channel → `apply_command(SetChannelVisible)`.
+JS receives an event, builds command JSON, and calls `scene.apply_command(json)`; WASM mutates state and bumps an epoch counter. Examples: user moves camera → `apply_command(SetCamera)`. Dataset opened broadcast arrives → `apply_command(DatasetOpened)`. User toggles a channel → `apply_command(SetChannelVisible)`.
 
 ### JS → WASM, every animation frame (query)
 JS pulls fresh state via known APIs. The main ones (used by the orchestrator each tick):
@@ -70,7 +66,7 @@ The cost is one parse+serialize per call — negligible at human input rates, mi
 ## Costs
 
 - **Build complexity.** Rust changes require `cargo test -p lucida-core` and then `cd lucida-web && npm run build:wasm`. Vite hot-reload picks up the new WASM but doesn't trigger the rebuild itself. See [[gotchas/wasm-rebuild-after-rust-changes]].
-- **JSON marshaling at the boundary.** `apply_command(json)` serializes commands as JSON across the WASM boundary because typed pyo3-style bindings would balloon the API surface. The cost is one parse+serialize per command — negligible at human input rates, mildly nontrivial at firehose presence rates.
+- **JSON marshaling at the boundary.** `apply_command(json)` serializes commands as JSON across the WASM boundary because typed pyo3-style bindings would balloon the API surface — see the cost note under "What crosses the boundary" above.
 - **Debugging crosses runtimes.** A bug in view-query math shows up as a wrong projected diagonal in JS; you have to reach into Rust source to debug it. Mitigated by the test suite in `lucida-core/src/scene/`, which is JS-callable equivalent.
 
 ## How this decision shows up in code
@@ -90,4 +86,4 @@ The cost is one parse+serialize per call — negligible at human input rates, mi
 
 - [[lucida-core]]
 - [[scene-state-and-epochs]]
-- [[chunk-pipeline]]
+- [[chunk-lifecycle]]

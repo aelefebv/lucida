@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-06-25
 ---
 
 # Presence and Follow Mode
@@ -47,7 +47,7 @@ When a client disconnects, anyone following them is reset to `following: None` a
 ## Invariants
 
 - **Presence updates are ephemeral.** Never sequenced; never persisted. Lost packets are fine because the next presence message overwrites.
-- **The server filters self-presence on the outbound side.** A client never receives back its own `PresenceUpdate`. The check is `sender == id` in the broadcast handler.
+- **The server filters self-presence on the outbound side.** A client never receives back its own `PresenceUpdate`/`CursorUpdate`/`DatasetPresenceUpdate`. The check is `sender == id` in the broadcast handler. **Exception: `FollowChanged`** carries no sender and is *not* self-filtered — the originator of a follow does receive their own `FollowChanged` (it confirms the transitive target the server resolved).
 - **Follow validation is monotonic.** `set_follow` either validates and applies (returning a non-empty change list) or rejects (returning empty). It does not partially apply.
 - **Cursor is null when the cursor leaves the canvas.** `null` is a real value, not "no update." Peers should explicitly hide remote cursors on `null`.
 

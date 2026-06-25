@@ -53,6 +53,6 @@ Unification is captured as deferred Slice 12 — landed only when a third asset 
 - [[decisions/0029-planning-index-split-into-per-concern-files]] — sister-refactor pattern on the upstream half of the chunk pipeline
 - [[decisions/0006-content-source-vs-fetch-source]] — context for the `ContentSource` type and the chunk/proxy duplication-vs-unification trade-off
 - [[cpu-cache]] — subsystem article (refreshed in Phase 5 after the refactor ships)
-- [[chunk-pipeline]] — overarching pipeline architecture
+- [[chunk-lifecycle]] — overarching pipeline architecture
 - PRD #592 — the work item this ADR was created during
 - `wiki/outputs/dechaos-fetch-decode-2026-05-15/` — the eight-pass design exploration that produced the slice plan

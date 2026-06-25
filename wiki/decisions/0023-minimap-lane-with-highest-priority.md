@@ -1,6 +1,6 @@
 ---
 created: 2026-05-14
-modified: 2026-05-14
+modified: 2026-06-25
 ---
 
 # Minimap Lane with Highest Priority
@@ -25,6 +25,8 @@ The starvation risk on initial load is bounded: minimap chunks are small (~16 ch
 - **Detail starvation window.** During the initial ~1 second, fetch capacity is consumed by minimap chunks rather than detail. The detail viewport may feel slower to populate on the very first dataset open. Acceptable because the window is short and bounded.
 - **One more lane in the system.** The lane count grows from four to five. The Pass 6 anti-recommendation against speculative lane proliferation does not apply here — this is a specific named lane for a specific real producer, not generic extension.
 
+> Note (since): a sixth lane has been added — `COARSE_LANE_OFFSET = 2400` for the coarse/detail path — so the "four → five lanes" framing above is now six in the live code (`pipeline/planning/config.ts`).
+
 ## How this decision shows up in code
 
 - `lucida-web/src/pipeline/planning/index.ts` — exports `MINIMAP_LANE_OFFSET = 0` alongside the renumbered other offsets.
@@ -36,7 +38,7 @@ The starvation risk on initial load is bounded: minimap chunks are small (~16 ch
 ## Related
 
 - [[principles/planning]] — the framework this decision lives within
-- [[chunk-pipeline]] — end-to-end trace; priority table updated to match
+- [[chunk-lifecycle]] — end-to-end trace; priority table updated to match
 - [[planning-domain]] — subsystem article; refreshed for the new lane
 - [[cpu-cache]] — eviction tier mapping note
 - PRD #545 — the work item this ADR was created during

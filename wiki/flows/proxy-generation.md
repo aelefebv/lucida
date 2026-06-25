@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Flow: Proxy Generation (S5)
@@ -27,11 +27,11 @@ After a dataset opens, [[lucida-server]] kicks off best-effort background pre-ge
    - Send to the requesting client's unicast channel.
 4. **Generator** ([[lucida-server]] `proxy::ProxyGenerator`):
    - **Dedup check**: if another in-flight request matches `spec`, await its future. (Many clients can request the same proxy; only one generation runs.)
-   - **Cache check** ([[lucida-server]] `ProxyCache::read`): if a proxy for this `spec` exists on disk and the header validates (algorithm version + source content hash), return it. No generation runs.
+   - **Cache check** ([[lucida-server]] `ProxyCache::get`): if a proxy for this `spec` exists on disk and the header validates (algorithm version + source content hash), return it. No generation runs.
    - **Concurrency permit**: acquire a permit from the bounded semaphore (size from `ProxyConfig::concurrency`, default `num_cpus / 2`).
    - **Pre-fetch source chunks** (`build_server_proxy_source`): determine which source chunks the spec's entity needs at the spec's `(t, c)`, fetch them from `CachedStore`, decode storage compression, populate an in-memory `ServerProxySource`.
    - **Synchronous generation**: call [[lucida-proxy]]'s `generate_proxy(manifest, spec, source)` — pure compute, returns a `ProxyAsset` (header + voxels).
-   - **Cache write**: atomic write to disk under `{cache_root}/{url_hash16 hex}/{entity}/{kind}/T{:05}_C{:03}.proxy`.
+   - **Cache write**: atomic write to disk under `{cache_root}/{url_hash16 hex}/{entity}/{kind}/T{:05}_C{:03}.bin`.
    - **Return** the asset to the awaiting requesters.
 5. **Server encodes binary frame**:
    ```
@@ -39,7 +39,7 @@ After a dataset opens, [[lucida-server]] kicks off best-effort background pre-ge
    ```
    Key is `proxy/{entity_id}/{kind_str}/T{:05}_C{:03}` where `kind_str` is `WellProxy3D` or `FieldProxy3D` (literal strings — see `proxy_kind_str`).
 6. **Client `bridge.ts::handleBinary`** parses the frame. Key prefix `proxy/` routes it to a separate proxy promise table (not the chunk pending-fetch map).
-7. **TickCoordinator** receives the proxy asset, posts a `proxyAsset` message over [[worker-protocol]] to the GPU worker.
+7. **TickCoordinator** receives the proxy asset, posts a `proxyAssetData` message over [[worker-protocol]] to the GPU worker.
 8. **Worker** allocates a slot in the appropriate proxy pool (keyed by `(datasetId, kind, slotDims, channel)` — see [[decisions/0004-multi-pool-atlases]]) and writes the voxel buffer. Updates the descriptor's proxy slot handle for that entity.
 9. **Render** — next frame, the shader's [[gpu-residency#semantic-fallback-chain|fallback chain]] now has the proxy as a candidate.
 

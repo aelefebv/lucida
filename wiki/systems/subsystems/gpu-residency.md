@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # GPU Residency
@@ -72,9 +72,9 @@ The chain runs **inside the volume ray-march loop** as well, so a ray that cross
 
 `coldState/groupEntries.ts` and `coldState/entityMetas.ts` are the pure pieces apply.ts delegates to. They group detail and coarse sources separately, so mismatched detail/coarse chunk shapes become separate pools instead of forcing one shared atlas layout.
 
-## Legacy Proxy Lifecycle
+## Proxy Fallback Lifecycle
 
-The proxy lifecycle is historical for the default path. `proxy/upload.ts` still handles a `proxyAsset` message for the opt-in bridge: validates the asset, allocates a slot in the right `(datasetId, kind, slotDims, channel)` pool, writes the u16 voxel buffer, and updates the descriptor handle pair on `state.proxyDescriptorsByEntity`, keyed by `(entityId, t, c)` so multichannel/time scrubs cannot overwrite another channel's fallback.
+The proxy path is the fallback below the default coarse/detail tiers (still fully wired). `proxy/upload.ts` handles the `proxyAssetData` message: validates the asset, allocates a slot in the right `(datasetId, kind, slotDims, channel)` pool, writes the u16 voxel buffer, and updates the descriptor handle pair on `state.proxyDescriptorsByEntity`, keyed by `(entityId, t, c)` so multichannel/time scrubs cannot overwrite another channel's fallback.
 
 `proxy/propagate.ts` is the well→fields fan-out: when a `WellProxy3D` lands for a well, every child field whose descriptor references that well gets its `wellProxyPoolIndex` / `wellProxySlotIndex` updated. The fan-out reads `state.wellToFields` (built per cold state) so each upload is O(children) instead of O(all-entities).
 
@@ -97,14 +97,14 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 
 ## Interactions
 
-- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, tier-labeled `sliceChunkData` and `volumeChunkData` messages over [[worker-protocol]]. `proxyAsset` is legacy bridge-only. The planner-only TickCoordinator drives the Uploader.
-- **Downstream**: the worker presents to the OffscreenCanvas; communicates back via `wantedSetDelta`, `chunksEvicted`, `frameStats`, `intensityRange`.
+- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, tier-labeled `sliceChunkData` and `volumeChunkData` messages over [[worker-protocol]]. `proxyAssetData` carries the proxy fallback tier. The planner-only TickCoordinator drives the Uploader.
+- **Downstream**: the worker presents to the OffscreenCanvas; communicates back via `wantedSetDelta`, `chunksEvicted`, `intensityRange`.
 
 ## Invariants
 
 - **`entityIndex` matches between CPU and GPU.** Both sides build their lists by iterating the active set in identical order. Drift here is a class of bug that only surfaces visually (wrong colormap on the wrong entity).
-- **Every per-session Map lives on `WorkerCtx.state`.** Module-level mutable state in render-side files is a regression; the lint to enforce is `grep -E '^(const|let|var) .* = new Map' renderer/{volume,slice,coldState,proxy,worker}/*.ts` — should return nothing.
-- **memberId is the canonical owner key on every wire message** (`chunksEvicted.memberId`, `volumeChunkData.memberId`, `sliceChunkData.memberId`). `proxyAsset` and `coldState` correctly stay `datasetId`-keyed because they really are per-dataset; every member-routed message uses `memberId`.
+- **Every per-session Map lives on `WorkerCtx.state`.** Module-level mutable *session* state in render-session files is a regression. The documented exception is `worker/resources.ts`, which intentionally holds module-scoped persistent resources (e.g. `lutCache`) that outlive any single session — scope the `new Map` lint to the render-session files and exclude `worker/resources.ts`.
+- **memberId is the canonical owner key on every wire message** (`chunksEvicted.memberId`, `volumeChunkData.memberId`, `sliceChunkData.memberId`). `proxyAssetData` and `coldState` correctly stay `datasetId`-keyed because they really are per-dataset; every member-routed message uses `memberId`.
 - **Descriptor byte offsets live only in `descriptor/layout.ts`.** Both TS writers and both WGSL shaders must agree; `layout.test.ts` enforces this by parsing the shaders at test time.
 - **Atlas slot IDs are pool-local.** A slot ID `42` in pool A is unrelated to slot `42` in pool B. The descriptor's tier source encodes which tier/indirection source to read.
 - **Indirection writes are batched per frame** — many residency changes coalesce into one mapped buffer write. Don't add a per-chunk write call.
@@ -116,5 +116,5 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 - **Pool keys include `channel` and `tier`** — `(datasetId, channel, slotDims, detail|coarse)`. Adding multi-channel or coarse/detail mode without re-keying pools regresses to channels or tiers fighting for one pool, which kills plate FPS and fallback reliability.
 - **Cold state carries explicit `multiChannel`.** A multi-channel view can have one visible channel; member IDs and pool grouping still need the multi-channel `imageId:chN` shape.
 - **`memberTierKey(memberId, tier)` is the tier routing key.** Falling back to the old `memberToPool` map for coarse uploads routes them through the detail pool and breaks mismatched chunk-shape cases.
-- **Volume's per-entity scissor for plate fields** lives in `volumePath.ts:15-65`. Skips fragments outside the field's screen-space AABB. If a field is rendering visibly outside its footprint, this is the place to look.
+- **Volume's per-entity scissor for plate fields** is computed by `computeScissorRect` in `pipeline/upload/scissor.ts`. Skips fragments outside the field's screen-space AABB. If a field is rendering visibly outside its footprint, this is the place to look.
 - **Compositor key naming is asymmetric**: `imageId:chN` for multichannel, bare `imageId` for single-channel. Mixing the two halves silently produces the wrong final composite.

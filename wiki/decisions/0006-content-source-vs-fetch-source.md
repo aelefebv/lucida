@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # ContentSource (JS) vs FetchSource (wire)
@@ -10,7 +10,7 @@ modified: 2026-05-07
 Two distinct types share related-sounding names by design:
 
 - **`FetchSource`** (Rust, in [[lucida-protocol]]) — wire envelope describing how to fetch bytes. Currently `Proxied(ProxiedFetchDescriptor)`; reserved variants `Direct` and `Local`. The reserved `Local` variant is also why the open command is named `OpenRemoteDataset` (server-mediated) — it leaves room for a future `OpenLocalDataset` sibling for browser-side paths. See [[flows/dataset-opening]].
-- **`ContentSource`** (TypeScript, in `lucida-web/src/pipeline/contentSource.ts`) — in-browser fetch orchestrator. Wraps a `FetchSource` and exposes `registerImage(id, wireFormat)` and `fetch(req)` returning a binary frame promise.
+- **`ContentSource`** (TypeScript, in `lucida-web/src/pipeline/fetch/contentSource.ts`) — in-browser fetch orchestrator. Wraps a `FetchSource` and exposes `registerImage(id, wireFormat)` and `fetch(req)` returning a binary frame promise.
 
 The split was clarified in commit `1718e9a`. The names hint at the relationship; the prefixes (`Content` vs `Fetch`) hint at the layer.
 
@@ -32,18 +32,18 @@ The `register_dataset → dataset_opened` server-event rename in commit `c1d982d
 
 - `lucida-protocol/src/fetch.rs::FetchSource` — the wire enum.
 - `lucida-web/src/manifestTypes.ts` — TS mirror of `FetchSource`.
-- `lucida-web/src/pipeline/contentSource.ts::ContentSource` — the JS class, constructed from a `FetchSource` payload.
+- `lucida-web/src/pipeline/fetch/contentSource.ts::ContentSource` — the JS class, constructed from a `FetchSource` payload.
 - `lucida-web/src/hooks/useBridge.ts::setupFetchPipeline` — `contentSource.registerImage(image_id, wire_format)` per image after `DatasetOpened`.
 
 ## Tradeoff
 
 - **Two near-identical names invite confusion.** Mitigated by:
-  - File location: `pipeline/contentSource.ts` for JS, `lucida-protocol/src/fetch.rs` for wire.
+  - File location: `pipeline/fetch/contentSource.ts` for JS, `lucida-protocol/src/fetch.rs` for wire.
   - Type-level: TS uses `ContentSource` (class); Rust uses `FetchSource` (enum).
 - The alternative (calling them the same name with disambiguation suffixes) was worse — it implied they were the same thing.
 
 ## Related
 
 - [[lucida-protocol]] — wire types
-- [[chunk-pipeline]] — where ContentSource is invoked in the fetch path
+- [[chunk-lifecycle]] — where ContentSource is invoked in the fetch path
 - [[decisions/0005-three-output-import-model]] — the broader split that FetchSource is part of

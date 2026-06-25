@@ -19,7 +19,7 @@ Three concrete benefits:
 
 ## Tradeoffs
 
-- **Debugging is harder.** Browser DevTools attach to workers but the tooling is less polished than main-thread profiling. The `frameStats` worker → main message exists partly to surface telemetry the DevTools won't.
+- **Debugging is harder.** Browser DevTools attach to workers but the tooling is less polished than main-thread profiling. The worker → main messages (`wantedSetDelta`, `chunksEvicted`, `intensityRange`) surface some telemetry the DevTools won't.
 - **Every state change crosses a serialization boundary.** Cold state, hot state, chunk uploads — all `postMessage`. We mitigate with the cold/hot/delta split (see [[worker-protocol]]) and typed array transfers, but it's a real cost.
 - **Lifecycle is annoying.** `OffscreenCanvas` can be transferred only once. A worker crash means losing the canvas and re-initing. There's no graceful recovery path; we rely on workers not crashing.
 
@@ -35,10 +35,10 @@ Three concrete benefits:
 - `lucida-web/src/renderer/gpu.worker.ts` — worker entry point. Holds the WebGPU device, the canvas, the atlas state, the descriptor buffer.
 - `lucida-web/src/renderer/workerContext.ts` — running state inside the worker.
 - `lucida-web/src/hooks/useRenderClient.ts` — React hook that wires the worker to the canvas (transfer happens here on first mount).
-- The `init`/`resize`/`coldState`/`viewHotState`/`sliceChunkData`/`volumeChunkData`/`proxyAsset` message types in `workerProtocol.ts`.
+- The `resize`/`coldState`/`viewHotState`/`sliceChunkData`/`volumeChunkData`/`proxyAssetData` message types in `workerProtocol.ts`.
 
 ## Related
 
 - [[worker-protocol]] — the message contract
 - [[gpu-residency]] — what lives in the worker
-- [[chunk-pipeline]] — where the drain-to-worker step happens
+- [[chunk-lifecycle]] — where the drain-to-worker step happens

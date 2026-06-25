@@ -1,11 +1,11 @@
 ---
 created: 2026-05-13
-modified: 2026-05-13
+modified: 2026-06-25
 ---
 
 # Deployment Artifacts Are Reference Templates, Not Opinionated Infra
 
-> Status: Proposed (PRD #486 — feature in implementation).
+> Status: Accepted (implemented; PRD #486). The `extras/deploy/` manifests, `docker-compose.yml`, and `RUNBOOK.md` all exist.
 
 ## Decision
 

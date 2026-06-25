@@ -40,5 +40,5 @@ The one-tier-at-a-time rule honors [[principles/planning#1-visual-smoothness-ove
 
 - [[principles/planning]] — the framework this decision lives within
 - [[planning-domain]] — subsystem article; the "Invariants" section
-- [[chunk-pipeline]] — section 3b (promotion) and the catalog-aware degradation paragraph
+- [[chunk-lifecycle]] — section 3b (promotion) and the catalog-aware degradation paragraph
 - PRD #545 — the work item during which this ADR was captured

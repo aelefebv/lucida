@@ -1,6 +1,6 @@
 ---
 created: 2026-05-07
-modified: 2026-05-08
+modified: 2026-06-25
 ---
 
 # Topic: Collaboration
@@ -13,7 +13,7 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 
 - [[decisions/0001-document-vs-viewport-split]] — the foundational split that everything else in collaboration is downstream of
 - [[presence-and-follow-mode]] — peer-to-peer presence model, transitive follow chains, throttling
-- [[saved-views]] — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks with live cross-peer sidebar updates
+- [[saved-views]] — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks, surfaced through the `WorkspaceSavedViewsSidebar` component with live cross-peer updates
 
 ## Crate ownership
 
@@ -26,7 +26,7 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 - [[decisions/0002-peer-to-peer-follow-mode]] — anyone can follow anyone; server validates and flattens chains into stars
 - [[decisions/0013-url-as-app-state-for-saved-views]] — saved views are debounced URL-hash writes (Google-Maps-style); refresh preserves view; sharing = copy URL
 - [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] — local-file paths in saved views work for sender refresh but warn on share
-- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — SQLite-backed bookmarks with `AuthPrincipal` seam; first cross-cutting persistent state in `lucida-server`
+- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — SQLite-backed bookmarks with `AuthPrincipal` seam
 
 ## Cross-cutting flows
 

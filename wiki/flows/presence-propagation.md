@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # Flow: Presence Propagation
@@ -10,15 +10,15 @@ From "user A pans" to "user B's viewport reflects A's new position" (when B is f
 ## Trace: ordinary presence (cursor / viewport)
 
 1. **User A interacts** — pan, zoom, mouse-move, slice scrub.
-2. **Local apply** — `applyAndSend.ts::applyViewportCommand` calls `wasmScene.apply_command(json)`. Scene's `apply_viewport(cmd)` mutates the local viewport state and bumps the `view` or `selection` epoch.
-3. **Render-loop dirty** — the command sets `interactiveDirty` so the local render reflects immediately.
-4. **Throttled emit** — `applyViewportCommand` queues a `presence` message. `bridge.ts` throttles at ~50 ms; the latest queued payload wins (older queued payloads are dropped).
+2. **Local apply** — `applyAndSend.ts::applyViewportCommand` calls only `wasmScene.apply_command(json)`. Scene's `apply_viewport(cmd)` mutates the local viewport state and bumps the `view` or `selection` epoch. It does **not** mark dirty or emit — the caller does both.
+3. **Render-loop dirty** — the caller marks `interactiveDirty` so the local render reflects immediately.
+4. **Throttled emit** — the caller queues a `presence` message via `bridge.ts::sendPresence`, throttled at ~50 ms; the latest queued payload wins (older queued payloads are dropped).
 5. **Wire** — `{type: "presence", camera, view, display}` JSON to the WebSocket.
 6. **Server** ([[lucida-server]] `handler.rs`) — `Session::update_presence` mutates `clients[id]` in place. Constructs `ServerMessage::PresenceUpdate { client_id, camera, view, display }` and broadcasts via `BroadcastItem::PresenceUpdate { sender, json }`.
 7. **Self-filter** — the broadcast loop checks `sender == id` and skips sending back to the originator.
 8. **All other clients** receive `presence_update`. `bridge.ts::onPresenceUpdate` routes to `useBridge`'s handler which:
    - Updates the per-peer presence state in the local store.
-   - If the receiving client is **following** `client_id`, mirrors the camera/view/display locally via `applyViewportCommand` (without re-emitting — see invariants below).
+   - If the receiving client is **following** `client_id`, imports the camera/view/display locally (`scene.import_presence`) and **re-emits** its own presence (see invariants below).
    - Otherwise, just stores it (e.g. for the [[lucida-web|peer cursor overlay]] to read).
 
 ## Trace: cursor (`cursor` message)
@@ -38,7 +38,7 @@ The server-side path is identical: `Session::update_dataset_presence` → `Serve
 - **Presence is never sequenced or persisted.** Lost packets are fine — the next presence update overwrites. New clients on connect get current `peers` in `Snapshot` rather than replaying lost messages.
 - **Self-filter is server-side.** The originator never receives back its own presence/cursor/dataset-presence updates. The check is `sender == id` in the outbound broadcast loop.
 - **Throttling is sender-side.** The server broadcasts everything it receives; rate-limiting happens on each client's `bridge.ts` to avoid hammering its own send path.
-- **Following clients apply incoming presence locally without re-emitting.** Otherwise A→B following would echo back through B's emit and create a feedback loop. The follow-mode local apply is silent.
+- **Following clients DO re-broadcast after applying.** `useBridge.ts` `onPresenceUpdate` (when following) and `onFollowChanged`/steer both call `sendPresence(scene.export_presence())` right after `import_presence`. No feedback loop results because the server self-filters the sender; re-emission is how a follower's *own* followers stay synced transitively.
 
 ## Latency
 

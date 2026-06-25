@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-06-25
 ---
 
 # TS Type-Check Trap
@@ -9,7 +9,7 @@ modified: 2026-04-18
 
 Running `npx tsc --noEmit` from `lucida-web/` looks like it works — exits successfully, prints nothing. But it's **a no-op in this repo**: the default `tsconfig.json` exists only as a project references container; the actual app sources are configured in `tsconfig.app.json` and aren't included by the default invocation.
 
-The first time you discover this is usually after committing code that fails TypeScript with `npm run build`.
+The first time you discover this is usually after committing code that fails TypeScript with `pnpm run build`.
 
 ## What to run instead
 

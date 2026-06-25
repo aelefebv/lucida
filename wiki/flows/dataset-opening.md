@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Flow: Dataset Opening
@@ -12,7 +12,7 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
 1. **UI input** — user types/pastes a URL into the open-dataset input. `App.tsx` captures it; `useDatasets.handleUrlSubmit` calls `Bridge.sendOpenRemoteDataset(url)`.
 2. **Wire**: `{type: "open_remote_dataset", url}` JSON to the WebSocket.
 3. **Server** ([[lucida-server]] `handler.rs::handle_open_remote_dataset`):
-   1. Normalize the source, compute `dataset_id` from URL hash (BLAKE3 → `ds-{16 hex}`), and emit request-correlated `dataset_open_progress` diagnostics. If a `ServerBinding` already exists for this URL, **rebroadcast the canonical `DatasetOpened` and return** (cache the import work).
+   1. Normalize the source and compute the `dataset_source_id` from the URL hash (`dataset_id_for_url`, BLAKE3 → `ds-{16 hex}` — the source/cache dedup key, distinct from the client-facing `DatasetId`). Emit request-correlated `dataset_open_progress` diagnostics. If a `ServerBinding` already exists for this URL, **rebroadcast the canonical `DatasetOpened` and return** (cache the import work). The client-facing workspace id (`wds-{uuid}`, what peers address) is minted separately via `new_workspace_dataset_id`.
    2. Otherwise, `lucida_store::backend::open(url)` → `Arc<dyn ObjectStore>`.
    3. `lucida_store::import::import_dataset(...)` → `ImportResult { manifest, fetch, binding_seed }`.
    4. Build the default client-visible `AssetCatalog` as empty. Legacy proxy catalog generation only runs when `legacy_proxy_enabled` is explicitly set.
@@ -29,19 +29,19 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
      2. `datasetsRef.set(datasetId, {manifest, fetch})`
      3. `initLayerMaps(datasetId)`
      4. `set_channel_visible` per channel
-     5. `loopRef.current.addDataset(datasetId, manifest)` and flip `interactiveDirty=true`
+     5. `loopRef.current.addDataset(datasetId, manifest)` (which itself flips `interactiveDirty=true`), then `bumpDatasetsVersion()`
      6. Merge generated availability updates into the client-side generated availability catalog as they arrive
-5. **Next RAF tick** ([[chunk-pipeline]]):
+5. **Next RAF tick** ([[chunk-lifecycle]]):
    1. TickCoordinator's `planAndFetch` runs because `interactiveDirty`.
    2. WASM `view_query(dsId)` returns visible entities with `projected_diagonal_px` and `idealTargetLod`.
    3. [[planning-domain]] resolves explicit detail/coarse levels per field/image and enumerates tier-labeled wanted chunks with priorities.
    4. [[cpu-cache]] `submit(plan)` queues unique requests.
-   5. Up to ~9 fetches launch via `contentSource.fetch(req)` → server.
+   5. Fetches launch via `contentSource.fetch(req)` → server, bounded by `decode-pool-size × 3` and 32 MB in-flight.
 6. **Server serves chunks**:
    - Source level request: `serve_chunk_from_store` uses `CachedStore`, decodes storage compression, and sends a normal chunk frame.
    - Generated coarse request: if bytes are ready, `serve_generated_chunk_request` sends the same normal chunk frame. If not, it sends `GeneratedChunkStatus` (`pending`, `failed_*`, or `unavailable`) so the client does not wait for a timeout.
 7. **Client receives frame/status** (`bridge.ts::handleBinary` and `GeneratedChunkStatus` handlers): normal chunk frames resolve `contentSource.fetch`; generated `pending` is treated as non-failure and retried after later readiness.
-8. **Decode pool** — 3 workers running `decode.worker.ts` decompress (Raw/Lz4/Zstd) into typed arrays.
+8. **Decode pool** — a dynamically-sized worker pool (`Math.max(2, floor(cores/2) - 1)`) running `decode.worker.ts` decompresses (Raw/Lz4/Zstd) into typed arrays.
 9. **Cache insertion** — chunk lands in CpuCache with priority and wanted-generation metadata.
 10. **Upload** (next tick): the uploader walks `cpuCache.getDeliverable()` within the 8 MB main-view upload budget and posts `sliceChunkData` or `volumeChunkData` to the GPU worker.
 11. **Worker** ([[gpu-residency]]): writes atlas slot, updates indirection buffer, recomputes wanted-set, posts `wantedSetDelta` back to main.
@@ -65,7 +65,7 @@ The name is forward-looking: [[decisions/0006-content-source-vs-fetch-source|Fet
 
 ## Related
 
-- [[chunk-pipeline]] — every step from planning forward
+- [[chunk-lifecycle]] — every step from planning forward
 - [[dataset-diagnostics]] — browser/CLI/Python/server-log diagnostics for open, health, restore, cache, and failure behavior
 - [[decisions/0011-dual-handoff-on-dataset-opened]] — why WASM and JS both consume the event
 - [[decisions/0005-three-output-import-model]] — the `ImportResult` shape

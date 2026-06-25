@@ -1,33 +1,29 @@
 ---
 created: 2026-05-16
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Upload Pipeline
 
-`lucida-web/src/pipeline/upload/` — the CPU → GPU hand-off half of the [[chunk-pipeline]]. A directory of focused modules with `uploader.ts` as a thin coordinator that fans out to collaborators (two parallel telemetry systems, a worker-feedback parser, pure cold-state builders, dispatch helpers, and worker-resource lifecycle tracking). See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for the directory-layout philosophy and the per-module rationale.
+`lucida-web/src/pipeline/upload/` — the CPU → GPU hand-off half of the [[chunk-lifecycle]]. A directory of focused modules with `uploader.ts` as a thin coordinator that fans out to collaborators (two parallel telemetry systems, a worker-feedback parser, pure cold-state builders, dispatch helpers, and worker-resource lifecycle tracking). See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for the directory-layout philosophy and the per-module rationale.
 
 The Uploader is the symmetric downstream counterpart to [[cpu-cache]]: the cache owns bytes coming in from the network, the Uploader owns bytes going out to the GPU worker. Both halves of the chunk pipeline share a shape (thin coordinator + sibling files + sub-folders for tight clusters), so the pipeline reads as one consistent system rather than two unrelated styles.
 
 ## Why split it out
 
-`tickCoordinator.ts` was a dual-personality god-object: planning (driven by view state, produces request plans) and upload (driven by tick budget, dispatches bytes to the worker) coexisted in one 2027-line class because both touched [[cpu-cache]] and worker IPC during early development. The two roles share almost no state in practice — `lastEpochs`, `requestEpoch`, and `lastViewEpochByDataset` were the only fields read by both — yet every modification required reasoning across both phases.
-
-The split mirrors the fetch/decode refactor (see [[decisions/0032-cpucache-split-into-pipeline-fetch]]) in shape and cadence: a single overgrown file becomes a coordinator plus a directory of small modules, behaviour-preserving except for explicit named bug fixes. The eleven modules correspond one-to-one with the extractable units the fetch side surfaced — a state tracker, pure builders, telemetry counters, a feedback handler.
+The upload role used to live in the former `orchestrator.ts` — a dual-personality god-object where planning and upload coexisted in one ~2000-line class because both touched [[cpu-cache]] and worker IPC. The two roles share almost no state, yet every change required reasoning across both phases. The split (see ADR [[decisions/0034-orchestrator-split-into-pipeline-upload]]) mirrors the fetch/decode refactor: one overgrown file becomes a coordinator plus small modules, behaviour-preserving except for named bug fixes. (The current `tickCoordinator.ts` is ~711 lines and owns the planner seam.)
 
 ## Module layout
 
-The directory's collaborators (each one a focused, separately-testable unit):
+Durable collaborators:
 
-- `uploader.ts` — coordinator. Wires the collaborators in its constructor; the planner-facing public surface is `sendColdState`, `sendViewHotStateIfAdvanced`, and `deliverToWorker`. Worker-feedback and resource-lifecycle methods remain, but they are wire-boundary delegations rather than planner-staging hooks.
-- `index.ts` — barrel re-export. External callers import from `pipeline/upload/` only.
-- `constants.ts` — `MAIN_VIEW_UPLOAD_BUDGET_BYTES` (8 MB) plus the two telemetry-tuning families (`COLD_STATE_*` and `UPLOAD_*`).
-- `proxyKeys.ts` — legacy bridge helpers that build the `${datasetId}|${entityId}|${kind}|${t}|${c}` composite key used to dedupe proxy uploads.
-- `uploadClient.ts` — `UploadClient` interface (narrow facet of `RenderClient`: cold/hot state, tier-labeled chunk dispatch, legacy proxy dispatch, layer-resource removal, the two worker → main feedback callback fields). Render-side methods stay on the full `RenderClient`.
-- `scissor.ts` — pure `computeScissorRect` helper, extracted to land in unit-test territory.
-- `coldState/` — pure builders. `build.ts` is the top-level `buildColdState` + `buildColdActiveEntry`; `hotState.ts` is `buildViewHotState`; `roster.ts` is `buildRoster` + `synthesizeWellRosterEntry`; `displayState.ts` is `buildDisplayStateByChannel`; `identity.ts` is the `identityMatrix` factory.
-- `delivery/` — wire-boundary helpers. `dispatch.ts` is `dispatchChunk` + `dispatchProxy` plus worker-member-id construction/parsing helpers; `manifestIndex.ts` is the per-tick `buildManifestByImage` memo; `feedback.ts` parses worker feedback and delegates to [[cpu-cache]]; `resources.ts` tracks worker member IDs for cleanup.
-- `telemetry/` — `upload.ts` is `UploadTelemetry`; `coldState.ts` is `ColdStateTelemetry`; `sustained.ts` is the shared `SustainedCondition` + `ConsecutiveTickDetector` detectors.
+- `uploader.ts` — coordinator. The planner-facing surface is `sendColdState`, `sendViewHotStateIfAdvanced`, `deliverToWorker`; worker-feedback and resource-lifecycle methods are wire-boundary delegations.
+- `uploadClient.ts` — `UploadClient`, the narrow facet of `RenderClient` (cold/hot state, tier-labeled chunk dispatch, proxy-fallback dispatch, layer-resource removal, the two feedback callbacks). Render-side methods stay on the full `RenderClient`.
+- `coldState/` — pure builders (`buildColdState`, `buildViewHotState`, `buildRoster` + `synthesizeWellRosterEntry`, `buildDisplayStateByChannel`, `identityMatrix`).
+- `delivery/` — wire-boundary helpers: `dispatch.ts` (`dispatchChunk`/`dispatchProxy` + member-id helpers), `manifestIndex.ts`, `feedback.ts` (delegates to [[cpu-cache]]), `resources.ts` (member-id cleanup tracking).
+- `telemetry/` — `UploadTelemetry`, `ColdStateTelemetry`, and the shared `SustainedCondition`/`ConsecutiveTickDetector`.
+
+Plus `constants.ts` (`MAIN_VIEW_UPLOAD_BUDGET_BYTES` = 8 MB; the budget splits in half per tier when both detail and coarse have demand), `proxyKeys.ts`, `scissor.ts` (`computeScissorRect`), `index.ts` (barrel).
 
 ## The Uploader's role per tick
 

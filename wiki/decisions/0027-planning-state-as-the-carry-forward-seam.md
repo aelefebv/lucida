@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # `PlanningState` as the Carry-Forward Seam
@@ -22,7 +22,7 @@ Today `nextState = { previousActiveSet: result.activeSet }` would be a trivial d
 ## How this decision shows up in code
 
 - `lucida-web/src/pipeline/planning/index.ts` — `PlanningState` interface, `plan()` accepts state and returns `nextState`.
-- `lucida-web/src/pipeline/orchestrator.ts` — `previousActiveSet: Map<datasetId, ActiveSetEntry[]>` becomes `planningState: Map<datasetId, PlanningState>`; the post-`plan()` write site stores `result.nextState` instead of `result.activeSet`.
+- `lucida-web/src/pipeline/orchestrator.ts` — `previousActiveSet: Map<datasetId, ActiveSetEntry[]>` becomes `planningState: Map<datasetId, PlanningState>`; the post-`plan()` write site stores `result.nextState` instead of `result.activeSet`. (`orchestrator.ts` has since been renamed to `pipeline/tickCoordinator.ts`, which now owns this Map.)
 
 ## Related
 

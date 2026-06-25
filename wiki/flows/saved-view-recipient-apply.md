@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-09
+modified: 2026-06-25
 ---
 
 # Flow: Saved-View Recipient Apply
@@ -14,7 +14,7 @@ The path a `#view=<inline>` or `#b=<id>` URL takes from "user clicks a shared li
 3. **`useSavedViewSync` mounts** (`lucida-web/src/hooks/useSavedViewSync.ts`). Constructs the applier and `urlSync` engines.
 4. **`urlSync` bootstrap** (`lucida-web/src/savedView/urlSync.ts`):
    - Reads `window.location.hash`. Matches `#view=…` regex.
-   - Calls `decoder.decode(payload)`: base64url-unwrap → ungzip via `DecompressionStream` → `JSON.parse` → validate `v: 1`. (For `v > 1`, decode best-effort with a console warning; never refuse.)
+   - Calls `decoder.decode(payload)`: base64url-unwrap → ungzip via `DecompressionStream` → `JSON.parse`. The decoder requires `v > 0`; any `v` above the current version decodes best-effort with a console warning (never refuses).
    - Sets `applyInProgress = true`. Hands the decoded `SavedView` to the applier.
 5. **Applier diffs datasets** (`lucida-web/src/savedView/applier.ts`):
    - For each URL in `view.datasets`, compute `DatasetId` via the injected `dataset_id_for_url` (BLAKE3 prefix; see [[lucida-core]]).
@@ -42,7 +42,7 @@ The path a `#view=<inline>` or `#b=<id>` URL takes from "user clicks a shared li
 Steps 1-3 unchanged. Differences:
 
 4. **`urlSync` bootstrap** matches the `#b=…` regex via `parseBookmarkHash` (validator: `[A-Za-z0-9._-]+`).
-5. **Fetch the bookmark** via the injected `fetchBookmark` REST helper (`bookmarksApi.getBookmark(id)`). 401 → user is unauthed; redirect through `UnauthLanding` (the existing flow preserves `#b=<id>` as transparently as `#view=…`). 404 → console warn + leave hash alone.
+5. **Fetch the bookmark** via the injected `fetchBookmark` REST helper (`bookmarksApi.getBookmark(id)`). 404 → `null` → console warn + leave hash alone. A 401 is caught generically (console.warn, no explicit `UnauthLanding` redirect in this path); the AuthGate before mount likely makes it moot.
 6. **Apply** the returned `view` payload via the same applier path (steps 5-9 above).
 7. **URL collapse** (`urlSync.ts`): after successful apply, `replaceState` to `#view=<inline>` (encoded from the just-applied `SavedView`). Further pans drift the URL forward; the user is no longer "viewing the bookmark," they're viewing live state. Per [[saved-views]] this is intentional — `BookmarkChanged` Updated/Deleted broadcasts must NOT re-rewrite the hash.
 

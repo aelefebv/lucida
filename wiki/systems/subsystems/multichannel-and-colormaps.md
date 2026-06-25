@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-05-17
+modified: 2026-06-25
 ---
 
 # Multi-Channel and Colormaps
 
-How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings. The pipeline runs from `ChannelSettings` in [[lucida-core]] through 15 LUT textures in `colormaps.ts` through composite-key naming in [[gpu-residency]] to `compositor.wgsl`.
+How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings. The pipeline runs from `ChannelSettings` in [[lucida-core]] through per-name LUT textures in `colormaps.ts` through composite-key naming in [[gpu-residency]] to `compositor.wgsl`.
 
 ## Why multichannel is its own subsystem
 
@@ -17,7 +17,7 @@ In [[lucida-core]] `scene/types.rs`:
 
 - `ChannelSettings { visible, colormap, contrast_min, contrast_max, gamma }` — five fields, defaulted from the [[scene-state-and-epochs|DatasetDisplaySettings]] when a dataset opens.
 - `DatasetDisplaySettings.channel_settings: Vec<ChannelSettings>` — one entry per channel, length set from the first image's `shape[1]` (C dimension).
-- `DatasetDisplaySettings.channel_blend_mode: BlendMode` — `Additive` (default) or `Alpha`.
+- `BlendMode` has THREE variants: `Alpha`, `Additive`, `Max`. Two distinct defaults: the dataset-level `blend_mode` defaults to `Alpha`, while `channel_blend_mode` defaults to `Additive`. Don't conflate them.
 
 15 colormap variants enumerated in `Colormap` (`Gray`, `Magenta`, `Green`, `Cyan`, `Red`, `Blue`, `Yellow`, `Viridis`, `Inferno`, `Plasma`, `Magma`, `Turbo`, `Hot`, `Cool`, `Jet`). The `default_for_channel` helper rotates through `Magenta`, `Green`, `Cyan` so a fresh dataset opens with sensible per-channel colors.
 
@@ -36,31 +36,31 @@ Each bumps the `selection` epoch (cheap re-render, no chunk re-fetch).
 
 ## LUT pipeline (web)
 
-`lucida-web/src/colormaps.ts` defines 15 RGBA8 ramps as 256-entry tables (1024 bytes each). At init the worker uploads them as a single 256×N texture. The per-channel descriptor (`EntityDescriptor`) carries a `colormap` index; the shader does `textureSample(lutTex, samplerLinear, vec2(intensity, colormapIndex / N))` to look up the color.
+`lucida-web/src/colormaps.ts` defines 15 RGBA8 ramps as 256-entry tables (1024 bytes each). LUTs are NOT a single atlas uploaded at init. Each colormap is its own **256×1 `rgba8unorm` texture**, created lazily per name on first use and cached (`getOrCreateLUT` in `renderer/worker/resources.ts`). The colormap is selected by **binding a different LUT texture per draw** (`setColormapTexture(getOrCreateLUT(name))` in `slice/render.ts` / `volume/render.ts`); `colormapLutIndex` on the descriptor drives that JS-side texture selection, it is not a shader v-coordinate.
 
-The shader path:
+The shader path (`slice.wgsl` / `volume.wgsl`):
 
 1. Sample the chunk atlas at the entity's voxel coords → raw intensity.
 2. Apply contrast window: `(intensity - min) / (max - min)`.
 3. Apply gamma: `pow(t, 1/gamma)`.
-4. LUT sample: `textureSample(lutTex, samplerLinear, vec2(t, 0.5))` (single-channel) or with a per-channel row offset (multichannel).
+4. LUT sample: always `textureSample(lutTex, lutSampler, vec2(normalized, 0.5))` — the v-coordinate is a fixed `0.5`; the bound texture *is* the chosen colormap.
 5. Multiply by `opacity`.
 
-## Composite key naming
+## Compositor and blending
 
 Composite keys identify which compositor output buffer a render result lands in:
 
 - **Multichannel**: `${memberId}:ch${channel}` — one buffer per (entity, channel) pair.
 - **Single-channel**: bare `${memberId}` — one buffer per entity.
 
-`compositor.wgsl` reads each buffer in turn and accumulates with the chosen blend mode. Mixing the two key formats (e.g. accidentally producing `member:ch0` when the dataset isn't multichannel) silently produces empty composites because the accumulator can't find the buffer.
+`compositor.wgsl` does **not** blend in-shader — it samples ONE layer texture (`textureLoad`) and outputs it as-is. Blending across channels/layers is done by the **GPU pipeline blend state**, set per layer from that layer's `BlendMode`. Mixing the two key formats (e.g. accidentally producing `member:ch0` when the dataset isn't multichannel) silently produces empty composites because the layer texture can't be found.
 
 ## Interactions
 
 - **State**: [[scene-state-and-epochs|DocumentState/DatasetDisplaySettings]] holds the per-channel settings.
 - **UI**: `LayerPanel.tsx` exposes channel sublayers when multichannel is enabled. `ColormapSelector.tsx` is the dropdown. `ContrastControls.tsx` covers contrast/gamma.
-- **Pipeline**: [[planning-domain]] reads `channel_settings[c].visible` to skip invisible channels in proxy enumeration. The tick coordinator builds per-channel descriptor entries.
-- **GPU**: descriptors carry per-channel colormap/contrast/gamma; the compositor blends.
+- **Pipeline**: planning reads `snapshot.selection.visibleChannels` (computed from `channel_settings` at the snapshot boundary) to skip invisible channels. The tick coordinator builds per-channel descriptor entries.
+- **GPU**: descriptors carry per-channel colormap/contrast/gamma; per-layer blend state composites.
 
 ## Invariants
 

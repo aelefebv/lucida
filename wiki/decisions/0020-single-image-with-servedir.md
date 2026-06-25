@@ -1,11 +1,11 @@
 ---
 created: 2026-05-13
-modified: 2026-05-13
+modified: 2026-06-25
 ---
 
 # Single-Image Container with `ServeDir` is the Canonical Deploy Unit
 
-> Status: Proposed (PRD #486 — feature in implementation).
+> Status: Accepted (implemented; PRD #486). `static_serve.rs`, the root `Dockerfile`, and `LUCIDA_WEB_DIST` all exist.
 
 ## Decision
 

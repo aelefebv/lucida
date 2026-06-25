@@ -1,13 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # lucida-proxy
 
-Status: Historical / legacy bridge. The default fallback model is chunk-only
-coarse/detail using source or generated pyramid levels. This crate remains for
-the opt-in proxy compatibility path and for older design context.
+Status: Fallback path, still wired. The default model is chunk-only coarse/detail
+using source or generated pyramid levels (`coarseDetailEnabled` defaults true);
+this crate stays wired as the proxy fallback when that path can't serve.
 
 Pure-compute proxy generation. Given a `DatasetManifest` plus caller-supplied source-volume bytes, produces a `ProxyAsset` — a small low-resolution placeholder volume that stands in for either a single field's downsampled image (`FieldProxy3D`) or an aggregated well composed of many fields (`WellProxy3D`).
 
@@ -17,7 +17,7 @@ This crate has **no I/O and no async**. Storage, fetching, and caching live in [
 
 When a plate dataset zooms out so a single well projects to ≤80 screen pixels, fetching every field's detail chunks is wasted bandwidth. The renderer instead asks for one `WellProxy3D` per visible channel, gets back a coarse aggregate, and draws that. As the user zooms in, planning crosses the next threshold and switches to per-field detail. The proxy fills the gap between "no data yet" and "full detail" without making the renderer wait.
 
-See [[planning-domain]] for the threshold logic and [[chunk-pipeline]] for the end-to-end flow.
+See [[planning-domain]] for the threshold logic and [[chunk-lifecycle]] for the end-to-end flow.
 
 ## Why pure compute, with the I/O wrapper outside
 
