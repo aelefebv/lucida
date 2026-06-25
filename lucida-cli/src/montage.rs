@@ -9,6 +9,7 @@
 
 use std::io::Cursor;
 
+use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{ImageFormat, Rgba, RgbaImage};
 use lucida_content::DatasetId;
 use lucida_core::camera::{Camera, Slice};
@@ -225,10 +226,58 @@ pub fn build_cell_view(
     view
 }
 
+/// Draw `text` in white (8×8 bitmap font, `scale`×) at `(ox, oy)` over a dark
+/// translucent backing, so the label is legible on any cell content. Clipped to
+/// the canvas. This is what makes a montage self-identifying: each cell carries
+/// its own slice label, so an agent reads the slice straight off the image.
+fn draw_label(canvas: &mut RgbaImage, ox: i64, oy: i64, text: &str, scale: i64) {
+    let (cw, chh) = (canvas.width() as i64, canvas.height() as i64);
+    let glyph = 8 * scale;
+    let text_w = text.chars().count() as i64 * glyph;
+    let pad = scale.max(1);
+    // Darken a backing rectangle so white glyphs read on bright cells.
+    for y in (oy - pad)..(oy + glyph + pad) {
+        for x in (ox - pad)..(ox + text_w + pad) {
+            if (0..cw).contains(&x) && (0..chh).contains(&y) {
+                let p = canvas.get_pixel_mut(x as u32, y as u32);
+                p[0] = (p[0] as u32 * 3 / 10) as u8;
+                p[1] = (p[1] as u32 * 3 / 10) as u8;
+                p[2] = (p[2] as u32 * 3 / 10) as u8;
+                p[3] = 255;
+            }
+        }
+    }
+    for (i, ch) in text.chars().enumerate() {
+        let Some(bitmap) = BASIC_FONTS.get(ch) else {
+            continue;
+        };
+        for (row, bits) in bitmap.iter().enumerate() {
+            for col in 0..8 {
+                if bits & (1 << col) == 0 {
+                    continue; // bit `col` (LSB = leftmost) lit?
+                }
+                let gx = ox + (i as i64 * 8 + col) * scale;
+                let gy = oy + row as i64 * scale;
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let (x, y) = (gx + dx, gy + dy);
+                        if (0..cw).contains(&x) && (0..chh).contains(&y) {
+                            canvas.put_pixel(x as u32, y as u32, Rgba([255, 255, 255, 255]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Stitch rendered thumbnail PNGs (row-major, `cols` wide) into one montage
-/// PNG. Cells are sized to the largest thumbnail and laid on a dark backdrop so
-/// ragged sizes (e.g. a final short row) still align. Returns encoded PNG bytes.
-pub fn stitch_grid(thumbs: &[Vec<u8>], cols: u32) -> Result<Vec<u8>, String> {
+/// PNG, burning each cell's `label` into its top-left corner so the sheet is
+/// self-identifying. Cells are sized to the largest thumbnail and laid on a dark
+/// backdrop so ragged sizes (e.g. a final short row) still align. `labels` is
+/// indexed in step with `thumbs` (a missing label just draws nothing). Returns
+/// encoded PNG bytes.
+pub fn stitch_grid(thumbs: &[Vec<u8>], labels: &[String], cols: u32) -> Result<Vec<u8>, String> {
     if thumbs.is_empty() {
         return Err("no thumbnails to stitch".into());
     }
@@ -245,10 +294,23 @@ pub fn stitch_grid(thumbs: &[Vec<u8>], cols: u32) -> Result<Vec<u8>, String> {
     let cell_h = decoded.iter().map(|t| t.height()).max().unwrap_or(1).max(1);
     let rows = (decoded.len() as u32).div_ceil(cols);
     let mut canvas = RgbaImage::from_pixel(cols * cell_w, rows * cell_h, Rgba([12, 12, 16, 255]));
+    // Scale the label to the cell: ~2px glyphs per 160px of cell width, min 2×.
+    let scale = (cell_w as i64 / 160).max(2);
     for (i, thumb) in decoded.iter().enumerate() {
         let cx = (i as u32 % cols) * cell_w;
         let cy = (i as u32 / cols) * cell_h;
         image::imageops::overlay(&mut canvas, thumb, cx as i64, cy as i64);
+        if let Some(label) = labels.get(i)
+            && !label.is_empty()
+        {
+            draw_label(
+                &mut canvas,
+                cx as i64 + 2 * scale,
+                cy as i64 + 2 * scale,
+                label,
+                scale,
+            );
+        }
     }
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(canvas)
@@ -367,19 +429,30 @@ mod tests {
     #[test]
     fn stitch_lays_thumbs_in_a_grid() {
         let thumbs = vec![
-            solid_png(8, 8, [255, 0, 0, 255]),
-            solid_png(8, 8, [0, 255, 0, 255]),
-            solid_png(8, 8, [0, 0, 255, 255]),
+            solid_png(64, 64, [255, 0, 0, 255]),
+            solid_png(64, 64, [0, 255, 0, 255]),
+            solid_png(64, 64, [0, 0, 255, 255]),
         ];
-        let png = stitch_grid(&thumbs, 2).unwrap();
+        let labels = vec!["z=0".to_string(), "z=1".to_string(), "z=2".to_string()];
+        let png = stitch_grid(&thumbs, &labels, 2).unwrap();
         let img = image::load_from_memory(&png).unwrap();
-        // 3 cells, 2 cols → 2x2 grid of 8px cells = 16x16.
-        assert_eq!(img.dimensions(), (16, 16));
+        // 3 cells, 2 cols → 2x2 grid of 64px cells = 128x128.
+        assert_eq!(img.dimensions(), (128, 128));
+        // A label burns white (255,255,255) glyph pixels into the first cell's
+        // top-left corner — the solid red cell alone has none.
+        let rgba = img.to_rgba8();
+        let has_white = (0..40)
+            .flat_map(|y| (0..60).map(move |x| (x, y)))
+            .any(|(x, y)| {
+                let p = rgba.get_pixel(x, y);
+                p[0] > 200 && p[1] > 200 && p[2] > 200
+            });
+        assert!(has_white, "expected burned-in label glyph pixels");
     }
 
     #[test]
     fn stitch_rejects_empty() {
-        assert!(stitch_grid(&[], 4).is_err());
+        assert!(stitch_grid(&[], &[], 4).is_err());
     }
 
     #[test]

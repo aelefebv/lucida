@@ -24,4 +24,5 @@ blake3 = "1"
 base64 = "0.22"
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+font8x8 = "0.3"
 rand = "0.8"

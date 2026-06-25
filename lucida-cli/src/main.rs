@@ -2147,6 +2147,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
+                        // Grid position of this cell in the image (row-major), so
+                        // an agent can map a cell it sees back to this entry with
+                        // no counting: cell at (row, col) == cells[row*cols + col].
+                        "row": index as u32 / plan.cols.max(1),
+                        "col": index as u32 % plan.cols.max(1),
                         "z": cell.z, "t": cell.t, "c": cell.c, "field": cell.field,
                         "label": cell.label,
                         "url": url,
@@ -2156,9 +2161,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     urls.push(montage::with_render_param(&url));
                 }
 
+                let labels: Vec<String> =
+                    plan.cells.iter().map(|cell| cell.label.clone()).collect();
                 let pngs =
                     capture_montage_pngs(&urls, token.as_ref(), *cell_px, *cell_px, wait).await?;
-                let montage_png = montage::stitch_grid(&pngs, plan.cols)
+                let montage_png = montage::stitch_grid(&pngs, &labels, plan.cols)
                     .map_err(|message| CliError::new(ErrorKind::Protocol, message))?;
                 if let Some(parent) = Path::new(out).parent()
                     && !parent.as_os_str().is_empty()
@@ -2174,6 +2181,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     "axis": axis,
                     "cols": plan.cols,
                     "rows": plan.rows,
+                    // Cells fill the grid left-to-right, top-to-bottom.
+                    "order": "row-major",
                     "cell_px": cell_px,
                     // The shared contrast window applied to every cell (null when
                     // the probe fell back to per-cell auto-contrast).
