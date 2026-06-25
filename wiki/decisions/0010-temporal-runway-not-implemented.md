@@ -25,5 +25,5 @@ GPU-side temporal lookahead (keeping next-timepoint chunks resident on the GPU w
 ## Related
 
 - [[cpu-cache]] — prefetch tier and lane priority
-- [[chunk-pipeline]] — where the prefetch lane shows up in the priority formula
+- [[chunk-lifecycle]] — where the prefetch lane shows up in the priority formula
 - [[planning-domain]] — emits prefetch requests

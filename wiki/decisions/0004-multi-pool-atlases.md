@@ -43,5 +43,5 @@ By keying on `(channel)`, channels stop fighting for shared capacity; by keying 
 ## Related
 
 - [[gpu-residency]] — atlas architecture
-- [[chunk-pipeline]] — where the upload path consults pool capacity
+- [[chunk-lifecycle]] — where the upload path consults pool capacity
 - [[planning-domain]] — what generates the proxy demand

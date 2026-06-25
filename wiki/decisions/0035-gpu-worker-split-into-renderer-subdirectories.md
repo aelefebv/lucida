@@ -105,7 +105,7 @@ Pass 8 explicitly recommends **against** producing a `RenderClient` interface sp
 - [[decisions/0029-planning-index-split-into-per-concern-files]] — first refactor in the chunk-pipeline arc; precedent for the cadence and the integration-tests-stay-monolithic discipline
 - [[decisions/0003-gpu-on-dedicated-worker]] — establishes the worker boundary this refactor cleans up inside of
 - [[decisions/0026-discriminated-active-set-and-entity-types]] — the discrimination pattern Slice 11 mirrors on the cold-state wire boundary
-- [[chunk-pipeline]] — overarching pipeline architecture; will be refreshed after the refactor stabilizes
+- [[chunk-lifecycle]] — overarching pipeline architecture; will be refreshed after the refactor stabilizes
 - PRD #622 — the work item this ADR was created during
 - PRDs #545 / #592 / #607 — the cumulative arc this refactor completes
 - `wiki/outputs/dechaos-render-2026-05-16/` — the eight-pass design exploration that produced the slice plan

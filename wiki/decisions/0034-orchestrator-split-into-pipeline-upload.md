@@ -1,9 +1,11 @@
 ---
 created: 2026-05-16
-modified: 2026-05-16
+modified: 2026-06-25
 ---
 
 # `orchestrator.ts` split into `pipeline/upload/` modules
+
+> Note (since): the planner-only `orchestrator.ts` that remains after this split has since been renamed to `pipeline/tickCoordinator.ts`; references to `orchestrator.ts` below describe the file at decision time.
 
 ## Decision
 
@@ -64,6 +66,6 @@ Pass 6 of the dechaos analysis explicitly recommended **against** an asset-abstr
 - [[decisions/0029-planning-index-split-into-per-concern-files]] — earlier directory-of-small-files refactor; original template both this ADR and 0032 mirror
 - [[decisions/0006-content-source-vs-fetch-source]] — context for the chunk/proxy duplication-vs-unification trade-off (the spirit this refactor honours by NOT unifying)
 - [[decisions/0008-cpu-cache-as-sole-fetch-path]] — establishes the fetch-side phase boundaries; upload-side is the symmetric downstream half
-- [[chunk-pipeline]] — overarching pipeline architecture; will be refreshed in Slice 13 after the refactor stabilizes
+- [[chunk-lifecycle]] — overarching pipeline architecture; will be refreshed in Slice 13 after the refactor stabilizes
 - PRD #607 — the work item this ADR was created during
 - `wiki/outputs/dechaos-upload-2026-05-15/` — the eight-pass design exploration that produced the slice plan

@@ -1,6 +1,6 @@
 ---
 created: 2026-05-19
-modified: 2026-05-29
+modified: 2026-06-25
 ---
 
 # Generated Coarse
@@ -14,14 +14,14 @@ The client resolves two chunk tiers:
 - **detail** — source-backed only, defaults to the finest selectable source level unless the user explicitly chooses another source level.
 - **coarse** — an explicit source coarse level when available; otherwise a generated coarse level planned and owned by the server.
 
-Generated levels are append-only metadata from the client's point of view. The server emits `GeneratedAvailabilityUpdate` deltas with level metadata and per-chunk readiness. The client merges those deltas into its generated availability catalog and planning snapshot.
+Generated levels are append-only metadata from the client's point of view. The server emits `GeneratedAvailabilityUpdate` (the `ServerMessage` variant) carrying a `GeneratedAvailabilityDelta` payload with level metadata and per-chunk readiness. The client merges those deltas into its generated availability catalog and planning snapshot.
 
 ## Serving Contract
 
 Generated coarse chunks use the same request key shape as source chunks: `{level}/{t}/{c}/{z}/{y}/{x}`.
 
 - If bytes are ready, `serve_generated_chunk_request` returns the normal chunk frame: `[client_id u32 LE][key_len u16 LE][dataset/image/key][payload]`.
-- If bytes are not ready, the server returns `GeneratedChunkStatus` (`pending`, `failed_transient`, `failed_permanent`, or `unavailable`).
+- If bytes are not ready, the server returns `GeneratedChunkStatus` (`pending`, `failed_transient`, `failed_permanent`, or `unavailable`). The enum has a 5th variant, `Ready(bytes)`, used internally when materialized bytes are available.
 - `pending` is not a failure. The CPU cache clears the in-flight request and will re-request on a later submit after readiness changes.
 
 ## Materialization

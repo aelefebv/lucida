@@ -1,6 +1,6 @@
 ---
 created: 2026-04-23
-modified: 2026-04-23
+modified: 2026-06-25
 ---
 
 # Wire chunk keys: t/c are voxel coords, z/y/x are chunk-grid coords
@@ -9,7 +9,7 @@ The wire chunk key is `level/t/c/z/y/x`. The five spatial values look symmetric,
 
 ## Why the asymmetry exists
 
-The web client's chunk planner ([[lucida-web]] `pipeline/planning.ts`) iterates two axes differently:
+The web client's chunk planner ([[lucida-web]] `pipeline/planning/`) iterates two axes differently:
 
 - For **`z`, `y`, `x`** it walks chunk-grid cells (`for iz in zStart..zEnd`, etc.) — `iz` is already a chunk index by construction. Wire-coord = disk-grid-coord directly.
 - For **`t`, `c`** it picks a single voxel value: `selection.t` (the current timepoint) and each `c` in `selection.visibleChannels`. Wire-coord = voxel index — which equals disk-grid-coord *only when* `chunk_shape[axis] == 1`.

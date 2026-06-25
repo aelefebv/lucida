@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Worker Protocol
@@ -21,17 +21,17 @@ modified: 2026-05-19
 - `viewHotState` — view-only fast path; carries ray-pick coords used for GPU eviction distance. Sent only when `view` epoch bumps.
 - `sliceChunkData { epochs, memberId, tier, chunks[], level, z, t, c, ... }` — typed array transfer of decoded chunks for the slice path. The owner key is **memberId** and the residency route is **tier** (`detail` or `coarse`).
 - `volumeChunkData { epochs, memberId, tier, chunks[], level, t, c, ... }` — same for volume.
-- `proxyAsset` — legacy bridge-only proxy asset (`[Z, Y, X]` u16 voxel buffer + identifying metadata). Stays `datasetId`-keyed because proxies are routed per dataset, not per member.
-- `requestEpoch` — bumps the request epoch so the worker re-evaluates.
-- `setUploadBudget` — runtime tunable.
+- `proxyAssetData` — proxy asset (`[Z, Y, X]` u16 voxel buffer + identifying metadata). Stays `datasetId`-keyed because proxies are routed per dataset, not per member. A live fallback (still wired); coarse/detail is the default.
+- **render + minimap messages** (also Main → worker): `resize`, `volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimapInit` / `minimapRender` / `minimapDestroy` / `minimapUploadOverviewChunksForLayer`, `removeLayerResources`, `updateCursorData`, `destroy`. These drive draws and minimap residency, distinct from the cold/hot/chunk state push above.
 
-**Worker → main** (state pull):
+The full `MainToWorker` union is in `MainToWorkerMessage` (workerProtocol.ts).
 
-- `wantedSetDelta` — what the worker wants but doesn't have. `MissingChunk` carries the missing chunk and tier; `MissingProxy` is legacy bridge-only. Drives the next `submit`.
+**Worker → main** (state pull). The complete `WorkerToMainMessage` union is exactly five variants: `ready`, `error`, `intensityRange`, `chunksEvicted`, `wantedSetDelta`.
+
+- `wantedSetDelta` — what the worker wants but doesn't have. `MissingChunk` carries the missing chunk and tier; `MissingProxy` is the proxy-fallback case. Drives the next `submit`.
 - `chunksEvicted { memberId, keys, skipped? }` — keys evicted (+ keys it skipped because they were never actually present). The main thread clears delivery tracking so the next drain re-uploads.
 - `intensityRange { datasetId, min, max }` — running min/max from `sampleIntensityRange` after a chunk upload, batched on the main side via `useIntensityBatcher`.
-- `frameStats` — per-frame timing/budget telemetry surfaced in the [[lucida-web|debug panel]].
-- `ready` — handshake after `init`/`resize`.
+- `ready` / `error` — handshake / failure after `init`/`resize`.
 
 ## Cold state, hot state, deltas
 
@@ -39,41 +39,41 @@ Three different update cadences, by design:
 
 - **Cold state** is the worker's worldview — everything it needs to plan its own work without round-tripping. Rebuilt rarely (epoch-gated).
 - **Hot state** is the per-frame view-only data (ray-pick coords for eviction distance). Rebuilt only when `view` epoch bumps.
-- **Chunk data** are deltas — typed array transfers, one slice/volume upload at a time, carrying tier labels and planning epochs so the worker can ignore stale uploads. Proxy data follow the same pattern only in legacy bridge mode.
+- **Chunk data** are deltas — typed array transfers, one slice/volume upload at a time, carrying tier labels and planning epochs so the worker can ignore stale uploads. Proxy data (`proxyAssetData`) follow the same stale-rejected pattern.
+
+## Stale-rejection asymmetry
+
+Render messages (`volumeRenderMultiPass` / `sliceRenderMultiPass`) carry `epochs` but are **stale-tolerant**: they do NOT run through `isStaleDelivery`, so the worker draws with whatever residency it has at draw time (re-issuing a render is cheap, and the next `view` epoch fires one anyway). By contrast, chunk and `proxyAssetData` *data* messages ARE stale-rejected — `isStaleDelivery` drops a delivery older than the worker's current epochs, so wrong-epoch voxels never get written into the atlas.
 
 ## `ColdStateActiveEntry`
 
-Per-entity records in `ColdStateMessage.activeSet` are field/image entries in the default path. Each carries:
+A discriminated union on `kind`, NOT a flat field set:
 
-- `imageId`, `entityId`, `parentWellId`
-- `detailLevel` and optional `coarseLevel`
-- `wantedLodLevels` and per-level geometry metadata
-- `modelMatrix` / `invModelMatrix`
-- `displayStateByChannel`
+- `kind: "field"` — an image member with a real `imageId`; `mode` is `fields-with-detail` or `fields-with-proxy-fallback`, plus `parentWellId`.
+- `kind: "well-as-proxy"` — a synthesised well-level entry with no backing image (`imageId?: never`); the worker renders the well's proxy directly. A live fallback (still wired); coarse/detail is the default, so the planner usually emits `field` entries.
 
-Legacy `kind: "well-as-proxy"` entries are still understood by the bridge code but should not be produced by the default planner. The clean path keeps wells as layout/grouping concepts and renders field/image chunks through explicit tier sources.
+Both share `ColdStateActiveEntryBase`: `entityId`, `targetLod`, `detailLevel`/`coarseLevel`, `wantedLodLevels`, per-`levels` geometry, `proxyKind`/`proxyAvailable`, `modelMatrix`/`invModelMatrix`, `displayStateByChannel`.
 
 The canonical way to derive a memberId from an entry is `memberIdForColdEntry(entry, channel, multiCh)` in `renderer/descriptorBuffer.ts`. The canonical way to route a tier to a pool is `memberTierKey(memberId, tier)` from `renderer/poolKeys.ts`.
 
 ## Interactions
 
-- **Main side**: the [[upload-pipeline|Uploader]] is the only sender, via `client` (a thin `UploadClient` facet of `RenderClient`). It owns `coldState`, `viewHotState`, tier-labeled `sliceChunkData` / `volumeChunkData`, legacy `proxyAsset` emission, and the worker → main feedback callbacks.
+- **Main side**: the [[upload-pipeline|Uploader]] is the only sender, via `client` (a thin `UploadClient` facet of `RenderClient`). It owns `coldState`, `viewHotState`, tier-labeled `sliceChunkData` / `volumeChunkData`, `proxyAssetData` emission, and the worker → main feedback callbacks.
 - **Worker side**: the ~34-LOC entry point `renderer/gpu.worker.ts` delegates to `worker/dispatch.ts`, which routes each typed message to its handler under `coldState/`, `proxy/`, `volume/`, `slice/`, `worker/`. See [[gpu-residency]] for the module layout.
 - **`renderer/workerContext.ts`** holds the worker's running state; per-session Maps live on `WorkerCtx.state: RendererState`. Renderer-class singletons and persistent GPU resources stay at module scope in `worker/resources.ts`.
 
 ## Invariants
 
-- **Every chunk/proxy data message carries the planning epochs.** The worker compares against its current epochs and drops stale uploads. Don't strip the epochs as an "optimization" — the staleness check is what keeps the worker from thrashing on a flurry of in-flight uploads after a viewport change.
+- **Every chunk/proxy data message carries the planning epochs and is stale-rejected.** The worker compares against its current epochs and drops stale uploads via `isStaleDelivery`. Don't strip the epochs as an "optimization" — the staleness check is what keeps the worker from writing wrong-epoch voxels after a viewport change. (Render messages carry epochs too but are deliberately stale-tolerant — see above.)
 - **Every default chunk upload carries a tier.** Missing or omitted tier is treated as legacy detail compatibility; new code must send `detail` or `coarse` explicitly.
 - **`coldState` is the full active-set worldview, not a delta.** Sending a partial cold state would let stale entries linger in the worker. The worker rebuilds atlases / descriptor buffer / wanted-set from each cold-state on receipt.
 - **`OffscreenCanvas` is transferred once, on `init`.** It cannot be transferred back; closing the worker means losing the canvas. Re-init requires a new canvas.
 - **`wantedSetDelta` is a delta, not a full set.** Adds and removes are both expressed.
-- **`memberId` is the owner key on every member-routed message** (`chunksEvicted`, `volumeChunkData`, `sliceChunkData`). The remaining `datasetId` fields (on `coldState`, `viewHotState`, legacy `proxyAsset`, `intensityRange`, `MissingProxy`) are correctly per-dataset.
+- **`memberId` is the owner key on every member-routed message** (`chunksEvicted`, `volumeChunkData`, `sliceChunkData`). The remaining `datasetId` fields (on `coldState`, `viewHotState`, `proxyAssetData`, `intensityRange`, `MissingProxy`) are correctly per-dataset.
 
 ## Gotchas
 
 - **Don't bypass the protocol with raw `postMessage`** for one-off messages. Adding an untyped channel breaks the "one place to look" property and reintroduces silent drift.
 - **Typed array transfers are zero-copy via the transfer list.** Forgetting to transfer means a costly clone — visible as upload-bandwidth pressure in the debug panel.
-- **The worker's wanted-set is reactive to cold-state.** If you want to force a worker re-evaluation without changing cold state, use `requestEpoch`. Sending a redundant cold state works too but is wasteful.
-- **`frameStats` cadence depends on the worker's render path.** Slice and volume don't emit on identical schedules; consumers (debug panel) treat the data as best-effort, not authoritative.
+- **The worker's wanted-set is reactive to cold-state.** To force a worker re-evaluation, send a fresh cold state — there is no separate request-epoch message.
 - **Route by tier, not by the old detail fallback map.** Coarse uploads must look up `memberTierKey(memberId, "coarse")`; otherwise mismatched coarse/detail chunk shapes are silently sent to the wrong atlas.

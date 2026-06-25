@@ -43,5 +43,5 @@ This decision honors [[principles/planning#3-wells-are-coherent-visual-units]]. 
 
 - [[principles/planning]] — the framework this decision lives within
 - [[planning-domain]] — subsystem article; the "Invariants" section
-- [[chunk-pipeline]] — section 1c (single vs plate divergence) and section 3b (promotion)
+- [[chunk-lifecycle]] — section 1c (single vs plate divergence) and section 3b (promotion)
 - PRD #545 — the work item during which this ADR was captured

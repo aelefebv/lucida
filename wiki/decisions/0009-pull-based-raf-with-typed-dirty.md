@@ -47,6 +47,6 @@ The typed split lets the loop be aggressive when the user wants snap response (`
 
 ## Related
 
-- [[chunk-pipeline]]
+- [[chunk-lifecycle]]
 - [[scene-state-and-epochs]] — the WASM-side epoch model the orchestrator consults to decide if planning is needed at all
 - [[gotchas/minimap-render-key]] — a related render-skip mechanism

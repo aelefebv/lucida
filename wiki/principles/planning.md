@@ -1,6 +1,6 @@
 ---
 created: 2026-05-14
-modified: 2026-05-14
+modified: 2026-06-25
 ---
 
 # Principles — Planning Domain
@@ -32,6 +32,8 @@ On plates, all fields belonging to one well are treated as one visual unit. Fiel
 **Why.** A plate well is a perceptual unit — the user reads "well B7," not "field 4 of well B7." A system that gives different fields different representations creates visible patchwork that reads as a rendering defect, not as informative variation.
 
 **When in tension.** Coherence can cost responsiveness — if one field could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right trade.
+
+**In tension with the current default.** The shipped coarse/detail path resolves residency tiers *per field* (see [[planning-domain]]), so this principle is in tension with the default rather than realized by it — kept as direction, not current behavior.
 
 ## 4. Planning is pure; carry-forward state is explicit
 

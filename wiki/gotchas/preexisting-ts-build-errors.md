@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-13
+modified: 2026-06-25
 ---
 
 # Pre-existing TS Build Errors (resolved)
@@ -17,7 +17,7 @@ Earlier in the project, three TS errors were known to surface from `npm run buil
 
 - `lucida-web/src/renderer/renderClient.ts` — `SharedArrayBuffer` type incompatibility. The browser environment lacks COOP/COEP headers in the dev configuration, and TS5.4+ widened typed-array `.buffer` to `ArrayBufferLike` (i.e. `ArrayBuffer | SharedArrayBuffer`), which broke the worker `postMessage` and WebGPU upload sites that wanted a plain `ArrayBuffer`.
 - `lucida-web/src/renderLoop.ts` — an unused-import that the strict TS config promoted to error. The import had bounced through several attempted fixes; each time, the import got used elsewhere and the fix became wrong.
-- The LZ4 decompression worker (which lives at `lucida-web/src/pipeline/decode.worker.ts`, formerly described in earlier notes as `lz4.worker.ts`) — `postMessage` overload mismatch. The right answer depended on whether the worker ran in a window context, a web worker, or a service worker — and on whether the buffer being transferred was `ArrayBuffer` vs `ArrayBufferLike`.
+- The LZ4 decompression worker (which lives at `lucida-web/src/pipeline/fetch/decode.worker.ts`, formerly described in earlier notes as `lz4.worker.ts`) — `postMessage` overload mismatch. The right answer depended on whether the worker ran in a window context, a web worker, or a service worker — and on whether the buffer being transferred was `ArrayBuffer` vs `ArrayBufferLike`.
 
 The fix pattern (see commit `593eb8d`):
 

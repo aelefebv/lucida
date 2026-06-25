@@ -1,6 +1,6 @@
 ---
 created: 2026-05-13
-modified: 2026-05-13
+modified: 2026-06-25
 ---
 
 # Deployment
@@ -58,7 +58,7 @@ The auth subsystem itself is documented in [[subsystems/auth]]; the deployment a
 
 ## Data backend dispatch
 
-The dataset URL passed to `lucida-store::backend::open` selects the storage backend by URL scheme (`lucida-store/src/backend.rs` lines 92-133):
+The dataset URL passed to `lucida-store::backend::open` selects the storage backend by URL scheme (the scheme-dispatch match in the `open` fn in `lucida-store/src/backend.rs`):
 
 - `gs://bucket/path` → Google Cloud Storage via Application Default Credentials
 - `s3://bucket/path` → Amazon S3 via `AmazonS3Builder::from_env()` (env credentials, instance profile, etc.)
@@ -117,4 +117,5 @@ Adopters consume releases by **pinning image tags** in their manifests, not by t
 - [[subsystems/auth]] — the auth subsystem this article complements
 - [[lucida-server]] — the runtime being deployed
 - [[lucida-store]] — data backend dispatch
+- `extras/deploy/docker-compose.yml` — single-host/homelab deploy option: same image, named volume at `/var/lib/lucida`, full `LUCIDA_*` env, `/readyz` healthcheck
 - `extras/deploy/RUNBOOK.md` — procedural counterpart (first-time setup walkthrough)

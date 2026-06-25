@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-06-25
 ---
 
 # Flow: Authentication Sign-In
@@ -15,8 +15,8 @@ The path from "user navigates to lucida unauthenticated" to "user lands at the o
    - API route → bare 401 JSON.
 3. **JS shim runs** in the unauth landing page:
    - Captures `location.hash` (browser-only — never sent to the server).
-   - `window.location.href = "/auth/start?path=" + encodeURIComponent(location.pathname + location.search) + "&hash=" + encodeURIComponent(location.hash.slice(1))`.
-4. **`POST /auth/start`** ([[lucida-server]] `auth/handlers.rs::auth_start`):
+   - `window.location.replace("/auth/start?path=" + encodeURIComponent(location.pathname + location.search) + "&hash=" + encodeURIComponent(location.hash.slice(1)))` — `replace` keeps the landing page out of history.
+4. **`GET/POST /auth/start`** (shim navigates via GET; both methods registered) ([[lucida-server]] `auth/handlers.rs::auth_start`):
    - Generates a 256-bit random `state` token (URL-safe base64).
    - INSERTs `pending_auth` row with `{state_token, intended_path, intended_hash, created_at}`.
    - Builds Google authorization URL: `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=…&redirect_uri=…&scope=openid email profile&state=<token>`.

@@ -1,11 +1,11 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-06-25
 ---
 
 # Backend-Mediated OAuth with Session Cookies
 
-> Status: Proposed (in design — feature not yet implemented; PRD #455).
+> Status: Accepted (implemented; PRD #455). The auth subsystem lives in `lucida-server/src/auth/`.
 
 ## Decision
 

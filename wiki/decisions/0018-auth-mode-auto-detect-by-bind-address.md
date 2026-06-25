@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-14
+modified: 2026-06-25
 ---
 
 
@@ -14,8 +14,11 @@ silently regressed into requiring a session cookie that nothing minted
 — `LUCIDA_AUTH=disabled` looped the SPA between `/auth/whoami` and an
 unregistered `/auth/start` until the URL hit HTTP 414. PRD #527
 restored the extractor (so this ADR's loopback-default promise actually
-holds) and removed the now-dead `/auth/dev/login` machinery. See
-[[auth]] for the post-restoration extractor lineup.
+holds) and re-gated the dev-login machinery on disabled mode rather
+than removing it: `dev_status` and `dev_login` both still exist in
+`main.rs`, with `/auth/dev/login` registered only when
+`mode == AuthMode::Disabled`. See [[auth]] for the post-restoration
+extractor lineup.
 
 ## Decision
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-13
+modified: 2026-06-25
 ---
 
 # OSS Config Defaults and the LUCIDA_* Env Var Contract
@@ -21,7 +21,10 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 - `LUCIDA_INSECURE` — explicit acknowledgment for `disabled + non-loopback`.
 - `LUCIDA_DB_PATH` — SQLite file path. Default `./lucida.db` (CWD-relative).
 - `LUCIDA_COOKIE_{NAME,SECURE}` — cookie configuration overrides.
-- `LUCIDA_DATA_DIR` — root for `/api/browse`. Mirrors `--data-dir`; CLI flag wins.- `LUCIDA_PROXY_CACHE_DIR` — proxy on-disk cache root. Mirrors `--proxy-cache-dir`; CLI flag wins.- `LUCIDA_PROXY_CONCURRENCY` — per-generator concurrency cap. Mirrors `--proxy-concurrency`; CLI flag wins.- `LUCIDA_LOG_FORMAT` — `text` (default) or `json`. Switches the tracing subscriber between the dev-friendly pretty formatter and the production JSON formatter that log aggregators consume natively. Unknown values fall back to `text` (mirrors `SecureCookieMode::parse`).
+- `LUCIDA_DATA_DIR` — root for `/api/browse`. Mirrors `--data-dir`; CLI flag wins.
+- `LUCIDA_PROXY_CACHE_DIR` — proxy on-disk cache root. Mirrors `--proxy-cache-dir`; CLI flag wins.
+- `LUCIDA_PROXY_CONCURRENCY` — per-generator concurrency cap. Mirrors `--proxy-concurrency`; CLI flag wins.
+- `LUCIDA_LOG_FORMAT` — `text` (default) or `json`. Switches the tracing subscriber between the dev-friendly pretty formatter and the production JSON formatter that log aggregators consume natively. Unknown values fall back to `text` (mirrors `SecureCookieMode::parse`).
 ## Common misconfigurations
 
 ### "Auth disabled but I bound to 0.0.0.0"

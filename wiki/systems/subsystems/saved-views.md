@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-29
+modified: 2026-06-25
 ---
 
 # Saved Views
@@ -24,7 +24,7 @@ Full design rationale in [[decisions/0013-url-as-app-state-for-saved-views]] (th
 - `v: 1` — schema version. Decoder rejects payloads without it. `v > 1` decodes known fields with a console warning (best-effort, never refuse — refusing means a stale tab opening a fresh link breaks).
 - `datasets`, `active_layouts`, `dataset_order`, `dataset_settings` — multi-dataset shape and per-dataset visibility/contrast/colormap.
 - `camera`, `view`, `display` — same types as `PresenceState`.
-- `auto_contrast: HashMap<DatasetId, bool>` — JS-side preference (lives in `useDatasetSettings.autoContrastMap`, not in WASM) that round-trips explicitly so the recipient's intensity batcher doesn't immediately overwrite captured contrast values. Pattern to follow when adding new client-only state — see [[gotchas/saved-view-client-only-state]].
+- `auto_contrast: IndexMap<DatasetId, bool>` — JS-side preference (lives in `useDatasetSettings.autoContrastMap`, not in WASM) that round-trips explicitly so the recipient's intensity batcher doesn't immediately overwrite captured contrast values. `IndexMap` (not `HashMap`) like every per-dataset map here, so deserialize→serialize preserves key order — load-bearing for deterministic on-the-wire serialization of the collaborative document. Pattern to follow when adding new client-only state — see [[gotchas/saved-view-client-only-state]].
 
 Notable exclusions per [[decisions/0013-url-as-app-state-for-saved-views]]: `selectedDatasetId` (UI focus only — but see "selectedDatasetId wrinkle" below), `following` (sender's follow target irrelevant to recipient), `cursor` (mouse position is noise), `client_id` (not portable).
 
@@ -44,7 +44,7 @@ The `subscribeApplyResult` channel on the applier is the seam for UI-state that 
 
 - **`store.rs`** (deep) — `BookmarkStore` trait + `SqliteBookmarkStore` + `MemoryBookmarkStore`. Two-table schema: `bookmarks` for the row + `bookmark_datasets(bookmark_id, dataset_url)` indexed for the any-overlap query. Picked side-table over JSON1 to work on every SQLite build and make `EXPLAIN QUERY PLAN` regression-guardable.
 - **`handlers.rs`** — REST endpoints under `/api/bookmarks`. Permission checks at handler level: PATCH/DELETE require `bookmark.created_by == principal.email || principal.is_admin`. POST overwrites `created_by` from `AuthPrincipal` (request body cannot spoof creator).
-- **`broadcast.rs`** — best-effort `BookmarkChanged` dispatch after successful CUD. Affected-client computation: iterate live sessions, for each client check if any session-loaded `DatasetId` matches a `dataset_id_for_url` of any URL in the bookmark's `dataset_urls`. Empty `dataset_urls` falls through as broadcast-to-all (e.g., a bookmark made before any dataset is opened).
+- **`broadcast.rs`** — best-effort `BookmarkChanged` dispatch after successful CUD. Affected-client computation: check whether any session binding's `source_url` appears in the bookmark's `dataset_urls`, by URL-string equality — deliberately NOT via `dataset_id_for_url`/BLAKE3, since both ends are already the canonical source-URL string. Empty `dataset_urls` falls through as broadcast-to-all (e.g., a bookmark made before any dataset is opened).
 
 Bookmarks are the second persistent state added to [[lucida-server]] (after auth's `login_sessions` and `pending_auth`). Same SQLite file, same connection pool.
 
@@ -65,7 +65,7 @@ The manager enforces viewer-or-better for list/get and editor-or-better for crea
 
 ## `BookmarkChanged` is unsequenced
 
-`ServerMessage::BookmarkChanged { id, action, dataset_urls }` (in `lucida-core/src/protocol.rs`) is the **first `ServerMessage` variant without a `seq`** — it's a session-scoped notification, not a sequenced document command. Per [[decisions/0001-document-vs-viewport-split]] and [[decisions/0015-server-stored-bookmarks-and-auth-seam]]: bookmark mutations are durable on the server (in SQLite) but the live-update broadcast that informs other tabs is closer to presence than to a document command — there's no need for ordering, no replay-on-reconnect, and a missed broadcast just means the next dataset-loaded refetch picks up the canonical state.
+`ServerMessage::BookmarkChanged { id, action, dataset_urls }` (in `lucida-core/src/protocol.rs`) is **unsequenced, like the presence variants** — it's a session-scoped notification, not a sequenced document command. Per [[decisions/0001-document-vs-viewport-split]] and [[decisions/0015-server-stored-bookmarks-and-auth-seam]]: bookmark mutations are durable on the server (in SQLite) but the live-update broadcast that informs other tabs is closer to presence than to a document command — there's no need for ordering, no replay-on-reconnect, and a missed broadcast just means the next dataset-loaded refetch picks up the canonical state.
 
 The web bridge dispatcher handles it via a per-bridge `subscribeBookmarkChanged` fan-out, not the snapshot/command/ack path.
 
@@ -104,7 +104,7 @@ Resolution (option c per [[queue]]): the applier auto-selects the first *visible
 - **`WasmScene.dataset_volume_shape` returns `[Z, Y, X]` only** — `t`/`c` not surfaced through that API. The applier conservatively only clamps `z`; t/c pass through unmodified (the WASM `set_t`/`set_c` accept any u32). If a stored bookmark references a dataset that has shrunk in t/c since capture, the user sees the WASM-side behavior (no clamp), not a friendly bound-check.
 - **Web-side URL → DatasetId map is populated only on local opens.** Datasets opened by *other peers* won't have an entry, so they're omitted from any `SavedView` this client emits. Correct behavior (you can't share what you don't know the URL of) but worth knowing when debugging "why isn't my colleague's dataset in the share link."
 - **URL collapse after `#b=<id>` apply is intentional.** The URL is rewritten to `#view=…` after applying a bookmark so further pans don't drift back to the snapshot. `BookmarkChanged` Updated/Deleted broadcasts must NOT re-rewrite the URL hash — the user has moved on from that bookmark.
-- **`captureBuilder` excludes a dataset from a `SavedView` if `dataset_settings[id]` doesn't exist** — happens for datasets opened by a peer (URL not in this client's URL→DatasetId map). The exclusion is silent.
+- **`captureBuilder` excludes a dataset from a `SavedView` when its URL is unknown** — i.e. opened by a peer, so it's absent from this client's URL→DatasetId map (you can't share a dataset whose URL you don't have). The exclusion is silent.
 - **Pre-auth `dev@local` bookmarks** created during the auth design phase carry `created_by: "dev@local"`. Cutover policy at production rollout is recorded in [[queue]].
 - **Dataset URLs in saved views are visible to anyone with the link.** Presigned URLs and similar credentialed URLs are exposed via clipboard, browser history, screenshots, copy-paste. See [[gotchas/saved-view-credentials-in-urls]].
 - **Workspace saved views are not source-open recipes.** In workspace mode, `SavedView.datasets` is empty and the applier never opens source URLs. Missing `workspace_dataset_id` references partially apply with warnings.

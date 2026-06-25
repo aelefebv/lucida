@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-14
+modified: 2026-06-25
 ---
 
 # Authentication
@@ -82,7 +82,6 @@ All auth boundaries emit `tracing` events at `dot.scope` event names per [[decis
 - **Cross-origin cookie wrinkle in dev**: lucida-server (`:9876`) and Vite (`:5173`) run on different origins; SameSite=Lax cookies aren't sent on cross-origin XHR/fetch even with `credentials: include`. The Vite proxy in `lucida-web/vite.config.ts` forwards `/auth`, `/api`, `/admin`, `/ws` to the backend so the browser sees one origin. Visit `:5173`, never `:9876` directly.
 - **Pre-auth `dev@local` bookmarks** created during PRD #454's design phase carry `created_by: "dev@local"`. Migration policy at the auth-cutover for production is recorded in [[queue]].
 - **Disabled-auth multi-user testing is cookie-scoped.** In local disabled mode, the profile menu's "Dev user" form calls `/auth/dev/login` and sets a browser-specific `lucida_dev_principal` cookie. Use a separate browser profile or incognito window for each fake user. Leave "Admin override" unchecked when testing workspace viewer/editor behavior; admin users bypass normal workspace membership.
-- **Ghostty/macOS bash 3.2 quirk**: `wait -n` doesn't exist; the `lucida-dev` script polls in a loop instead. Doesn't affect the auth subsystem itself but bites anyone scripting around it.
 
 ## Related
 

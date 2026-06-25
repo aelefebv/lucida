@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # lucida-protocol
 
-Wire-level types shared between [[lucida-server]] and any client (web, CLI, Python). This crate is intentionally thin — it owns nothing computational, only the on-the-wire shapes of dataset-open events, fetch descriptors, generated availability metadata, legacy asset catalogs, and legacy asset requests.
+Wire-level types shared between [[lucida-server]] and any client (web, CLI, Python). This crate is intentionally thin — it owns nothing computational, only the on-the-wire shapes of dataset-open events, fetch descriptors, dataset-open/health diagnostics, generated availability metadata, legacy asset catalogs, and legacy asset requests.
 
 The lower-level message envelopes (`ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`) live in [[lucida-core]]'s `protocol.rs` because they reference camera and view types. This crate carries the dataset-shape pieces that [[lucida-store]] produces and clients consume.
 
@@ -19,18 +19,19 @@ Two reasons:
 ## Module map
 
 - `register.rs` — `DatasetOpened { manifest, fetch, catalog }`. The full payload broadcast when the server opens a dataset.
-- `fetch.rs` — `FetchSource` enum: `Proxied(ProxiedFetchDescriptor)`, with `Direct` and `Local` reserved. `WireFormat` enum (`Raw`, `Lz4`, `Zstd`) and `ProxiedImageSpec`.
+- `fetch.rs` — `FetchSource` enum: `Proxied`, `Direct`, and `Local` are all implemented, each with its own descriptor struct (`Local` = local filesystem / Python headless). `WireFormat` enum whose variants each carry a `{ data_type: DataType }` payload (`Raw`, `Lz4`, `Zstd`), plus `ProxiedImageSpec`.
+- `diagnostics.rs` — dataset-open progress/failure/success diagnostics plus runtime source/cache health snapshots.
 - `generated.rs` — `GeneratedAvailabilitySnapshot`, `GeneratedAvailabilityDelta`, generated level summaries, and per-chunk status updates.
-- `asset.rs` — legacy `AssetCatalog`, `ProxyAvailability`, `ProxyKind` (`WellProxy3D`, `FieldProxy3D`), `AssetCatalogDelta`.
+- `asset.rs` — legacy `AssetCatalog`, `ProxyAvailability`, `AssetCatalogDelta`. Re-exports `ProxyKind` (`WellProxy3D`, `FieldProxy3D`) via `pub use lucida_proxy::ProxyKind` (defined in lucida-proxy/src/spec.rs).
 - `asset_request.rs` — legacy `AssetMessage::AssetRequest { dataset_id, entity_id, kind, t, c }`.
 
-All four modules are re-exported via `pub use` so consumers do `use lucida_protocol::*;`.
+All six modules are re-exported via `pub use` so consumers do `use lucida_protocol::*;`.
 
 ## Interactions
 
 - [[lucida-store]] **constructs** these types from imported dataset metadata.
 - [[lucida-server]] **broadcasts** them in `ServerMessage::CommandBroadcast` (for `DatasetOpened`), `ServerMessage::GeneratedAvailabilityUpdate`, and legacy `ServerMessage::AssetCatalogUpdate`.
-- Clients ([[lucida-web]], [[lucida-cli]], [[lucida-py]]) **consume** them — the web client mirrors `manifestTypes.ts` and routes `FetchSource` into the [[chunk-pipeline]].
+- Clients ([[lucida-web]], [[lucida-cli]], [[lucida-py]]) **consume** them — the web client mirrors `manifestTypes.ts` and routes `FetchSource` into the [[chunk-lifecycle]].
 
 ## Invariants
 

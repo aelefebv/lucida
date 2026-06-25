@@ -1,11 +1,11 @@
 ---
 created: 2026-05-13
-modified: 2026-05-14
+modified: 2026-06-25
 ---
 
 # Trunk-Based Releases via Manual-Merge `release-please` on `main`
 
-> Status: Proposed (PRD #486 — feature in implementation).
+> Status: Accepted / Implemented. release-please is live on `main`; the manifest tracks the shipped version (`.release-please-manifest.json`).
 
 ## Decision
 
@@ -17,10 +17,10 @@ Branch protection on `main` requires a PR with passing CI before merge and disal
 
 The release process is part of lucida's public OSS contract: adopters pinning to `vX.Y.Z` tags rely on the cadence and the bumping rules being predictable. Five real choices existed:
 
-1. **Manual tags only** (no automation). Maintainer runs `git tag vX.Y.Z && git push --tags`. Maximally controlled, maximally tedious, easy to forget.
-2. **Per-commit auto-tag with calver** (`v2026.05.13.NNN`). Fully automatic. No semver semantics. Tag stream becomes opaque to adopters.
-3. **Per-commit auto-release via Conventional Commits** (release-please with auto-merge ON). Every `feat:`/`fix:` merge to `main` produces a release within minutes. Smallest possible releases; easiest possible rollback.
-4. **Scheduled releases** (release-please cron, or manual cadence). Cut a release every Friday. Less frequent, larger releases.
+1. **Manual tags only** (no automation). Maintainer runs `git tag vX.Y.Z && git push --tags`. Maximally controlled, maximally tedious. Rejected — relies on the maintainer remembering to release; CHANGELOG.md must be hand-written; adopters lose visibility into what changed.
+2. **Per-commit auto-tag with calver** (`v2026.05.13.NNN`). Fully automatic, no semver semantics. Rejected — opaque to adopters; precludes the semver "API may break" / "patch is safe" signal.
+3. **Per-commit auto-release via Conventional Commits** (release-please with auto-merge ON). Every `feat:`/`fix:` merge to `main` produces a release within minutes — smallest possible releases, easiest rollback. Rejected for v1 — over-releases for solo / small-team work where related PRs land in quick succession. Re-evaluate if cadence preferences change; flipping the auto-merge flag on is a one-line config change.
+4. **Scheduled releases** (release-please cron, or manual cadence). Cut a release every Friday — less frequent, larger releases. Rejected — under-releases when an urgent fix lands; the urgency-vs-schedule mismatch creates pressure to ship out-of-band, defeating the schedule.
 5. **Manual-merge release-please PR**. Release-please opens the PR with the cumulative changelog whenever a bumping commit lands; the maintainer merges when ready. Hybrid of (1) and (3).
 
 (5) wins for lucida's stage and shape:
@@ -37,13 +37,6 @@ The release process is part of lucida's public OSS contract: adopters pinning to
 
 - **GitFlow** (long-lived `develop` + release branches + hotfix branches) is designed for slow-cadence software with multiple supported in-flight versions. A solo / small-team OSS project with a single deployable image drowns in its ceremony. Skip it.
 - **Environment branches** (`dev`, `staging`, `prod`) is a known anti-pattern for trunk-based releases: branches go stale, "what's deployed where" drifts from "what's in the branch," and merge promotions accumulate conflicts. The right model for "what's deployed where" is **image tags**, not branches — the dev cluster pulls `:latest`, the prod cluster pins `:v0.5.3`, promotion is a manifest edit.
-
-## Alternatives considered
-
-- **(1) Manual tags only.** Rejected — relies on the maintainer remembering to release; CHANGELOG.md must be hand-written; adopters lose visibility into what changed.
-- **(2) Calver / per-commit auto-tag.** Rejected — opaque to adopters; precludes the semver "API may break" / "patch is safe" signal.
-- **(3) Auto-merge release PR.** Rejected for v1 — over-releases for solo / small-team work where related PRs land in quick succession. Re-evaluate if cadence preferences change; flipping the auto-merge flag on is a one-line config change.
-- **(4) Scheduled releases.** Rejected — under-releases when an urgent fix lands; the urgency-vs-schedule mismatch creates pressure to ship out-of-band, defeating the schedule.
 
 ## Consequences
 

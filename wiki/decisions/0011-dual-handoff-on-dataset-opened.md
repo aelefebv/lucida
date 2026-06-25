@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # Dual Hand-off on DatasetOpened (WASM + JS)
@@ -42,13 +42,13 @@ Reordering breaks subtly — see [[gotchas/app-tsx-hook-order]] for the related 
 
 ## How this decision shows up in code
 
-- `lucida-web/src/hooks/useBridge.ts:142-186` (the command handler).
-- `lucida-web/src/hooks/useBridge.ts:355-409` (`setupFetchPipeline`).
+- `lucida-web/src/hooks/useBridge.ts` — the `dataset_opened` command handler.
+- `lucida-web/src/hooks/useBridge.ts::setupFetchPipeline` — the JS-side hand-off.
 - `lucida-web/src/manifestTypes.ts` mirrors the manifest shape on the TS side so both `apply_command` and `setupFetchPipeline` see the same structure.
 - See the dataset-opening flow article: [[flows/dataset-opening]].
 
 ## Related
 
 - [[scene-state-and-epochs]]
-- [[chunk-pipeline]]
+- [[chunk-lifecycle]]
 - [[flows/dataset-opening]]

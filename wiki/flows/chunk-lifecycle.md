@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Flow: Chunk Lifecycle
@@ -15,7 +15,7 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 ### 2. CPU cache submits + schedules
 
-[[cpu-cache]] demotes stale detail entities, dedups by chunk key, interleaves detail/coarse requests when both lanes have work, and pushes survivors to the scheduler. Fetches launch up to about 9 concurrent requests bounded by 32 MB in-flight.
+[[cpu-cache]] demotes stale detail entities, dedups by chunk key, interleaves detail/coarse requests when both lanes have work, and pushes survivors to the scheduler. Concurrent fetches are bounded by `decode-pool-size × FETCH_CONCURRENCY_MULTIPLIER` (multiplier = 3, hardware-dependent) and by 32 MB in-flight.
 
 ### 3. Network fetch
 
@@ -25,7 +25,7 @@ Ready source and generated chunks both use the normal chunk frame layout: `[clie
 
 ### 4. Decode
 
-`decodePool.ts` hands the encoded buffer to one of 3 web workers (`decode.worker.ts`) which selects codec (Raw/Lz4/Zstd) from the `WireFormat` for that image and produces a typed array.
+`decodePool.ts` hands the encoded buffer to a worker in a dynamically-sized pool (`decode.worker.ts`; size `Math.max(2, floor(cores/2) - 1)`) which selects codec (Raw/Lz4/Zstd) from the `WireFormat` for that image and produces a typed array.
 
 ### 5. Cache insertion
 
@@ -70,7 +70,7 @@ When the worker evicts a slot under memory pressure, it posts `chunksEvicted` (e
 
 ## Related
 
-- [[chunk-pipeline]] — system overview
+- [[chunk-lifecycle]] — system overview
 - [[planning-domain]]
 - [[cpu-cache]]
 - [[gpu-residency]]

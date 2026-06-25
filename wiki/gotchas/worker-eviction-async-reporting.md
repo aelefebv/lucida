@@ -23,7 +23,7 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 2. Worker posts `chunksEvicted { keys: [K], skipped: [] }` to main thread.
 3. Worker includes `K` in next `wantedSetDelta { missing: [K, ...] }` (if still wanted).
 4. Main thread parses `memberId` at the upload wire boundary and clears `DeliveryState` chunk sent state. `skipped` chunks are the special case: they are true atlas-policy rejections and also flow into `RejectionTracker`.
-5. Next [[chunk-pipeline|tick]]: `cpuCache.getDeliverable()` includes `K` again if it is cached, wanted in the current rebuild generation, not rejected, and not currently marked sent.
+5. Next [[upload-pipeline|tick]]: `cpuCache.getDeliverable()` includes `K` again if it is cached, wanted in the current rebuild generation, not rejected, and not currently marked sent.
 
 ## What to do
 
@@ -44,4 +44,4 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 
 - [[gpu-residency]]
 - [[worker-protocol]]
-- [[chunk-pipeline]]
+- [[chunk-lifecycle]]

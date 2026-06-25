@@ -1,34 +1,25 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # CPU Cache
 
-`lucida-web/src/pipeline/fetch/` — host-side cache between the network and the GPU. A directory of focused modules with `cpuCache.ts` as a thin coordinator that fans out to collaborators (interaction-mode detector, telemetry counters, eviction policies, three stores, two schedulers, retry policy + typed errors, rejection tracker, delivery-state tracker, wire-protocol helpers). See [[decisions/0032-cpucache-split-into-pipeline-fetch]] for the directory-layout philosophy and the per-module rationale.
+`lucida-web/src/pipeline/fetch/` — host-side cache between the network and the GPU. `cpuCache.ts` (~1230 lines) is the entry point: it owns inline implementations of submit/schedule/deliver/eviction plumbing while delegating distinct concerns to a handful of collaborators. It is not a thin few-line fan-out. See [[decisions/0032-cpucache-split-into-pipeline-fetch]] for the directory-layout philosophy.
 
-This is the **sole** chunk fetch path. If you see a reference to a `SharedChunkQueue` anywhere, that's stale.
+This is the **sole** chunk fetch path.
 
-## Module layout
+## Key collaborators
 
-The directory's collaborators (each one a focused, separately-testable unit):
+`cpuCache.ts` wires roughly five durable collaborators (the rest of the directory is types/telemetry/wire helpers):
 
-- `cpuCache.ts` — coordinator. Wires the collaborators in its constructor; each public method (`submit`, `getDeliverable`, `markSent`, `markChunkEvicted`, `markProxyMissing`, `onPlanRebuildStart`, `snapshot`, `telemetry`, `cancelDataset`, `reset`, `markRejected`, `getCachedChunk`, `getCachedProxy`, `getCacheDump`, `getProxyCacheDump`, `subscribe`) is a few-line fan-out. Still hosts `fetchAndDecode` and `fetchProxy` — they're the startFn callbacks the schedulers invoke and the seam where source + decode + store coordinate.
-- `types.ts` — internal + public type defs (`CacheEntry`, `ReadyDelivery` union, `CacheTelemetry`, `CpuCacheConfig`, `EvictionTier`, `Lane`, `TierCounters`, `TierResidencyEntry`).
-- `interactionMode.ts` — `InteractionModeDetector` (panning / scrubbing / idle) drives the tier-order rotation in `TieredPolicy`.
-- `eviction.ts` — `EvictionPolicy` interface with `LRUPolicy` (coarse/minimap/legacy proxy stores) and `TieredPolicy` (detail store; preserves the active-detail tiebreaker exactly).
-- `chunkStore.ts` — `ChunkStore`. Wraps a `Map<entityId, Map<chunkKey, CacheEntry>>` + bytes counter + budget + eviction policy. The detail and coarse buckets are both `ChunkStore` instances; coarse also hosts minimap/overview lanes.
-- `proxyStore.ts` — legacy `ProxyStore`. Still exists for the opt-in proxy bridge, but the default fallback path uses chunk stores only.
-- `scheduler.ts` — `Scheduler<Req>` generic. Owns pending queue + in-flight Map + concurrency/bytes caps + backpressure logging via injected `BurstLogger`. The chunk scheduler interleaves detail/coarse requests so both lanes make progress; the legacy proxy scheduler remains separate.
-- `retry.ts` — typed `FetchError(kind: "permanent" | "transient" | "pending" | "abort")` + `classifyFetchError` + `RetryPolicy` interface with `OnceTransientRetry` (current chunk behaviour) and `NeverRetry` (current proxy behaviour). `pending` means generated coarse bytes are not ready yet and must not enter failure tracking. See [[decisions/0033-typed-fetch-error]].
-- `telemetry.ts` — `TelemetryCounters` (verb API: `recordRequest` / `recordHit` / `recordEviction` / `recordDecode` / `recordFetchFailure` / `recordCompletedFetch` / `snapshot` / `reset`) + `BurstLogger` (rate-limited debug log channel for `cache.backpressure` and `cache.failure_burst`).
-- `rejection.ts` — `RejectionTracker` wraps the per-entity `Set<chunkKey>` rejected map. `mark` returns whether the key was newly added so the caller can abort an in-flight fetch.
-- `deliveryState.ts` — `DeliveryState` wraps optimistic chunk/proxy sent state. Chunk sent facts clear on cold-state rebuild; proxy sent facts survive until worker feedback says the proxy is missing or the dataset is removed.
-- `contentSource.ts` — `ContentSource` interface + `ProxiedContentSource` impl over the WebSocket bridge. Owns `handleBinary(key, payload)` and routes itself by `proxy/` prefix (the bridge does not sniff for binary routing).
-- `decodePool.ts` — codec-agnostic decode worker pool. Unchanged shape.
-- `decode.worker.ts` — Raw / LZ4 / Zstd decompression + uint8 / bool / uint16 normalization. The Zstd path slices the typed-array view to avoid a 12-byte garbage prefix in some payloads.
-- `wireProtocol.ts` — `parseProxyHeader` (64-byte LE) + `proxyResponseKey` (cross-language contract with the Rust server's `proxy_response_key`).
-- `index.ts` — barrel re-export. External callers import from `pipeline/fetch/` only.
+- **stores** — `ChunkStore` (`chunkStore.ts`) backs both the detail/main store (`chunkStore`) and the coarse/minimap store (`overviewStore`, serving `lane="coarse"` and `lane="minimap"`). `ProxyStore` (`proxyStore.ts`) is a separate store for the proxy fallback. **These are separate stores, each with its own LRU** — not one combined ordering.
+- **scheduler** — `Scheduler<Req>` (`scheduler.ts`): pending queue + in-flight Map + concurrency/bytes caps. The chunk scheduler interleaves detail/coarse so both lanes progress; the proxy scheduler is separate.
+- **eviction policies** — `eviction.ts`: `LRUPolicy` (overview + proxy stores) and `TieredPolicy` (detail store; preserves the active-detail tiebreaker). Tier order is supplied by `interactionMode.ts` (`InteractionModeDetector`: panning / scrubbing / idle).
+- **content source** — `ContentSource` / `ProxiedContentSource` (`contentSource.ts`) over the WebSocket bridge; routes binary by `proxy/` prefix.
+- **decode pool** — `decodePool.ts` + `decode.worker.ts` (Raw / LZ4 / Zstd + uint8/bool/uint16 normalization).
+
+Supporting modules: `types.ts`, `retry.ts` (typed `FetchError`; `pending` = generated bytes not ready yet, see [[decisions/0033-typed-fetch-error]]), `telemetry.ts`, `rejection.ts`, `deliveryState.ts`, `wireProtocol.ts`, `index.ts` (barrel). The cache's wanted-set-delta call for missing chunks is `markChunkMissing`; proxy misses use `markProxyMissing`.
 
 ## Why a CPU cache between network and GPU
 
@@ -46,22 +37,18 @@ Each tick:
 2. **Submit** — tick coordinator calls `cpuCache.submit(plan)` per dataset. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, refreshes wanted-generation/priority on cached entries, and pushes survivors onto scheduler pending queues.
 3. **Schedule** — schedulers launch up to `maxConcurrentFetches` (≈9), bounded by `maxBytesInFlight` (32 MB). Detail and coarse chunk requests are interleaved when both lanes have work. If only one lane has demand, its cache bucket can borrow unused budget from the other lane; if both lanes have demand, each keeps its standard allocation.
 4. **Fetch** — `contentSource.fetch(req)` or `fetchProxy(req)` returns bytes via the WebSocket bridge.
-5. **Decode / insert** — decoded chunks land in the detail or coarse cache bucket with priority, residency tier, and wanted generation stamped from the latest submit that still wanted the in-flight request. Legacy proxies land in their proxy store only when the bridge is enabled.
+5. **Decode / insert** — decoded chunks land in the detail or coarse cache bucket with priority, residency tier, and wanted generation stamped from the latest submit that still wanted the in-flight request. Proxy bytes (a live fallback; coarse/detail is the default) land in the proxy store.
 6. **Deliver** — the uploader walks `cpuCache.getDeliverable()`, which yields cached, currently-wanted, not-rejected, not-sent chunks in priority order. After dispatch, it calls `cpuCache.markSent(delivery)`.
 
 ## Eviction tiers
 
-Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`), except for **active-detail** — see below.
+Eviction is **not** one 5-tier ordering. Each store has its own LRU; the coarse/minimap store and the proxy store are separate from the detail store. Within the detail/main store, `EvictionTier` has exactly THREE values — `prefetch`, `demoted-detail`, `active-detail` — and `TieredPolicy` evicts cheapest-tier-first within that store (LRU by `insertedAt`, except active-detail; see below). The overview and proxy stores each just use `LRUPolicy`.
 
-1. **prefetch** — cheapest to lose
-2. **demoted-detail** — entity navigated away from
-3. **active-detail** — currently visible detail chunks
-4. **coarse/minimap** — coarse fallback/context chunks, including minimap
-5. **legacy proxy** — only when the opt-in proxy bridge is enabled
+**The detail store's tier order is interaction-mode-dependent.** `getTierOrder(mode)` rotates it: panning and idle evict `prefetch → demoted-detail → active-detail` (cheapest losses first), but **scrubbing protects the prefetch tier** (next-time-step chunks the user is skimming) by demoting it last: `demoted-detail → active-detail → prefetch`.
 
-`lane: "minimap"` chunks land in the coarse bucket so the minimap is isolated from detail churn. Combined with the planner emitting minimap at priority 0, the effect is "fetched first, evicted outside the detail budget." See [[decisions/0023-minimap-lane-with-highest-priority]].
+`lane: "minimap"` chunks land in the `overviewStore` (coarse) so the minimap is isolated from detail churn. Combined with the planner emitting minimap at priority 0, the effect is "fetched first, evicted outside the detail budget." See [[decisions/0023-minimap-lane-with-highest-priority]].
 
-Default budgets: detail/main 512 MB, coarse/minimap 64 MB, legacy proxy 256 MB. Detail and coarse have elastic borrowing only when the other lane has no current demand.
+Default budgets: detail/main 512 MB, coarse/minimap 64 MB, proxy 256 MB. Detail and coarse have elastic borrowing only when the other lane has no current demand.
 
 ### Active-detail uses least-recently-wanted, lowest-importance first
 
@@ -79,7 +66,7 @@ Both `lastSeenTick` and `priority` are refreshed on every `submit()` for any cac
 
 - **Upstream**: [[planning-domain]] produces the `RequestPlan` consumed by `submit`. The tick coordinator owns the call site (`pipeline/tickCoordinator.ts`).
 - **Sideways**: `contentSource.ts` (binary fetch via [[lucida-web|bridge.ts]]) and `decodePool.ts` (3 web workers running `decode.worker.ts`).
-- **Downstream**: the [[upload-pipeline|Uploader]] walks `getDeliverable()` and posts tier-labeled chunks to the GPU worker via [[worker-protocol]] messages. Worker feedback returns through `markChunkEvicted`; legacy proxy feedback uses `markProxyMissing`.
+- **Downstream**: the [[upload-pipeline|Uploader]] walks `getDeliverable()` and posts tier-labeled chunks to the GPU worker via [[worker-protocol]] messages. Worker feedback returns through `markChunkEvicted` (evicted/re-eligible) and `markChunkMissing` (wanted-set delta); proxy-fallback feedback uses `markProxyMissing`.
 
 ## Invariants
 

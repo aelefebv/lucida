@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-06-10
+modified: 2026-06-25
 ---
 
 # lucida-py
@@ -10,14 +10,16 @@ Python package for Lucida scripting. It has two surfaces:
 1. **Server client (`lucida.client`)** — pure-Python workspace client for [[lucida-server]].
 2. **Local analysis bindings** — `pyo3` + `maturin` bindings for [[lucida-core]] and [[lucida-store]].
 
-The local binding classes are:
+The local binding classes (the only `#[pyclass]` types) are:
 
 - **`PyScene`** — wraps `Scene`. Pan/zoom/set-z/set-t/set-c, set camera mode, import presence from JSON, serialize commands as JSON, ask for a chunk plan.
 - **`PyStore`** — wraps `lucida-store::backend::open` and `import_dataset`. Reads a single chunk by path, returns raw bytes.
 
+`ViewportData` is **not** a binding class — it's a pure-Python `@dataclass` in `python/lucida/zarr_reader.py`, used by the local-analysis OME-Zarr helpers.
+
 The server-client entrypoint is:
 
-- **`LucidaClient`** — resolves server and token config, exposes `status()`, `whoami()`, `workspaces`, and per-workspace `datasets`, `view`, `layer`, `channel`, and `debug` resources.
+- **`LucidaClient`** — resolves server and token config, exposes `status()`, `whoami()`, `workspaces`, and per-workspace `datasets`, `view`, `layer`, `channel`, `debug`, and `saved_views` resources.
 
 The crate is **excluded from the workspace** (`exclude = ["lucida-py"]` in the root `Cargo.toml`) because it builds a `cdylib` extension module rather than an `rlib` and uses its own `Cargo.lock`. Build via `maturin develop` from `lucida-py/`.
 

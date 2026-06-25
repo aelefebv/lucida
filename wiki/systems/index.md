@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Systems
@@ -10,7 +10,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - **`crates/`** — one article per Cargo workspace member. Crate boundaries are durable; these articles describe what each crate owns.
 - **`subsystems/`** — web-internal modules and cross-cutting concepts (chunk pipeline, GPU residency, etc.). These live inside `lucida-web/src/` (or span `lucida-web` + `lucida-server` like the chunk pipeline) and are runtime-architecture concepts, not crates.
 
-`[[wiki-link]]` resolution is by basename, so `[[lucida-core]]` and `[[chunk-pipeline]]` work unqualified.
+`[[wiki-link]]` resolution is by basename, so `[[lucida-core]]` and `[[chunk-lifecycle]]` work unqualified.
 
 ## Crates (`crates/`)
 
@@ -27,7 +27,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 ## Subsystems (`subsystems/`)
 
 - [[auth]] — backend-mediated Google OAuth + httpOnly session cookies; `PrincipalExtractor` trait is the OSS provider extension point
-- [[chunk-pipeline]] — overview of the end-to-end path from dataset URL to pixels
+- [[chunk-lifecycle]] — overview of the end-to-end path from dataset URL to pixels
 - [[planning-domain]] — wanted-set computation, detail/coarse tier selection, lane-based priority formula
 - [[cpu-cache]] — sole chunk fetch path; tiered LRU eviction; decode pool dispatch; drain to GPU
 - [[generated-coarse]] — server-managed derived coarse pyramid levels served through the normal chunk path
@@ -40,4 +40,5 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[layout-system]] — registered layouts, `SetActiveLayout`, derived placement rebuilds
 - [[multichannel-and-colormaps]] — per-channel state, 15 LUTs, composite key naming
 - [[saved-views]] — `#view=…` URL-as-app-state + server-stored `#b=<id>` bookmarks; spans `lucida-core` (schema), `lucida-web` (encoder/applier/sidebar), `lucida-server` (SQLite store + REST + broadcast)
+- [[workspaces]] — server-stored container of opened datasets, saved views, and members; the unit of collaboration and of the live session (`/ws/workspaces/:id`); `wds-` membership vs `ds-` source identity
 - [[deployment]] — single-image container shape, env-var contract, persistence model, OAuth + data-backend identity per cloud, Ingress / WebSocket tuning, release flow. Conceptual companion to `extras/deploy/RUNBOOK.md`.

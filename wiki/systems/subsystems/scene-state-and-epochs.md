@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Scene State and Epochs
@@ -9,15 +9,16 @@ How the WASM Scene exposes "what changed since you last asked." Owns one of the 
 
 ## What an epoch is
 
-`SceneEpochs` (in [[lucida-core]]'s `epoch.rs`) is a struct of monotonically increasing `u64` counters, one per category of state:
+`SceneEpochs` (in [[lucida-core]]'s `epoch.rs`) is a struct of six monotonically increasing `u64` counters, one per category of state:
 
-- `content` — entity membership / metadata changed (`DatasetOpened`, `RemoveDataset`)
+- `content` — entity membership / metadata changed (`DatasetOpened`, `RemoveDataset`, `RenameDataset`)
 - `layout` — spatial layout changed (`RegisterLayout`, `SetActiveLayout`)
 - `view` — camera moved (`Pan`, `Zoom`, `Rotate`, `Fly`, `SetCenter`, `SetViewport`, mode switch)
-- `selection` — selection-like state changed (`SetT`, `SetC`, `SetZ`, `SetMultiChannel`, channel visibility/settings, render mode, contrast, gamma)
-- `asset` — runtime asset/generated availability changed (legacy proxy availability or generated coarse metadata/readiness)
+- `selection` — selection-like state changed (`SetT`, `SetC`, `SetZ`, `SetMultiChannel`, channel visibility/settings, render mode, contrast, gamma, and the per-dataset display commands `SetDatasetVisible`/`Opacity`/`Order`/`RenderMode`/`DetailLevelOverride`/`BlendMode`)
+- `asset` — asset catalog changed (proxy availability published or revoked). Bumped only by `ApplyAssetCatalogDelta`.
+- `annotation` — collaborative annotations changed. Bumped by `AddAnnotation` / `RemoveAnnotation` / `MoveAnnotation` and `AddComment` / `RemoveComment` / `EditComment` (a pin's comment thread is part of its annotation state).
 
-Every command that mutates the scene bumps exactly the right epoch(s). `Pan` bumps only `view`. `SetT` bumps only `selection`. `DatasetOpened` bumps both `content` and `layout`. Legacy `ApplyAssetCatalogDelta` bumps only `asset`. Generated coarse availability is server runtime state and is tracked outside document commands on the server/client bridge. The bumps happen inside `Scene::apply`; nothing else writes them.
+Every command that mutates the scene bumps exactly the right epoch(s). `Pan` bumps only `view`. `SetT` bumps only `selection`. `DatasetOpened` bumps both `content` and `layout`. `ApplyAssetCatalogDelta` bumps only `asset`. Generated coarse availability is tracked separately (not via the `asset` epoch). The bumps happen inside `Scene::apply`; nothing else writes them.
 
 ## Why typed epochs over a single dirty flag
 
@@ -25,7 +26,7 @@ A single dirty bit forces every consumer to do the most expensive work. Typed ep
 
 > "Selection changed but view didn't — so I need to rebuild the descriptor buffer, but I can skip the full cold-state rebuild and the wanted-set recomputation."
 
-Concretely, the tick coordinator's `planAndFetch` ([[chunk-pipeline]]) starts with an epoch read; if every counter is unchanged, it returns the cached result and the tick is essentially free. Hits ~5% of frames in normal viewing.
+Concretely, the tick coordinator's `planAndFetch` ([[chunk-lifecycle]]) starts with an epoch read; if every counter is unchanged, it returns the cached result and the tick is essentially free. Hits ~5% of frames in normal viewing.
 
 The split also lets [[gpu-residency|the worker]] decide independently — it gets the planning epochs in every chunk/proxy delivery and drops anything that's stale relative to its current understanding.
 
@@ -43,7 +44,7 @@ Three layers of "what is the scene right now":
 
 - **Producer**: `Scene::apply` in [[lucida-core]]. Single mutator, single epoch bumper.
 - **Consumers**:
-  - [[chunk-pipeline|tick coordinator]] reads epochs every tick to short-circuit; passes them in chunk deliveries to [[gpu-residency|the worker]] for staleness checks. Legacy proxy deliveries carry epochs too.
+  - [[upload-pipeline|tick coordinator]] reads epochs every tick to short-circuit; passes them in chunk deliveries to [[gpu-residency|the worker]] for staleness checks. Proxy deliveries (the fallback path) carry epochs too.
   - The web client passes `Scene::apply_command` for every incoming `CommandBroadcast` so all clients converge on the same document state and bump the same epochs.
   - [[lucida-server]] doesn't read epochs directly — it owns its own seq counter for command ordering. Epochs are a renderer concern.
 
@@ -52,10 +53,10 @@ Three layers of "what is the scene right now":
 - **Epochs only increase.** Fresh `Scene` starts at zero; `Scene::apply` is the only writer.
 - **`Scene::apply` is the conventional mutation path.** Helpers like `Scene::register_dataset`, `remove_dataset`, and `ensure_channel` are also `pub fn (&mut self)` and can be called directly from anywhere in the workspace — but doing so bypasses `apply`'s epoch bumps and derived-state rebuilds, which is invisible until the renderer goes stale. The discipline is enforced by code review, not the type system.
 - **Derived state is a function of document state + active layout.** Always reconstructable; never serialized. The CLI takes a snapshot and calls `Scene::rebuild_derived` to recompute it locally.
-- **The same command applied twice produces the same Scene** when the command is idempotent. Legacy `ApplyAssetCatalogDelta` is the explicit case — repeated application of the same delta merges idempotently. `DatasetOpened` is not idempotent (it would bump epochs twice), and the server's reuse path catches the duplicate before re-applying.
+- **The same command applied twice produces the same Scene** when the command is idempotent. `ApplyAssetCatalogDelta` (the proxy fallback path, still wired) is the explicit case — repeated application of the same delta merges idempotently. `DatasetOpened` is not idempotent (it would bump epochs twice), and the server's reuse path catches the duplicate before re-applying.
 
 ## Gotchas
 
-- **`SetActiveLayout` requires special apply ordering.** Document state must be applied first, then derived state rebuilt — because rebuilding derived state needs to read the freshly-applied layout selection from `document.active_layout_ids`. See `command.rs:121` for the explicit early-return.
+- **`SetActiveLayout` requires special apply ordering.** Document state must be applied first, then derived state rebuilt — because rebuilding derived state needs to read the freshly-applied layout selection from `document.active_layout_ids`. The `SetActiveLayout` arm in `Scene::apply` is the explicit early-return that enforces this.
 - **Asset epoch bumps on every `ApplyAssetCatalogDelta`** even when the catalog contents are unchanged. The contents-equality check happens in the merge, but the epoch reflects the message arrival, not the content delta. If you wire a UI to "asset epoch changed → rerender," expect spurious wake-ups on no-op deltas.
 - **Backward-compat fields** (e.g. `channel_settings` defaulting to empty in old `DatasetDisplaySettings` JSON) live in serde defaults; tests in `scene/types.rs` lock the wire format. Don't touch the field structure casually.

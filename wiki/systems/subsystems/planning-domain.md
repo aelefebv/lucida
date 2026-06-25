@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Planning Domain
 
-`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the tick coordinator (generated availability, minimap pending coords, carry-forward state); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. The module is structured as a small directory of pure functions: `types.ts` (every interface and type alias), `modes.ts` (tier/LOD resolution), `chunks.ts` (chunk enumeration + culling), `emit.ts` (lane emitters + priority), `plan.ts` (top-level composition), with `index.ts` as a barrel re-export. Supporting modules: `config.ts` / `configStore.ts` (live-tunable parameters), `snapshot.ts` (WASM → snapshot translation), `debug.ts` (debug-panel derivations), `synthetic.ts` (test fixtures), `validate.ts` (dev-mode boundary check).
+`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the tick coordinator (generated availability, minimap pending coords, carry-forward state); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. The module is structured as a small directory of pure functions: `types.ts` (every interface and type alias), `modes.ts` (tier/LOD resolution), `chunks.ts` (chunk enumeration + culling), `emit.ts` (lane emitters + priority), `plan.ts` (top-level composition), with `index.ts` as a barrel re-export. Supporting modules: `config.ts` / `configStore.ts` (live-tunable parameters), `snapshot.ts` (WASM → snapshot translation), `proxyResidency.ts` (the GPU proxy residency budget pass — `planProxyResidency`), `debug.ts` (debug-panel derivations), `synthetic.ts` (test fixtures), `validate.ts` (dev-mode boundary check).
 
 ## Why a separate domain
 
@@ -26,7 +26,7 @@ The default residency model is chunk-only coarse/detail, for both plate datasets
 
 For plate datasets, each field can resolve its own detail/coarse levels while preserving its well-relative transform and placement. There is no requirement that all fields in a well share a tier or a level. For single-image datasets, the same code path applies with one image member.
 
-Legacy proxy promotion modes (`well-as-proxy`, `fields-with-proxy-fallback`) remain only behind the explicit legacy bridge flag and should not be described as the current model.
+Proxy promotion modes (`well-as-proxy`, `fields-with-proxy-fallback`) are a fallback that stays wired: `coarseDetailEnabled` defaults `true`, so coarse/detail is the default and the proxy path runs only when the flag is set `false` (`plan.ts` branches on it).
 
 ## LOD range
 
@@ -86,15 +86,14 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 - **Generated levels are coarse-only.** Detail overrides and detail option lists are source-backed only; generated levels are selected only for the coarse tier.
 - **The plan is fresh every tick.** No caching across ticks; the [[scene-state-and-epochs|epoch fast-path]] in the tick coordinator decides whether to re-run planning at all.
 - **Per-variant invariants are compile-time enforced.** `InvisibleEntry` is its own kind, never confused with a visible field/image entry. `FieldSnapshot` always has a `parentId: string`; `ImageSnapshot` and `WellSnapshot` don't have the field at all. Reads must narrow on `kind` first. See [[decisions/0026-discriminated-active-set-and-entity-types]].
-- **Carry-forward state is explicit.** The planner consumes `state: PlanningState` (today: `{ previousActiveSet }`) and returns `nextState: PlanningState`. No globals, no module state, no implicit caches — see [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]].
+- **Carry-forward state is explicit.** Cross-tick state rides only through the `PlanningState` in/`nextState` out seam (see Plan signature above) — no globals, no module state, no implicit caches. See [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]].
 - **`datasetId` is stamped at emit time, not post-hoc.** The snapshot carries `datasetId`; the planner stamps it on every `ChunkRequest` and `ProxyRequest` as it emits. The tick coordinator no longer mutates the result.
-- **Inputs are validated in dev mode, not in production.** `validatePlanningInputs` runs at `plan()` entry under `import.meta.env.DEV`. In dev, malformed snapshots throw a crisp `Error` at the boundary; in production, the call is dead-code-eliminated. The validator catches semantic invariants the type system can't express (referential integrity of `parentId`, uniqueness of `entityId` / non-empty `imageId`, valid bbox + level shape arity, prev-active-set duplicates, prev-active-set kind agreement when entity present). Disappeared prev-active-set entities are explicitly NOT a violation — entities can come and go across ticks. Minimap pending coordinates are also NOT validated against the snapshot's entity set because they are populated at a producer scope that can exceed the per-tick view-query result.
+- **What `validatePlanningInputs` checks** (the dev-mode boundary check described under Interactions): semantic invariants the type system can't express — referential integrity of `parentId`, uniqueness of `entityId` / non-empty `imageId`, valid bbox + level shape arity, prev-active-set duplicates, prev-active-set kind agreement when the entity is present. Two things are explicitly NOT violations: a prev-active-set entity that disappeared (entities come and go across ticks), and a minimap pending coordinate absent from the snapshot's entity set (it is populated at a producer scope wider than the per-tick view query).
 
 ## Gotchas
 
 - **`importance` is per-entity per frame and comes from WASM** — don't try to compute it client-side. The math involves projected area and centroid distance from the viewport center; the WASM impl is the canonical one.
 - **Projected size is advisory, not a proxy-mode switch.** The default coarse/detail path keeps chunk tiering explicit. Use `projected_diagonal_px` and importance for priority and debug reasoning, not to force an entire well into a proxy mode.
 - **Generated coarse readiness is asynchronous.** Planning can request a generated coarse chunk before bytes exist. The server returns a generated chunk status (`pending`, `ready`, `failed_*`, `unavailable`); the CPU cache treats `pending` as non-failure and will re-request after later readiness.
-- **Legacy hysteresis only matters when the proxy bridge is enabled.** The default path should not introduce mode flapping because fields/images keep stable detail/coarse tier identities.
-- **Dev-mode-only assertions don't fire in production.** If a producer bug surfaces only via the validator's throw in development, fix the producer — production won't catch it. The validator is a developer-time guard, not a runtime safety net.
+- **Hysteresis only matters on the proxy fallback path** (`coarseDetailEnabled: false`). The default coarse/detail path doesn't flap because fields/images keep stable detail/coarse tier identities.
 - **Visible field with absent parent is legitimate.** Production WASM `view_query` may surface a visible field whose parent well is invisible (and so absent from `entities`). The planner's `groupByWell` handles this gracefully via `wellEntity: null`. The validator's check 1 reflects this: it only enforces "if the parent IS in `entities`, it must be a `Well`," not "every field's parent must be present."

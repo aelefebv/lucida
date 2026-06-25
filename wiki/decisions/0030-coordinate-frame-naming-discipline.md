@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # Coordinate-Frame Naming Discipline at the JS↔WASM Boundary
@@ -34,18 +34,6 @@ The field is genuinely "the entity's placement position within the layout, in vo
 ## Why suffix discipline at the snapshot boundary, not on the Rust side
 
 The Rust source is the canonical implementation of the projection / centroid / bounds math. Renaming Rust fields would touch `lucida-core`, the wire format (via serde), `lucida-store`, the CLI, the Python bindings — different review surface. The JS-side suffix discipline gives readers crisp frame information at the contract surface they actually consume, without the cost of a wire-format change.
-
-## Why `Axis.X` namespace, not `AXIS_X` flat consts
-
-The namespace form (`shape[Axis.X]`) reads cleaner at call sites than the flat form (`shape[AXIS_X]`); one import covers all five axes; grouping is obvious. Same payoff as flat consts at site-of-use, less import noise.
-
-## Why `axes.ts` at the top level, not under `pipeline/`
-
-The constants are about indexing the manifest-shape arrays (`LevelGeometry.shape[]`, `LevelGeometry.chunk_shape[]`, `LevelGeometry.grid_shape[]`). Their consumers include `orchestrator.ts`, `layoutBuilders.ts`, `pipeline/planning/chunks.ts`, `minimapPath.ts`, plus tests. Top-level (sibling to `manifestTypes.ts`) is the right scope; `pipeline/axes.ts` would imply pipeline-internal use.
-
-## Why JS-only — no Rust mirror
-
-The Rust side mostly uses destructuring (`let [t, c, z, y, x] = arr`) rather than indexed access; constants would be modest payoff. Rust comments are already informative ("TCZYX order" appears in 14+ places across `lucida-store`). Rust-side axis constants are a separate small PR if wanted later — they don't belong in this PRD's scope.
 
 ## Why function-local variables are not renamed
 

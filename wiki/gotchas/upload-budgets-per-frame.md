@@ -45,6 +45,6 @@ The minimap budget being separate (and smaller) is intentional: the minimap rend
 
 ## Related
 
-- [[chunk-pipeline]]
+- [[chunk-lifecycle]]
 - [[cpu-cache]]
 - [[gpu-residency]]
