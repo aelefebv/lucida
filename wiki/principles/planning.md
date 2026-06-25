@@ -5,63 +5,65 @@ modified: 2026-06-25
 
 # Principles — Planning Domain
 
-Planning is the subsystem that, each tick, decides which chunks the renderer wants. These principles describe what planning optimizes for, and why. They are stable claims about *direction*; specific design choices are recorded as ADRs that cite these principles as their justification.
+> What a *principle* is — guiding light, not mechanism — is defined once in [[principles/index]]. This is a subsystem-scoped principles doc.
 
-Principles are blind to decisions. They are read by — never read from — the rest of the wiki.
+## Scope
 
-## 1. Visual smoothness over fetch optimality
+Planning is the subsystem that, each tick, decides which chunks the renderer wants next. These principles say what that decision optimizes for, and why — the durable direction, not the current policy. They govern the trade-offs planning is allowed to make (how much to fetch ahead, what to hold in memory, how coherent a plate well must look) and the shape planning must keep (pure, snapshot-driven, deferring all view math to the one Rust implementation). They do not describe the shipped coarse/detail path; where a principle and today's default disagree, the principle is recorded as direction and the gap is called out.
 
-Within memory bounds, planning prefers what reduces visible flicker, pop-in, or perceptual discontinuity over what reduces total bytes fetched. When two policies are equally correct but differ on perceived continuity, the smoother one wins.
+## 1. The smoother render wins over the cheaper fetch
 
-**Why.** The user perceives the system through pixels changing over time. A system that fetches optimally but flickers visibly is worse than one that fetches slightly more but renders coherently. Smoothness is the user-facing quality measure that separates a good viewer from a fast one.
+Within the memory bound, planning should prefer whatever the user perceives as continuous over whatever moves the fewest bytes. When two policies are equally correct but one flickers and one doesn't, choose the one that doesn't — even if it costs a little more to fetch.
 
-**When in tension.** Smoothness can grow memory pressure or fetch cost. Principle 2 caps both. Tied trade-offs go to smoothness; bounded trade-offs respect the bound.
+**Why.** The user experiences this system as pixels changing over time. A viewer that fetches optimally but pops and flickers is worse than one that fetches a little more and stays coherent. Smoothness is the quality that separates a good viewer from a merely fast one.
 
-## 2. Memory is the binding constraint
+**When in tension.** Smoothness can raise memory pressure or fetch cost. Principle 2 caps both: tied trades go to smoothness, bounded trades respect the bound.
 
-Every policy must be bounded. No unbounded enumeration, no unbounded fetch escalation, no unbounded carry-forward state, no unbounded asset retention. Any feature that holds more memory must come with a budget, an eviction policy when the budget is hit, and a documented behaviour when the policy can't keep up.
+## 2. Stay within memory; nothing is allowed past it
 
-**Why.** GPU and CPU memory caps are hardware-given; we can't engineer past them. Every "let's also keep X around" needs a paired "and we'll let X go when Y." Without this, large datasets exhaust memory and the renderer dies.
+Every policy must be bounded. No unbounded enumeration, no runaway fetch escalation, no carry-forward state that only grows, no asset you never let go of. Anything that holds more memory ships with three things: a budget, an eviction policy for when the budget is hit, and a defined behavior for when eviction can't keep up.
 
-**This is a constraint, not a preference.** No other principle may violate it.
+**Why.** GPU and CPU memory caps are hardware-given — we cannot engineer past them. Every "let's also keep X around" needs its paired "…and we'll release X when Y." Without that pairing, a large dataset simply exhausts memory and the renderer dies.
 
-## 3. Wells are coherent visual units
+**This is a constraint, not a preference.** No other principle may violate it; it is the one that wins every tie it's in.
 
-On plates, all fields belonging to one well are treated as one visual unit. Fields within a well agree on representation and timing. Per-field divergence within a well is not a target.
+## 3. A well reads as one thing, so it should render as one thing
 
-**Why.** A plate well is a perceptual unit — the user reads "well B7," not "field 4 of well B7." A system that gives different fields different representations creates visible patchwork that reads as a rendering defect, not as informative variation.
+On a plate, all the fields of a single well are one visual unit. They should agree on representation and timing. Per-field divergence inside a well is not something to optimize toward — it's something to avoid.
 
-**When in tension.** Coherence can cost responsiveness — if one field could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right trade.
+**Why.** The user reads "well B7," not "field 4 of well B7." Giving sibling fields different representations produces a visible patchwork that the eye reads as a rendering defect, not as meaningful variation.
 
-**In tension with the current default.** The shipped coarse/detail path resolves residency tiers *per field* (see [[planning-domain]]), so this principle is in tension with the default rather than realized by it — kept as direction, not current behavior.
+**When in tension.** Coherence can cost responsiveness: if one field could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right call.
 
-## 4. Planning is pure; carry-forward state is explicit
+**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per field* (see [[planning-domain]]), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
 
-Planning consumes a snapshot and produces a plan. State that survives across ticks is an explicit input parameter — never private to the planner. There are no globals, no module state, no hidden caches.
+## 4. Planning is a pure function of a snapshot
 
-**Why.** Pure functions are testable without mocks, debuggable without runtime context, and replaceable behind their contract. Hidden state is the most common cause of "works in the test but not in the app" bugs in render pipelines, and it makes alternative planning strategies impossible to A/B-compare on the same inputs.
+Planning should take a snapshot in and hand a plan back, with nothing hidden in between. Any state that needs to survive from one tick to the next is an explicit input, passed in and out in the open — never a private cache, a module global, or a static the planner reaches for on its own.
 
-## 5. WASM owns truth; planning consumes a snapshot
+**Why.** A pure function is testable without mocks, debuggable without runtime context, and swappable behind its contract. Hidden state is the classic cause of "passes in the test, breaks in the app" bugs in render pipelines, and it makes A/B-comparing two planning strategies on identical inputs impossible.
 
-What is visible at what apparent size is computed in `lucida-core` (compiled to WASM) and read via query. Planning never re-derives projected size, importance, frustum geometry, or LOD selection on the JS side. If a number planning needs isn't in the snapshot, the snapshot grows.
+## 5. The view math has one home, and planning isn't it
 
-**Why.** The visibility math has a single Rust implementation that is also used by the server, the CLI, and the Python bindings. Reimplementing any piece of it in JS would create multiple versions of the same math, with subtly different bugs that drift over time. The boundary is the cost we pay to keep one implementation.
+What is visible, and at what apparent size, is decided once — in `lucida-core` — and planning reads the answer from the snapshot. Planning should never recompute projected size, frustum geometry, importance, or LOD on the JS side. If a number planning needs isn't in the snapshot, the right move is to grow the snapshot, not to re-derive the number.
 
-## 6. Anticipate the user's likely next gesture
+**Why.** That visibility math has a single Rust implementation, shared by the server, the CLI, and the Python bindings as well as the web client. A second copy in JS would be a second set of subtly different bugs, drifting apart over time. The boundary is the price we pay to keep exactly one source of that truth. (This is the planner's view of the product-level [[principles/surface-parity]].)
 
-Planning may fetch slightly ahead of the current view to absorb the next likely user motion — a zoom step, a timepoint scrub, exploration of a neighboring entity. The amount of anticipation is bounded by principle 2.
+## 6. Fetch a step ahead of the user's likely next move
 
-**Why.** User input is bursty: a pan, a zoom, a scrub, then a pause. The fetch latency for "just-arrived" data is too long to feel responsive if planning only starts work when a gesture begins. Pre-fetching the most likely next state, sized to fit the bound, makes interaction feel local even when the underlying data is remote.
+Planning may fetch a little past the current view to absorb the next plausible gesture — a zoom step, a timepoint scrub, a glance at the neighboring entity — so that when the user makes that move, the data is already there. How far ahead it reaches is capped by principle 2.
 
-**When in tension.** Anticipation costs memory and bandwidth. Principle 2 caps it; principle 1 says that, within the cap, the path that absorbs the next likely gesture more smoothly is preferred.
+**Why.** User input is bursty: pan, zoom, scrub, pause. If planning only starts work when a gesture begins, the fetch latency for just-arrived data is too long to feel responsive. Pre-fetching the most likely next state, sized to fit the bound, makes remote data feel local.
 
-## How these interact
+**When in tension.** Anticipation costs memory and bandwidth. Principle 2 caps it; principle 1 says that, within the cap, the path that absorbs the next gesture more smoothly is the one to take.
 
-These principles are not equally weighted.
+## How these pull against each other
 
-- **Principle 2 (memory) is a hard constraint.** Nothing may violate it.
-- **Principles 1 and 6 (smoothness, anticipation) trade against each other** within the bound. More anticipation is usually smoother but costs more memory and bandwidth.
-- **Principle 3 (well coherence)** constrains what 1 and 6 are allowed to do at the per-field level.
-- **Principles 4 and 5 (purity, WASM as truth)** are architectural — they shape *how* planning is built, not *what* it optimizes for.
+These principles are not equally weighted, and most of the real decisions live in the tension between them.
 
-When a proposed change cannot honor all principles simultaneously, surface it as an ADR that names the principle being relaxed, the alternatives considered, and the reason for the trade-off.
+- **Memory (2) is the hard floor.** Nothing may cross it; it wins every tie.
+- **Smoothness (1) and anticipation (6) trade against each other** inside the bound — more lookahead is usually smoother but costs more memory and bandwidth.
+- **Well coherence (3) constrains what 1 and 6 may do** at the per-field level.
+- **Purity (4) and one-home view math (5) are about *how* planning is built**, not *what* it optimizes for — they shape the subsystem so the other four stay testable and consistent.
+
+When a change can't satisfy all six at once, don't soften a principle to fit the change. Write the ADR: name the principle being relaxed, the alternatives considered, and why the trade is worth making.
