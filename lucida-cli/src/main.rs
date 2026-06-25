@@ -577,8 +577,9 @@ enum DatasetCommand {
         /// Grid width (max columns)
         #[arg(long, default_value_t = 4)]
         cols: u32,
-        /// Per-cell thumbnail size in pixels (square)
-        #[arg(long, default_value_t = 256)]
+        /// Per-cell thumbnail size in pixels (square). Larger cells preserve
+        /// fine/sparse structure that downsampling would otherwise average away.
+        #[arg(long, default_value_t = 320)]
         cell_px: u32,
         /// Also write a JSON sidecar at <out>.json
         #[arg(long)]
