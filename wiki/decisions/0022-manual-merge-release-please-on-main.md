@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Trunk-Based Releases via Manual-Merge `release-please` on `main`"
+description: "Lucida's release process is trunk-based: main is the only long-lived branch and is always release-ready."
+tags: [lucida, decision]
+source_path: wiki/decisions/0022-manual-merge-release-please-on-main.md
 created: 2026-05-13
 modified: 2026-06-25
 ---
@@ -59,6 +64,6 @@ The release process is part of lucida's public OSS contract: adopters pinning to
 ## Related
 
 - PRD #486 — implementation specification
-- [[decisions/0020-single-image-with-servedir]] — the deploy unit these releases produce
-- [[decisions/0021-deployment-artifacts-as-reference-templates]] — what adopters consume per release tag
-- [[decisions/0017-configurable-from-day-one-for-oss-release]] — the OSS posture the release process serves
+- [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](0020-single-image-with-servedir.md) — the deploy unit these releases produce
+- [Deployment Artifacts Are Reference Templates, Not Opinionated Infra](0021-deployment-artifacts-as-reference-templates.md) — what adopters consume per release tag
+- [Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md) — the OSS posture the release process serves

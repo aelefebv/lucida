@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "`planning/index.ts` Split into Per-Concern Files"
+description: "lucida-web/src/pipeline/planning/index.ts (1695 lines) is split into 5 sibling files inside pipeline/planning/."
+tags: [lucida, decision]
+source_path: wiki/decisions/0029-planning-index-split-into-per-concern-files.md
 created: 2026-05-15
 modified: 2026-06-25
 ---
@@ -17,7 +22,7 @@ modified: 2026-06-25
 | `emit.ts` | ~285 | `computePriority` + four `emit*Lane` helpers + `chunkDistanceFromCenter`. |
 | `plan.ts` | ~105 | `plan()` itself. |
 
-Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]] — splitting the planner core out of its support primitives sharpens the pure-function decomposition. `plan.ts` reads as the small composition it actually is; `types.ts` / `modes.ts` / `chunks.ts` / `emit.ts` are the supporting-cast modules whose purity is enforced by their lack of side effects.
+Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit) — splitting the planner core out of its support primitives sharpens the pure-function decomposition. `plan.ts` reads as the small composition it actually is; `types.ts` / `modes.ts` / `chunks.ts` / `emit.ts` are the supporting-cast modules whose purity is enforced by their lack of side effects.
 
 ## Why 5 files, not the 6 PRD-1 named
 
@@ -41,7 +46,7 @@ Every external consumer of planning types and helpers (orchestrator, cpuCache, d
 
 ## Note (since)
 
-The 5-file split + barrel is intact, but the directory has grown since this ADR landed. The coarse/detail bridge ([[decisions/0039-chunk-only-coarse-detail-residency]]) added `emit.ts::emitCoarseLane` (so `emit.ts` now holds **five** `emit*Lane` helpers, not four) and `modes.ts::assignCoarseDetailModes`. The directory also gained per-concern siblings beyond the original five: `config.ts`, `proxyResidency.ts`, `synthetic.ts`, `debug.ts`, `configStore.ts` (plus their `*.test.ts`). The barrel still re-exports the public surface.
+The 5-file split + barrel is intact, but the directory has grown since this ADR landed. The coarse/detail bridge ([Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md)) added `emit.ts::emitCoarseLane` (so `emit.ts` now holds **five** `emit*Lane` helpers, not four) and `modes.ts::assignCoarseDetailModes`. The directory also gained per-concern siblings beyond the original five: `config.ts`, `proxyResidency.ts`, `synthetic.ts`, `debug.ts`, `configStore.ts` (plus their `*.test.ts`). The barrel still re-exports the public surface.
 
 ## How this decision shows up in code
 
@@ -51,8 +56,8 @@ The 5-file split + barrel is intact, but the directory has grown since this ADR 
 
 ## Related
 
-- [[principles/planning]] — the framework this decision lives within
-- [[planning-domain]] — subsystem article; refreshed for the new module layout
-- [[decisions/0030-coordinate-frame-naming-discipline]] — sister decision; same PRD
-- [[decisions/0031-validate-planning-inputs-dev-mode-boundary-check]] — sister decision; same PRD
+- [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
+- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new module layout
+- [Coordinate-Frame Naming Discipline at the JS↔WASM Boundary](0030-coordinate-frame-naming-discipline.md) — sister decision; same PRD
+- [`validatePlanningInputs` as the Dev-Mode Boundary Check](0031-validate-planning-inputs-dev-mode-boundary-check.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

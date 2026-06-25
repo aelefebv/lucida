@@ -1,11 +1,16 @@
 ---
+type: Flow
+title: "Flow: Saved-View Propose → Review"
+description: "How a viewer without edit rights gets a saved view onto the team's shared shelf: they propose it → it enters every editor's review queue → an editor approves (→ Shared, visible to all) or rejects (→ back to the propos…"
+tags: [lucida, flow]
+source_path: wiki/flows/saved-view-proposal-review.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Flow: Saved-View Propose → Review
 
-How a viewer without edit rights gets a [[saved-views|saved view]] onto the team's shared shelf: they **propose** it → it enters every editor's review queue → an editor **approves** (→ Shared, visible to all) or **rejects** (→ back to the proposer's Personal). This is the collaboration/permission workflow (#702) the [[saved-views]] and [[workspaces]] articles only mention in passing. It spans server ([[lucida-server]] `workspace.rs`), web ([[lucida-web]] `useWorkspaceSavedViews.ts` + `WorkspaceSavedViewsSidebar.tsx`), and [[lucida-cli]] (`saved_view.rs`).
+How a viewer without edit rights gets a [saved view](../systems/subsystems/saved-views.md) onto the team's shared shelf: they **propose** it → it enters every editor's review queue → an editor **approves** (→ Shared, visible to all) or **rejects** (→ back to the proposer's Personal). This is the collaboration/permission workflow (#702) the [Saved Views](../systems/subsystems/saved-views.md) and [Workspaces](../systems/subsystems/workspaces.md) articles only mention in passing. It spans server ([lucida-server](../systems/crates/lucida-server.md) `workspace.rs`), web ([lucida-web](../systems/crates/lucida-web.md) `useWorkspaceSavedViews.ts` + `WorkspaceSavedViewsSidebar.tsx`), and [lucida-cli](../systems/crates/lucida-cli.md) (`saved_view.rs`).
 
 Three things make it non-obvious and worth a trace: a **three-state visibility machine** with a deliberately-closed transition allow-list, an **editor-only review-queue disclosure** that is a never-leak boundary, and a **deferred, per-id-undoable reject**.
 
@@ -57,9 +62,9 @@ Three things make it non-obvious and worth a trace: a **three-state visibility m
 
 ## Related
 
-- [[saved-views]] — the subsystem overview; visibility model and the `SavedView` payload
-- [[workspaces]] — membership/roles and the `/api/workspaces/{id}/saved-views` surface
-- [[saved-view-recipient-apply]] — what happens when someone opens a (now-Shared) view's link
-- [[lucida-server]] — `workspace.rs` store + authorization gates
-- [[lucida-cli]] — the `saved-view` command parity
-- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — the server-stored-view + auth-seam rationale this builds on
+- [Saved Views](../systems/subsystems/saved-views.md) — the subsystem overview; visibility model and the `SavedView` payload
+- [Workspaces](../systems/subsystems/workspaces.md) — membership/roles and the `/api/workspaces/{id}/saved-views` surface
+- [Flow: Saved-View Recipient Apply](saved-view-recipient-apply.md) — what happens when someone opens a (now-Shared) view's link
+- [lucida-server](../systems/crates/lucida-server.md) — `workspace.rs` store + authorization gates
+- [lucida-cli](../systems/crates/lucida-cli.md) — the `saved-view` command parity
+- [Server-Stored Bookmarks and the AuthPrincipal Seam](../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — the server-stored-view + auth-seam rationale this builds on

@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Single-Image Container with `ServeDir` is the Canonical Deploy Unit"
+description: "lucida-server serves the SPA bundle (lucida-web/dist) directly via a tower-http::ServeDir route, with SPA-fallback to index.html for unknown paths and a \"build the SPA first\" landing page when the dist directory is mi…"
+tags: [lucida, decision]
+source_path: wiki/decisions/0020-single-image-with-servedir.md
 created: 2026-05-13
 modified: 2026-06-25
 ---
@@ -13,7 +18,7 @@ modified: 2026-06-25
 
 ## Why
 
-The SPA and the API must share an origin in production because the auth design (`HttpOnly` + `SameSite=Lax` cookies; [[decisions/0016-backend-mediated-oauth-with-session-cookies]]) blocks cross-origin cookie writes on POST/PATCH/DELETE. Some single-origin shape is required.
+The SPA and the API must share an origin in production because the auth design (`HttpOnly` + `SameSite=Lax` cookies; [Backend-Mediated OAuth with Session Cookies](0016-backend-mediated-oauth-with-session-cookies.md)) blocks cross-origin cookie writes on POST/PATCH/DELETE. Some single-origin shape is required.
 
 Three alternatives could deliver single-origin:
 
@@ -38,7 +43,7 @@ The same decision also collapses three localhost personas onto a clean substrate
 ## Consequences
 
 - The Dockerfile gains a `node:lts` stage that builds the SPA against the WASM artifact from the rust stage. The build sequence is non-trivially ordered (WASM before SPA before runtime), which is the cost of bundling.
-- The SPA build (`pnpm run build`) must succeed cleanly. The three pre-existing TypeScript errors documented in [[gotchas/preexisting-ts-build-errors]] become a hard blocker that the deployment work clears as a prerequisite slice.
+- The SPA build (`pnpm run build`) must succeed cleanly. The three pre-existing TypeScript errors documented in [Pre-existing TS Build Errors (resolved)](../gotchas/preexisting-ts-build-errors.md) become a hard blocker that the deployment work clears as a prerequisite slice.
 - The "missing dist" landing page is a small piece of UX surface that does not exist today and must not be skipped — without it, a stale local checkout produces a blank page rather than an actionable message.
 - The dev workflow gains a small invariant: visiting `:9876` directly will work but serve whatever the SPA dist directory contains (possibly empty / stale). Devs visit `:5173` for hot-reload; this is unchanged but worth knowing.
 - `lucida-server` now has a static-asset responsibility. The new `static_serve` module owns it; main.rs does not gain SPA-serving logic of its own.
@@ -54,9 +59,9 @@ The same decision also collapses three localhost personas onto a clean substrate
 ## Related
 
 - PRD #486 — implementation specification
-- [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — the same-origin requirement this decision answers
-- [[decisions/0017-configurable-from-day-one-for-oss-release]] — `LUCIDA_WEB_DIST` follows the established env-var contract
-- [[gotchas/preexisting-ts-build-errors]] — the prerequisite that becomes a hard blocker
-- [[decisions/0021-deployment-artifacts-as-reference-templates]] — reference manifests consume this image
-- [[lucida-server]] — the crate gaining static-asset responsibility
-- [[lucida-web]] — the SPA whose dist is being served
+- [Backend-Mediated OAuth with Session Cookies](0016-backend-mediated-oauth-with-session-cookies.md) — the same-origin requirement this decision answers
+- [Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md) — `LUCIDA_WEB_DIST` follows the established env-var contract
+- [Pre-existing TS Build Errors (resolved)](../gotchas/preexisting-ts-build-errors.md) — the prerequisite that becomes a hard blocker
+- [Deployment Artifacts Are Reference Templates, Not Opinionated Infra](0021-deployment-artifacts-as-reference-templates.md) — reference manifests consume this image
+- [lucida-server](../systems/crates/lucida-server.md) — the crate gaining static-asset responsibility
+- [lucida-web](../systems/crates/lucida-web.md) — the SPA whose dist is being served

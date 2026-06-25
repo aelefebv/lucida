@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Scene/DocumentState JSON Backward Compatibility"
+description: "Scene composes DocumentState with #[serde(flatten)] so that the on-the-wire JSON shape stayed compatible across the Document-state refactor."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/scene-document-state-json-compat.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -38,5 +43,5 @@ The alternative — bumping the wire format and migrating all snapshots — woul
 
 ## Related
 
-- [[lucida-core]]
-- [[scene-state-and-epochs]]
+- [lucida-core](../systems/crates/lucida-core.md)
+- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)

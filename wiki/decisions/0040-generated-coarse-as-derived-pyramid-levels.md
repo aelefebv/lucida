@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Generated coarse as derived pyramid levels"
+description: "Coarse residency is represented as an explicit level pointer in image metadata."
+tags: [lucida, decision]
+source_path: wiki/decisions/0040-generated-coarse-as-derived-pyramid-levels.md
 created: 2026-05-18
 modified: 2026-05-18
 ---
@@ -52,10 +57,10 @@ that metadata says which level is coarse and the resolver knows which backing
 store owns that level.
 
 Keeping generated coarse in a store-owned derived cache preserves the audience
-split from [[decisions/0005-three-output-import-model]]. Clients see image
+split from [Three-Output Import Model](0005-three-output-import-model.md). Clients see image
 metadata and fetch routes; the server keeps private source handles, cache
 identity, and resolver bindings. It also keeps local-file saved-view behavior
-compatible with [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]:
+compatible with [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md):
 Lucida can use server-local files without writing derived bytes into the user's
 source path.
 
@@ -110,10 +115,10 @@ materialized now"; generation progress is communicated separately.
 
 ## Related
 
-- [[decisions/0005-three-output-import-model]]
-- [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]
-- [[decisions/0039-chunk-only-coarse-detail-residency]]
-- [[principles/planning#2-memory-is-the-binding-constraint]]
-- [[principles/planning#5-wasm-owns-truth-planning-consumes-a-snapshot]]
+- [Three-Output Import Model](0005-three-output-import-model.md)
+- [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md)
+- [Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md)
+- [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
+- [Principles — Planning Domain](../principles/planning.md#5-wasm-owns-truth-planning-consumes-a-snapshot)
 - PRD #672
 - Issue #561

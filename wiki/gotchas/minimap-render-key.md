@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Minimap Skip-When-Stationary via Render Key"
+description: "The minimap doesn't re-render every frame."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/minimap-render-key.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -38,6 +43,6 @@ The minimap renders are cheap individually but add up: each frame's render is on
 
 ## Related
 
-- [[chunk-lifecycle]] — minimap is one of four phases per tick
-- [[lucida-web]]
-- [[decisions/0009-pull-based-raf-with-typed-dirty]] — related render-skip mechanism
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — minimap is one of four phases per tick
+- [lucida-web](../systems/crates/lucida-web.md)
+- [Pull-Based RAF Render Loop with Typed Dirty Flags](../decisions/0009-pull-based-raf-with-typed-dirty.md) — related render-skip mechanism

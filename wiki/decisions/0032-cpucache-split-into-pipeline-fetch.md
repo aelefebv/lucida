@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "`cpuCache.ts` split into `pipeline/fetch/` modules"
+description: "lucida-web/src/pipeline/cpuCache.ts (1627 lines, 35 fields, twelve responsibilities) is split into a new lucida-web/src/pipeline/fetch/ directory of focused modules."
+tags: [lucida, decision]
+source_path: wiki/decisions/0032-cpucache-split-into-pipeline-fetch.md
 created: 2026-05-15
 modified: 2026-06-25
 ---
@@ -13,13 +18,13 @@ The eleven sibling modules: `types.ts`, `cpuCache.ts` (coordinator), `chunkStore
 
 ## Why this shape
 
-[[decisions/0008-cpu-cache-as-sole-fetch-path]] documented `cpuCache.ts` at "~900 lines and dense" with the mitigation being clear `submit → schedule → decode → drain` phase boundaries. The file has nearly doubled since then; the phase boundaries are no longer crisp inside it. Reading or modifying any one phase requires holding the whole god-object in your head.
+[CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md) documented `cpuCache.ts` at "~900 lines and dense" with the mitigation being clear `submit → schedule → decode → drain` phase boundaries. The file has nearly doubled since then; the phase boundaries are no longer crisp inside it. Reading or modifying any one phase requires holding the whole god-object in your head.
 
-The split mirrors [[decisions/0029-planning-index-split-into-per-concern-files]] in shape: a single overgrown file becomes a directory of 100–500 LOC modules, with a thin coordinator on top, behaviour-preserving except for explicit named bug fixes. The two refactors are symmetric across the chunk pipeline (planning is upstream of fetch/decode); having matching shape on both halves makes the pipeline read as one consistent system rather than two unrelated styles.
+The split mirrors [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) in shape: a single overgrown file becomes a directory of 100–500 LOC modules, with a thin coordinator on top, behaviour-preserving except for explicit named bug fixes. The two refactors are symmetric across the chunk pipeline (planning is upstream of fetch/decode); having matching shape on both halves makes the pipeline read as one consistent system rather than two unrelated styles.
 
 ## Why the integration test suite stays monolithic
 
-`cpuCache.test.ts` (1427 LOC, 68 `it()` blocks) is excellent end-to-end coverage and serves as the safety net throughout the eleven slices. Splitting it into per-module test files would mean deciding which test belongs with which module — the same cognitive-load argument [[decisions/0029-planning-index-split-into-per-concern-files]] used. Per-module unit tests are added alongside each extracted module; existing integration tests stay put.
+`cpuCache.test.ts` (1427 LOC, 68 `it()` blocks) is excellent end-to-end coverage and serves as the safety net throughout the eleven slices. Splitting it into per-module test files would mean deciding which test belongs with which module — the same cognitive-load argument [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) used. Per-module unit tests are added alongside each extracted module; existing integration tests stay put.
 
 The four `adaptive eviction` tests are an exception: they migrate to `interactionMode.test.ts` in Slice 3 because they become *pure* (no cache instance needed) once the detector is extracted. Tests that lift cleanly into a new pure module follow the module out; tests that need integration scaffolding stay in `cpuCache.test.ts`.
 
@@ -36,7 +41,7 @@ Each fix is one or two lines once the surrounding structure exists. Pulling them
 
 Slice 7 lands two `Scheduler` instances on `CpuCache` (`chunkScheduler`, `proxyScheduler`) rather than unifying them. Chunks have decode + retry + failure-map; proxies have none of those. The shapes are similar enough to suggest unification but the semantics diverge enough that a `Scheduler<Req, Result>` would be a hollow generic.
 
-Unification is captured as deferred Slice 12 — landed only when a third asset kind appears or the duplication actively bites a feature. The deferral matches the spirit of [[decisions/0006-content-source-vs-fetch-source]] (two near-identical names for related-but-distinct concepts; the alternative — one shared name — was worse).
+Unification is captured as deferred Slice 12 — landed only when a third asset kind appears or the duplication actively bites a feature. The deferral matches the spirit of [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) (two near-identical names for related-but-distinct concepts; the alternative — one shared name — was worse).
 
 ## How this decision shows up in code
 
@@ -49,10 +54,10 @@ Unification is captured as deferred Slice 12 — landed only when a third asset 
 
 ## Related
 
-- [[decisions/0008-cpu-cache-as-sole-fetch-path]] — earlier ADR; documented the file at ~900 lines pre-growth
-- [[decisions/0029-planning-index-split-into-per-concern-files]] — sister-refactor pattern on the upstream half of the chunk pipeline
-- [[decisions/0006-content-source-vs-fetch-source]] — context for the `ContentSource` type and the chunk/proxy duplication-vs-unification trade-off
-- [[cpu-cache]] — subsystem article (refreshed in Phase 5 after the refactor ships)
-- [[chunk-lifecycle]] — overarching pipeline architecture
+- [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md) — earlier ADR; documented the file at ~900 lines pre-growth
+- [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — sister-refactor pattern on the upstream half of the chunk pipeline
+- [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — context for the `ContentSource` type and the chunk/proxy duplication-vs-unification trade-off
+- [CPU Cache](../systems/subsystems/cpu-cache.md) — subsystem article (refreshed in Phase 5 after the refactor ships)
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — overarching pipeline architecture
 - PRD #592 — the work item this ADR was created during
 - `wiki/outputs/dechaos-fetch-decode-2026-05-15/` — the eight-pass design exploration that produced the slice plan

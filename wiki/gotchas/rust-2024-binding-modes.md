@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Rust 2024 Edition Binding Modes"
+description: "lucida-core (and the workspace at large) is on Rust edition 2024 (Cargo.toml workspace says resolver = \"3\" and crates declare edition = \"2024\")."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/rust-2024-binding-modes.md
 created: 2026-04-18
 modified: 2026-04-18
 ---
@@ -7,7 +12,7 @@ modified: 2026-04-18
 
 ## The footgun
 
-[[lucida-core]] (and the workspace at large) is on Rust **edition 2024** (`Cargo.toml` workspace says `resolver = "3"` and crates declare `edition = "2024"`). Binding modes — particularly in patterns inside closures — differ from edition 2021. Code that compiled cleanly under 2021 with `&` references in closures may now require explicit dereferencing or different binding patterns, and vice versa.
+[lucida-core](../systems/crates/lucida-core.md) (and the workspace at large) is on Rust **edition 2024** (`Cargo.toml` workspace says `resolver = "3"` and crates declare `edition = "2024"`). Binding modes — particularly in patterns inside closures — differ from edition 2021. Code that compiled cleanly under 2021 with `&` references in closures may now require explicit dereferencing or different binding patterns, and vice versa.
 
 The compiler error messages are usually clear, but the *fix* often involves removing what looks like necessary `&` or adding what looks like an unnecessary `*`. Reach for the edition-2024 migration guide first, not your usual binding-mode mental model.
 

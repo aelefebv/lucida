@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Budgeted proxy GPU residency"
+description: "Chunk-only coarse/detail residency."
+tags: [lucida, decision]
+source_path: wiki/decisions/0038-budgeted-proxy-gpu-residency.md
 created: 2026-05-18
 modified: 2026-05-18
 ---
@@ -6,7 +11,7 @@ modified: 2026-05-18
 # Budgeted proxy GPU residency
 
 Status: Superseded for the chunk-only coarse/detail path by
-[[decisions/0039-chunk-only-coarse-detail-residency]]. Historical proxy-path
+[Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md). Historical proxy-path
 behavior remains documented here.
 
 ## Decision
@@ -42,10 +47,10 @@ fetching is not the bottleneck.
 Memory is the binding constraint here, so the system needs a positive decision
 about which proxies deserve GPU residency, not a reactive eviction loop after
 everything has already been declared wanted. Whole-well bundles preserve the
-plate invariant from [[decisions/0025-wells-as-planning-unit]]: fields within a
+plate invariant from [Wells Are the Planning Unit on Plates](0025-wells-as-planning-unit.md): fields within a
 well should not diverge arbitrarily because of slot-level eviction.
 
-Keeping the policy in planning follows [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]:
+Keeping the policy in planning follows [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit):
 the ranking and budget decision can be tested from snapshots, catalog metadata,
 and explicit config. The worker stays responsible for GPU resources, descriptor
 updates, and stale upload rejection, but it no longer invents residency policy.
@@ -87,11 +92,11 @@ updates, and stale upload rejection, but it no longer invents residency policy.
 
 ## Related
 
-- [[decisions/0004-multi-pool-atlases]]
-- [[decisions/0024-catalog-degrade-one-tier-at-a-time]]
-- [[decisions/0025-wells-as-planning-unit]]
-- [[decisions/0037-delivery-state-as-cpucache-sidecar]]
-- [[principles/planning#2-memory-is-the-binding-constraint]]
-- [[principles/planning#3-wells-are-coherent-visual-units]]
-- [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+- [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](0004-multi-pool-atlases.md)
+- [Catalog Degradation Steps One Tier at a Time](0024-catalog-degrade-one-tier-at-a-time.md)
+- [Wells Are the Planning Unit on Plates](0025-wells-as-planning-unit.md)
+- [Delivery state as a CpuCache sidecar](0037-delivery-state-as-cpucache-sidecar.md)
+- [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
+- [Principles — Planning Domain](../principles/planning.md#3-wells-are-coherent-visual-units)
+- [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
 - PRD #664

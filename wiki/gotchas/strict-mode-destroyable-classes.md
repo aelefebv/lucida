@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "React Strict-Mode Kills One-Shot `destroy()` Classes"
+description: "A class instance with a destroyed = true flag set in destroy() and never reset gets permanently disabled in dev when its lifecycle is wired to a useEffect cleanup — Strict-Mode double-invokes mount effects (mount → un…"
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/strict-mode-destroyable-classes.md
 created: 2026-05-09
 modified: 2026-06-25
 ---
@@ -37,5 +42,5 @@ As of the PR #483 fix, `UrlSync` is the only instance matching *all* of the abov
 ## Related
 
 - `lucida-web/src/savedView/urlSync.ts::start()` — the canonical re-arm-after-destroy implementation
-- [[saved-views]] — the subsystem that tripped over this
+- [Saved Views](../systems/subsystems/saved-views.md) — the subsystem that tripped over this
 - `wiki/gotchas/app-tsx-hook-order.md` — adjacent React-quirk territory

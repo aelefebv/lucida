@@ -1,4 +1,9 @@
 ---
+type: Crate
+title: "lucida-proxy"
+description: "using source or generated pyramid levels (coarseDetailEnabled defaults true);"
+tags: [lucida, crate]
+source_path: wiki/systems/crates/lucida-proxy.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -11,13 +16,13 @@ this crate stays wired as the proxy fallback when that path can't serve.
 
 Pure-compute proxy generation. Given a `DatasetManifest` plus caller-supplied source-volume bytes, produces a `ProxyAsset` — a small low-resolution placeholder volume that stands in for either a single field's downsampled image (`FieldProxy3D`) or an aggregated well composed of many fields (`WellProxy3D`).
 
-This crate has **no I/O and no async**. Storage, fetching, and caching live in [[lucida-server]]'s `proxy/` module. The split is deliberate — see below.
+This crate has **no I/O and no async**. Storage, fetching, and caching live in [lucida-server](lucida-server.md)'s `proxy/` module. The split is deliberate — see below.
 
 ## Why proxies exist
 
 When a plate dataset zooms out so a single well projects to ≤80 screen pixels, fetching every field's detail chunks is wasted bandwidth. The renderer instead asks for one `WellProxy3D` per visible channel, gets back a coarse aggregate, and draws that. As the user zooms in, planning crosses the next threshold and switches to per-field detail. The proxy fills the gap between "no data yet" and "full detail" without making the renderer wait.
 
-See [[planning-domain]] for the threshold logic and [[chunk-lifecycle]] for the end-to-end flow.
+See [Planning Domain](../subsystems/planning-domain.md) for the threshold logic and [Flow: Chunk Lifecycle](../../flows/chunk-lifecycle.md) for the end-to-end flow.
 
 ## Why pure compute, with the I/O wrapper outside
 
@@ -26,7 +31,7 @@ Two separate problems push in the same direction:
 1. **The algorithm is testable as a function** — feed it a `DatasetManifest` plus an in-memory volume, get a `ProxyAsset`. No fixtures of buckets, no mock stores.
 2. **The runtime concerns differ between callers.** The server uses tokio + a bounded semaphore + an LRU disk cache. Future callers (e.g. an offline batch generator) might want rayon and disk-only output. Keeping the algorithm runtime-agnostic preserves both options.
 
-The trade-off: callers must pre-fetch all source chunks into a `ProxySourceData` impl before invoking `generate_proxy`. The server does this in `ServerProxySource` ([[lucida-server]]'s `proxy/server_source.rs`). The MVP has [[gotchas/proxy-priority-not-honored|priority parameters that aren't yet honored]].
+The trade-off: callers must pre-fetch all source chunks into a `ProxySourceData` impl before invoking `generate_proxy`. The server does this in `ServerProxySource` ([lucida-server](lucida-server.md)'s `proxy/server_source.rs`). The MVP has [priority parameters that aren't yet honored](../../gotchas/proxy-priority-not-honored.md).
 
 ## Module map
 
@@ -38,8 +43,8 @@ The trade-off: callers must pre-fetch all source chunks into a `ProxySourceData`
 
 ## Interactions
 
-- **Direct caller**: [[lucida-server]] `proxy::ProxyGenerator` invokes `generate_proxy` after pre-fetching all source chunks.
-- **Inputs**: a `DatasetManifest` (from [[lucida-content]]) and a `ProxySpec` (entity_id, kind, t, c, target_long_axis).
+- **Direct caller**: [lucida-server](lucida-server.md) `proxy::ProxyGenerator` invokes `generate_proxy` after pre-fetching all source chunks.
+- **Inputs**: a `DatasetManifest` (from [lucida-content](lucida-content.md)) and a `ProxySpec` (entity_id, kind, t, c, target_long_axis).
 - **Outputs**: a `ProxyAsset` containing the 64-byte header and a `Vec<u16>` voxel buffer in `[Z, Y, X]` row-major.
 
 ## Invariants

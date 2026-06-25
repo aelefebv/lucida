@@ -1,4 +1,9 @@
 ---
+type: Flow
+title: "Flow: Presence Propagation"
+description: "From \"user A pans\" to \"user B's viewport reflects A's new position\" (when B is following A) or \"user B sees A's cursor move on screen\" (always)."
+tags: [lucida, flow]
+source_path: wiki/flows/presence-propagation.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -14,12 +19,12 @@ From "user A pans" to "user B's viewport reflects A's new position" (when B is f
 3. **Render-loop dirty** — the caller marks `interactiveDirty` so the local render reflects immediately.
 4. **Throttled emit** — the caller queues a `presence` message via `bridge.ts::sendPresence`, throttled at ~50 ms; the latest queued payload wins (older queued payloads are dropped).
 5. **Wire** — `{type: "presence", camera, view, display}` JSON to the WebSocket.
-6. **Server** ([[lucida-server]] `handler.rs`) — `Session::update_presence` mutates `clients[id]` in place. Constructs `ServerMessage::PresenceUpdate { client_id, camera, view, display }` and broadcasts via `BroadcastItem::PresenceUpdate { sender, json }`.
+6. **Server** ([lucida-server](../systems/crates/lucida-server.md) `handler.rs`) — `Session::update_presence` mutates `clients[id]` in place. Constructs `ServerMessage::PresenceUpdate { client_id, camera, view, display }` and broadcasts via `BroadcastItem::PresenceUpdate { sender, json }`.
 7. **Self-filter** — the broadcast loop checks `sender == id` and skips sending back to the originator.
 8. **All other clients** receive `presence_update`. `bridge.ts::onPresenceUpdate` routes to `useBridge`'s handler which:
    - Updates the per-peer presence state in the local store.
    - If the receiving client is **following** `client_id`, imports the camera/view/display locally (`scene.import_presence`) and **re-emits** its own presence (see invariants below).
-   - Otherwise, just stores it (e.g. for the [[lucida-web|peer cursor overlay]] to read).
+   - Otherwise, just stores it (e.g. for the [peer cursor overlay](../systems/crates/lucida-web.md) to read).
 
 ## Trace: cursor (`cursor` message)
 
@@ -42,7 +47,7 @@ The server-side path is identical: `Session::update_dataset_presence` → `Serve
 
 ## Latency
 
-- Local render after user input: **immediate** (`interactiveDirty` is throttle-exempt — see [[decisions/0009-pull-based-raf-with-typed-dirty]]).
+- Local render after user input: **immediate** (`interactiveDirty` is throttle-exempt — see [Pull-Based RAF Render Loop with Typed Dirty Flags](../decisions/0009-pull-based-raf-with-typed-dirty.md)).
 - Wire latency to the next-hop server: 1–10 ms typical.
 - Server fan-out: O(n) per peer; for typical n<10, sub-millisecond.
 - Receiver render: next RAF — ≤16 ms.
@@ -51,6 +56,6 @@ End-to-end (panner finger → follower screen): ~30–50 ms typical, dominated b
 
 ## Related
 
-- [[presence-and-follow-mode]]
-- [[flows/follow-chain-resolution]]
-- [[decisions/0001-document-vs-viewport-split]]
+- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md)
+- [Flow: Follow Chain Resolution](follow-chain-resolution.md)
+- [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md)

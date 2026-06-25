@@ -1,17 +1,22 @@
 ---
+type: Crate
+title: "lucida-web"
+description: "React 19 + Vite 7 + WebGPU frontend that consumes the lucida-core WASM build and renders multi-channel volumetric microscopy datasets."
+tags: [lucida, crate]
+source_path: wiki/systems/crates/lucida-web.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
 
 # lucida-web
 
-React 19 + Vite 7 + WebGPU frontend that consumes the [[lucida-core]] WASM build and renders multi-channel volumetric microscopy datasets. The web client is a thin orchestration layer over the WASM Scene — JS owns the network, the GPU, and the DOM; WASM owns the truth about what's visible and where.
+React 19 + Vite 7 + WebGPU frontend that consumes the [lucida-core](lucida-core.md) WASM build and renders multi-channel volumetric microscopy datasets. The web client is a thin orchestration layer over the WASM Scene — JS owns the network, the GPU, and the DOM; WASM owns the truth about what's visible and where.
 
 This article is a roadmap. The substantive content for each subsystem lives in its own article.
 
 ## Why a thin client over WASM
 
-The web client doesn't reimplement the Scene model. It doesn't decide what's visible, what LOD to use, or where entities project to on screen — it asks WASM. This split exists because the same questions need answers on the server, the CLI, and the Python bindings, and we'd otherwise have to re-implement view-query math four times. See [[decisions/0007-wasm-scene-as-source-of-truth]].
+The web client doesn't reimplement the Scene model. It doesn't decide what's visible, what LOD to use, or where entities project to on screen — it asks WASM. This split exists because the same questions need answers on the server, the CLI, and the Python bindings, and we'd otherwise have to re-implement view-query math four times. See [WASM Scene as Source of Truth](../../decisions/0007-wasm-scene-as-source-of-truth.md).
 
 Practically, the web client owns:
 
@@ -29,32 +34,32 @@ WASM owns:
 
 ## Subsystem map
 
-- [[chunk-lifecycle]] — end-to-end overview pointing into the deep dive
-- [[planning-domain]] — wanted-set computation, detail/coarse tier selection, lane-based priorities
-- [[cpu-cache]] — fetch scheduling, decode pool, tiered LRU, drain to GPU
-- [[generated-coarse]] — server-generated coarse metadata/readiness consumed by planning and fetch
-- [[gpu-residency]] — tiered atlas pools, indirection buffers, descriptor buffer, semantic fallback chain
-- [[worker-protocol]] — main-thread ↔ render-worker message contract
-- [[scene-state-and-epochs]] — how WASM state is pulled into JS
-- [[presence-and-follow-mode]] — peer-to-peer presence, transitive follow chains
-- [[layout-system]] — registered layouts, switching, derived placements
-- [[multichannel-and-colormaps]] — per-channel settings, LUT textures, composite
-- [[saved-views]] annotations/mentions/comment-threads — `AnnotationOverlay{,3D}` + draft overlay, `MentionsOfMe`, `ThreadPopover`, `annotation*.ts`, and `savedView/{build,restore}AnnotationView.ts`
+- [Flow: Chunk Lifecycle](../../flows/chunk-lifecycle.md) — end-to-end overview pointing into the deep dive
+- [Planning Domain](../subsystems/planning-domain.md) — wanted-set computation, detail/coarse tier selection, lane-based priorities
+- [CPU Cache](../subsystems/cpu-cache.md) — fetch scheduling, decode pool, tiered LRU, drain to GPU
+- [Generated Coarse](../subsystems/generated-coarse.md) — server-generated coarse metadata/readiness consumed by planning and fetch
+- [GPU Residency](../subsystems/gpu-residency.md) — tiered atlas pools, indirection buffers, descriptor buffer, semantic fallback chain
+- [Worker Protocol](../subsystems/worker-protocol.md) — main-thread ↔ render-worker message contract
+- [Scene State and Epochs](../subsystems/scene-state-and-epochs.md) — how WASM state is pulled into JS
+- [Presence and Follow Mode](../subsystems/presence-and-follow-mode.md) — peer-to-peer presence, transitive follow chains
+- [Layout System](../subsystems/layout-system.md) — registered layouts, switching, derived placements
+- [Multi-Channel and Colormaps](../subsystems/multichannel-and-colormaps.md) — per-channel settings, LUT textures, composite
+- [Saved Views](../subsystems/saved-views.md) annotations/mentions/comment-threads — `AnnotationOverlay{,3D}` + draft overlay, `MentionsOfMe`, `ThreadPopover`, `annotation*.ts`, and `savedView/{build,restore}AnnotationView.ts`
 
 ## Top-level files in `src/`
 
-- `App.tsx` — the root component. Threads ~10 hooks together with deliberate ordering and callback refs to break circular deps. See [[gotchas/app-tsx-hook-order]].
+- `App.tsx` — the root component. Threads ~10 hooks together with deliberate ordering and callback refs to break circular deps. See [App.tsx Hook Order and Callback Refs](../../gotchas/app-tsx-hook-order.md).
 - `main.tsx` — Vite entry; `createRoot` mount
 - `bridge.ts` — WebSocket client; throttles presence/cursor/dataset-presence updates
-- `manifestTypes.ts` — TS mirror of [[lucida-content]]'s `DatasetManifest` and [[lucida-protocol]]'s `FetchSource`
+- `manifestTypes.ts` — TS mirror of [lucida-content](lucida-content.md)'s `DatasetManifest` and [lucida-protocol](lucida-protocol.md)'s `FetchSource`
 - `applyAndSend.ts` — `applyDocumentCommand` (sends to server) vs `applyViewportCommand` (local + presence emit)
 - `renderLoop.ts` / `renderLoopTypes.ts` — pull-based RAF loop with typed dirty flags
 - `slicePath.ts` / `volumePath.ts` / `minimapPath.ts` — entry points for the three render paths
 - `tickCommon.ts` — shared tick helpers
 - `session.ts` — session state container
 - `colormaps.ts` — 15 colormap LUTs
-- `savedView/` — web side of [[saved-views]]: `encoder.ts` (deep, gzip+base64url with default-stripping), `applier.ts` (deep, async orchestrator with `applyInProgress` flag and `subscribeApplyResult` channel), `urlSync.ts` (deep, debounced `replaceState` + popstate + bootstrap from `#view=…` and `#b=<id>`), `captureBuilder.ts`, `bookmarksApi.ts`, `useBookmarks.ts`, `types.ts`. Components: `BookmarkSidebar.tsx`, `ShareToolbarButton.tsx`, `LoadingViewBanner.tsx`.
-- `auth/` — [[auth]] consumer: `whoami.ts`, `useAuthState.ts`, `AuthGate.tsx`, `AuthSession.tsx`, `ProfileMenu.tsx`, `UnauthLanding.tsx`.
+- `savedView/` — web side of [Saved Views](../subsystems/saved-views.md): `encoder.ts` (deep, gzip+base64url with default-stripping), `applier.ts` (deep, async orchestrator with `applyInProgress` flag and `subscribeApplyResult` channel), `urlSync.ts` (deep, debounced `replaceState` + popstate + bootstrap from `#view=…` and `#b=<id>`), `captureBuilder.ts`, `bookmarksApi.ts`, `useBookmarks.ts`, `types.ts`. Components: `BookmarkSidebar.tsx`, `ShareToolbarButton.tsx`, `LoadingViewBanner.tsx`.
+- `auth/` — [Authentication](../subsystems/auth.md) consumer: `whoami.ts`, `useAuthState.ts`, `AuthGate.tsx`, `AuthSession.tsx`, `ProfileMenu.tsx`, `UnauthLanding.tsx`.
 - Workspace dashboard/routing: `WorkspaceRoot.tsx`, `WorkspaceDashboard.tsx`, `WorkspaceSharingDialog.tsx`, `workspaceApi.ts` — workspace list/open, deep-link routing, and sharing UI.
 - `types.ts` — shared TS types
 
@@ -72,18 +77,18 @@ The WASM bundle is **not** a `src/` subdir: `npm run build:wasm` builds it into 
 
 ## Interactions
 
-- **Inputs**: `lucida_core` WASM (Scene/View/Camera/Command), `bridge.ts` WebSocket connection to [[lucida-server]], browser events (mouse, keyboard, resize)
+- **Inputs**: `lucida_core` WASM (Scene/View/Camera/Command), `bridge.ts` WebSocket connection to [lucida-server](lucida-server.md), browser events (mouse, keyboard, resize)
 - **Outputs**: WebGPU draw calls via OffscreenCanvas in a worker; `ClientMessage` (commands + presence + cursor + follow + open-dataset) over WebSocket; debug telemetry to the DebugPanel
 
 ## Invariants
 
-- **All GPU work is on the worker.** The main thread never touches WebGPU directly; the canvas is transferred via `OffscreenCanvas`. See [[decisions/0003-gpu-on-dedicated-worker]].
-- **`interactiveDirty` and `residencyDirty` are throttled differently.** `interactiveDirty` renders immediately; `residencyDirty` waits ~33ms. The reason and consequence are in [[chunk-lifecycle]].
-- **The classification gate is call-site discipline, not a runtime predicate.** `applyDocumentCommand` (sends to server, awaits Ack/CommandBroadcast) vs `applyViewportCommand` (applies locally + emits presence) is the choice point; the Rust side enforces it at compile time via the disjoint `DocumentCommand` / `ViewportCommand` enums. Misclassifying a viewport command as a document command floods peers; misclassifying a document command as viewport silently drops shared state. See [[gotchas/document-vs-viewport-classification]].
+- **All GPU work is on the worker.** The main thread never touches WebGPU directly; the canvas is transferred via `OffscreenCanvas`. See [All GPU Work on a Dedicated Web Worker](../../decisions/0003-gpu-on-dedicated-worker.md).
+- **`interactiveDirty` and `residencyDirty` are throttled differently.** `interactiveDirty` renders immediately; `residencyDirty` waits ~33ms. The reason and consequence are in [Flow: Chunk Lifecycle](../../flows/chunk-lifecycle.md).
+- **The classification gate is call-site discipline, not a runtime predicate.** `applyDocumentCommand` (sends to server, awaits Ack/CommandBroadcast) vs `applyViewportCommand` (applies locally + emits presence) is the choice point; the Rust side enforces it at compile time via the disjoint `DocumentCommand` / `ViewportCommand` enums. Misclassifying a viewport command as a document command floods peers; misclassifying a document command as viewport silently drops shared state. See [Document vs Viewport Command Classification](../../gotchas/document-vs-viewport-classification.md).
 - **`Scene::apply_command` is called for every incoming command broadcast** so all clients converge on the same document state. Local viewport commands take a separate path (`applyViewportCommand`).
 
 ## Gotchas
 
-- **Build TypeScript with the project flag**: `tsc --noEmit -p tsconfig.app.json`. Plain `npx tsc --noEmit` is a no-op in this repo. See [[gotchas/ts-typecheck-trap]].
-- **`npm run build` has known TS errors** in `renderClient.ts` (SharedArrayBuffer), `renderLoop.ts` (unused import), `lz4.worker.ts` (postMessage overload). These are pre-existing — don't chase them when adding unrelated work. See [[gotchas/preexisting-ts-build-errors]].
+- **Build TypeScript with the project flag**: `tsc --noEmit -p tsconfig.app.json`. Plain `npx tsc --noEmit` is a no-op in this repo. See [TS Type-Check Trap](../../gotchas/ts-typecheck-trap.md).
+- **`npm run build` has known TS errors** in `renderClient.ts` (SharedArrayBuffer), `renderLoop.ts` (unused import), `lz4.worker.ts` (postMessage overload). These are pre-existing — don't chase them when adding unrelated work. See [Pre-existing TS Build Errors (resolved)](../../gotchas/preexisting-ts-build-errors.md).
 - **WASM rebuild required after Rust changes** — `npm run build:wasm` regenerates `src/wasm/`. Vite hot-reload picks it up but won't trigger the rebuild itself.

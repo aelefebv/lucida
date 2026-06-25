@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Annotations, comments, and mentions"
+description: "A collaborative markup layer over a dataset: point/line/box pins, a flat"
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/annotations.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
@@ -9,7 +14,7 @@ A collaborative markup layer over a dataset: point/line/box **pins**, a flat
 **comment thread** per pin, and inline `@mention` text in comments. It spans all
 three tiers — authoritative state in `lucida-core`, persistence/broadcast in
 `lucida-server`, and the overlays/inbox in `lucida-web` — and is the richest
-collaboration feature beyond [[presence-and-follow-mode|presence/follow]].
+collaboration feature beyond [presence/follow](presence-and-follow-mode.md).
 
 ## Authoritative model (lucida-core)
 
@@ -18,11 +23,11 @@ collaboration feature beyond [[presence-and-follow-mode|presence/follow]].
 world `position [x,y]`, an additive `z` depth, discrete view selectors `t`/`c`,
 an `AnnotationKind` (Point/Line/Box), an optional second vertex `end` (line
 endpoint / box corner), its insertion-ordered `comments`, an optional plate
-`anchor` entity, and an optional captured `view` (a [[saved-views|SavedView]]).
+`anchor` entity, and an optional captured `view` (a [SavedView](saved-views.md)).
 Every field added after slice 1 is `#[serde(default)]`, so old persisted/wire
 documents deserialize unchanged and a pin serializes identically whether or not
 it predates a field — the load-bearing wire-compat invariant (see
-[[scene-document-state-json-compat]]).
+[Scene/DocumentState JSON Backward Compatibility](../../gotchas/scene-document-state-json-compat.md)).
 
 Mutations are six `DocumentCommand` variants — `AddAnnotation`,
 `RemoveAnnotation`, `MoveAnnotation`, `AddComment`, `RemoveComment`,
@@ -35,7 +40,7 @@ clean no-op (never mints a phantom pin); removing a pin cascades its thread.
 
 All six commands bump one counter, `epochs.annotation` (`epoch.rs`) — a pin's
 thread is part of its annotation state, so comment edits invalidate the same
-epoch as the pin itself. See [[scene-state-and-epochs]] for the full epoch model.
+epoch as the pin itself. See [Scene State and Epochs](scene-state-and-epochs.md) for the full epoch model.
 
 ### Anchoring and re-anchoring on layout switch
 
@@ -47,7 +52,7 @@ inside the canonical apply from synced state, so server and clients derive the
 **same** anchor without it riding the wire. When the active layout changes,
 `reanchor_for_layout` rigidly translates each anchored pin (position + `end`) by
 its anchor entity's displacement between layouts, keeping it on the data it was
-dropped on across every [[layout-system|layout]]. `z` is never touched (layouts
+dropped on across every [layout](layout-system.md). `z` is never touched (layouts
 are 2-D in-plane); an unanchored pin, or one whose anchor isn't placed in *both*
 layouts, is left alone (no phantom origin jump).
 
@@ -83,7 +88,7 @@ Two security invariants are enforced server-/core-side, not by the UI:
 
 Dataset **duplication** remaps a copied pin's embedded `view` onto the copy's
 dataset ids across every id-keyed field, so a copied pin's "go to author's view"
-never dangles back to the source. See [[workspaces]].
+never dangles back to the source. See [Workspaces](workspaces.md).
 
 ## Web surface (lucida-web)
 
@@ -120,7 +125,7 @@ mention jump, or a deep-link — `restoreAnnotationView` runs the **LIGHT** rest
 tier: recipient-local viewport/display commands only (camera mode, z/t/c, global
 + per-channel display), clamped to the pin's own dataset extents. It deliberately
 **never** opens/hides datasets, broadcasts a layout, or calls `sendCommand` — the
-heavy [[saved-views|SavedView]] applier does that for cold share-link opens, and
+heavy [SavedView](saved-views.md) applier does that for cold share-link opens, and
 doing it for an in-session jump would be destructive. The boundary is enforced by
 construction (the destructive commands have no call site there).
 

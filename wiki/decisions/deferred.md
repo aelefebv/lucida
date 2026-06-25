@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Deferred — considered but not built yet"
+description: "Things we explored, decided not to ship today, and want to remember"
+tags: [lucida, decision]
+source_path: wiki/decisions/deferred.md
 created: 2026-05-14
 modified: 2026-05-14
 ---
@@ -14,7 +19,7 @@ that establishes the relevant context.
 Today, each entity holds chunks at exactly one LOD level in the GPU
 atlas at a time. When the user zooms past a threshold, the entity's
 old-LOD chunks evict, the new-LOD chunks fetch and upload fresh, and
-the [[principles/planning|proxy fallback chain]] bridges the visible
+the [proxy fallback chain](../principles/planning.md) bridges the visible
 gap while detail loads.
 
 **Sketch.** Allow each entity to hold chunks at multiple LOD levels
@@ -39,7 +44,7 @@ absorb the extra residency.
 **Why deferred.** No current UX evidence that zoom transitions feel
 jarring — the proxy fallback chain bridges the gap acceptably for
 the workloads we test against. The single-LOD model is naturally
-bounded ([[principles/planning#2-memory-is-the-binding-constraint]]);
+bounded ([Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint));
 multi-LOD requires explicit memory policy that we don't have a need
 to design yet. Reconsider if sustained user feedback says zoom
 snappiness matters more than the current trade, or if a perf budget
@@ -47,7 +52,7 @@ makes idle atlas slots cheaper than they are today.
 
 ## Per-browser anonymous identity in disabled-auth mode
 
-Today, [[decisions/0018-auth-mode-auto-detect-by-bind-address|disabled-auth mode]]
+Today, [disabled-auth mode](0018-auth-mode-auto-detect-by-bind-address.md)
 defaults every browser to the same admin `dev@local` principal. A
 developer can now intentionally switch a browser to another local dev
 identity with `/auth/dev/login`, which is enough for manual role tests,

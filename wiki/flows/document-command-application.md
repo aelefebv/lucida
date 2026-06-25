@@ -1,4 +1,9 @@
 ---
+type: Flow
+title: "Flow: Document Command Application"
+description: "The path a DocumentCommand (e.g."
+tags: [lucida, flow]
+source_path: wiki/flows/document-command-application.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -15,7 +20,7 @@ The path a `DocumentCommand` (e.g. `RegisterLayout`, `SetActiveLayout`, `RemoveD
    - **Apply locally and immediately** — `scene.apply_command(json)` mutates the local Scene and bumps the relevant epoch(s) *before* the command leaves the tab (optimistic apply).
    - Serialize the command and send it via `bridge.ts::sendCommand`.
 4. **Wire**: `{type: "command", command: {type: "set_active_layout", ...}}`.
-5. **Server** ([[lucida-server]] `handler.rs`):
+5. **Server** ([lucida-server](../systems/crates/lucida-server.md) `handler.rs`):
    - Match `ClientMessage::Command { command }`.
    - `let seq = session.lock().await.apply(command.clone())`. `Session::apply` mutates `document` and advances `seq`. The command also lands in the 256-entry history ring.
    - Construct two messages:
@@ -25,7 +30,7 @@ The path a `DocumentCommand` (e.g. `RegisterLayout`, `SetActiveLayout`, `RemoveD
 6. **Receiver clients**:
    - **Sender** sees `Ack { seq }`. Its `onAck` handler in `useBridge.ts` is a **no-op** — the sender already applied the command optimistically in step 3 and is deliberately excluded from the rebroadcast (the outbound loop selects `ack_json` when `sender == id`). The `Ack` exists only as a delivery/seq receipt; it triggers no apply.
    - **Other clients** see `CommandBroadcast { seq, command }`. `useBridge` calls `wasmScene.apply_command(commandJson)` → same mutation, same epoch bumps.
-7. **Render loop responds** — the relevant epoch bump triggers either a fast plan re-run or a full cold-state rebuild on the next tick. See [[scene-state-and-epochs]].
+7. **Render loop responds** — the relevant epoch bump triggers either a fast plan re-run or a full cold-state rebuild on the next tick. See [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md).
 
 ## Why optimistic apply converges
 
@@ -38,7 +43,7 @@ The win is **zero added latency** for document commands: a layout switch or pin 
 
 ## Special case: `DatasetOpened`
 
-`DatasetOpened` doesn't follow the normal client→server→back path. It's **server-originated**, in response to a separate `OpenRemoteDataset` request from a client. See [[flows/dataset-opening]] for the full trace.
+`DatasetOpened` doesn't follow the normal client→server→back path. It's **server-originated**, in response to a separate `OpenRemoteDataset` request from a client. See [Flow: Dataset Opening](dataset-opening.md) for the full trace.
 
 The key difference: the server uses sentinel `sender = u64::MAX` so no client matches and **everyone receives a `CommandBroadcast`** (not an `Ack`). The requesting client never `apply`'d the command itself, so it needs the broadcast path too.
 
@@ -55,13 +60,13 @@ Server-originated, similar to `DatasetOpened`. Reserved for S5+ when proxy avail
 
 ## Gotchas
 
-- **Misclassifying a viewport command as a document command** floods peers with sequenced shared-state updates and bumps `seq` for every mouse-pixel of pan. See [[gotchas/document-vs-viewport-classification]].
+- **Misclassifying a viewport command as a document command** floods peers with sequenced shared-state updates and bumps `seq` for every mouse-pixel of pan. See [Document vs Viewport Command Classification](../gotchas/document-vs-viewport-classification.md).
 - **A failed connection during apply-and-send** applies locally but loses the in-flight broadcast. The sender's tab is now ahead of the session: peers never see the command and there's no replay-on-reconnect for recent un-broadcast commands. Mitigated by document commands being rare.
 - **Optimistic apply hides server-side rejection.** Because the sender applies before the server sees the command, a command the server (or workspace persistence) declines still appears applied in the sender's tab; there is no rollback. Document commands are deliberately kept simple/total so this rarely bites.
 
 ## Related
 
-- [[scene-state-and-epochs]]
-- [[decisions/0001-document-vs-viewport-split]]
-- [[lucida-server]]
-- [[lucida-core]]
+- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)
+- [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md)
+- [lucida-server](../systems/crates/lucida-server.md)
+- [lucida-core](../systems/crates/lucida-core.md)

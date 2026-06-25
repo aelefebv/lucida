@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Use `GoogleCloudStorageBuilder::from_env()`, not `new()`, for GCS credentials"
+description: "A user trying to open a gs:// dataset from docker run (or any non-laptop, non-GKE environment) will set GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json — Google's standard ADC env var, used by every Google SDK and tutori…"
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/gcs-credentials.md
 created: 2026-05-14
 modified: 2026-05-14
 ---
@@ -31,7 +36,7 @@ Pre-fix, the user's bind-mounted ADC JSON sat unused because `new()` never asked
 
 ## Effective discovery order
 
-Post-fix, the `gs://` arm of `lucida-store::backend::open` (see [[lucida-store]]) constructs `GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket)`. The discovery order:
+Post-fix, the `gs://` arm of `lucida-store::backend::open` (see [lucida-store](../systems/crates/lucida-store.md)) constructs `GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket)`. The discovery order:
 
 1. **`GOOGLE_SERVICE_ACCOUNT*`** — object_store-native (read by `from_env`). Use this if you already export these for other tools in your stack.
 2. **`GOOGLE_APPLICATION_CREDENTIALS`** — Google's standard ADC env. Read by `from_env` (lowercased to `google_application_credentials`, parsed via `GoogleConfigKey::FromStr`, routed to `application_credentials_path`). Accepts both service-account JSON keys and user-credentials JSON (the file `gcloud auth application-default login` writes).
@@ -63,7 +68,7 @@ A probe at `open()` time (e.g. `HEAD` against `metadata.google.internal` with a 
 
 ## Why no `LUCIDA_GCS_*` env vars?
 
-Cloud-vendor SDK passthrough preserves the cloud vendor's standard env vars. The S3 arm inherits `AWS_*` directly via `AmazonS3Builder::from_env()`; the GCS arm inherits `GOOGLE_*` the same way. Wrapping these in a `LUCIDA_GCS_*` namespace would invent a dialect that adds nothing and breaks anyone running `gcloud` and lucida together. See [[oss-config-defaults]] for the broader env-var-contract posture.
+Cloud-vendor SDK passthrough preserves the cloud vendor's standard env vars. The S3 arm inherits `AWS_*` directly via `AmazonS3Builder::from_env()`; the GCS arm inherits `GOOGLE_*` the same way. Wrapping these in a `LUCIDA_GCS_*` namespace would invent a dialect that adds nothing and breaks anyone running `gcloud` and lucida together. See [OSS Config Defaults and the LUCIDA_* Env Var Contract](oss-config-defaults.md) for the broader env-var-contract posture.
 
 ## Public-bucket reads
 
@@ -71,5 +76,5 @@ Anonymous `gs://` access (`with_skip_signature(true)` on the object_store side) 
 
 ## Related
 
-- [[lucida-store]] — backend.rs URL routing and the credential-discovery wrapper.
-- [[oss-config-defaults]] — `LUCIDA_*` env-var contract and why cloud-vendor passthrough wins for cloud SDK config.
+- [lucida-store](../systems/crates/lucida-store.md) — backend.rs URL routing and the credential-discovery wrapper.
+- [OSS Config Defaults and the LUCIDA_* Env Var Contract](oss-config-defaults.md) — `LUCIDA_*` env-var contract and why cloud-vendor passthrough wins for cloud SDK config.

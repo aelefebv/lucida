@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Stage Translations Are Microns; Lucida Composes in Voxels"
+description: "OME-Zarr stores stage-positioned plate FOV translations in physical units (typically microns) inside coordinateTransformations.translation."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/stage-translations-are-microns.md
 created: 2026-04-18
 modified: 2026-04-18
 ---
@@ -9,7 +14,7 @@ modified: 2026-04-18
 
 OME-Zarr stores stage-positioned plate FOV translations in **physical units** (typically microns) inside `coordinateTransformations.translation`. Lucida composes everything downstream in **voxel units**. Forgetting to convert produces wells with FOVs scattered far outside the well's voxel bounds — a visible disaster.
 
-[[lucida-store]] `import.rs` does the conversion at import time, dividing the translation by the level-0 X/Y voxel scale before forming the `field → well` transform.
+[lucida-store](../systems/crates/lucida-store.md) `import.rs` does the conversion at import time, dividing the translation by the level-0 X/Y voxel scale before forming the `field → well` transform.
 
 ## Where the conversion lives
 
@@ -37,10 +42,10 @@ A defensive check: if `scale_x` or `scale_y` is missing or non-finite (`!isfinit
 
 ## Why this conversion lives in the importer
 
-The downstream layers ([[planning-domain]], [[gpu-residency]], shaders) all assume voxel units. Pushing the conversion to import means they don't have to thread "what unit am I in" through every transform. The cost is one place that has to know the unit story; the alternative would have been every consumer needing to know.
+The downstream layers ([Planning Domain](../systems/subsystems/planning-domain.md), [GPU Residency](../systems/subsystems/gpu-residency.md), shaders) all assume voxel units. Pushing the conversion to import means they don't have to thread "what unit am I in" through every transform. The cost is one place that has to know the unit story; the alternative would have been every consumer needing to know.
 
 ## Related
 
-- [[lucida-store]]
-- [[lucida-content]] — the downstream `VoxelTransform` consumers
+- [lucida-store](../systems/crates/lucida-store.md)
+- [lucida-content](../systems/crates/lucida-content.md) — the downstream `VoxelTransform` consumers
 - The `import_plate_with_stage_positions` test in `lucida-store/src/import.rs`

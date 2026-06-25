@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Minimap"
+description: "lucida-web/src/minimapPath.ts plus renderer/minimapHandlers.ts — the separate low-resolution spatial context path."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/minimap.md
 created: 2026-05-19
 modified: 2026-06-25
 ---
@@ -7,7 +12,7 @@ modified: 2026-06-25
 
 `lucida-web/src/minimapPath.ts` plus `renderer/minimapHandlers.ts` — the separate low-resolution spatial context path. The minimap is intentionally not the same thing as the coarse fallback tier.
 
-It is fed by **two paths**: [[planning-domain]] emits `lane:"minimap"` requests into the [[cpu-cache]], AND `tickMinimapOverview` (in `minimapPath.ts`) independently drains the CPU cache and uploads to the worker via the `minimapUploadOverviewChunksForLayer` message. The overview texture is **per-member/FOV** (each minimap layer gets its own), not one whole-dataset texture.
+It is fed by **two paths**: [Planning Domain](planning-domain.md) emits `lane:"minimap"` requests into the [CPU Cache](cpu-cache.md), AND `tickMinimapOverview` (in `minimapPath.ts`) independently drains the CPU cache and uploads to the worker via the `minimapUploadOverviewChunksForLayer` message. The overview texture is **per-member/FOV** (each minimap layer gets its own), not one whole-dataset texture.
 
 ## Model
 
@@ -22,9 +27,9 @@ The minimap binds its own colormap LUT (`resolveMinimapLayerColormap`) and per-c
 
 ## Interactions
 
-- [[planning-domain]] emits minimap requests at `MINIMAP_LANE_OFFSET` so first spatial context wins over detail/coarse fill.
-- [[cpu-cache]] routes `lane: "minimap"` through the coarse/minimap bucket so it does not compete with detail cache residency.
-- [[gpu-residency]] owns minimap GPU resources separately from slice/volume tier pools and removes them on dataset cleanup.
+- [Planning Domain](planning-domain.md) emits minimap requests at `MINIMAP_LANE_OFFSET` so first spatial context wins over detail/coarse fill.
+- [CPU Cache](cpu-cache.md) routes `lane: "minimap"` through the coarse/minimap bucket so it does not compete with detail cache residency.
+- [GPU Residency](gpu-residency.md) owns minimap GPU resources separately from slice/volume tier pools and removes them on dataset cleanup.
 
 ## Invariants
 
@@ -34,7 +39,7 @@ The minimap binds its own colormap LUT (`resolveMinimapLayerColormap`) and per-c
 
 ## Related
 
-- [[decisions/0023-minimap-lane-with-highest-priority]]
-- [[gotchas/minimap-render-key]]
-- [[cpu-cache]]
-- [[gpu-residency]]
+- [Minimap Lane with Highest Priority](../../decisions/0023-minimap-lane-with-highest-priority.md)
+- [Minimap Skip-When-Stationary via Render Key](../../gotchas/minimap-render-key.md)
+- [CPU Cache](cpu-cache.md)
+- [GPU Residency](gpu-residency.md)

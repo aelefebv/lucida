@@ -1,11 +1,16 @@
 ---
+type: Subsystem
+title: "Multi-Channel and Colormaps"
+description: "How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/multichannel-and-colormaps.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
 
 # Multi-Channel and Colormaps
 
-How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings. The pipeline runs from `ChannelSettings` in [[lucida-core]] through per-name LUT textures in `colormaps.ts` through composite-key naming in [[gpu-residency]] to `compositor.wgsl`.
+How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings. The pipeline runs from `ChannelSettings` in [lucida-core](../crates/lucida-core.md) through per-name LUT textures in `colormaps.ts` through composite-key naming in [GPU Residency](gpu-residency.md) to `compositor.wgsl`.
 
 ## Why multichannel is its own subsystem
 
@@ -13,9 +18,9 @@ Microscopy datasets routinely have 3–6 channels representing different fluorop
 
 ## Per-channel state
 
-In [[lucida-core]] `scene/types.rs`:
+In [lucida-core](../crates/lucida-core.md) `scene/types.rs`:
 
-- `ChannelSettings { visible, colormap, contrast_min, contrast_max, gamma }` — five fields, defaulted from the [[scene-state-and-epochs|DatasetDisplaySettings]] when a dataset opens.
+- `ChannelSettings { visible, colormap, contrast_min, contrast_max, gamma }` — five fields, defaulted from the [DatasetDisplaySettings](scene-state-and-epochs.md) when a dataset opens.
 - `DatasetDisplaySettings.channel_settings: Vec<ChannelSettings>` — one entry per channel, length set from the first image's `shape[1]` (C dimension).
 - `BlendMode` has THREE variants: `Alpha`, `Additive`, `Max`. Two distinct defaults: the dataset-level `blend_mode` defaults to `Alpha`, while `channel_blend_mode` defaults to `Additive`. Don't conflate them.
 
@@ -57,7 +62,7 @@ Composite keys identify which compositor output buffer a render result lands in:
 
 ## Interactions
 
-- **State**: [[scene-state-and-epochs|DocumentState/DatasetDisplaySettings]] holds the per-channel settings.
+- **State**: [DocumentState/DatasetDisplaySettings](scene-state-and-epochs.md) holds the per-channel settings.
 - **UI**: `LayerPanel.tsx` exposes channel sublayers when multichannel is enabled. `ColormapSelector.tsx` is the dropdown. `ContrastControls.tsx` covers contrast/gamma.
 - **Pipeline**: planning reads `snapshot.selection.visibleChannels` (computed from `channel_settings` at the snapshot boundary) to skip invisible channels. The tick coordinator builds per-channel descriptor entries.
 - **GPU**: descriptors carry per-channel colormap/contrast/gamma; per-layer blend state composites.

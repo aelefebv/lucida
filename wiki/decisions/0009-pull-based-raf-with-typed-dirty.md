@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Pull-Based RAF Render Loop with Typed Dirty Flags"
+description: "The web client's render loop (lucida-web/src/renderLoop.ts) is pull-based and driven by requestAnimationFrame."
+tags: [lucida, decision]
+source_path: wiki/decisions/0009-pull-based-raf-with-typed-dirty.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -47,6 +52,6 @@ The typed split lets the loop be aggressive when the user wants snap response (`
 
 ## Related
 
-- [[chunk-lifecycle]]
-- [[scene-state-and-epochs]] — the WASM-side epoch model the orchestrator consults to decide if planning is needed at all
-- [[gotchas/minimap-render-key]] — a related render-skip mechanism
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)
+- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md) — the WASM-side epoch model the orchestrator consults to decide if planning is needed at all
+- [Minimap Skip-When-Stationary via Render Key](../gotchas/minimap-render-key.md) — a related render-skip mechanism

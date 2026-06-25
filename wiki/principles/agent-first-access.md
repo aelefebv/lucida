@@ -1,11 +1,16 @@
 ---
+type: Principle
+title: "Agent-First Access"
+description: "Lucida should be drivable without a human in the loop: an LLM agent or a script can orient itself in a dataset, render any view reproducibly, drill to an exact slice, and read a dataset's health — all programmatically…"
+tags: [lucida, principle]
+source_path: wiki/principles/agent-first-access.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Agent-First Access
 
-> A product principle. What a *principle* is — and how these are read — is in [[principles/index]].
+> A product principle. What a *principle* is — and how these are read — is in [Principles](index.md).
 
 ## Scope
 
@@ -32,8 +37,8 @@ Lucida should be drivable without a human in the loop: an LLM agent or a script 
   - today: a render is fully determined by its `SavedView` (a versioned wire format with defaults stripped), so the same SavedView yields the same image; the montage's JSON sidecar makes each cell independently reproducible.
 
 - **The programmatic surface should be as complete as the rendered one.**
-  - aspirational: today the rich agent verbs (montage, headless render, slice, health) are CLI-first; the Python binding does not yet expose montage or render. The guiding light is parity of *capability*, reached through whichever surface an agent prefers — see [[principles/surface-parity]].
+  - aspirational: today the rich agent verbs (montage, headless render, slice, health) are CLI-first; the Python binding does not yet expose montage or render. The guiding light is parity of *capability*, reached through whichever surface an agent prefers — see [Surface Parity](surface-parity.md).
 
 ## Related
 
-[[lucida-cli]] · [[saved-views]] · [[principles/surface-parity]] · [[principles/collaboration-and-reproducibility]]
+[lucida-cli](../systems/crates/lucida-cli.md) · [Saved Views](../systems/subsystems/saved-views.md) · [Surface Parity](surface-parity.md) · [Collaboration & Reproducibility](collaboration-and-reproducibility.md)

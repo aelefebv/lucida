@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Coordinate-Frame Naming Discipline at the JS↔WASM Boundary"
+description: "Two related naming conventions are adopted on the JS side of the planning subsystem:"
+tags: [lucida, decision]
+source_path: wiki/decisions/0030-coordinate-frame-naming-discipline.md
 created: 2026-05-15
 modified: 2026-06-25
 ---
@@ -14,7 +19,7 @@ Two related naming conventions are adopted on the JS side of the planning subsys
 
 Both are applied JS-side only. Rust source naming (`pub centroid_world: [f64; 3]` in `lucida-core/src/query.rs`, `xy_bounds`, `sort_center`, etc.) stays untouched. The Rust→JS snake_case→camelCase translation in `pipeline/planning/snapshot.ts` is the seam where suffix application happens.
 
-Cited [[principles/planning#5-wasm-owns-truth-planning-consumes-a-snapshot]] — the JS-side suffix discipline and axis constants clarify the JS↔WASM boundary without altering WASM's ownership of math. Principle 5 is about ownership of values, not naming.
+Cited [Principles — Planning Domain](../principles/planning.md#5-wasm-owns-truth-planning-consumes-a-snapshot) — the JS-side suffix discipline and axis constants clarify the JS↔WASM boundary without altering WASM's ownership of math. Principle 5 is about ownership of values, not naming.
 
 ## Concrete suffix renames
 
@@ -49,8 +54,8 @@ Local vars (e.g., `centerX` / `centerY` / `centerZ` in `chunkDistanceFromCenter`
 
 ## Related
 
-- [[principles/planning]] — the framework this decision lives within
-- [[planning-domain]] — subsystem article; refreshed for the new naming
-- [[decisions/0029-planning-index-split-into-per-concern-files]] — sister decision; same PRD
-- [[decisions/0031-validate-planning-inputs-dev-mode-boundary-check]] — sister decision; same PRD
+- [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
+- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new naming
+- [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — sister decision; same PRD
+- [`validatePlanningInputs` as the Dev-Mode Boundary Check](0031-validate-planning-inputs-dev-mode-boundary-check.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

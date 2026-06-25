@@ -1,11 +1,16 @@
 ---
+type: Subsystem
+title: "Camera and Navigation"
+description: "How Lucida moves the viewpoint through a dataset, and how raw keyboard/pointer input becomes camera motion."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/camera-and-navigation.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Camera and Navigation
 
-How Lucida moves the viewpoint through a dataset, and how raw keyboard/pointer input becomes camera motion. The camera *model* is canonical in [[lucida-core]]'s `camera.rs`; the *input layer* (keybinding registry, RAF-driven loops, the mode/focal-depth UI) lives in `lucida-web`. The two are deliberately split: the math is testable in Rust with no DOM, and the web side only ever calls into WASM.
+How Lucida moves the viewpoint through a dataset, and how raw keyboard/pointer input becomes camera motion. The camera *model* is canonical in [lucida-core](../crates/lucida-core.md)'s `camera.rs`; the *input layer* (keybinding registry, RAF-driven loops, the mode/focal-depth UI) lives in `lucida-web`. The two are deliberately split: the math is testable in Rust with no DOM, and the web side only ever calls into WASM.
 
 ## Three camera models, one enum
 
@@ -15,9 +20,9 @@ How Lucida moves the viewpoint through a dataset, and how raw keyboard/pointer i
 - **`Arcball`** — 3D orbit. Spherical `(theta, phi, distance)` around a `target`. Phi is intentionally **unconstrained** (no gimbal clamp) — the spherical up-vector is recomputed every frame so the view matrix stays finite at any phi. This is the default 3D model.
 - **`Fly`** — 3D first-person. `position` + quaternion `orientation`. Advanced by `fly_tick(dt, forward, right, up, yaw, pitch, roll)`; movement is in camera-local axes, scaled by `base_speed * speed_multiplier`.
 
-The enum holds `f64`, so it derives `PartialEq` but not `Eq` — which is what lets a [[saved-views|SavedView]] embedded on an annotation derive `PartialEq` too.
+The enum holds `f64`, so it derives `PartialEq` but not `Eq` — which is what lets a [SavedView](saved-views.md) embedded on an annotation derive `PartialEq` too.
 
-`Camera` exposes a uniform surface regardless of variant: `viewport`/`set_viewport`, `effective_zoom`, `eye_position`, `project_to_screen` (returns `None` behind the camera in 3D), `unproject_ray`, and `visible_region`. Everything downstream — picking, [[planning-domain|planning]], presence — talks to this surface, not the variant.
+`Camera` exposes a uniform surface regardless of variant: `viewport`/`set_viewport`, `effective_zoom`, `eye_position`, `project_to_screen` (returns `None` behind the camera in 3D), `unproject_ray`, and `visible_region`. Everything downstream — picking, [planning](planning-domain.md), presence — talks to this surface, not the variant.
 
 ## View mode is derived, not stored
 
@@ -28,7 +33,7 @@ There is no separate "2D vs 3D" flag in core. The **view mode is a function of t
 
 These are two different toggles: view-mode crosses the 2D/3D boundary; camera-mode picks the 3D navigation style. Both call `bridge.breakFollow()` (you can't be follow-driven and also steer) and re-emit presence. **Gotcha:** `cameraMode` is React state that *mirrors* WASM — the scene command is the source of truth, and the mirror is best-effort (`try/catch` around `camera_mode()`), so a restore path always re-reads from WASM rather than trusting the React copy.
 
-Each mode setter (`set_mode_slice/arcball/fly` in `wasm.rs`) bumps the **`view` epoch** so the [[scene-state-and-epochs|epoch fast-path]] knows the camera changed. Switching arcball→fly is not a no-op state-wise: it also seeds `base_speed = volume_diagonal * 0.3` so fly speed scales to dataset size. Core provides `Fly::to_arcball` / `Arcball::to_fly` to convert *preserving eye position and view direction*, so a toggle doesn't teleport the viewpoint.
+Each mode setter (`set_mode_slice/arcball/fly` in `wasm.rs`) bumps the **`view` epoch** so the [epoch fast-path](scene-state-and-epochs.md) knows the camera changed. Switching arcball→fly is not a no-op state-wise: it also seeds `base_speed = volume_diagonal * 0.3` so fly speed scales to dataset size. Core provides `Fly::to_arcball` / `Arcball::to_fly` to convert *preserving eye position and view direction*, so a toggle doesn't teleport the viewpoint.
 
 ## Input layer: keybindings + RAF loops
 
@@ -53,11 +58,11 @@ It is purely a **fetch-priority hint** — not camera state, not saved-view/disp
 
 ## Interactions
 
-- **[[planning-domain]]** — `Camera::visible_region` is the planner's primary input: voxel `xy_bounds`, `z_range`, `effective_zoom` (LOD selection), `sort_center` (center-out order), and `frustum_planes` (per-chunk culling, Gribb-Hartmann from the MVP). The 3D path derives `effective_zoom` from distance *to the ray-hit surface*, not the orbit-target distance, so LOD resolves what you're actually looking at. `depthBiasView` rides the same planning config as every other tunable.
-- **[[gpu-residency]]** — the worker renders from `view_proj` / `inv_view_proj` matrices the camera produces. Camera motion → `view` epoch bump → render path wakes; residency changes only when planning re-runs.
-- **[[scene-state-and-epochs]]** — every camera mutation bumps the `view` epoch and only that; this is what makes a pan or orbit cheap.
-- **[[presence-and-follow-mode]]** — the camera is part of per-client presence; navigation re-emits it (throttled). Following another peer is mutually exclusive with steering, hence the `breakFollow()` on every toggle.
-- **[[lucida-web]]** — `App.tsx` owns the toggles + `FocalDepthControl`; `VolumeViewer` owns the in-3D input loops.
+- **[Planning Domain](planning-domain.md)** — `Camera::visible_region` is the planner's primary input: voxel `xy_bounds`, `z_range`, `effective_zoom` (LOD selection), `sort_center` (center-out order), and `frustum_planes` (per-chunk culling, Gribb-Hartmann from the MVP). The 3D path derives `effective_zoom` from distance *to the ray-hit surface*, not the orbit-target distance, so LOD resolves what you're actually looking at. `depthBiasView` rides the same planning config as every other tunable.
+- **[GPU Residency](gpu-residency.md)** — the worker renders from `view_proj` / `inv_view_proj` matrices the camera produces. Camera motion → `view` epoch bump → render path wakes; residency changes only when planning re-runs.
+- **[Scene State and Epochs](scene-state-and-epochs.md)** — every camera mutation bumps the `view` epoch and only that; this is what makes a pan or orbit cheap.
+- **[Presence and Follow Mode](presence-and-follow-mode.md)** — the camera is part of per-client presence; navigation re-emits it (throttled). Following another peer is mutually exclusive with steering, hence the `breakFollow()` on every toggle.
+- **[lucida-web](../crates/lucida-web.md)** — `App.tsx` owns the toggles + `FocalDepthControl`; `VolumeViewer` owns the in-3D input loops.
 
 ## Gotchas
 

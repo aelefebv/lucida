@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Deployment Artifacts Are Reference Templates, Not Opinionated Infra"
+description: "The deployment artifacts shipped in extras/deploy/ are raw YAML reference templates with <PLACEHOLDER> values, not packaged infrastructure."
+tags: [lucida, decision]
+source_path: wiki/decisions/0021-deployment-artifacts-as-reference-templates.md
 created: 2026-05-13
 modified: 2026-06-25
 ---
@@ -13,7 +18,7 @@ The deployment artifacts shipped in `extras/deploy/` are **raw YAML reference te
 
 ## Why
 
-Lucida is open-source and intentionally OSS-permissive ([[decisions/0017-configurable-from-day-one-for-oss-release]]). The deployment surface should be analogous to the configuration surface — every adopter-specific value is supplied by the adopter, not baked in.
+Lucida is open-source and intentionally OSS-permissive ([Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md)). The deployment surface should be analogous to the configuration surface — every adopter-specific value is supplied by the adopter, not baked in.
 
 Three real alternatives existed:
 
@@ -56,6 +61,6 @@ The same logic applies to provider-specific resources. A `gke-internal-lb/` Kust
 ## Related
 
 - PRD #486 — implementation specification
-- [[decisions/0017-configurable-from-day-one-for-oss-release]] — the OSS posture this extends from configuration to deployment
-- [[decisions/0020-single-image-with-servedir]] — the deploy unit these manifests reference
-- [[gotchas/oss-config-defaults]] — env-var contract the manifests plug values into
+- [Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md) — the OSS posture this extends from configuration to deployment
+- [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](0020-single-image-with-servedir.md) — the deploy unit these manifests reference
+- [OSS Config Defaults and the LUCIDA_* Env Var Contract](../gotchas/oss-config-defaults.md) — env-var contract the manifests plug values into

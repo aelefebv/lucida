@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)"
+description: "Chunk-only coarse/detail residency."
+tags: [lucida, decision]
+source_path: wiki/decisions/0004-multi-pool-atlases.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -6,7 +11,7 @@ modified: 2026-06-25
 # Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)
 
 Status: Superseded for the chunk-only coarse/detail path by
-[[decisions/0039-chunk-only-coarse-detail-residency]]. Historical proxy-atlas
+[Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md). Historical proxy-atlas
 behavior remains documented here.
 
 ## Decision
@@ -42,6 +47,6 @@ By keying on `(channel)`, channels stop fighting for shared capacity; by keying 
 
 ## Related
 
-- [[gpu-residency]] — atlas architecture
-- [[chunk-lifecycle]] — where the upload path consults pool capacity
-- [[planning-domain]] — what generates the proxy demand
+- [GPU Residency](../systems/subsystems/gpu-residency.md) — atlas architecture
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — where the upload path consults pool capacity
+- [Planning Domain](../systems/subsystems/planning-domain.md) — what generates the proxy demand

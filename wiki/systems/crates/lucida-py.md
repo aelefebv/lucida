@@ -1,4 +1,9 @@
 ---
+type: Crate
+title: "lucida-py"
+description: "Python package for Lucida scripting."
+tags: [lucida, crate]
+source_path: wiki/systems/crates/lucida-py.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -7,8 +12,8 @@ modified: 2026-06-25
 
 Python package for Lucida scripting. It has two surfaces:
 
-1. **Server client (`lucida.client`)** — pure-Python workspace client for [[lucida-server]].
-2. **Local analysis bindings** — `pyo3` + `maturin` bindings for [[lucida-core]] and [[lucida-store]].
+1. **Server client (`lucida.client`)** — pure-Python workspace client for [lucida-server](lucida-server.md).
+2. **Local analysis bindings** — `pyo3` + `maturin` bindings for [lucida-core](lucida-core.md) and [lucida-store](lucida-store.md).
 
 The local binding classes (the only `#[pyclass]` types) are:
 
@@ -42,10 +47,10 @@ Three concrete uses:
 
 ## Interactions
 
-- **`LucidaClient` connects to [[lucida-server]]** over HTTP for status/auth/workspace APIs and WebSocket for workspace session state and commands.
-- **Token sourcing mirrors [[lucida-cli]] where practical.** Explicit constructor token wins, then `LUCIDA_TOKEN`, then macOS Keychain under the `lucida-cli` service, then the CLI-compatible config token.
-- **Server config mirrors [[lucida-cli]] where practical.** `LUCIDA_CONFIG_PATH` wins, then `$XDG_CONFIG_HOME/lucida/config.json`, then `~/.config/lucida/config.json`; `LucidaClient(...).workspaces.use(...)` persists the default workspace id under the normalized server URL.
-- **Local bindings import** [[lucida-core]] and [[lucida-store]] directly. No FFI tricks — pyo3 handles the conversion.
+- **`LucidaClient` connects to [lucida-server](lucida-server.md)** over HTTP for status/auth/workspace APIs and WebSocket for workspace session state and commands.
+- **Token sourcing mirrors [lucida-cli](lucida-cli.md) where practical.** Explicit constructor token wins, then `LUCIDA_TOKEN`, then macOS Keychain under the `lucida-cli` service, then the CLI-compatible config token.
+- **Server config mirrors [lucida-cli](lucida-cli.md) where practical.** `LUCIDA_CONFIG_PATH` wins, then `$XDG_CONFIG_HOME/lucida/config.json`, then `~/.config/lucida/config.json`; `LucidaClient(...).workspaces.use(...)` persists the default workspace id under the normalized server URL.
+- **Local bindings import** [lucida-core](lucida-core.md) and [lucida-store](lucida-store.md) directly. No FFI tricks — pyo3 handles the conversion.
 - **JSON is the lingua franca**: `apply_command(json)`, `presence_json()`, `chunk_plan()` all use serde JSON to cross the boundary. This avoids defining a parallel pyo3 type for every Rust struct.
 - **Workspace commands use the same protocol messages as browser/CLI sessions.** Dataset open sends `open_remote_dataset`; dataset-open progress uses `dataset_open_progress`; dataset diagnostics use `dataset_health` including source-cache pressure and generated-cache telemetry; dataset binding retry sends `dataset_retry`; view commands send `presence`; layer/channel commands send `dataset_presence`.
 

@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Pre-existing TS Build Errors (resolved)"
+description: "pnpm run build in lucida-web/ exits 0."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/preexisting-ts-build-errors.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -7,7 +12,7 @@ modified: 2026-06-25
 
 ## Current state
 
-`pnpm run build` in `lucida-web/` exits 0. `tsc -b` (and `tsc --noEmit -p tsconfig.app.json`) is clean. The three issues described below were resolved as a prerequisite for the deployment Dockerfile build (see [[decisions/0020-single-image-with-servedir]]). Treat this article as a historical record — there is no live footgun to work around.
+`pnpm run build` in `lucida-web/` exits 0. `tsc -b` (and `tsc --noEmit -p tsconfig.app.json`) is clean. The three issues described below were resolved as a prerequisite for the deployment Dockerfile build (see [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../decisions/0020-single-image-with-servedir.md)). Treat this article as a historical record — there is no live footgun to work around.
 
 The bulk of the cleanup landed in commit `593eb8d` ("chore: clear 27 pre-existing TypeScript errors in lucida-web", closing issues #438-#443) on April 20, 2026.
 
@@ -28,12 +33,12 @@ The fix pattern (see commit `593eb8d`):
 ## What this means now
 
 - `pnpm run build` is the right command and it just works.
-- `tsc --noEmit -p tsconfig.app.json` remains the right narrow check during development; see [[ts-typecheck-trap]] for why plain `tsc --noEmit` is a no-op in this repo.
+- `tsc --noEmit -p tsconfig.app.json` remains the right narrow check during development; see [TS Type-Check Trap](ts-typecheck-trap.md) for why plain `tsc --noEmit` is a no-op in this repo.
 - If a similar `SharedArrayBuffer` widening error reappears in the future (e.g. after a TypeScript or `@webgpu/types` bump), the established pattern is the narrowing cast at the boundary, with a comment referencing the original issue (#438) so the next reader knows cross-origin isolation isn't supported.
 
 ## Related
 
-- [[ts-typecheck-trap]] — companion gotcha about `tsc --noEmit` being a no-op without `-p`
-- [[systems/crates/lucida-web]] — the crate these files live in
-- [[decisions/0020-single-image-with-servedir]] — the deployment ADR that depends on a clean `pnpm run build`
+- [TS Type-Check Trap](ts-typecheck-trap.md) — companion gotcha about `tsc --noEmit` being a no-op without `-p`
+- [lucida-web](../systems/crates/lucida-web.md) — the crate these files live in
+- [Single-Image Container with `ServeDir` is the Canonical Deploy Unit](../decisions/0020-single-image-with-servedir.md) — the deployment ADR that depends on a clean `pnpm run build`
 - `lucida-web/package.json` build scripts

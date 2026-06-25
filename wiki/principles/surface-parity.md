@@ -1,11 +1,16 @@
 ---
+type: Principle
+title: "Surface Parity"
+description: "Lucida is reachable from a web viewer, a lucida CLI, Python, and (by design) an LLM agent."
+tags: [lucida, principle]
+source_path: wiki/principles/surface-parity.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Surface Parity
 
-> A product principle. What a *principle* is — and how these are read — is in [[principles/index]].
+> A product principle. What a *principle* is — and how these are read — is in [Principles](index.md).
 
 ## Scope
 
@@ -23,7 +28,7 @@ Lucida is reachable from a web viewer, a `lucida` CLI, Python, and (by design) a
   - today: edits broadcast to all connected clients as `CommandBroadcast`; presence, cursor, and per-dataset display flow through the same relay, so a web client, a CLI session, and a Python script can sit in one workspace and see each other's changes.
 
 - **The view math has one home; no surface re-derives it.**
-  - today: projected size, frustum, LOD, and importance are computed in `lucida-core` and read via snapshot — the web client does not reimplement them in JS. This is the planner's [[principles/planning]] §5, seen at the product level: one implementation is *why* the surfaces agree.
+  - today: projected size, frustum, LOD, and importance are computed in `lucida-core` and read via snapshot — the web client does not reimplement them in JS. This is the planner's [Principles — Planning Domain](planning.md) §5, seen at the product level: one implementation is *why* the surfaces agree.
 
 - **Identity and permissions mean the same thing on every surface.**
   - today: workspace auth and the server-authored peer identity apply uniformly; a CLI peer and a web peer are the same kind of participant in the snapshot's peer list.
@@ -33,4 +38,4 @@ Lucida is reachable from a web viewer, a `lucida` CLI, Python, and (by design) a
 
 ## Related
 
-[[workspaces]] · [[lucida-cli]] · [[lucida-py]] · [[lucida-web]] · [[principles/agent-first-access]]
+[Workspaces](../systems/subsystems/workspaces.md) · [lucida-cli](../systems/crates/lucida-cli.md) · [lucida-py](../systems/crates/lucida-py.md) · [lucida-web](../systems/crates/lucida-web.md) · [Agent-First Access](agent-first-access.md)

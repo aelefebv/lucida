@@ -1,4 +1,9 @@
 ---
+type: Flow
+title: "Flow: Authentication Sign-In"
+description: "The path from \"user navigates to lucida unauthenticated\" to \"user lands at the originally-requested URL with a valid lucida_session cookie.\" Same flow handles cold first-visit and post-expiry re-auth."
+tags: [lucida, flow]
+source_path: wiki/flows/auth-signin.md
 created: 2026-05-08
 modified: 2026-06-25
 ---
@@ -10,13 +15,13 @@ The path from "user navigates to lucida unauthenticated" to "user lands at the o
 ## Trace: cold first-visit
 
 1. **User navigates** — `https://lucida.example.com/some-path#view=abc` in a fresh browser (no cookie).
-2. **Middleware** ([[auth]] `auth/middleware.rs`) — extractor returns `Err(Unauthenticated)`. The middleware's `unauthenticated_response` branches on `Accept`:
+2. **Middleware** ([Authentication](../systems/subsystems/auth.md) `auth/middleware.rs`) — extractor returns `Err(Unauthenticated)`. The middleware's `unauthenticated_response` branches on `Accept`:
    - HTML route → returns inline `UnauthLanding` HTML page (status 200, body is the JS shim).
    - API route → bare 401 JSON.
 3. **JS shim runs** in the unauth landing page:
    - Captures `location.hash` (browser-only — never sent to the server).
    - `window.location.replace("/auth/start?path=" + encodeURIComponent(location.pathname + location.search) + "&hash=" + encodeURIComponent(location.hash.slice(1)))` — `replace` keeps the landing page out of history.
-4. **`GET/POST /auth/start`** (shim navigates via GET; both methods registered) ([[lucida-server]] `auth/handlers.rs::auth_start`):
+4. **`GET/POST /auth/start`** (shim navigates via GET; both methods registered) ([lucida-server](../systems/crates/lucida-server.md) `auth/handlers.rs::auth_start`):
    - Generates a 256-bit random `state` token (URL-safe base64).
    - INSERTs `pending_auth` row with `{state_token, intended_path, intended_hash, created_at}`.
    - Builds Google authorization URL: `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=…&redirect_uri=…&scope=openid email profile&state=<token>`.
@@ -47,7 +52,7 @@ Different shape. `POST /auth/logout` (`auth/handlers.rs::logout`):
 1. Reads cookie, calls `LoginSessionStore::delete(id)`.
 2. Emits TWO `Set-Cookie` headers (via `AppendHeaders`):
    - `lucida_session=; Max-Age=0; Path=/; …` — clears the session cookie.
-   - `lucida_signed_out=1; Max-Age=600; HttpOnly; SameSite=Lax; Path=/; …` — sets the marker cookie (per [[decisions/0019-post-logout-marker-cookie-and-prompt-select-account]]).
+   - `lucida_signed_out=1; Max-Age=600; HttpOnly; SameSite=Lax; Path=/; …` — sets the marker cookie (per [Post-Logout Marker Cookie + `prompt=select_account`](../decisions/0019-post-logout-marker-cookie-and-prompt-select-account.md)).
 3. 302 to `/`.
 
 The SPA's `useAuthState.signOut` then `await refresh()`, which re-fetches `/auth/whoami`. The marker-aware middleware returns 401 with body `{ "error": "unauthenticated", "signedOut": true }`. The SPA threads `signedOut: true` onto `AuthState`; `AuthGate` re-renders `<UnauthLanding signedOut />`, which renders a static "Signed out — Sign in again" card instead of auto-bouncing.
@@ -64,7 +69,7 @@ The marker has a 10-minute TTL as a backstop. Without the marker, `/auth/start` 
 
 Why this shape: Google's authorization session typically outlives lucida's. A naive auto-bounce after logout would 302 → `/auth/start` → Google → silent pass-through → callback → fresh lucida session, defeating the user's intent. The marker plus `prompt=select_account` gives the user a deliberate choice point. Clearing the marker only on callback success means a chooser-bail doesn't silently undo the logout. Auto-bounce is still correct for *passive* unauth (session expired mid-tab), where re-auth without a click is the friction-free behavior the user wants — which is why the marker only flips on after explicit logout.
 
-Logout is local-only — no Google revocation, no federation. See [[decisions/0016-backend-mediated-oauth-with-session-cookies]] §"Why local-only logout."
+Logout is local-only — no Google revocation, no federation. See [Backend-Mediated OAuth with Session Cookies](../decisions/0016-backend-mediated-oauth-with-session-cookies.md) §"Why local-only logout."
 
 ## Cross-origin wrinkle in dev
 
@@ -96,7 +101,7 @@ User-fixable problems get specific actionable messages (`hd_mismatch`, `unverifi
 
 ## Related
 
-- [[auth]] — the subsystem this flow lives in
-- [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — design rationale for the flow shape
-- [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — when this flow is active vs the stub
-- [[gotchas/oss-config-defaults]] — common misconfigurations of the env-var surface
+- [Authentication](../systems/subsystems/auth.md) — the subsystem this flow lives in
+- [Backend-Mediated OAuth with Session Cookies](../decisions/0016-backend-mediated-oauth-with-session-cookies.md) — design rationale for the flow shape
+- [Auth Mode Auto-Detect by Bind Address](../decisions/0018-auth-mode-auto-detect-by-bind-address.md) — when this flow is active vs the stub
+- [OSS Config Defaults and the LUCIDA_* Env Var Contract](../gotchas/oss-config-defaults.md) — common misconfigurations of the env-var surface

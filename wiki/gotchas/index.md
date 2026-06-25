@@ -1,33 +1,28 @@
----
-created: 2026-04-18
-modified: 2026-05-14
----
-
 # Gotchas
 
 Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of thing a new contributor won't know until it bites them.
 
 ## Articles
 
-- [[ts-typecheck-trap]] — `npx tsc --noEmit` is a no-op; use `tsc --noEmit -p tsconfig.app.json`
-- [[preexisting-ts-build-errors]] — known unrelated `npm run build` failures in `renderClient.ts`, `renderLoop.ts`, `lz4.worker.ts`
-- [[rust-2024-binding-modes]] — edition 2024 binding inference differs from 2021; trust the compiler suggestion
-- [[app-tsx-hook-order]] — App.tsx hook order is load-bearing; callback refs break circular deps
-- [[document-vs-viewport-classification]] — misclassifying a command floods peers (viewport-as-document) or silently desyncs (document-as-viewport)
-- [[scene-document-state-json-compat]] — `Scene` flattens `DocumentState` for JSON compat; new fields need backward-compat tests
-- [[upload-budgets-per-frame]] — 8 MB main view, 2 MB minimap; non-linear behavior at limits, profile before changing
-- [[worker-eviction-async-reporting]] — worker posts `chunksEvicted` async; main-thread send-tracking must reconcile
-- [[minimap-render-key]] — minimap skips render when key matches; new visual inputs must extend the key
-- [[wasm-rebuild-after-rust-changes]] — `npm run build:wasm` is the second half of every Rust change
-- [[stage-translations-are-microns]] — OME-Zarr stores stage positions in microns; `lucida-store` converts to voxels at import
-- [[proxy-priority-not-honored]] — `priority` parameter on `ProxyGenerator::request` exists for API stability but FIFO today
-- [[non-canonical-axes]] — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible. Pinned axes and canonical-indexed axes (`t`, `c`) with `chunk_size > 1` are handled via post-decode byte slicing
-- [[blosc-support]] — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time
-- [[wire-chunk-key-conventions]] — wire chunk keys split asymmetrically: `t/c` are voxel coords, `z/y/x` are chunk-grid coords. The divide-and-slice for `t/c` happens server-side
-- [[oss-config-defaults]] — `LUCIDA_*` env var contract, common misconfigurations (bind + auth mode mismatch, TLS-terminating-proxy cookie issue, hosted domain edge cases)
-- [[saved-view-credentials-in-urls]] — dataset URLs in `#view=…` saved views are exposed via clipboard, browser history, screenshots; presigned URLs and credentialed URLs leak to anyone with the link
-- [[axum-query-multivalue]] — Axum's default `Query<T>` extractor silently drops repeated keys (`?dataset=A&dataset=B` → only `B` reaches the handler)
-- [[strict-mode-destroyable-classes]] — class instances with a `destroyed` flag set in `destroy()` get permanently disabled in dev (Strict-Mode double-invokes mount effects); `start()` must reset the flag
-- [[saved-view-client-only-state]] — JS-only preferences (e.g. `autoContrastMap`) that mutate WASM state need a dedicated SavedView field or recipients silently override with their defaults
-- [[branching-and-releases]] — trunk-based shape; image tags (not branches) for environment promotion; manual-merge release-please; branch-protection prerequisite
-- [[gcs-credentials]] — `object_store::gcp` discovery is incomplete vs. Google's full ADC contract; lucida forwards `GOOGLE_APPLICATION_CREDENTIALS` explicitly; off-cluster metadata-server hangs ~13s
+- [TS Type-Check Trap](ts-typecheck-trap.md) — `npx tsc --noEmit` is a no-op; use `tsc --noEmit -p tsconfig.app.json`
+- [Pre-existing TS Build Errors (resolved)](preexisting-ts-build-errors.md) — known unrelated `npm run build` failures in `renderClient.ts`, `renderLoop.ts`, `lz4.worker.ts`
+- [Rust 2024 Edition Binding Modes](rust-2024-binding-modes.md) — edition 2024 binding inference differs from 2021; trust the compiler suggestion
+- [App.tsx Hook Order and Callback Refs](app-tsx-hook-order.md) — App.tsx hook order is load-bearing; callback refs break circular deps
+- [Document vs Viewport Command Classification](document-vs-viewport-classification.md) — misclassifying a command floods peers (viewport-as-document) or silently desyncs (document-as-viewport)
+- [Scene/DocumentState JSON Backward Compatibility](scene-document-state-json-compat.md) — `Scene` flattens `DocumentState` for JSON compat; new fields need backward-compat tests
+- [Upload Budgets Are Per-Frame and Per-Path](upload-budgets-per-frame.md) — 8 MB main view, 2 MB minimap; non-linear behavior at limits, profile before changing
+- [Worker Eviction Reporting Is Async](worker-eviction-async-reporting.md) — worker posts `chunksEvicted` async; main-thread send-tracking must reconcile
+- [Minimap Skip-When-Stationary via Render Key](minimap-render-key.md) — minimap skips render when key matches; new visual inputs must extend the key
+- [WASM Rebuild After Rust Changes](wasm-rebuild-after-rust-changes.md) — `npm run build:wasm` is the second half of every Rust change
+- [Stage Translations Are Microns; Lucida Composes in Voxels](stage-translations-are-microns.md) — OME-Zarr stores stage positions in microns; `lucida-store` converts to voxels at import
+- [Proxy Generator Priority Is Not Honored Yet](proxy-priority-not-honored.md) — `priority` parameter on `ProxyGenerator::request` exists for API stability but FIFO today
+- [Non-canonical axes are pinned to index 0](non-canonical-axes.md) — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible. Pinned axes and canonical-indexed axes (`t`, `c`) with `chunk_size > 1` are handled via post-decode byte slicing
+- [Blosc support is a deliberately narrow subset](blosc-support.md) — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time
+- [Wire chunk keys: t/c are voxel coords, z/y/x are chunk-grid coords](wire-chunk-key-conventions.md) — wire chunk keys split asymmetrically: `t/c` are voxel coords, `z/y/x` are chunk-grid coords. The divide-and-slice for `t/c` happens server-side
+- [OSS Config Defaults and the LUCIDA_* Env Var Contract](oss-config-defaults.md) — `LUCIDA_*` env var contract, common misconfigurations (bind + auth mode mismatch, TLS-terminating-proxy cookie issue, hosted domain edge cases)
+- [Saved-View URLs Expose Dataset URLs (and Anything in Them)](saved-view-credentials-in-urls.md) — dataset URLs in `#view=…` saved views are exposed via clipboard, browser history, screenshots; presigned URLs and credentialed URLs leak to anyone with the link
+- [Axum's Default Query Extractor Drops Repeated Keys](axum-query-multivalue.md) — Axum's default `Query<T>` extractor silently drops repeated keys (`?dataset=A&dataset=B` → only `B` reaches the handler)
+- [React Strict-Mode Kills One-Shot `destroy()` Classes](strict-mode-destroyable-classes.md) — class instances with a `destroyed` flag set in `destroy()` get permanently disabled in dev (Strict-Mode double-invokes mount effects); `start()` must reset the flag
+- [SavedView Mirrors WASM Presence — Client-Only State Won't Round-Trip Without a Dedicated Field](saved-view-client-only-state.md) — JS-only preferences (e.g. `autoContrastMap`) that mutate WASM state need a dedicated SavedView field or recipients silently override with their defaults
+- [Branching and Releases](branching-and-releases.md) — trunk-based shape; image tags (not branches) for environment promotion; manual-merge release-please; branch-protection prerequisite
+- [Use `GoogleCloudStorageBuilder::from_env()`, not `new()`, for GCS credentials](gcs-credentials.md) — `object_store::gcp` discovery is incomplete vs. Google's full ADC contract; lucida forwards `GOOGLE_APPLICATION_CREDENTIALS` explicitly; off-cluster metadata-server hangs ~13s

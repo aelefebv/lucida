@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Debug overlays & diagnostics UI"
+description: "The in-app developer surface for inspecting the rendering pipeline live: an"
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/debug-overlays.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
@@ -30,10 +35,10 @@ orchestrator (tick coordinator), and CPU cache that already exist.
     projected circles (3 planes in 3D).
 - **`DebugPanel`** — a tabbed side panel: Render, Scene, Pick, Planning, Cache,
   **Health**, Orch, Catalog, Config, Logging. *Config* is the live planning-config
-  editor (sliders backed by `configStore`; see [[planning-domain]]). *Logging*
+  editor (sliders backed by `configStore`; see [Planning Domain](planning-domain.md)). *Logging*
   hosts the category toggles and the overlay toggles above. *Health* fetches
   **server-authored** `DatasetSourceHealth` over the WS (`bridge.requestDatasetHealth`),
-  the same per-source status/stage model traced in [[flows/dataset-diagnostics]] —
+  the same per-source status/stage model traced in [Flow: Dataset Diagnostics](../../flows/dataset-diagnostics.md) —
   client-side residency telemetry lives in Cache/Catalog instead.
 
 ## How it's toggled
@@ -67,7 +72,7 @@ installed in a `useEffect` and **deleted on cleanup**, so they vanish on unmount
 - Overlay projection reuses the renderer's exact voxel→world→screen path
   (`WasmScene.project_to_screen`), and in volume mode mirrors the shader's
   unit-cube Y-flip — so an overlay rect lining up with displayed data is a real
-  signal, not an approximation. A chunk's overlay color reflects [[gpu-residency]]
+  signal, not an approximation. A chunk's overlay color reflects [GPU Residency](gpu-residency.md)
   (worker-resident vs. CPU-ready vs. planned), which is *why* a green rect can
   briefly survive a cold-state rebuild during pan/zoom.
 - Overlays read live, tunable planning config; numbers shift when you edit the

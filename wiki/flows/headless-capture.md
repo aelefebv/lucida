@@ -1,11 +1,16 @@
 ---
+type: Flow
+title: "Flow: Headless Capture (montage + viewer screenshot/overview)"
+description: "How a CLI/agent command turns a dataset into a PNG without a human at a browser: lucida dataset montage out.png --json (a labeled contact sheet) and lucida view screenshot|overview (a single frame)."
+tags: [lucida, flow]
+source_path: wiki/flows/headless-capture.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Flow: Headless Capture (montage + viewer screenshot/overview)
 
-How a CLI/agent command turns a dataset into a PNG without a human at a browser: `lucida dataset montage out.png --json` (a labeled contact sheet) and `lucida view screenshot|overview` (a single frame). The CLI plans the shot, composes an inline [[saved-views|SavedView]], drives a headless Chrome over raw CDP, waits on a render-readiness contract the viewer publishes, captures the PNG(s), and (for montage) stitches + writes a drill-in sidecar. It is a genuine cross-surface flow — CLI ↔ headless browser ↔ the WebGPU [[chunk-lifecycle|render loop]] — invisible from any single crate. All code is in [[lucida-cli]] (`montage.rs`, `main.rs`) and a small contract in [[lucida-web]] (`App.tsx`, `renderLoop.ts`).
+How a CLI/agent command turns a dataset into a PNG without a human at a browser: `lucida dataset montage out.png --json` (a labeled contact sheet) and `lucida view screenshot|overview` (a single frame). The CLI plans the shot, composes an inline [SavedView](../systems/subsystems/saved-views.md), drives a headless Chrome over raw CDP, waits on a render-readiness contract the viewer publishes, captures the PNG(s), and (for montage) stitches + writes a drill-in sidecar. It is a genuine cross-surface flow — CLI ↔ headless browser ↔ the WebGPU [render loop](chunk-lifecycle.md) — invisible from any single crate. All code is in [lucida-cli](../systems/crates/lucida-cli.md) (`montage.rs`, `main.rs`) and a small contract in [lucida-web](../systems/crates/lucida-web.md) (`App.tsx`, `renderLoop.ts`).
 
 ## Trace: `dataset montage`
 
@@ -39,7 +44,7 @@ The probe reads `window.__lucidaCaptureReady` and only reports ready when `state
 
 ## The viewer side of the contract
 
-Two pieces in [[lucida-web]] make headless capture possible:
+Two pieces in [lucida-web](../systems/crates/lucida-web.md) make headless capture possible:
 
 - **`?render=1` chrome-free surface** — `App.tsx` parses it once into `renderMode` (`:116`); `useLayout` zeroes the sidebar and sizes the canvas to the full window (`useLayout.ts`), and `App` drops the `ProfileMenu` and adds the `render-mode` class. The screenshot is pure data — no toolbar/sidebar.
 - **`window.__lucidaCaptureReady`** — `renderLoop.ts::publishCaptureReady` (`:251`) writes the `LucidaCaptureReadyState` (`renderLoop.ts:21`: `ready`, `reason`, `frameCount`, `mode`, `datasetCount`, canvas size). `publishRenderedCaptureReady` sets `ready: true, reason: "rendered"` and increments `renderedFrameCount` only when datasets exist; an empty scene publishes `ready: false, reason: "no_datasets"`. This object IS the contract the CLI probe reads.
@@ -60,8 +65,8 @@ Two pieces in [[lucida-web]] make headless capture possible:
 
 ## Related
 
-- [[lucida-cli]] — the command surface this flow lives in
-- [[saved-views]] — the `SavedView` type + `#view=` encoding the inline capture URL carries
-- [[saved-view-recipient-apply]] — how the viewer applies the `#view=` the CLI hands it
-- [[chunk-lifecycle]] — the render loop whose `renderedFrameCount` the readiness probe gates on
-- [[dataset-opening]] — the path the captured viewer takes to load the dataset before the first frame
+- [lucida-cli](../systems/crates/lucida-cli.md) — the command surface this flow lives in
+- [Saved Views](../systems/subsystems/saved-views.md) — the `SavedView` type + `#view=` encoding the inline capture URL carries
+- [Flow: Saved-View Recipient Apply](saved-view-recipient-apply.md) — how the viewer applies the `#view=` the CLI hands it
+- [Flow: Chunk Lifecycle](chunk-lifecycle.md) — the render loop whose `renderedFrameCount` the readiness probe gates on
+- [Flow: Dataset Opening](dataset-opening.md) — the path the captured viewer takes to load the dataset before the first frame

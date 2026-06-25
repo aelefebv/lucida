@@ -1,21 +1,26 @@
 ---
+type: Flow
+title: "Flow: Annotation Lifecycle"
+description: "From \"a user shift-drags a pin onto a dataset\" through \"the author's exact view is captured onto the pin, broadcast, and persisted\" to \"anyone restores that view — by clicking the pin's thread, following an @mention,…"
+tags: [lucida, flow]
+source_path: wiki/flows/annotation-lifecycle.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Flow: Annotation Lifecycle
 
-From "a user shift-drags a pin onto a dataset" through "the author's exact view is captured onto the pin, broadcast, and persisted" to "anyone restores that view — by clicking the pin's thread, following an @mention, or opening a `#a=<id>` share link." This is the one path that ties annotations to the [[saved-views]] capture machinery and the [[document-command-application|document-command]] flow. The annotations subsystem otherwise has no wiki home.
+From "a user shift-drags a pin onto a dataset" through "the author's exact view is captured onto the pin, broadcast, and persisted" to "anyone restores that view — by clicking the pin's thread, following an @mention, or opening a `#a=<id>` share link." This is the one path that ties annotations to the [Saved Views](../systems/subsystems/saved-views.md) capture machinery and the [document-command](document-command-application.md) flow. The annotations subsystem otherwise has no wiki home.
 
-The defining tension: a pin carries a full [[saved-views|SavedView]] (camera + slice/timepoint/channel + per-dataset display), but restoring it must NOT be the heavy cold-share-link apply — it must be a **light, recipient-local** restore that never disturbs the workspace. That split is the heart of this flow.
+The defining tension: a pin carries a full [SavedView](../systems/subsystems/saved-views.md) (camera + slice/timepoint/channel + per-dataset display), but restoring it must NOT be the heavy cold-share-link apply — it must be a **light, recipient-local** restore that never disturbs the workspace. That split is the heart of this flow.
 
 ## Trace: create
 
 1. **Gesture** — a shift-drag on the slice canvas. `SliceViewer.tsx::onPointerUp` (~`:218`) constructs the pin: `position`/`end` from the released world point(s), `z`/`t`/`c` from the live slider refs (so the pin belongs to the slice/timepoint/channel it was dropped on, issue #779), `author` from `annotationIdentity.ts::annotationAuthorId()`.
 2. **Capture the author's view** — `buildAnnotationView(scene, liveViewWithLiveZTC(...))` (`buildAnnotationView.ts`) snapshots how the author is looking right now. It is a thin policy seam over `captureBuilder.ts::buildCapture` pinning two choices: `datasetReferenceMode: "workspace-dataset-id"` (so the view's `datasets` Vec is left EMPTY — no source URLs ever land on the pin), and verbatim live Z/T/C (the 2D path preserves the presence slab thickness + `multi_channel`; the 3D path uses `liveViewWithLiveTC`, taking presence z but overriding t/c). Capture failure returns `null` and is simply omitted — the view is additive.
-3. **Apply locally AND send** — `applyDocumentCommand(scene, { type: "add_annotation", … view }, sendCommand)`. This is a [[document-command-application|document command]]: optimistic local apply + send; the client-supplied UUID `id` makes the local apply and the server's rebroadcast converge. The captured view rides on the command only when present (`...(capturedView ? { view } : {})`).
+3. **Apply locally AND send** — `applyDocumentCommand(scene, { type: "add_annotation", … view }, sendCommand)`. This is a [document command](document-command-application.md): optimistic local apply + send; the client-supplied UUID `id` makes the local apply and the server's rebroadcast converge. The captured view rides on the command only when present (`...(capturedView ? { view } : {})`).
 4. **Canonical apply** — `lucida-core/src/command.rs` `AddAnnotation` arm (`:111`): unbox the view (`Option<Box<SavedView>>` on the wire, kept boxed to dodge clippy's `large_enum_variant`; stored unboxed on `Annotation::view`). `DocumentState::apply` also glues the pin to the nearest placeable layout entity via `nearest_anchor` (`scene/types.rs:853`), storing `Annotation::anchor` (issue #780). The arm bumps `epochs.annotation` (`command.rs:534`) — shared by every annotation/comment command.
-5. **Render** — the annotation-epoch bump drives the overlay redraw on the next tick (see [[scene-state-and-epochs]]).
+5. **Render** — the annotation-epoch bump drives the overlay redraw on the next tick (see [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)).
 
 ## Trace: restore (in-session, the light tier)
 
@@ -40,7 +45,7 @@ The link is the workspace URL + `#a=<annotationId>` — a deep-link, NOT an acce
 ## Invariants
 
 - **A pin's view never carries source URLs.** Always workspace-dataset-id form (empty `datasets`) — membership is the workspace document's job; an embedded view must not leak URLs onto broadcast/persisted state.
-- **A command WITH a view rebroadcasts byte-identically.** The server's `from_str`→`to_string` round-trip is exact because [[saved-views|SavedView]]'s per-dataset maps are `IndexMap` (order-preserving), not `HashMap`. Locked by `add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical`.
+- **A command WITH a view rebroadcasts byte-identically.** The server's `from_str`→`to_string` round-trip is exact because [SavedView](../systems/subsystems/saved-views.md)'s per-dataset maps are `IndexMap` (order-preserving), not `HashMap`. Locked by `add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical`.
 - **The light restore issues ONLY recipient-local ViewportCommands.** No `sendCommand`, no `set_dataset_visible`/`_opacity`/`_active_layout`/`_order`, no dataset open — the boundary is enforced by the destructive commands having no call site in `restoreAnnotationView.ts`.
 - **Annotation access == workspace access.** A recipient without workspace access fails at the gate; an id absent from the loaded doc returns plain `not-found` — indistinguishable, by construction, from "exists but you can't see it."
 - **Author identity outlives a connection.** `annotationAuthorId()` is a localStorage UUID cached in-memory for the session — NOT `bridge.myId` (which the server reassigns per WS connect). Rejoining keeps ownership of your pins (issue #777).
@@ -54,9 +59,9 @@ The link is the workspace URL + `#a=<annotationId>` — a deep-link, NOT an acce
 
 ## Related
 
-- [[saved-views]] — the capture/`SavedView` type a pin embeds and the heavy applier this path deliberately avoids
-- [[saved-view-recipient-apply]] — the HEAVY cold-share-link tier (opens/hides datasets); the contrast to this light path
-- [[document-command-application]] — `AddAnnotation`/comment/move commands and the optimistic-apply + byte-identical-rebroadcast model
-- [[scene-state-and-epochs]] — `epochs.annotation` and the redraw it drives
-- [[layout-system]] — the placed-entity model `nearest_anchor`/`reanchor_for_layout` depend on
-- [[presence-and-follow-mode]] — restore breaks follow and re-emits presence; `bridge.myId` vs the author id
+- [Saved Views](../systems/subsystems/saved-views.md) — the capture/`SavedView` type a pin embeds and the heavy applier this path deliberately avoids
+- [Flow: Saved-View Recipient Apply](saved-view-recipient-apply.md) — the HEAVY cold-share-link tier (opens/hides datasets); the contrast to this light path
+- [Flow: Document Command Application](document-command-application.md) — `AddAnnotation`/comment/move commands and the optimistic-apply + byte-identical-rebroadcast model
+- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md) — `epochs.annotation` and the redraw it drives
+- [Layout System](../systems/subsystems/layout-system.md) — the placed-entity model `nearest_anchor`/`reanchor_for_layout` depend on
+- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — restore breaks follow and re-emits presence; `bridge.myId` vs the author id

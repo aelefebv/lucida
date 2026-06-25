@@ -1,8 +1,3 @@
----
-created: 2026-05-14
-modified: 2026-06-25
----
-
 # Principles
 
 ## What a principle is
@@ -19,11 +14,11 @@ Two altitudes. **Product principles** are cross-cutting north-stars about what L
 
 ### Product
 
-- [[principles/surface-parity]] — web, CLI, Python, and LLM agents are all first-class clients of the same workspace; every surface sees the same datasets, the same chunks, and the same live state.
-- [[principles/agent-first-access]] — Lucida is drivable without a human in the loop: an agent can orient (montage), render any view headless, drill to an exact slice, and read dataset health — all programmatically and reproducibly.
-- [[principles/collaboration-and-reproducibility]] — a view is a thing you can hand to someone: any view is a link that re-opens exactly, and what one user sees a peer can see and follow.
-- [[principles/runs-anywhere-and-open]] — one open, local-first product: a single server binary, configurable from day one, where dataset size or dimensionality is never a reason not to open data.
+- [Surface Parity](surface-parity.md) — web, CLI, Python, and LLM agents are all first-class clients of the same workspace; every surface sees the same datasets, the same chunks, and the same live state.
+- [Agent-First Access](agent-first-access.md) — Lucida is drivable without a human in the loop: an agent can orient (montage), render any view headless, drill to an exact slice, and read dataset health — all programmatically and reproducibly.
+- [Collaboration & Reproducibility](collaboration-and-reproducibility.md) — a view is a thing you can hand to someone: any view is a link that re-opens exactly, and what one user sees a peer can see and follow.
+- [Runs Anywhere, Open by Default](runs-anywhere-and-open.md) — one open, local-first product: a single server binary, configurable from day one, where dataset size or dimensionality is never a reason not to open data.
 
 ### Subsystem
 
-- [[principles/planning]] — what the per-tick chunk planner optimizes for: the smoother render over the cheaper fetch, memory as the hard floor, well coherence, planner purity, one-home view math, anticipation.
+- [Principles — Planning Domain](planning.md) — what the per-tick chunk planner optimizes for: the smoother render over the cheaper fetch, memory as the hard floor, well coherence, planner purity, one-home view math, anticipation.

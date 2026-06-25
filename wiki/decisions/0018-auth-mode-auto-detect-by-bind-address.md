@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Auth Mode Auto-Detect by Bind Address"
+description: "slice-1 StubPrincipalExtractor without replacement, so disabled mode"
+tags: [lucida, decision]
+source_path: wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md
 created: 2026-05-08
 modified: 2026-06-25
 ---
@@ -17,7 +22,7 @@ restored the extractor (so this ADR's loopback-default promise actually
 holds) and re-gated the dev-login machinery on disabled mode rather
 than removing it: `dev_status` and `dev_login` both still exist in
 `main.rs`, with `/auth/dev/login` registered only when
-`mode == AuthMode::Disabled`. See [[auth]] for the post-restoration
+`mode == AuthMode::Disabled`. See [Authentication](../systems/subsystems/auth.md) for the post-restoration
 extractor lineup.
 
 ## Decision
@@ -81,6 +86,6 @@ Both are acceptable trade-offs given the safety win. Documented in the OSS quick
 
 ## Related
 
-- [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — the auth flow this configures defaults for
-- [[decisions/0017-configurable-from-day-one-for-oss-release]] — OSS configurability of the underlying env vars
+- [Backend-Mediated OAuth with Session Cookies](0016-backend-mediated-oauth-with-session-cookies.md) — the auth flow this configures defaults for
+- [Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md) — OSS configurability of the underlying env vars
 - PRD #455 — implementation specification

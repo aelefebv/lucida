@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Scene State and Epochs"
+description: "How the WASM Scene exposes \"what changed since you last asked.\" Owns one of the central performance levers in the codebase: the tick coordinator's epoch fast-path skips most frames entirely."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/scene-state-and-epochs.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -9,7 +14,7 @@ How the WASM Scene exposes "what changed since you last asked." Owns one of the 
 
 ## What an epoch is
 
-`SceneEpochs` (in [[lucida-core]]'s `epoch.rs`) is a struct of six monotonically increasing `u64` counters, one per category of state:
+`SceneEpochs` (in [lucida-core](../crates/lucida-core.md)'s `epoch.rs`) is a struct of six monotonically increasing `u64` counters, one per category of state:
 
 - `content` — entity membership / metadata changed (`DatasetOpened`, `RemoveDataset`, `RenameDataset`)
 - `layout` — spatial layout changed (`RegisterLayout`, `SetActiveLayout`)
@@ -26,9 +31,9 @@ A single dirty bit forces every consumer to do the most expensive work. Typed ep
 
 > "Selection changed but view didn't — so I need to rebuild the descriptor buffer, but I can skip the full cold-state rebuild and the wanted-set recomputation."
 
-Concretely, the tick coordinator's `planAndFetch` ([[chunk-lifecycle]]) starts with an epoch read; if every counter is unchanged, it returns the cached result and the tick is essentially free. Hits ~5% of frames in normal viewing.
+Concretely, the tick coordinator's `planAndFetch` ([Flow: Chunk Lifecycle](../../flows/chunk-lifecycle.md)) starts with an epoch read; if every counter is unchanged, it returns the cached result and the tick is essentially free. Hits ~5% of frames in normal viewing.
 
-The split also lets [[gpu-residency|the worker]] decide independently — it gets the planning epochs in every chunk/proxy delivery and drops anything that's stale relative to its current understanding.
+The split also lets [the worker](gpu-residency.md) decide independently — it gets the planning epochs in every chunk/proxy delivery and drops anything that's stale relative to its current understanding.
 
 ## Document state, derived state, presence state
 
@@ -38,15 +43,15 @@ Three layers of "what is the scene right now":
 - **Derived state** — computed from document state + active layout. Member positions, projected transforms. Rebuilt by `Scene::rebuild_derived` and per-command in `Scene::apply`. Not serialized; reconstructable.
 - **Presence state** — per-client viewport, camera, view, display, follow target, cursor. Local + broadcast as ephemeral `PresenceState`; never sequenced.
 
-`Scene` composes `DocumentState` via `#[serde(flatten)]` so the JSON wire format stayed compatible across the document/scene refactor — see [[gotchas/scene-document-state-json-compat]].
+`Scene` composes `DocumentState` via `#[serde(flatten)]` so the JSON wire format stayed compatible across the document/scene refactor — see [Scene/DocumentState JSON Backward Compatibility](../../gotchas/scene-document-state-json-compat.md).
 
 ## Interactions
 
-- **Producer**: `Scene::apply` in [[lucida-core]]. Single mutator, single epoch bumper.
+- **Producer**: `Scene::apply` in [lucida-core](../crates/lucida-core.md). Single mutator, single epoch bumper.
 - **Consumers**:
-  - [[upload-pipeline|tick coordinator]] reads epochs every tick to short-circuit; passes them in chunk deliveries to [[gpu-residency|the worker]] for staleness checks. Proxy deliveries (the fallback path) carry epochs too.
+  - [tick coordinator](upload-pipeline.md) reads epochs every tick to short-circuit; passes them in chunk deliveries to [the worker](gpu-residency.md) for staleness checks. Proxy deliveries (the fallback path) carry epochs too.
   - The web client passes `Scene::apply_command` for every incoming `CommandBroadcast` so all clients converge on the same document state and bump the same epochs.
-  - [[lucida-server]] doesn't read epochs directly — it owns its own seq counter for command ordering. Epochs are a renderer concern.
+  - [lucida-server](../crates/lucida-server.md) doesn't read epochs directly — it owns its own seq counter for command ordering. Epochs are a renderer concern.
 
 ## Invariants
 

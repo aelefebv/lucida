@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Generated Coarse"
+description: "lucida-server/src/generated.rs — server-managed derived pyramid levels for datasets that do not already contain a usable source coarse level."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/generated-coarse.md
 created: 2026-05-19
 modified: 2026-06-25
 ---
@@ -21,7 +26,7 @@ Generated levels are append-only metadata from the client's point of view. The s
 Generated coarse chunks use the same request key shape as source chunks: `{level}/{t}/{c}/{z}/{y}/{x}`.
 
 - If bytes are ready, `serve_generated_chunk_request` returns the normal chunk frame: `[client_id u32 LE][key_len u16 LE][dataset/image/key][payload]`.
-- If bytes are not ready, the server returns `GeneratedChunkStatus` (`pending`, `failed_transient`, `failed_permanent`, or `unavailable`). `GeneratedChunkStatus` (in [[lucida-protocol]] `generated.rs`) is five **unit** variants — the fifth is `Ready`, which carries no payload; it only signals that bytes exist. The materialized bytes themselves ride a *different*, server-only enum: `DerivedChunkLookup::Ready(Vec<u8>)` (`lucida-server/src/generated.rs`), which `serve_generated_chunk_request` matches on to emit the chunk frame. Don't conflate the two.
+- If bytes are not ready, the server returns `GeneratedChunkStatus` (`pending`, `failed_transient`, `failed_permanent`, or `unavailable`). `GeneratedChunkStatus` (in [lucida-protocol](../crates/lucida-protocol.md) `generated.rs`) is five **unit** variants — the fifth is `Ready`, which carries no payload; it only signals that bytes exist. The materialized bytes themselves ride a *different*, server-only enum: `DerivedChunkLookup::Ready(Vec<u8>)` (`lucida-server/src/generated.rs`), which `serve_generated_chunk_request` matches on to emit the chunk frame. Don't conflate the two.
 - `pending` is not a failure. The CPU cache clears the in-flight request and will re-request on a later submit after readiness changes.
 
 ## Materialization
@@ -54,9 +59,9 @@ Materialized chunks are written through `DerivedChunkCache`. On-disk writes are 
 
 ## Related
 
-- [[decisions/0039-chunk-only-coarse-detail-residency]]
-- [[decisions/0040-generated-coarse-as-derived-pyramid-levels]]
-- [[decisions/0041-clean-two-source-chunk-tier-renderer]]
-- [[planning-domain]]
-- [[cpu-cache]]
-- [[gpu-residency]]
+- [Chunk-only coarse/detail residency](../../decisions/0039-chunk-only-coarse-detail-residency.md)
+- [Generated coarse as derived pyramid levels](../../decisions/0040-generated-coarse-as-derived-pyramid-levels.md)
+- [Clean two-source chunk-tier renderer](../../decisions/0041-clean-two-source-chunk-tier-renderer.md)
+- [Planning Domain](planning-domain.md)
+- [CPU Cache](cpu-cache.md)
+- [GPU Residency](gpu-residency.md)

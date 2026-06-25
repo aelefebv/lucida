@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Server-Stored Bookmarks and the AuthPrincipal Seam"
+description: "Two coupled architectural shifts to support named, persistent saved views (URL-as-App-State for Saved Views):"
+tags: [lucida, decision]
+source_path: wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md
 created: 2026-05-07
 modified: 2026-05-08
 ---
@@ -9,9 +14,9 @@ modified: 2026-05-08
 
 ## Decision
 
-Two coupled architectural shifts to support named, persistent saved views ([[decisions/0013-url-as-app-state-for-saved-views]]):
+Two coupled architectural shifts to support named, persistent saved views ([URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md)):
 
-1. **`lucida-server` gains its first persistent state.** A SQLite-backed bookmark store ([[lucida-server]]'s session has been entirely in-memory until now). Bookmarks are uniquely-identified records (`{id, name, created_by, created_by_name, created_at, datasets, view}`) addressable via short URLs (`#b=<id>`).
+1. **`lucida-server` gains its first persistent state.** A SQLite-backed bookmark store ([lucida-server](../systems/crates/lucida-server.md)'s session has been entirely in-memory until now). Bookmarks are uniquely-identified records (`{id, name, created_by, created_by_name, created_at, datasets, view}`) addressable via short URLs (`#b=<id>`).
 
 2. **An `AuthPrincipal` abstraction is introduced** as the seam between request-handling code and authentication. Saved-views handlers consume a principal (`{email, display_name, picture_url, is_admin}`) from middleware; they never see JWTs, OAuth flows, or any auth provider details. Two extractor implementations: a `StubPrincipalExtractor` for dev (returns `dev@local`) and a `GoogleJwtPrincipalExtractor` (built separately as part of the auth project).
 
@@ -21,7 +26,7 @@ The bookmark feature uses the principal for ownership (`created_by = principal.e
 
 ### Why server-stored bookmarks
 
-A pure URL-hash approach ([[decisions/0013-url-as-app-state-for-saved-views]] alone) handles the *personal* use case (refresh-preserves-state) and the *one-shot share* case (copy-current-URL). It does not handle:
+A pure URL-hash approach ([URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md) alone) handles the *personal* use case (refresh-preserves-state) and the *one-shot share* case (copy-current-URL). It does not handle:
 
 - **Discoverability.** "Show me other people's analyses of this dataset" is a sidebar feature; URL hashes are invisible until shared.
 - **Persistence with names.** A URL hash carries no name, no creator, no created-at; it's an opaque blob. For curated analyses ("Apoptotic morphology — well B7"), a named entry is qualitatively different.
@@ -73,24 +78,24 @@ The trait is also the natural carrier for evolving capabilities: today `is_admin
 - **First migration system in the codebase.** Plumbing is small (versioned `.sql` files run on startup) but it's a new operational concept.
 - **REST endpoints expand the server's HTTP surface** beyond the existing `/api/browse` admin endpoint. Authentication middleware applies to the new `/api/bookmarks/*` endpoints.
 - **WebSocket protocol gains a new server message** (`BookmarkChanged { id, action, dataset_urls }`) for live sidebar updates. Broadcast scope: clients with overlapping loaded datasets.
-- **Pre-auth bookmarks** carry `created_by: "dev@local"`. Migration policy on auth cutover is open ([[queue]]).
-- **The blake3-collision-on-different-content sharp edge** (see [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]) extends to bookmarks: a bookmark referencing a local-file path will silently load *whatever* file is at that path on the recipient's server. Same warning applies; same documentation.
+- **Pre-auth bookmarks** carry `created_by: "dev@local"`. Migration policy on auth cutover is open ([Queue — Open Questions](../queue.md)).
+- **The blake3-collision-on-different-content sharp edge** (see [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md)) extends to bookmarks: a bookmark referencing a local-file path will silently load *whatever* file is at that path on the recipient's server. Same warning applies; same documentation.
 
 ## How this decision shows up in code
 
 - `lucida-server/src/bookmarks/store.rs` — `BookmarkStore` trait + `SqliteBookmarkStore` + `MemoryBookmarkStore`. Two-table schema (`bookmarks` for the row + `bookmark_datasets` indexed for any-overlap query). Picked side-table over JSON1 to work on every SQLite build and make `EXPLAIN QUERY PLAN` regression-guardable. `delete` returns `Result<Option<Bookmark>, _>` so the broadcast helper can scope by the deleted row's `dataset_urls`.
-- `lucida-server/src/bookmarks/handlers.rs` — REST handlers under `/api/bookmarks`. POST overwrites `created_by` from `AuthPrincipal` (request body cannot spoof). PATCH/DELETE check `bookmark.created_by == principal.email || principal.is_admin`. Hand-rolled `parse_dataset_params` against `RawQuery` for repeated `?dataset=…` (Axum's default `Query<T>` drops repeats; see [[gotchas/axum-query-multivalue]]).
+- `lucida-server/src/bookmarks/handlers.rs` — REST handlers under `/api/bookmarks`. POST overwrites `created_by` from `AuthPrincipal` (request body cannot spoof). PATCH/DELETE check `bookmark.created_by == principal.email || principal.is_admin`. Hand-rolled `parse_dataset_params` against `RawQuery` for repeated `?dataset=…` (Axum's default `Query<T>` drops repeats; see [Axum's Default Query Extractor Drops Repeated Keys](../gotchas/axum-query-multivalue.md)).
 - `lucida-server/src/bookmarks/broadcast.rs` — best-effort affected-client computation + dispatch. Empty `dataset_urls` falls through as broadcast-to-all.
 - `lucida-server/migrations/20260508000003_create_bookmarks.sql` — versioned migration; runs on startup via the existing sqlx pipeline that auth set up.
 - `lucida-core/src/auth_principal.rs` — `AuthPrincipal` struct (shared seam type). Lives in `lucida-core` so future provider extractors don't pull in lucida-server.
 - `lucida-server/src/auth/principal.rs` — `PrincipalExtractor` trait + `SessionCookieExtractor` (browser cookie path), `BearerTokenExtractor` / `DualCredentialExtractor` (CLI/Python bearer path), `GoogleJwtPrincipalExtractor` (Google ID-token validator helper), and `StubPrincipalExtractor` (disabled-mode local-dev path).
 - `lucida-core/src/saved_view.rs` — the `SavedView` schema, shared between web and server.
-- `lucida-core/src/protocol.rs` — `ServerMessage::BookmarkChanged { id, action, dataset_urls }` variant + `BookmarkAction` enum. **First `ServerMessage` variant without a `seq`** — session-scoped notification, not a sequenced document command. See [[saved-views]] §"BookmarkChanged is unsequenced."
+- `lucida-core/src/protocol.rs` — `ServerMessage::BookmarkChanged { id, action, dataset_urls }` variant + `BookmarkAction` enum. **First `ServerMessage` variant without a `seq`** — session-scoped notification, not a sequenced document command. See [Saved Views](../systems/subsystems/saved-views.md) §"BookmarkChanged is unsequenced."
 
 ## Related
 
-- [[decisions/0013-url-as-app-state-for-saved-views]] — the umbrella saved-views decision; this one extends it with the server-stored side
-- [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] — sharp edge that extends to bookmarks
-- [[lucida-server]] — gains its first persistent state
-- [[presence-and-follow-mode]] — the discrete-snapshot counterpart to live follow
-- [[queue]] — auth-cutover migration question; selected-dataset wrinkle
+- [URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md) — the umbrella saved-views decision; this one extends it with the server-stored side
+- [Local-File Datasets Are Personal-Only in Saved Views](0014-local-file-datasets-personal-only-in-saved-views.md) — sharp edge that extends to bookmarks
+- [lucida-server](../systems/crates/lucida-server.md) — gains its first persistent state
+- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — the discrete-snapshot counterpart to live follow
+- [Queue — Open Questions](../queue.md) — auth-cutover migration question; selected-dataset wrinkle

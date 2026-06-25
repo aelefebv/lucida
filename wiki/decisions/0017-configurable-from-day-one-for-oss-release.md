@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Configurable From Day One for OSS Release"
+description: "The auth implementation (and, by extension, all subsequent features that consume identity) is configurable from day one to support open-source release."
+tags: [lucida, decision]
+source_path: wiki/decisions/0017-configurable-from-day-one-for-oss-release.md
 created: 2026-05-08
 modified: 2026-06-25
 ---
@@ -59,6 +64,6 @@ This also benefits Calico — if Calico ever migrates from Google Workspace to a
 
 ## Related
 
-- [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — the auth flow this configures
-- [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — auto-detection layered on top of explicit `LUCIDA_AUTH`
+- [Backend-Mediated OAuth with Session Cookies](0016-backend-mediated-oauth-with-session-cookies.md) — the auth flow this configures
+- [Auth Mode Auto-Detect by Bind Address](0018-auth-mode-auto-detect-by-bind-address.md) — auto-detection layered on top of explicit `LUCIDA_AUTH`
 - PRD #455 — implementation specification including the full env var table

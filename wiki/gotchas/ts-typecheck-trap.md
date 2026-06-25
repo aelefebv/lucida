@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "TS Type-Check Trap"
+description: "Running npx tsc --noEmit from lucida-web/ looks like it works — exits successfully, prints nothing."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/ts-typecheck-trap.md
 created: 2026-04-18
 modified: 2026-06-25
 ---

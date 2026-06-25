@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Backend-Mediated OAuth with Session Cookies"
+description: "Lucida's authentication uses backend-mediated OAuth 2.0 Authorization Code flow with server-side session cookies, not the SPA-with-JWT pattern."
+tags: [lucida, decision]
+source_path: wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md
 created: 2026-05-08
 modified: 2026-06-25
 ---
@@ -32,9 +37,9 @@ Backend-mediated won on four grounds:
 1. **Tokens never touch JavaScript.** `httpOnly` cookies are immune to XSS exfiltration. Lucida's web client pulls in many transitive JS dependencies (vite, react, all their downstream packages); any compromised dep in that graph becomes a token-stealer in the SPA-with-JWT model. With cookies, even full XSS doesn't read the auth token.
 2. **WebSocket auth is automatic.** Browsers send cookies on WS upgrade (HTTP Upgrade is just an HTTP request). With SPA-with-JWT, browsers can't set custom headers on WS upgrade, so authentication needs an inline handshake protocol or a query param (which leaks tokens to logs). Cookies sidestep this entirely.
 3. **Refresh logic is server-side.** Client-side refresh timers have classic edge cases: refreshing while parallel requests are in flight, multiple tabs racing to refresh, timer drift on sleeping laptops, refresh token expiry mid-refresh. None of these matter with server-side handling. (Moot in v1 since we don't have refresh tokens, but the architecture accommodates them cleanly.)
-4. **Server is already gaining persistent state.** [[decisions/0015-server-stored-bookmarks-and-auth-seam]] introduces SQLite for bookmarks. Adding `login_sessions` to the same database is incremental, not a new architectural commitment.
+4. **Server is already gaining persistent state.** [Server-Stored Bookmarks and the AuthPrincipal Seam](0015-server-stored-bookmarks-and-auth-seam.md) introduces SQLite for bookmarks. Adding `login_sessions` to the same database is incremental, not a new architectural commitment.
 
-The CSRF concern with cookies is well-handled by `SameSite=Lax` + REST discipline (no GET side effects). `Lax` blocks cookies on cross-origin POST/PATCH/DELETE while still allowing cross-origin GET top-level navigations — so saved-views link clicks from Slack ([[decisions/0013-url-as-app-state-for-saved-views]]) work seamlessly without the user having to re-auth on first click.
+The CSRF concern with cookies is well-handled by `SameSite=Lax` + REST discipline (no GET side effects). `Lax` blocks cookies on cross-origin POST/PATCH/DELETE while still allowing cross-origin GET top-level navigations — so saved-views link clicks from Slack ([URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md)) work seamlessly without the user having to re-auth on first click.
 
 ## Why no refresh tokens in v1
 
@@ -57,12 +62,12 @@ The trade-off: if someone leaves the org mid-session, they retain access until t
 
 ## Consequences
 
-- **First persistent state in `lucida-server`** (jointly with [[decisions/0015-server-stored-bookmarks-and-auth-seam]]). Operational impact: server now needs a writable directory for SQLite, with backup considerations.
+- **First persistent state in `lucida-server`** (jointly with [Server-Stored Bookmarks and the AuthPrincipal Seam](0015-server-stored-bookmarks-and-auth-seam.md)). Operational impact: server now needs a writable directory for SQLite, with backup considerations.
 - **REST endpoints gain auth middleware.** All non-`/auth/` endpoints require a valid session; 401 on missing/expired. Existing endpoints (`/api/browse`, `/admin/clear-proxy-cache`) are auto-wrapped.
 - **WebSocket upgrade gains auth check.** Cookie validated at upgrade time; rejected with close frame on failure. Mid-connection expiry is *not* enforced in v1 (open WS persists for its lifetime); mitigation tracked for v2.
 - **`AuthPrincipal` is now a real per-request value** that handlers can extract. Saved views (PRD #454) and any future feature consume it without knowing about auth providers.
 - **CSRF posture depends on REST discipline.** GET endpoints must remain side-effect-free for `SameSite=Lax` cookies to be sufficient CSRF protection. Worth recording as an invariant.
-- **Pre-auth `dev@local` bookmarks** (created during PRD #454's design phase) need a migration policy at cutover; recorded in [[queue]].
+- **Pre-auth `dev@local` bookmarks** (created during PRD #454's design phase) need a migration policy at cutover; recorded in [Queue — Open Questions](../queue.md).
 
 ## How this decision shows up in code
 
@@ -80,8 +85,8 @@ The trade-off: if someone leaves the org mid-session, they retain access until t
 
 ## Related
 
-- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — defines the `AuthPrincipal` contract this ADR's implementation provides
-- [[decisions/0017-configurable-from-day-one-for-oss-release]] — OSS configurability for the auth implementation
-- [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — dev-mode bypass safety model
+- [Server-Stored Bookmarks and the AuthPrincipal Seam](0015-server-stored-bookmarks-and-auth-seam.md) — defines the `AuthPrincipal` contract this ADR's implementation provides
+- [Configurable From Day One for OSS Release](0017-configurable-from-day-one-for-oss-release.md) — OSS configurability for the auth implementation
+- [Auth Mode Auto-Detect by Bind Address](0018-auth-mode-auto-detect-by-bind-address.md) — dev-mode bypass safety model
 - PRD #455 — implementation specification
 - PRD #454 — saved views, the immediate downstream feature unblocked by this work

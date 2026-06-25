@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Blosc support is a deliberately narrow subset"
+description: "CZI-derived OME-Zarrs (and many older Bioformats exports) compress chunks with Blosc, a meta-codec that wraps an inner compressor (zstd/lz4/zlib/...) with optional byte/bit shuffling."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/blosc-support.md
 created: 2026-04-23
 modified: 2026-04-23
 ---
@@ -23,7 +28,7 @@ Anything outside the table — `blosclz`, `lz4`, `lz4hc`, `zlib`, `snappy` cname
 ## Where it lives
 
 - Decoder: `lucida-server::decode::blosc` (~200 LOC, no FFI). 16-byte header parse, cross-check against the `BloscConfig` recorded at import, dispatch to `zstd::decode_all` then `unshuffle` (byte/bit). MEMCPYED frames short-circuit decompression.
-- Codec types: `lucida-store::codec` defines `StorageCompression`, `BloscConfig`, `BloscCompressor`, `BloscShuffle`. Used by both the import-time validator and the decoder. See [[lucida-store]].
+- Codec types: `lucida-store::codec` defines `StorageCompression`, `BloscConfig`, `BloscCompressor`, `BloscShuffle`. Used by both the import-time validator and the decoder. See [lucida-store](../systems/crates/lucida-store.md).
 - Validation: runs at import per level; per-level errors so a partially broken pyramid surfaces the bad level rather than failing opaquely on first chunk fetch.
 
 ## Test vectors
@@ -44,5 +49,5 @@ The test file documents this one-liner inline so the regen recipe stays next to 
 
 ## Related
 
-- [[non-canonical-axes]] — the other half of the CZI-rendering story; codec rejection and prefix-slice eligibility share the import-time validation pass.
-- [[lucida-store]] — `lucida-store::codec` and `lucida-store::layout` modules, and the binding-seed shape that carries per-level codec + layout to the server.
+- [Non-canonical axes are pinned to index 0](non-canonical-axes.md) — the other half of the CZI-rendering story; codec rejection and prefix-slice eligibility share the import-time validation pass.
+- [lucida-store](../systems/crates/lucida-store.md) — `lucida-store::codec` and `lucida-store::layout` modules, and the binding-seed shape that carries per-level codec + layout to the server.

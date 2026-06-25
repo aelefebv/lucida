@@ -1,4 +1,9 @@
 ---
+type: Flow
+title: "Flow: Follow Chain Resolution"
+description: "What happens when a follow command would create or modify a chain of followers."
+tags: [lucida, flow]
+source_path: wiki/flows/follow-chain-resolution.md
 created: 2026-04-18
 modified: 2026-05-07
 ---
@@ -19,7 +24,7 @@ Three clients: `1`, `2`, `3`. `2` is following `1`.
 ## Case A: 3 tries to follow 2 (chain forbidden)
 
 1. Client 3 sends `{type: "follow", target: 2}`.
-2. Server [[lucida-server]] `Session::set_follow(3, Some(2))`:
+2. Server [lucida-server](../systems/crates/lucida-server.md) `Session::set_follow(3, Some(2))`:
    - Validation: target `2` exists, but `2` is following `1`. **Reject** — return empty change list.
 3. No broadcast. Client 3 sees no `follow_changed` echo and infers (from local state, or after a timeout) that the request was rejected.
 
@@ -87,6 +92,6 @@ Steer is a follow-from-the-other-side: the sender asks the server to make `clien
 
 ## Related
 
-- [[presence-and-follow-mode]]
-- [[decisions/0002-peer-to-peer-follow-mode]]
-- [[lucida-server]]
+- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md)
+- [Peer-to-Peer Follow Mode](../decisions/0002-peer-to-peer-follow-mode.md)
+- [lucida-server](../systems/crates/lucida-server.md)

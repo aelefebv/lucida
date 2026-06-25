@@ -1,4 +1,9 @@
 ---
+type: Topic
+title: "Topic: Collaboration"
+description: "Multi-client coordination — what gets shared, what stays local, how clients learn about each other, and how follow chains propagate state."
+tags: [lucida, topic]
+source_path: wiki/topics/collaboration.md
 created: 2026-05-07
 modified: 2026-06-25
 ---
@@ -7,39 +12,39 @@ modified: 2026-06-25
 
 Multi-client coordination — what gets shared, what stays local, how clients learn about each other, and how follow chains propagate state. The central architectural choice is the **document-vs-viewport split**: shared/sequenced state goes through one path, ephemeral per-client state goes through another.
 
-This page is a curated index. Articles live in their canonical homes; follow `[[wiki-links]]` for the content.
+This page is a curated index. Articles live in their canonical homes; follow the links for the content.
 
 ## Start here
 
-- [[workspaces]] — the per-workspace container of collaboration: presence, follow, the sequenced document, and the broadcast channel are all workspace-local (no global shared session)
-- [[decisions/0001-document-vs-viewport-split]] — the foundational split that everything else in collaboration is downstream of
-- [[presence-and-follow-mode]] — peer-to-peer presence model, transitive follow chains, throttling
-- [[saved-views]] — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks, surfaced through the `WorkspaceSavedViewsSidebar` component with live cross-peer updates
+- [Workspaces](../systems/subsystems/workspaces.md) — the per-workspace container of collaboration: presence, follow, the sequenced document, and the broadcast channel are all workspace-local (no global shared session)
+- [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md) — the foundational split that everything else in collaboration is downstream of
+- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — peer-to-peer presence model, transitive follow chains, throttling
+- [Saved Views](../systems/subsystems/saved-views.md) — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks, surfaced through the `WorkspaceSavedViewsSidebar` component with live cross-peer updates
 
 ## Crate ownership
 
-- [[lucida-server]] — Tokio + Axum WebSocket relay; sequences document commands, brokers presence, fans out follow chains
-- [[lucida-cli]] — terminal client for `lucida-server`; useful for scripted multi-client scenarios
+- [lucida-server](../systems/crates/lucida-server.md) — Tokio + Axum WebSocket relay; sequences document commands, brokers presence, fans out follow chains
+- [lucida-cli](../systems/crates/lucida-cli.md) — terminal client for `lucida-server`; useful for scripted multi-client scenarios
 
 ## Why decisions were made
 
-- [[decisions/0001-document-vs-viewport-split]] — disjoint `DocumentCommand` / `ViewportCommand` enums separate shared/sequenced from local/ephemeral
-- [[decisions/0002-peer-to-peer-follow-mode]] — anyone can follow anyone; server validates and flattens chains into stars
-- [[decisions/0013-url-as-app-state-for-saved-views]] — saved views are debounced URL-hash writes (Google-Maps-style); refresh preserves view; sharing = copy URL
-- [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] — local-file paths in saved views work for sender refresh but warn on share
-- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — SQLite-backed bookmarks with `AuthPrincipal` seam
+- [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md) — disjoint `DocumentCommand` / `ViewportCommand` enums separate shared/sequenced from local/ephemeral
+- [Peer-to-Peer Follow Mode](../decisions/0002-peer-to-peer-follow-mode.md) — anyone can follow anyone; server validates and flattens chains into stars
+- [URL-as-App-State for Saved Views](../decisions/0013-url-as-app-state-for-saved-views.md) — saved views are debounced URL-hash writes (Google-Maps-style); refresh preserves view; sharing = copy URL
+- [Local-File Datasets Are Personal-Only in Saved Views](../decisions/0014-local-file-datasets-personal-only-in-saved-views.md) — local-file paths in saved views work for sender refresh but warn on share
+- [Server-Stored Bookmarks and the AuthPrincipal Seam](../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — SQLite-backed bookmarks with `AuthPrincipal` seam
 
 ## Cross-cutting flows
 
-- [[flows/document-command-application]] — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
-- [[flows/presence-propagation]] — local viewport change → throttled wire emit → server fan-out (self-filtered) → peer apply (or follow-mirror)
-- [[flows/follow-chain-resolution]] — `set_follow` validation, transitive flatten into stars, disconnect-driven reset
-- [[flows/saved-view-recipient-apply]] — `#view=…` or `#b=<id>` → bootstrap parse → diff datasets → open missing → apply layouts/settings/camera in fixed order
+- [Flow: Document Command Application](../flows/document-command-application.md) — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
+- [Flow: Presence Propagation](../flows/presence-propagation.md) — local viewport change → throttled wire emit → server fan-out (self-filtered) → peer apply (or follow-mirror)
+- [Flow: Follow Chain Resolution](../flows/follow-chain-resolution.md) — `set_follow` validation, transitive flatten into stars, disconnect-driven reset
+- [Flow: Saved-View Recipient Apply](../flows/saved-view-recipient-apply.md) — `#view=…` or `#b=<id>` → bootstrap parse → diff datasets → open missing → apply layouts/settings/camera in fixed order
 
 ## Gotchas
 
-- [[gotchas/document-vs-viewport-classification]] — misclassifying a command floods peers (viewport-as-document) or silently desyncs (document-as-viewport). Most common collaboration footgun.
-- [[gotchas/saved-view-credentials-in-urls]] — `#view=…` URLs embed dataset URLs verbatim; presigned URLs and credentialed URLs leak via clipboard, history, screenshots
-- [[gotchas/axum-query-multivalue]] — Axum's default `Query<T>` extractor silently drops repeated query keys; bookmarks list endpoint hand-rolls the multi-value parse
-- [[gotchas/saved-view-client-only-state]] — `SavedView.dataset_settings` mirrors WASM presence; client-only JS/localStorage state won't round-trip without a dedicated field
-- [[gotchas/scene-document-state-json-compat]] — `Scene` `#[serde(flatten)]`s `DocumentState`; field collisions across the two corrupt the wire format
+- [Document vs Viewport Command Classification](../gotchas/document-vs-viewport-classification.md) — misclassifying a command floods peers (viewport-as-document) or silently desyncs (document-as-viewport). Most common collaboration footgun.
+- [Saved-View URLs Expose Dataset URLs (and Anything in Them)](../gotchas/saved-view-credentials-in-urls.md) — `#view=…` URLs embed dataset URLs verbatim; presigned URLs and credentialed URLs leak via clipboard, history, screenshots
+- [Axum's Default Query Extractor Drops Repeated Keys](../gotchas/axum-query-multivalue.md) — Axum's default `Query<T>` extractor silently drops repeated query keys; bookmarks list endpoint hand-rolls the multi-value parse
+- [SavedView Mirrors WASM Presence — Client-Only State Won't Round-Trip Without a Dedicated Field](../gotchas/saved-view-client-only-state.md) — `SavedView.dataset_settings` mirrors WASM presence; client-only JS/localStorage state won't round-trip without a dedicated field
+- [Scene/DocumentState JSON Backward Compatibility](../gotchas/scene-document-state-json-compat.md) — `Scene` `#[serde(flatten)]`s `DocumentState`; field collisions across the two corrupt the wire format

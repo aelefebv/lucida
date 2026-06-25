@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "`validatePlanningInputs` as the Dev-Mode Boundary Check"
+description: "A new function validatePlanningInputs(snapshot, state) is added at lucida-web/src/pipeline/planning/validate.ts."
+tags: [lucida, decision]
+source_path: wiki/decisions/0031-validate-planning-inputs-dev-mode-boundary-check.md
 created: 2026-05-15
 modified: 2026-06-25
 ---
@@ -23,7 +28,7 @@ if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);
 
 Vite dead-code-eliminates the branch in production builds; the validator has zero runtime cost in shipped code.
 
-Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]] — the validator enforces both "explicit input" and "well-formed input" at the boundary the principle establishes. Producer bugs surface as crisp errors at the bug's origin rather than silent downstream wrongness.
+Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit) — the validator enforces both "explicit input" and "well-formed input" at the boundary the principle establishes. Producer bugs surface as crisp errors at the bug's origin rather than silent downstream wrongness.
 
 ## The nine checks
 
@@ -99,8 +104,8 @@ A runtime invariant that fires on first execution against real producer output i
 
 ## Related
 
-- [[principles/planning]] — the framework this decision lives within
-- [[planning-domain]] — subsystem article; gains a "developer-mode validator" mention
-- [[decisions/0029-planning-index-split-into-per-concern-files]] — sister decision; same PRD
-- [[decisions/0030-coordinate-frame-naming-discipline]] — sister decision; same PRD
+- [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
+- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; gains a "developer-mode validator" mention
+- [`planning/index.ts` Split into Per-Concern Files](0029-planning-index-split-into-per-concern-files.md) — sister decision; same PRD
+- [Coordinate-Frame Naming Discipline at the JS↔WASM Boundary](0030-coordinate-frame-naming-discipline.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

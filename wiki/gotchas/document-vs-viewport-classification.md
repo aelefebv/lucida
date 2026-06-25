@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Document vs Viewport Command Classification"
+description: "Misclassifying a viewport command as a document command, or vice versa, has loud consequences:"
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/document-vs-viewport-classification.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -14,12 +19,12 @@ Misclassifying a viewport command as a document command, or vice versa, has loud
 
 ## How to classify
 
-The split is documented in [[decisions/0001-document-vs-viewport-split]]. Quick rule:
+The split is documented in [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md). Quick rule:
 
 - Does the change affect **what's loaded** (datasets, layouts, asset catalogs)? → **DocumentCommand**.
 - Does the change affect **how I'm looking at it** (camera, slice index, contrast, channel visibility)? → **ViewportCommand**.
 
-The Rust enums in [[lucida-core]] `command.rs` enumerate every variant. If you're adding a new command, decide which enum it belongs in *before* writing the apply logic, and use [[lucida-web]]'s `applyDocumentCommand` vs `applyViewportCommand` accordingly.
+The Rust enums in [lucida-core](../systems/crates/lucida-core.md) `command.rs` enumerate every variant. If you're adding a new command, decide which enum it belongs in *before* writing the apply logic, and use [lucida-web](../systems/crates/lucida-web.md)'s `applyDocumentCommand` vs `applyViewportCommand` accordingly.
 
 ## The wire-side check
 
@@ -49,6 +54,6 @@ The defense is reading the wire payload format on the server (which differentiat
 
 ## Related
 
-- [[decisions/0001-document-vs-viewport-split]]
-- [[scene-state-and-epochs]] — epochs reflect the split
-- [[presence-and-follow-mode]] — the presence side
+- [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md)
+- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md) — epochs reflect the split
+- [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — the presence side

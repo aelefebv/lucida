@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Non-canonical axes are pinned to index 0"
+description: "OME-Zarr datasets exported from CZI (and some other Bioformats sources) may include axes outside the canonical Lucida set {t, c, z, y, x} — most commonly m (mosaic/scene enumeration), s, h, or r."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/non-canonical-axes.md
 created: 2026-04-23
 modified: 2026-04-23
 ---
@@ -37,7 +42,7 @@ Both cases share one mechanism: byte-level slicing at the decode step, computed 
 
 - `lucida-store::layout::compute_chunk_byte_layout` runs at import per level and returns `ChunkByteLayout { canonical_byte_size, on_disk_byte_size, byte_stride_t, byte_stride_c, chunk_size_t, chunk_size_c }`.
 - `ChunkByteLayout::slice_range(wire_t, wire_c) -> (offset, size)` is the single seam used by `serve_chunk_from_store` and `build_server_proxy_source`. It reduces wire `t/c` voxel coords to intra-chunk indices (`wire_value % chunk_size`) and returns the byte range to extract from the decompressed bytes. For canonical 5D and pinned-only datasets, the result is `(0, canonical_byte_size)` — equivalent to the pre-PRD-#451 `bytes.truncate(canonical_byte_size)` path.
-- The per-level layout is carried on the server-private binding seed (see [[lucida-store#binding-seed-shape]]).
+- The per-level layout is carried on the server-private binding seed (see [lucida-store](../systems/crates/lucida-store.md#binding-seed-shape)).
 
 ### Eligibility rule (unified outer/inner)
 
@@ -69,5 +74,5 @@ The "drop axes with `chunk_size == 1`" relaxation matters: many real exports hav
 
 ## Related
 
-- [[blosc-support]] — the storage codec used by every CZI export in the wild; codec validation now happens at import alongside the prefix-eligibility check.
-- [[lucida-store]] — where `compute_chunk_byte_layout` and the codec validator live.
+- [Blosc support is a deliberately narrow subset](blosc-support.md) — the storage codec used by every CZI export in the wild; codec validation now happens at import alongside the prefix-eligibility check.
+- [lucida-store](../systems/crates/lucida-store.md) — where `compute_chunk_byte_layout` and the codec validator live.

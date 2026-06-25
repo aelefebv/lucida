@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Workspaces"
+description: "A workspace is the durable, server-stored container users return to: a set of opened datasets, a set of saved views, and a membership/access policy, all addressed by an opaque id — the browser page route is /w/:id (Wo…"
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/workspaces.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
@@ -18,7 +23,7 @@ Implemented in `lucida-server/src/workspace.rs` (one large module): `WorkspaceMa
 
 ## Membership, roles, and sharing
 
-Roles are `viewer < editor < owner`. Sharing has two axes: explicit members (added by email, may be pre-provisioned before that user ever signs in — see [[auth]] principals) and a link-access mode (`restricted` | `anyone_with_link`, the latter granting `viewer`/`editor` but **never** owner). Only owners manage membership, link access, rename/archive, and ownership; editors mutate content (datasets, shared saved views, active layout, default view); viewers read, follow, and copy `#view`/`#b` links.
+Roles are `viewer < editor < owner`. Sharing has two axes: explicit members (added by email, may be pre-provisioned before that user ever signs in — see [Authentication](auth.md) principals) and a link-access mode (`restricted` | `anyone_with_link`, the latter granting `viewer`/`editor` but **never** owner). Only owners manage membership, link access, rename/archive, and ownership; editors mutate content (datasets, shared saved views, active layout, default view); viewers read, follow, and copy `#view`/`#b` links.
 
 Enforcement is server-side at three points — HTTP API, WebSocket connect (viewer+), and each mutating command (editor+); button-hiding is never sufficient. The **never-leak** discipline is load-bearing: to a non-member, an existing-but-denied workspace is byte-identical to a missing one (both `NotFound`/404), so the role check runs *before* any row is read. Archived state is surfaced (`Gone`/410) only to a real member; to everyone else it too collapses to 404. Link-shared workspaces are not globally listed — a user sees one only after explicit membership or a successful link visit (recorded in `user_workspace_state`, which also holds personal pins).
 
@@ -33,9 +38,9 @@ Renaming a dataset's display label is a real document mutation, not a local edit
 
 ## Interactions
 
-- [[auth]] — members/link grants resolve through the same `AuthPrincipal` boundary; email is the v0 membership key, with provider subject stored for later hardening.
-- [[saved-views]] — workspace saved views are the third saved-view surface; they replaced the global bookmark concept once workspaces landed. Editors create/update/delete + set the `default_saved_view_id`; viewers list/open/copy.
-- [[presence-and-follow-mode]] — the session is per-workspace: each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`. Presence, peers, follow chains, and document/saved-view broadcasts are all workspace-local; `ClientId` is workspace-local live-peer identity. There is no longer a single global shared session (ADR-0020).
+- [Authentication](auth.md) — members/link grants resolve through the same `AuthPrincipal` boundary; email is the v0 membership key, with provider subject stored for later hardening.
+- [Saved Views](saved-views.md) — workspace saved views are the third saved-view surface; they replaced the global bookmark concept once workspaces landed. Editors create/update/delete + set the `default_saved_view_id`; viewers list/open/copy.
+- [Presence and Follow Mode](presence-and-follow-mode.md) — the session is per-workspace: each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`. Presence, peers, follow chains, and document/saved-view broadcasts are all workspace-local; `ClientId` is workspace-local live-peer identity. There is no longer a single global shared session (ADR-0020).
 
 ## Other gotchas / invariants
 

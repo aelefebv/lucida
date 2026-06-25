@@ -1,11 +1,16 @@
 ---
+type: Principle
+title: "Principles — Planning Domain"
+description: "Planning is the subsystem that, each tick, decides which chunks the renderer wants next."
+tags: [lucida, principle]
+source_path: wiki/principles/planning.md
 created: 2026-05-14
 modified: 2026-06-25
 ---
 
 # Principles — Planning Domain
 
-> What a *principle* is — guiding light, not mechanism — is defined once in [[principles/index]]. This is a subsystem-scoped principles doc.
+> What a *principle* is — guiding light, not mechanism — is defined once in [Principles](index.md). This is a subsystem-scoped principles doc.
 
 ## Scope
 
@@ -35,7 +40,7 @@ On a plate, all the fields of a single well are one visual unit. They should agr
 
 **When in tension.** Coherence can cost responsiveness: if one field could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right call.
 
-**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per field* (see [[planning-domain]]), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
+**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per field* (see [Planning Domain](../systems/subsystems/planning-domain.md)), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
 
 ## 4. Planning is a pure function of a snapshot
 
@@ -47,7 +52,7 @@ Planning should take a snapshot in and hand a plan back, with nothing hidden in 
 
 What is visible, and at what apparent size, is decided once — in `lucida-core` — and planning reads the answer from the snapshot. Planning should never recompute projected size, frustum geometry, importance, or LOD on the JS side. If a number planning needs isn't in the snapshot, the right move is to grow the snapshot, not to re-derive the number.
 
-**Why.** That visibility math has a single Rust implementation, shared by the server, the CLI, and the Python bindings as well as the web client. A second copy in JS would be a second set of subtly different bugs, drifting apart over time. The boundary is the price we pay to keep exactly one source of that truth. (This is the planner's view of the product-level [[principles/surface-parity]].)
+**Why.** That visibility math has a single Rust implementation, shared by the server, the CLI, and the Python bindings as well as the web client. A second copy in JS would be a second set of subtly different bugs, drifting apart over time. The boundary is the price we pay to keep exactly one source of that truth. (This is the planner's view of the product-level [Surface Parity](surface-parity.md).)
 
 ## 6. Fetch a step ahead of the user's likely next move
 

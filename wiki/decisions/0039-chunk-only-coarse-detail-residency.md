@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Chunk-only coarse/detail residency"
+description: "Lucida's fallback/residency model moves to two canonical chunk tiers:"
+tags: [lucida, decision]
+source_path: wiki/decisions/0039-chunk-only-coarse-detail-residency.md
 created: 2026-05-18
 modified: 2026-05-18
 ---
@@ -50,9 +55,9 @@ candidates than GPU memory could hold.
 A chunk-only model keeps fallback in the same pipeline as detail. The renderer
 can ask for "coarse chunk" and "detail chunk" instead of mixing chunk requests
 with proxy assets and catalog degradation. This honors
-[[principles/planning#2-memory-is-the-binding-constraint]] because each tier has
+[Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint) because each tier has
 an explicit budget and eviction policy. It also honors
-[[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+[Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
 because tier selection and priority remain planner-visible inputs/outputs rather
 than hidden worker state.
 
@@ -61,14 +66,14 @@ inspection to begin at the best available source resolution; lowering detail LOD
 is an explicit user choice, not an automatic memory-pressure response.
 
 Planning still consumes WASM-produced visibility and sizing data, honoring
-[[principles/planning#5-wasm-owns-truth-planning-consumes-a-snapshot]]. Priority
+[Principles — Planning Domain](../principles/planning.md#5-wasm-owns-truth-planning-consumes-a-snapshot). Priority
 lanes and prefetch remain bounded ways to anticipate pan/zoom/T/Z/channel
 changes, honoring
-[[principles/planning#6-anticipate-the-users-likely-next-gesture]] under the
+[Principles — Planning Domain](../principles/planning.md#6-anticipate-the-users-likely-next-gesture) under the
 memory bound.
 
 This decision intentionally relaxes
-[[principles/planning#3-wells-are-coherent-visual-units]] for residency. The old
+[Principles — Planning Domain](../principles/planning.md#3-wells-are-coherent-visual-units) for residency. The old
 well-as-unit rule was appropriate for proxy promotion modes, where a well proxy
 was itself the fallback asset. In the chunk-only model, fields already have
 their own image chunks and can be scheduled independently while the well remains
@@ -114,14 +119,14 @@ the user's layout/navigation unit.
 
 ## Related
 
-- [[principles/planning#2-memory-is-the-binding-constraint]]
-- [[principles/planning#3-wells-are-coherent-visual-units]]
-- [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
-- [[principles/planning#5-wasm-owns-truth-planning-consumes-a-snapshot]]
-- [[principles/planning#6-anticipate-the-users-likely-next-gesture]]
-- Supersedes the new-path behavior in [[decisions/0004-multi-pool-atlases]]
-- Supersedes the new-path behavior in [[decisions/0024-catalog-degrade-one-tier-at-a-time]]
-- Supersedes the new-path behavior in [[decisions/0025-wells-as-planning-unit]]
-- Supersedes the new-path behavior in [[decisions/0038-budgeted-proxy-gpu-residency]]
+- [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
+- [Principles — Planning Domain](../principles/planning.md#3-wells-are-coherent-visual-units)
+- [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
+- [Principles — Planning Domain](../principles/planning.md#5-wasm-owns-truth-planning-consumes-a-snapshot)
+- [Principles — Planning Domain](../principles/planning.md#6-anticipate-the-users-likely-next-gesture)
+- Supersedes the new-path behavior in [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](0004-multi-pool-atlases.md)
+- Supersedes the new-path behavior in [Catalog Degradation Steps One Tier at a Time](0024-catalog-degrade-one-tier-at-a-time.md)
+- Supersedes the new-path behavior in [Wells Are the Planning Unit on Plates](0025-wells-as-planning-unit.md)
+- Supersedes the new-path behavior in [Budgeted proxy GPU residency](0038-budgeted-proxy-gpu-residency.md)
 - PRD #672
 - Issue #561

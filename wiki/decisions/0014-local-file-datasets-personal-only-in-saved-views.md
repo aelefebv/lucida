@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Local-File Datasets Are Personal-Only in Saved Views"
+description: "A saved view (URL-as-App-State for Saved Views) that references local-file datasets — paths like /data/scans/foo.zarr, c:/users/me/foo.zarr, or //server/share/foo.zarr, identified by lucida_content::url::is_local_data…"
+tags: [lucida, decision]
+source_path: wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md
 created: 2026-05-07
 modified: 2026-06-25
 ---
@@ -7,11 +12,11 @@ modified: 2026-06-25
 
 > Status: Accepted (implemented in PR #478 via `ShareToolbarButton.tsx`'s local-file warning toast — landed 2026-05-08).
 
-> Amended 2026-05-26 by [[decisions/0042-canonical-dataset-url-form]]: the local-path classifier is now `is_local_dataset_url(normalize_dataset_url(s))`, extended to cover drive-letter (`c:/…`) and UNC (`//server/share/…`) canonical forms. The personal-only-share decision and the `DatasetId`-blake3-collision sharp edge below remain valid verbatim.
+> Amended 2026-05-26 by [Canonical dataset URL form](0042-canonical-dataset-url-form.md): the local-path classifier is now `is_local_dataset_url(normalize_dataset_url(s))`, extended to cover drive-letter (`c:/…`) and UNC (`//server/share/…`) canonical forms. The personal-only-share decision and the `DatasetId`-blake3-collision sharp edge below remain valid verbatim.
 
 ## Decision
 
-A saved view ([[decisions/0013-url-as-app-state-for-saved-views]]) that references local-file datasets — paths like `/data/scans/foo.zarr`, `c:/users/me/foo.zarr`, or `//server/share/foo.zarr`, identified by `lucida_content::url::is_local_dataset_url` after `normalize_dataset_url` — is treated as a *personal* artifact: it works for the sender refreshing on the same `lucida-server`, but is documented and warned-about as fragile when shared across machines.
+A saved view ([URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md)) that references local-file datasets — paths like `/data/scans/foo.zarr`, `c:/users/me/foo.zarr`, or `//server/share/foo.zarr`, identified by `lucida_content::url::is_local_dataset_url` after `normalize_dataset_url` — is treated as a *personal* artifact: it works for the sender refreshing on the same `lucida-server`, but is documented and warned-about as fragile when shared across machines.
 
 The web client surfaces a non-blocking warning at share time when the current URL contains local-file paths: "This view references local files (N paths) — link only works on a server with the same files at the same paths."
 
@@ -31,7 +36,7 @@ The blake3-collision-on-different-content case is the sharpest edge. Any tooling
 Three approaches were considered:
 
 1. **Refuse to encode local-file URLs in saved views.** Hostile to local development — local-file workflows would lose refresh-preserves-state entirely.
-2. **Warn and embed (chosen).** Honest. Zero infra. Sender keeps refresh-preserves; sharing is documented as fragile. Recipient sees clean error per [[decisions/0013-url-as-app-state-for-saved-views]] §"Decision B" (partial-apply with inline warnings) when a path doesn't resolve.
+2. **Warn and embed (chosen).** Honest. Zero infra. Sender keeps refresh-preserves; sharing is documented as fragile. Recipient sees clean error per [URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md) §"Decision B" (partial-apply with inline warnings) when a path doesn't resolve.
 3. **Convert local to served-URL on share.** Server starts exposing the local file via stable HTTP (e.g. `/served/<blake3>`). Recipient web client fetches via HTTP. Big new server responsibility (TLS, auth, content addressing, GC). A real product feature in its own right and out of scope here.
 
 ## Consequences
@@ -46,6 +51,6 @@ See "Why" §3 above.
 
 ## Related
 
-- [[decisions/0013-url-as-app-state-for-saved-views]] — the umbrella saved-views decision; this one carves out a sharp edge in it
-- [[lucida-store]] — `backend::open` URL-scheme routing
-- [[lucida-server]] — `dataset_id_for_url` and the `/api/browse` endpoint
+- [URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md) — the umbrella saved-views decision; this one carves out a sharp edge in it
+- [lucida-store](../systems/crates/lucida-store.md) — `backend::open` URL-scheme routing
+- [lucida-server](../systems/crates/lucida-server.md) — `dataset_id_for_url` and the `/api/browse` endpoint
