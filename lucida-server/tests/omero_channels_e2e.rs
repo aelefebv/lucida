@@ -32,8 +32,13 @@ fn write_store(name: &str, omero: Option<serde_json::Value>) -> PathBuf {
     if let Some(o) = omero {
         ome.as_object_mut().unwrap().insert("omero".into(), o);
     }
-    let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {"ome": ome}});
-    fs::write(dir.join("zarr.json"), serde_json::to_string_pretty(&root).unwrap()).unwrap();
+    let root =
+        serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {"ome": ome}});
+    fs::write(
+        dir.join("zarr.json"),
+        serde_json::to_string_pretty(&root).unwrap(),
+    )
+    .unwrap();
 
     let level = dir.join("0");
     fs::create_dir_all(&level).unwrap();
@@ -45,7 +50,11 @@ fn write_store(name: &str, omero: Option<serde_json::Value>) -> PathBuf {
         "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
         "fill_value": 0
     });
-    fs::write(level.join("zarr.json"), serde_json::to_string_pretty(&arr).unwrap()).unwrap();
+    fs::write(
+        level.join("zarr.json"),
+        serde_json::to_string_pretty(&arr).unwrap(),
+    )
+    .unwrap();
     dir
 }
 
@@ -61,10 +70,15 @@ fn omero_three() -> serde_json::Value {
 async fn omero_labels_flow_into_manifest() {
     let dir = write_store("with-omero", Some(omero_three()));
     let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
-    let result = import_dataset(&store, "b1-omero", "B1 omero").await.unwrap();
+    let result = import_dataset(&store, "b1-omero", "B1 omero")
+        .await
+        .unwrap();
     let json = serde_json::to_value(&result.manifest).unwrap();
     let blob = serde_json::to_string(&json).unwrap();
-    assert!(blob.contains("channel_infos"), "manifest must carry channel_infos: {blob}");
+    assert!(
+        blob.contains("channel_infos"),
+        "manifest must carry channel_infos: {blob}"
+    );
     for label in ["DAPI (405 nm)", "ALEXA 594 (590 nm)", "ALEXA 488 (499 nm)"] {
         assert!(blob.contains(label), "manifest missing label {label:?}");
     }
@@ -74,8 +88,13 @@ async fn omero_labels_flow_into_manifest() {
 async fn no_omero_is_back_compatible() {
     let dir = write_store("no-omero", None);
     let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
-    let result = import_dataset(&store, "b1-plain", "B1 plain").await.unwrap();
+    let result = import_dataset(&store, "b1-plain", "B1 plain")
+        .await
+        .unwrap();
     // skip_serializing_if = empty => the field simply doesn't appear; import must not error.
     let blob = serde_json::to_string(&serde_json::to_value(&result.manifest).unwrap()).unwrap();
-    assert!(!blob.contains("DAPI"), "no-omero store should carry no channel labels");
+    assert!(
+        !blob.contains("DAPI"),
+        "no-omero store should carry no channel labels"
+    );
 }

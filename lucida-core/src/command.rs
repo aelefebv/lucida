@@ -350,6 +350,17 @@ pub enum ViewportCommand {
         channel: u32,
         colormap: Colormap,
     },
+    /// Set (or clear) a user display-name override for a single channel. A
+    /// local-only per-channel display setting, exactly like
+    /// [`Self::SetChannelColormap`]: applied locally, emitted as a presence
+    /// update, persisted in saved views, and broadcast to followers via the
+    /// selection epoch. `name: None` clears the override, falling the UI back
+    /// to the manifest's omero label and then `Ch {channel}`.
+    SetChannelName {
+        dataset_id: String,
+        channel: u32,
+        name: Option<String>,
+    },
     SetChannelContrast {
         dataset_id: String,
         channel: u32,
@@ -747,6 +758,16 @@ impl Scene {
             } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).colormap = colormap;
+                }
+                self.epochs.selection += 1;
+            }
+            ViewportCommand::SetChannelName {
+                dataset_id,
+                channel,
+                name,
+            } => {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
+                    s.ensure_channel(channel as usize).name = name;
                 }
                 self.epochs.selection += 1;
             }
@@ -1396,6 +1417,7 @@ mod tests {
             contrast_min: 100.0,
             contrast_max: 50000.0,
             gamma: 0.8,
+            name: Some("Nucleus".into()),
         };
         let json = serde_json::to_string(&cs).unwrap();
         let parsed: ChannelSettings = serde_json::from_str(&json).unwrap();
@@ -1404,6 +1426,26 @@ mod tests {
         assert_eq!(parsed.contrast_min, 100.0);
         assert_eq!(parsed.contrast_max, 50000.0);
         assert_eq!(parsed.gamma, 0.8);
+        assert_eq!(parsed.name.as_deref(), Some("Nucleus"));
+    }
+
+    #[test]
+    fn channel_settings_without_name_round_trips_and_omits_key() {
+        // Back-compat: a default `ChannelSettings` (no override) must
+        // deserialize WITHOUT a `name` key (→ None) and serialize WITHOUT the
+        // key, so old saved views / presence snapshots load and a name-less
+        // channel is byte-identical to a pre-slice one.
+        use crate::scene::ChannelSettings;
+        let cs = ChannelSettings::default();
+        let json = serde_json::to_string(&cs).unwrap();
+        assert!(
+            !json.contains("\"name\""),
+            "a channel with no override must not emit a `name` key: {json}"
+        );
+        // An older blob with no `name` field deserializes as None.
+        let old = r#"{"visible":true,"colormap":"gray","contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0}"#;
+        let parsed: ChannelSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.name, None);
     }
 
     #[test]
@@ -1494,6 +1536,47 @@ mod tests {
                 assert_eq!(colormap, crate::scene::Colormap::Viridis);
             }
             _ => panic!("expected SetChannelColormap"),
+        }
+    }
+
+    #[test]
+    fn set_channel_name_round_trips() {
+        let cmd = ViewportCommand::SetChannelName {
+            dataset_id: "ds1".into(),
+            channel: 2,
+            name: Some("Nucleus".into()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        // The exact wire shape the web client emits (snake_case tag).
+        assert_eq!(
+            json,
+            r#"{"type":"set_channel_name","dataset_id":"ds1","channel":2,"name":"Nucleus"}"#
+        );
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelName {
+                dataset_id,
+                channel,
+                name,
+            } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(channel, 2);
+                assert_eq!(name.as_deref(), Some("Nucleus"));
+            }
+            _ => panic!("expected SetChannelName"),
+        }
+    }
+
+    #[test]
+    fn set_channel_name_none_round_trips() {
+        // The clear-override form: `name: null` carries through the wire and
+        // back as `None`, and (mirroring how the web sends it) parses as a
+        // ViewportCommand.
+        let wire = r#"{"type":"set_channel_name","dataset_id":"ds1","channel":0,"name":null}"#;
+        let parsed: ViewportCommand = serde_json::from_str(wire).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelName { name, .. } => assert_eq!(name, None),
+            _ => panic!("expected SetChannelName"),
         }
     }
 
@@ -1609,6 +1692,92 @@ mod tests {
             scene.dataset_settings[&ds_id].channel_settings[1].colormap,
             Colormap::Viridis
         );
+    }
+
+    #[test]
+    fn apply_set_channel_name_sets_and_clears() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 2);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        // No override by default.
+        assert_eq!(
+            scene.dataset_settings[&ds_id].channel_settings[1].name,
+            None
+        );
+
+        // Set an override on channel 1.
+        scene.apply(
+            ViewportCommand::SetChannelName {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                name: Some("Membrane".into()),
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&ds_id].channel_settings[1]
+                .name
+                .as_deref(),
+            Some("Membrane")
+        );
+
+        // `None` clears it back to the fallback (omero/`Ch N`).
+        scene.apply(
+            ViewportCommand::SetChannelName {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                name: None,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&ds_id].channel_settings[1].name,
+            None
+        );
+    }
+
+    #[test]
+    fn apply_set_channel_name_grows_channel_settings() {
+        // Mirrors the colormap/contrast arms: ensure_channel back-fills missing
+        // channels so a name can be set on a channel index that has no entry yet
+        // (e.g. before any other per-channel edit) without panicking.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        scene.apply(
+            ViewportCommand::SetChannelName {
+                dataset_id: "ds1".into(),
+                channel: 3,
+                name: Some("Far".into()),
+            }
+            .into(),
+        );
+        let ch = &scene.dataset_settings[&ds_id].channel_settings;
+        assert!(ch.len() >= 4);
+        assert_eq!(ch[3].name.as_deref(), Some("Far"));
+    }
+
+    #[test]
+    fn set_channel_name_bumps_only_selection_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let selection_before = scene.epochs.selection;
+        let view_before = scene.epochs.view;
+        let content_before = scene.epochs.content;
+        scene.apply(
+            ViewportCommand::SetChannelName {
+                dataset_id: "ds1".into(),
+                channel: 0,
+                name: Some("Nucleus".into()),
+            }
+            .into(),
+        );
+        assert_eq!(scene.epochs.selection, selection_before + 1);
+        assert_eq!(scene.epochs.view, view_before);
+        assert_eq!(scene.epochs.content, content_before);
     }
 
     #[test]

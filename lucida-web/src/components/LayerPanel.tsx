@@ -20,12 +20,13 @@ export interface LayerInfo {
   fullRange: boolean;
   dataRange: { min: number; max: number } | null;
   fullRangeMax: number;
-  channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
+  channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
   /**
    * Per-channel display labels from the manifest's omero block, in channel
    * order. Optional/positional: an entry may be missing for a given channel,
    * in which case the row falls back to `Ch {i}`. Names are immutable manifest
-   * data, decoupled from the mutable `channelSettings`.
+   * data, decoupled from the mutable `channelSettings` (which carries the
+   * user's per-channel `name` override that takes precedence over these).
    */
   channelInfos?: { label: string; color?: string | null }[];
   channelBlendMode: string;
@@ -59,6 +60,11 @@ interface Props {
   canEdit: boolean;
   onChannelSetVisible?: (id: string, ch: number, visible: boolean) => void;
   onChannelSetColormap?: (id: string, ch: number, colormap: string) => void;
+  /** Set (`name`) or clear (`null`) a user display-name override for a
+   *  channel. Editor-only; gated behind the same `canEdit` as the layer
+   *  rename. An emptied input passes `null` to clear back to the omero
+   *  label / `Ch N`. */
+  onChannelSetName?: (id: string, ch: number, name: string | null) => void;
   onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
   onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
   onChannelSetBlendMode?: (id: string, blendMode: string) => void;
@@ -96,6 +102,7 @@ export function LayerPanel({
   canEdit,
   onChannelSetVisible,
   onChannelSetColormap,
+  onChannelSetName,
   onChannelSetContrast,
   onChannelSetGamma,
   onChannelSetBlendMode,
@@ -109,6 +116,10 @@ export function LayerPanel({
 }: Props) {
   // Which layer row's name is currently being edited inline (editor-only).
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
+  // Which channel sublayer's name is currently being edited inline
+  // (editor-only). Keyed by `${layerId}::${channelIndex}` so only one channel
+  // across all layers is in edit mode at a time, mirroring `renamingLayerId`.
+  const [renamingChannelKey, setRenamingChannelKey] = useState<string | null>(null);
   return (
     <div className="layer-panel" style={style}>
       <div className="layer-panel-header">
@@ -228,9 +239,15 @@ export function LayerPanel({
                   {multiChannel && layer.channelSettings ? (
                     <>
                       {layer.channelSettings.map((ch, chIdx) => {
+                        // Display-name precedence: user override \u2192 omero label
+                        // (B1) \u2192 `Ch N`. The override is the mutable per-channel
+                        // `name`; the omero label is immutable manifest data.
                         const chName =
+                          ch.name?.trim() ||
                           layer.channelInfos?.[chIdx]?.label?.trim() ||
                           `Ch ${chIdx}`;
+                        const channelKey = `${layer.id}::${chIdx}`;
+                        const isRenamingChannel = renamingChannelKey === channelKey;
                         return (
                         <div key={chIdx} className="channel-sublayer">
                           <div className="channel-sublayer-header">
@@ -243,7 +260,41 @@ export function LayerPanel({
                             >
                               {ch.visible ? "\u25C9" : "\u25CB"}
                             </button>
-                            <span className="channel-label">{chName}</span>
+                            {canEdit && isRenamingChannel ? (
+                              <ChannelNameInput
+                                // Pre-fill with the user override if one is set;
+                                // otherwise start empty so the placeholder shows
+                                // the inherited (omero/`Ch N`) name and a blank
+                                // commit clears back to it.
+                                initial={ch.name ?? ""}
+                                placeholder={chName}
+                                onCommit={(name) => {
+                                  setRenamingChannelKey(null);
+                                  const trimmed = name.trim();
+                                  // Empty \u2192 clear the override (null); else set.
+                                  onChannelSetName?.(layer.id, chIdx, trimmed.length === 0 ? null : trimmed);
+                                }}
+                                onCancel={() => setRenamingChannelKey(null)}
+                              />
+                            ) : (
+                              <span
+                                className="channel-label"
+                                title={canEdit ? "Double-click to rename channel" : chName}
+                                onDoubleClick={canEdit ? () => setRenamingChannelKey(channelKey) : undefined}
+                              >
+                                {chName}
+                              </span>
+                            )}
+                            {canEdit && !isRenamingChannel && (
+                              <button
+                                className="channel-rename-btn"
+                                title={`Rename ${layer.name} ${chName}`}
+                                aria-label={`Rename channel ${chName}`}
+                                onClick={() => setRenamingChannelKey(channelKey)}
+                              >
+                                {"\u270E"}
+                              </button>
+                            )}
                             <ColormapSelector
                               value={ch.colormap}
                               label={`${layer.name} ${chName} colormap`}
@@ -419,6 +470,58 @@ function LayerNameInput({
       type="text"
       className="layer-name-input"
       aria-label="Layer name"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={() => onCommit(value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onCommit(value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    />
+  );
+}
+
+/**
+ * Inline rename input for a single channel's display-name override. Mirrors
+ * {@link LayerNameInput} (auto-focus + select on mount; Enter/blur commits,
+ * Escape cancels; stops click propagation), with two channel-specific
+ * differences:
+ *  - it starts from the current override (empty when none is set) and shows the
+ *    inherited name (omero label / `Ch N`) as the `placeholder`, and
+ *  - an **empty** commit is meaningful: it clears the override (the caller maps
+ *    blank → `null`), falling the label back to the omero/`Ch N` name. (The
+ *    layer rename, by contrast, ignores a blank value.)
+ */
+function ChannelNameInput({
+  initial,
+  placeholder,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  placeholder: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  return (
+    <input
+      ref={ref}
+      type="text"
+      className="channel-name-input"
+      aria-label="Channel name"
+      placeholder={placeholder}
       value={value}
       onChange={(e) => setValue(e.target.value)}
       onClick={(e) => e.stopPropagation()}

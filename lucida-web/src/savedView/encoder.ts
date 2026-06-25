@@ -195,6 +195,9 @@ function stripChannel(c: ChannelSettings, index: number): Record<string, unknown
   if (c.contrast_min !== 0) { out.contrast_min = c.contrast_min; any = true; }
   if (c.contrast_max !== 65535) { out.contrast_max = c.contrast_max; any = true; }
   if (c.gamma !== 1.0) { out.gamma = c.gamma; any = true; }
+  // The default override is "none" (absent), so any present name is non-default
+  // and must ride the wire. Mirrors the Rust `skip_serializing_if` on `name`.
+  if (c.name !== undefined) { out.name = c.name; any = true; }
   return any ? out : undefined;
 }
 
@@ -270,13 +273,17 @@ function restoreDatasetSettings(p: unknown): DatasetDisplaySettings {
 
 function restoreChannel(p: Partial<ChannelSettings>, index: number): ChannelSettings {
   const defaultColormap = DEFAULT_COLORMAP_CYCLE[index % DEFAULT_COLORMAP_CYCLE.length];
-  return {
+  const out: ChannelSettings = {
     visible: p.visible ?? true,
     colormap: p.colormap ?? defaultColormap,
     contrast_min: p.contrast_min ?? 0,
     contrast_max: p.contrast_max ?? 65535,
     gamma: p.gamma ?? 1.0,
   };
+  // Restore the user override only when present, so a channel with no name
+  // stays `name: undefined` (round-trip identity with a pre-slice payload).
+  if (p.name !== undefined) out.name = p.name;
+  return out;
 }
 
 // gzip / gunzip via CompressionStream

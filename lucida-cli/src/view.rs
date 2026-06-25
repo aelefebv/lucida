@@ -3024,6 +3024,7 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetMultiChannel { .. } => "channel mode",
         ViewportCommand::SetChannelVisible { .. } => "channel visibility",
         ViewportCommand::SetChannelColormap { .. } => "channel colormap",
+        ViewportCommand::SetChannelName { .. } => "channel name",
         ViewportCommand::SetChannelContrast { .. } => "channel contrast",
         ViewportCommand::SetChannelGamma { .. } => "channel gamma",
         ViewportCommand::SetChannelBlendMode { .. } => "channel blend-mode",

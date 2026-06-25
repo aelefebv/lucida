@@ -187,3 +187,144 @@ describe("LayerPanel channel labels", () => {
     expect(screen.getByText("GFP")).toBeTruthy();
   });
 });
+
+describe("LayerPanel channel rename", () => {
+  function multiChannelProps(
+    overrides: Partial<LayerInfo>,
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      ...baseProps(true, vi.fn()),
+      multiChannel: true,
+      expandedLayerId: "wds-1" as string | null,
+      layers: [layer(overrides)],
+      ...extra,
+    };
+  }
+
+  // The 3-tier precedence: user override > omero label > `Ch N`.
+  it("prefers the user override over the omero label and `Ch N`", () => {
+    render(
+      <LayerPanel
+        {...multiChannelProps({
+          channelSettings: [
+            // ch0: user override beats the omero label "DAPI".
+            { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, name: "Nucleus" },
+            // ch1: no override → omero label "GFP".
+            { visible: true, colormap: "green", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+            // ch2: no override, no omero entry → `Ch 2`.
+            { visible: true, colormap: "cyan", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+          ],
+          channelInfos: [{ label: "DAPI" }, { label: "GFP" }],
+        })}
+      />,
+    );
+    // Tier 1: override wins, the omero label is NOT shown.
+    expect(screen.getByText("Nucleus")).toBeTruthy();
+    expect(screen.queryByText("DAPI")).toBeNull();
+    // Tier 2: omero label for the un-renamed channel.
+    expect(screen.getByText("GFP")).toBeTruthy();
+    // Tier 3: positional fallback when neither override nor omero exists.
+    expect(screen.getByText("Ch 2")).toBeTruthy();
+  });
+
+  it("shows a channel rename affordance for an editor, hidden for a viewer", () => {
+    const named = {
+      channelSettings: [
+        { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+      ],
+      channelInfos: [{ label: "DAPI" }],
+    } satisfies Partial<LayerInfo>;
+
+    const { rerender } = render(<LayerPanel {...multiChannelProps(named)} />);
+    expect(screen.getByLabelText("Rename channel DAPI")).toBeTruthy();
+
+    rerender(
+      <LayerPanel {...multiChannelProps(named, { canEdit: false })} />,
+    );
+    expect(screen.queryByLabelText("Rename channel DAPI")).toBeNull();
+  });
+
+  it("commits a trimmed name on Enter via onChannelSetName", () => {
+    const onChannelSetName = vi.fn();
+    render(
+      <LayerPanel
+        {...multiChannelProps(
+          {
+            channelSettings: [
+              { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+            ],
+            channelInfos: [{ label: "DAPI" }],
+          },
+          { onChannelSetName },
+        )}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Rename channel DAPI"));
+    const input = screen.getByLabelText("Channel name") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "  Nucleus  " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onChannelSetName).toHaveBeenCalledTimes(1);
+    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, "Nucleus");
+    // The inline input is gone after commit.
+    expect(screen.queryByLabelText("Channel name")).toBeNull();
+  });
+
+  it("clears the override (null) when committed empty, falling back to omero", () => {
+    const onChannelSetName = vi.fn();
+    render(
+      <LayerPanel
+        {...multiChannelProps(
+          {
+            // Currently overridden to "Nucleus".
+            channelSettings: [
+              { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, name: "Nucleus" },
+            ],
+            channelInfos: [{ label: "DAPI" }],
+          },
+          { onChannelSetName },
+        )}
+      />,
+    );
+
+    // Override shows first.
+    expect(screen.getByText("Nucleus")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Rename channel Nucleus"));
+    const input = screen.getByLabelText("Channel name") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // Blank commit clears the override.
+    expect(onChannelSetName).toHaveBeenCalledTimes(1);
+    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, null);
+  });
+
+  it("cancels on Escape without calling onChannelSetName", () => {
+    const onChannelSetName = vi.fn();
+    render(
+      <LayerPanel
+        {...multiChannelProps(
+          {
+            channelSettings: [
+              { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+            ],
+            channelInfos: [{ label: "DAPI" }],
+          },
+          { onChannelSetName },
+        )}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Rename channel DAPI"));
+    const input = screen.getByLabelText("Channel name") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "discard me" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(onChannelSetName).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Channel name")).toBeNull();
+    // The original (omero) label is shown again.
+    expect(screen.getByText("DAPI")).toBeTruthy();
+  });
+});

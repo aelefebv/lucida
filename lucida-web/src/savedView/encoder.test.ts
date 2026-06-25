@@ -211,6 +211,39 @@ describe("SavedView encoder", () => {
       expect(back.dataset_settings["ds-x"].channel_settings![1].colormap).toBe("green");
     });
 
+    it("user channel-name override round-trips; un-named channels stay absent", async () => {
+      const v = emptySliceView();
+      v.datasets = ["gs://x"];
+      v.dataset_order = ["ds-x"];
+      const ch0 = defaultChannel(0);
+      ch0.name = "Nucleus"; // user override
+      const settings = defaultDatasetSettings(2);
+      settings.channel_settings = [ch0, defaultChannel(1)];
+      v.dataset_settings = { "ds-x": settings };
+      const back = await decode(await encode(v));
+      // The override persists through the saved-view round-trip...
+      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Nucleus");
+      // ...and a channel with no override has no `name` key (back-compat with
+      // pre-slice payloads).
+      expect(back.dataset_settings["ds-x"].channel_settings![1].name).toBeUndefined();
+    });
+
+    it("a channel whose ONLY non-default is a name override survives", async () => {
+      // Guards that `name` alone flips the stripper's `any` flag, so a channel
+      // that is otherwise all-default but carries a rename isn't collapsed to
+      // an empty `{}` (which would drop the name on decode).
+      const v = emptySliceView();
+      v.datasets = ["gs://x"];
+      v.dataset_order = ["ds-x"];
+      const ch0 = defaultChannel(0); // every field default...
+      ch0.name = "Membrane"; // ...except the override.
+      const settings = defaultDatasetSettings(1);
+      settings.channel_settings = [ch0];
+      v.dataset_settings = { "ds-x": settings };
+      const back = await decode(await encode(v));
+      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Membrane");
+    });
+
     it("auto_contrast: false entries round-trip; true entries are stripped (default)", async () => {
       const v = emptySliceView();
       v.auto_contrast = { "ds-a": false, "ds-b": true, "ds-c": false };

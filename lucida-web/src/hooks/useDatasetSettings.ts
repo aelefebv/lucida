@@ -187,6 +187,23 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
+  // Set (or clear) a user display-name override for one channel. A
+  // viewport/display command exactly like handleChannelSetColormap — applies
+  // locally, breaks follow, marks dirty, and emits presence so followers see
+  // it via the selection epoch. `name === null` (an emptied input) clears the
+  // override, falling the label back to the omero name / `Ch N`. Whitespace is
+  // trimmed before this is called; the caller passes null for a blank value.
+  const handleChannelSetName = useCallback((id: string, channel: number, name: string | null) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_name", dataset_id: id, channel, name });
+      loopRef.current?.markInteractiveDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
   const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -379,7 +396,7 @@ export function useDatasetSettings({
       gamma: number;
       blend_mode: string;
       render_mode: string;
-      channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
+      channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
       channel_blend_mode?: string;
       detail_level_override?: number | null;
     }>;
@@ -460,6 +477,7 @@ export function useDatasetSettings({
     handleLayerSetColormap,
     handleChannelSetVisible,
     handleChannelSetColormap,
+    handleChannelSetName,
     handleChannelSetContrast,
     handleChannelSetGamma,
     handleChannelSetBlendMode,
