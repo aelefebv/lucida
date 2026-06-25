@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Worker Eviction Reporting Is Async"
+description: "When the GPU worker evicts a chunk to make room for a new upload, the main thread doesn't know immediately."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/worker-eviction-async-reporting.md
 created: 2026-04-18
 modified: 2026-05-17
 ---
@@ -7,7 +12,7 @@ modified: 2026-05-17
 
 ## The footgun
 
-When the [[gpu-residency|GPU worker]] evicts a chunk to make room for a new upload, the main thread doesn't know **immediately**. The worker posts a `chunksEvicted` message; the main thread sees it on the next event-loop turn.
+When the [GPU worker](../systems/subsystems/gpu-residency.md) evicts a chunk to make room for a new upload, the main thread doesn't know **immediately**. The worker posts a `chunksEvicted` message; the main thread sees it on the next event-loop turn.
 
 Code that assumes "I just sent it, so it's there" is wrong. The worker may have evicted it by the time you read back. The reconciliation path goes through `chunksEvicted` and the next `wantedSetDelta`.
 
@@ -23,7 +28,7 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 2. Worker posts `chunksEvicted { keys: [K], skipped: [] }` to main thread.
 3. Worker includes `K` in next `wantedSetDelta { missing: [K, ...] }` (if still wanted).
 4. Main thread parses `memberId` at the upload wire boundary and clears `DeliveryState` chunk sent state. `skipped` chunks are the special case: they are true atlas-policy rejections and also flow into `RejectionTracker`.
-5. Next [[upload-pipeline|tick]]: `cpuCache.getDeliverable()` includes `K` again if it is cached, wanted in the current rebuild generation, not rejected, and not currently marked sent.
+5. Next [tick](../systems/subsystems/upload-pipeline.md): `cpuCache.getDeliverable()` includes `K` again if it is cached, wanted in the current rebuild generation, not rejected, and not currently marked sent.
 
 ## What to do
 
@@ -42,6 +47,6 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 
 ## Related
 
-- [[gpu-residency]]
-- [[worker-protocol]]
-- [[chunk-lifecycle]]
+- [GPU Residency](../systems/subsystems/gpu-residency.md)
+- [Worker Protocol](../systems/subsystems/worker-protocol.md)
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md)

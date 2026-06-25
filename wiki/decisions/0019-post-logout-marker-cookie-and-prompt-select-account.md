@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Post-Logout Marker Cookie + `prompt=select_account`"
+description: "After explicit /auth/logout, lucida-server sets a short-lived"
+tags: [lucida, decision]
+source_path: wiki/decisions/0019-post-logout-marker-cookie-and-prompt-select-account.md
 created: 2026-05-08
 modified: 2026-05-08
 ---
@@ -72,7 +77,7 @@ deliberate click) without forcing a full password re-entry.
 The simpler design would be to always send `prompt=select_account` on
 every `/auth/start`. Rejected because it adds an extra click to every
 cold visit and every saved-view link click from Slack — exactly the
-friction-free flow ADR-0016 was designed to preserve. Calico is small,
+friction-free flow ADR-0016 was designed to preserve. The team is small,
 all users have one work account; on cold paths, silent pass-through is
 the correct UX.
 
@@ -227,8 +232,8 @@ on its own and the next fresh visit behaves like a cold visit.
 
 ## Related
 
-- [[decisions/0016-backend-mediated-oauth-with-session-cookies]] —
+- [Backend-Mediated OAuth with Session Cookies](0016-backend-mediated-oauth-with-session-cookies.md) —
   the parent ADR; this one extends its logout flow.
-- [[flows/auth-signin]] — end-to-end trace, including the explicit-
+- [Flow: Authentication Sign-In](../flows/auth-signin.md) — end-to-end trace, including the explicit-
   logout path this ADR shapes.
-- [[auth]] — the subsystem this lives in.
+- [Authentication](../systems/subsystems/auth.md) — the subsystem this lives in.

@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "App.tsx Hook Order and Callback Refs"
+description: "lucida-web/src/App.tsx calls ~10 React hooks in a deliberate order."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/app-tsx-hook-order.md
 created: 2026-04-18
 modified: 2026-05-26
 ---
@@ -46,5 +51,5 @@ The pragma: **treat App.tsx hook order as load-bearing**. Refactor with care.
 
 ## Related
 
-- [[lucida-web]]
+- [lucida-web](../systems/crates/lucida-web.md)
 - React docs on hook ordering and refs

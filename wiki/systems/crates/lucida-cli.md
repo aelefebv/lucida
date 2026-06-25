@@ -1,4 +1,9 @@
 ---
+type: Crate
+title: "lucida-cli"
+description: "The Rust crate that builds Lucida's product CLI binary, lucida."
+tags: [lucida, crate]
+source_path: wiki/systems/crates/lucida-cli.md
 created: 2026-04-18
 modified: 2026-06-25
 ---

@@ -1,6 +1,11 @@
 ---
+type: Decision
+title: "Discriminated Active-Set and Entity Types"
+description: "ActiveSetEntry is a discriminated union of three variants — WellAsProxyEntry | FieldEntry | InvisibleEntry — discriminated by a top-level kind field."
+tags: [lucida, decision]
+source_path: wiki/decisions/0026-discriminated-active-set-and-entity-types.md
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # Discriminated Active-Set and Entity Types
@@ -11,7 +16,7 @@ modified: 2026-05-15
 
 `EntitySnapshot` is a discriminated union of three variants — `ImageSnapshot | WellSnapshot | FieldSnapshot` — discriminated by `kind`. `parentId: string` (non-null) lives only on `FieldSnapshot`. Conservative form: `levels: LevelGeometry[]` is kept on all three variants.
 
-Both extend [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]] from "carry-forward state is explicit" to "per-variant invariants are compile-time enforced." The previous JSDoc-encoded invariants (e.g., "`well-as-proxy` entries have empty `imageId`," "Field entries always have a `parentId`") are now type-system-enforced.
+Both extend [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit) from "carry-forward state is explicit" to "per-variant invariants are compile-time enforced." The previous JSDoc-encoded invariants (e.g., "`well-as-proxy` entries have empty `imageId`," "Field entries always have a `parentId`") are now type-system-enforced.
 
 ## Why three variants for active-set, not four
 
@@ -23,13 +28,13 @@ The aggressive form would strip `levels` from `WellSnapshot` (well-as-proxy neve
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts` — `ActiveSetEntry` union, `EntitySnapshot` union, `make*Entry` constructors return matching discriminated variants.
-- All consumer sites (`pipeline/orchestrator.ts`, `pipeline/cpuCache.ts`, `pipeline/planning/debug.ts`, tests) narrow on `kind` before reading variant-specific fields.
+- `lucida-web/src/pipeline/planning/types.ts` — `ActiveSetEntry` union and `EntitySnapshot` union (both re-exported through the `planning` barrel); the `make*Entry` constructors live in `planning/modes.ts` and return matching discriminated variants.
+- All consumer sites (`pipeline/tickCoordinator.ts`, `pipeline/planning/debug.ts`, tests) narrow on `kind` before reading variant-specific fields.
 - `groupByWell` and `buildPrevModeByWell` simplify after the discrimination — no more `?? null` fallback on `parentId`.
 
 ## Related
 
-- [[principles/planning]] — the framework this decision lives within
-- [[planning-domain]] — subsystem article; refreshed for the new contract shape
-- [[decisions/0027-planning-state-as-the-carry-forward-seam]] — sister decision; same PRD, same principle
+- [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
+- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new contract shape
+- [`PlanningState` as the Carry-Forward Seam](0027-planning-state-as-the-carry-forward-seam.md) — sister decision; same PRD, same principle
 - PRD #563 — the work item this ADR was created during

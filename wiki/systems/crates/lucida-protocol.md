@@ -1,19 +1,24 @@
 ---
+type: Crate
+title: "lucida-protocol"
+description: "Wire-level types shared between lucida-server and any client (web, CLI, Python)."
+tags: [lucida, crate]
+source_path: wiki/systems/crates/lucida-protocol.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
 
 # lucida-protocol
 
-Wire-level types shared between [[lucida-server]] and any client (web, CLI, Python). This crate is intentionally thin — it owns nothing computational, only the on-the-wire shapes of dataset-open events, fetch descriptors, dataset-open/health diagnostics, generated availability metadata, legacy asset catalogs, and legacy asset requests.
+Wire-level types shared between [lucida-server](lucida-server.md) and any client (web, CLI, Python). This crate is intentionally thin — it owns nothing computational, only the on-the-wire shapes of dataset-open events, fetch descriptors, dataset-open/health diagnostics, generated availability metadata, legacy asset catalogs, and legacy asset requests.
 
-The lower-level message envelopes (`ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`) live in [[lucida-core]]'s `protocol.rs` because they reference camera and view types. This crate carries the dataset-shape pieces that [[lucida-store]] produces and clients consume.
+The lower-level message envelopes (`ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`) live in [lucida-core](lucida-core.md)'s `protocol.rs` because they reference camera and view types. This crate carries the dataset-shape pieces that [lucida-store](lucida-store.md) produces and clients consume.
 
 ## Why a separate crate
 
 Two reasons:
 
-1. **No circular dependency.** [[lucida-store]] needs to produce wire types but can't depend on [[lucida-core]] (which would pull in WASM-only modules and the full Scene model). [[lucida-core]] re-exports from this crate so downstream consumers see one cohesive API.
+1. **No circular dependency.** [lucida-store](lucida-store.md) needs to produce wire types but can't depend on [lucida-core](lucida-core.md) (which would pull in WASM-only modules and the full Scene model). [lucida-core](lucida-core.md) re-exports from this crate so downstream consumers see one cohesive API.
 2. **Wire stability.** Pulling these types out makes the wire surface easier to audit when bumping the protocol. A diff on `lucida-protocol/src/` is the place to look for "did the wire format change?"
 
 ## Module map
@@ -29,13 +34,13 @@ All six modules are re-exported via `pub use` so consumers do `use lucida_protoc
 
 ## Interactions
 
-- [[lucida-store]] **constructs** these types from imported dataset metadata.
-- [[lucida-server]] **broadcasts** them in `ServerMessage::CommandBroadcast` (for `DatasetOpened`), `ServerMessage::GeneratedAvailabilityUpdate`, and legacy `ServerMessage::AssetCatalogUpdate`.
-- Clients ([[lucida-web]], [[lucida-cli]], [[lucida-py]]) **consume** them — the web client mirrors `manifestTypes.ts` and routes `FetchSource` into the [[chunk-lifecycle]].
+- [lucida-store](lucida-store.md) **constructs** these types from imported dataset metadata.
+- [lucida-server](lucida-server.md) **broadcasts** them in `ServerMessage::CommandBroadcast` (for `DatasetOpened`), `ServerMessage::GeneratedAvailabilityUpdate`, and legacy `ServerMessage::AssetCatalogUpdate`.
+- Clients ([lucida-web](lucida-web.md), [lucida-cli](lucida-cli.md), [lucida-py](lucida-py.md)) **consume** them — the web client mirrors `manifestTypes.ts` and routes `FetchSource` into the [Flow: Chunk Lifecycle](../../flows/chunk-lifecycle.md).
 
 ## Invariants
 
-- **`ContentSource` (JS/TS) is distinct from `FetchSource` (wire)** — the rename in commit `c1d982d` and clarification in `1718e9a` made this explicit. The wire envelope carries `FetchSource`; the web client wraps it in a `ContentSource` class for in-browser fetch orchestration. Don't conflate them. See [[decisions/0006-content-source-vs-fetch-source]].
+- **`ContentSource` (JS/TS) is distinct from `FetchSource` (wire)** — the rename in commit `c1d982d` and clarification in `1718e9a` made this explicit. The wire envelope carries `FetchSource`; the web client wraps it in a `ContentSource` class for in-browser fetch orchestration. Don't conflate them. See [ContentSource (JS) vs FetchSource (wire)](../../decisions/0006-content-source-vs-fetch-source.md).
 - **Generated availability deltas are client-visible runtime state.** They are not document commands or saved-view payload. The server includes snapshots on connect and broadcasts deltas as generated coarse levels/chunks become available.
 - **`AssetCatalog` is legacy proxy metadata.** The default `DatasetOpened` catalog is empty after the coarse/detail default flip. `AssetCatalogDelta` remains monotonic for compatibility.
 - **Wire format names are pinned via explicit `serde` tags**, not derived from `Debug`. `ProxyKind::WellProxy3D` serializes as the literal string `"WellProxy3D"`, asserted by the `proxy_kind_str` helper in the server. Renaming a variant requires touching both ends.

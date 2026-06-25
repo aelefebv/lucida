@@ -1,11 +1,16 @@
 ---
+type: Decision
+title: "Logging Conventions"
+description: "Cross-process conventions for debug logging."
+tags: [lucida, decision]
+source_path: wiki/decisions/0012-logging-conventions.md
 created: 2026-04-20
 modified: 2026-06-25
 ---
 
 # Logging Conventions
 
-Cross-process conventions for debug logging. Trial-run on the dataset-opening flow ([[flows/dataset-opening]]); expand opportunistically as other flows need debugging.
+Cross-process conventions for debug logging. Trial-run on the dataset-opening flow ([Flow: Dataset Opening](../flows/dataset-opening.md)); expand opportunistically as other flows need debugging.
 
 ## Decision
 
@@ -52,9 +57,9 @@ When in doubt: **the prefix should be the most useful word to grep for.** If you
 - `lucida-core/src/wasm.rs::set_debug_categories` — wasm-bindgen entry point JS calls.
 - `lucida-server/src/handler.rs::handle_open_remote_dataset` — first instrumented handler.
 - `lucida-server/src/main.rs` — subscriber configured with `FmtSpan::CLOSE` for free per-span timing.
-- See [[flows/dataset-opening]] for the trace where this convention is in force.
+- See [Flow: Dataset Opening](../flows/dataset-opening.md) for the trace where this convention is in force.
 
 ## Related
 
-- [[flows/dataset-opening]] — the flow this was first applied to
-- [[chunk-lifecycle]] — next candidate for instrumentation when debugged
+- [Flow: Dataset Opening](../flows/dataset-opening.md) — the flow this was first applied to
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — next candidate for instrumentation when debugged

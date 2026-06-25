@@ -1,15 +1,20 @@
 ---
+type: Subsystem
+title: "GPU Residency"
+description: "How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/gpu-residency.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
 
 # GPU Residency
 
-How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels. Lives in `lucida-web/src/renderer/`. All WebGPU work happens inside `gpu.worker.ts` (now a ~34 LOC entry point) on a dedicated Web Worker — see [[decisions/0003-gpu-on-dedicated-worker]].
+How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels. Lives in `lucida-web/src/renderer/`. All WebGPU work happens inside `gpu.worker.ts` (now a ~34 LOC entry point) on a dedicated Web Worker — see [All GPU Work on a Dedicated Web Worker](../../decisions/0003-gpu-on-dedicated-worker.md).
 
 ## Module layout
 
-`renderer/` is a tree of focused modules organized around the worker entry point. The entry point wires five collaborators in `worker/` ([[decisions/0035-gpu-worker-split-into-renderer-subdirectories]]):
+`renderer/` is a tree of focused modules organized around the worker entry point. The entry point wires five collaborators in `worker/` ([`gpu.worker.ts` split into `renderer/` subdirectories](../../decisions/0035-gpu-worker-split-into-renderer-subdirectories.md)):
 
 - `worker/bootstrap.ts` — `init` handler: builds `WorkerCtx`, creates GPU device + canvas context, instantiates the per-mode renderers (slice, volume, cursor, compositor), and constructs the per-session `RendererState`.
 - `worker/dispatch.ts` — message switch: routes every typed `MainToWorkerMessage` to its handler.
@@ -90,14 +95,14 @@ When worker residency changes or rejects an upload:
 
 1. Posts chunk feedback keyed by `memberId`. `keys` are re-eligible chunks whose optimistic sent state should clear; `skipped` is reserved for atlas-policy rejection (atlas full + too far).
 2. Includes missing detail/coarse chunks in the next `wantedSetDelta` from authoritative atlas state. Legacy proxy misses are included only for bridge entries.
-3. Main thread reconciles through [[cpu-cache]]: missing/re-eligible chunks clear `DeliveryState` chunk sent state; true rejections enter `RejectionTracker`; legacy missing proxies clear proxy sent state.
+3. Main thread reconciles through [CPU Cache](cpu-cache.md): missing/re-eligible chunks clear `DeliveryState` chunk sent state; true rejections enter `RejectionTracker`; legacy missing proxies clear proxy sent state.
 4. Next `getDeliverable()` pass re-uploads cached, wanted, not-rejected, not-sent assets without relying on a pan/zoom cold-state rebuild.
 
-This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [[decisions/0004-multi-pool-atlases]].
+This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../../decisions/0004-multi-pool-atlases.md).
 
 ## Interactions
 
-- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, tier-labeled `sliceChunkData` and `volumeChunkData` messages over [[worker-protocol]]. `proxyAssetData` carries the proxy fallback tier. The planner-only TickCoordinator drives the Uploader.
+- **Upstream**: the [Uploader](upload-pipeline.md) posts `coldState`, `viewHotState`, tier-labeled `sliceChunkData` and `volumeChunkData` messages over [Worker Protocol](worker-protocol.md). `proxyAssetData` carries the proxy fallback tier. The planner-only TickCoordinator drives the Uploader.
 - **Downstream**: the worker presents to the OffscreenCanvas; communicates back via `wantedSetDelta`, `chunksEvicted`, `intensityRange`.
 
 ## Invariants

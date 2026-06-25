@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Saved-View URLs Expose Dataset URLs (and Anything in Them)"
+description: "Saved-view URLs (#view=…) embed dataset URLs verbatim inside the encoded payload."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/saved-view-credentials-in-urls.md
 created: 2026-05-08
 modified: 2026-05-08
 ---
@@ -23,7 +28,7 @@ The exposure surface is broader than just "the recipient":
 
 ## Why it works this way
 
-Saved views are designed for refresh-preserves-state and one-shot sharing without server involvement (see [[decisions/0013-url-as-app-state-for-saved-views]]). The encoder is pure and stateless; it has no way to know which URLs contain credentials and no policy to apply if it did. Filtering would either:
+Saved views are designed for refresh-preserves-state and one-shot sharing without server involvement (see [URL-as-App-State for Saved Views](../decisions/0013-url-as-app-state-for-saved-views.md)). The encoder is pure and stateless; it has no way to know which URLs contain credentials and no policy to apply if it did. Filtering would either:
 
 - Reject URLs with query strings (breaks presigned cloud datasets entirely), or
 - Strip query strings (breaks the link silently, recipient sees `OpenDatasetFailed`), or
@@ -33,7 +38,7 @@ None of these is good. The current contract: the encoder embeds whatever URL the
 
 ## What's mitigated
 
-- **Local-file paths** (`/data/...` or `file://...`) get an explicit warning in the share toast — a different sharp edge (see [[gotchas/non-canonical-axes]] adjacency: the `DatasetId`-collision problem in [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]).
+- **Local-file paths** (`/data/...` or `file://...`) get an explicit warning in the share toast — a different sharp edge (see [Non-canonical axes are pinned to index 0](non-canonical-axes.md) adjacency: the `DatasetId`-collision problem in [Local-File Datasets Are Personal-Only in Saved Views](../decisions/0014-local-file-datasets-personal-only-in-saved-views.md)).
 - **Soft 4 KB threshold** warning hints at "large link, may not survive chat apps" — orthogonal to the credential leak but secondary nudge to consider `#b=<id>` instead.
 - **`#b=<id>` URLs** are tiny opaque strings; dataset URLs live server-side in the bookmark row. Sharing a bookmark link does NOT expose dataset URLs to anyone who can see the link (only to anyone authenticated who can fetch `/api/bookmarks/:id`).
 
@@ -50,7 +55,7 @@ None of these is good. The current contract: the encoder embeds whatever URL the
 
 ## Related
 
-- [[saved-views]] — subsystem overview
-- [[decisions/0013-url-as-app-state-for-saved-views]] — why the URL is the encoded state
-- [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] — adjacent footgun for local paths
-- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — `#b=<id>` as the shareable alternative
+- [Saved Views](../systems/subsystems/saved-views.md) — subsystem overview
+- [URL-as-App-State for Saved Views](../decisions/0013-url-as-app-state-for-saved-views.md) — why the URL is the encoded state
+- [Local-File Datasets Are Personal-Only in Saved Views](../decisions/0014-local-file-datasets-personal-only-in-saved-views.md) — adjacent footgun for local paths
+- [Server-Stored Bookmarks and the AuthPrincipal Seam](../decisions/0015-server-stored-bookmarks-and-auth-seam.md) — `#b=<id>` as the shareable alternative

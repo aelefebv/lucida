@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Layout System"
+description: "A layout is a named placement of entities in 2D world space."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/layout-system.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -25,10 +30,10 @@ When `SetActiveLayout` references an unknown layout ID, derived state falls back
 
 ## Interactions
 
-- **Producers**: [[lucida-store]] `import.rs` builds the source layout(s). Web-client UI (`LayoutSwitcher.tsx`) emits `SetActiveLayout`; some derived layouts are computed in `pipeline/layoutBuilders.ts` and published via `RegisterLayout`.
-- **Consumers**: [[lucida-core]] `Scene::apply` rebuilds `DerivedState` (member positions, projected transforms) on layout change. [[planning-domain]] reads from derived state.
+- **Producers**: [lucida-store](../crates/lucida-store.md) `import.rs` builds the source layout(s). Web-client UI (`LayoutSwitcher.tsx`) emits `SetActiveLayout`; some derived layouts are computed in `pipeline/layoutBuilders.ts` and published via `RegisterLayout`.
+- **Consumers**: [lucida-core](../crates/lucida-core.md) `Scene::apply` rebuilds `DerivedState` (member positions, projected transforms) on layout change. [Planning Domain](planning-domain.md) reads from derived state.
 - **Annotation re-anchoring**: `SetActiveLayout` also re-anchors collaborative annotations — each anchored pin translates by its anchor entity's displacement between the old and new layouts (`DocumentState::reanchor_for_layout` in `scene/types.rs`; unanchored pins are left alone).
-- **Storage**: `document.registered_layouts` and `document.active_layout_ids` in [[scene-state-and-epochs|DocumentState]]. Both serialized and re-broadcast on `Snapshot`.
+- **Storage**: `document.registered_layouts` and `document.active_layout_ids` in [DocumentState](scene-state-and-epochs.md). Both serialized and re-broadcast on `Snapshot`.
 
 ## Invariants
 

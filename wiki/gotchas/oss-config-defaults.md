@@ -1,11 +1,16 @@
 ---
+type: Gotcha
+title: "OSS Config Defaults and the LUCIDA_* Env Var Contract"
+description: "Lucida is open-source and keeps zero deployment-specific literals in code — every such value lives in a LUCIDA_* environment variable."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/oss-config-defaults.md
 created: 2026-05-08
 modified: 2026-06-25
 ---
 
 # OSS Config Defaults and the LUCIDA_* Env Var Contract
 
-Lucida is open-source and intentionally has zero Calico-specific literals in code. Every Calico-specific value lives in environment variables. This is a deliberate posture (see [[decisions/0017-configurable-from-day-one-for-oss-release]]) and shapes a few non-obvious behaviors.
+Lucida is open-source and intentionally has zero organization-specific literals in code. Every deployment-specific value lives in environment variables. This is a deliberate posture (see [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md)) and shapes a few non-obvious behaviors.
 
 ## The contract
 
@@ -17,7 +22,7 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 - `LUCIDA_AUTH` — auth mode (`google` or `disabled`). Auto-detected from bind address when unset.
 - `LUCIDA_ALLOWED_HOSTED_DOMAINS` — comma-separated allowlist of `hd` claim values. Empty = no domain restriction.
 - `LUCIDA_ADMIN_EMAILS` — comma-separated allowlist of admin emails. Empty = no admins.
-- `LUCIDA_GOOGLE_{CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` — required when `LUCIDA_AUTH=google`.
+- `LUCIDA_GOOGLE_{CLIENT_ID,CLIENT_SECRET}` and `LUCIDA_OAUTH_REDIRECT_URI` — required when `LUCIDA_AUTH=google`. Note the redirect URI does **not** share the `LUCIDA_GOOGLE_` prefix.
 - `LUCIDA_INSECURE` — explicit acknowledgment for `disabled + non-loopback`.
 - `LUCIDA_DB_PATH` — SQLite file path. Default `./lucida.db` (CWD-relative).
 - `LUCIDA_COOKIE_{NAME,SECURE}` — cookie configuration overrides.
@@ -29,7 +34,7 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 
 ### "Auth disabled but I bound to 0.0.0.0"
 
-Server fail-fasts at startup with `AuthConfigError::InsecureRequiresOptIn`. This is intentional — auto-detect ([[decisions/0018-auth-mode-auto-detect-by-bind-address]]) treats "disabled auth + non-loopback bind" as the dangerous combination that requires explicit `LUCIDA_INSECURE=1` acknowledgment.
+Server fail-fasts at startup with `AuthConfigError::InsecureRequiresOptIn`. This is intentional — auto-detect ([Auth Mode Auto-Detect by Bind Address](../decisions/0018-auth-mode-auto-detect-by-bind-address.md)) treats "disabled auth + non-loopback bind" as the dangerous combination that requires explicit `LUCIDA_INSECURE=1` acknowledgment.
 
 If you genuinely want auth-off on a non-loopback bind (private network, VPN-only deployment, hardcoded firewall):
 ```
@@ -49,17 +54,17 @@ We deliberately do NOT trust `X-Forwarded-Proto` (forgeable; documented inline i
 
 ### "Microsoft auth value doesn't work"
 
-`LUCIDA_AUTH=microsoft` (or any unknown value) fails at startup with `UnknownAuthMode`. Parsing is deliberately strict — it fails loud rather than silently falling through to `Disabled`. Adding a new auth provider requires implementing the `PrincipalExtractor` trait — the value isn't recognized until a provider implementation registers it. See [[decisions/0017-configurable-from-day-one-for-oss-release]] for the OSS extension model.
+`LUCIDA_AUTH=microsoft` (or any unknown value) fails at startup with `UnknownAuthMode`. Parsing is deliberately strict — it fails loud rather than silently falling through to `Disabled`. Adding a new auth provider requires implementing the `PrincipalExtractor` trait — the value isn't recognized until a provider implementation registers it. See [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md) for the OSS extension model.
 
 ### "Email format issues with hosted domain check"
 
-`LUCIDA_ALLOWED_HOSTED_DOMAINS` and `LUCIDA_ADMIN_EMAILS` are both lowercased at parse time AND when matched against incoming claims. So `LUCIDA_ADMIN_EMAILS="AuStin@CalicoLabs.com"` correctly matches a JWT with `email: "austin@calicolabs.com"`. Whitespace around commas is tolerated.
+`LUCIDA_ALLOWED_HOSTED_DOMAINS` and `LUCIDA_ADMIN_EMAILS` are both lowercased at parse time AND when matched against incoming claims. So `LUCIDA_ADMIN_EMAILS="AdMin@Example.com"` correctly matches a JWT with `email: "admin@example.com"`. Whitespace around commas is tolerated.
 
-The hosted domain check uses the JWT `hd` claim, NOT email suffix matching. A user with `email: someone@calico-alias.com` but `hd: calicolabs.com` is allowed when the allowlist contains `calicolabs.com`. Personal Gmail accounts (no `hd` claim at all) are rejected when any allowlist is set.
+The hosted domain check uses the JWT `hd` claim, NOT email suffix matching. A user with `email: someone@other-alias.com` but `hd: example.com` is allowed when the allowlist contains `example.com`. Personal Gmail accounts (no `hd` claim at all) are rejected when any allowlist is set.
 
 ### "Empty allowed_hosted_domains accepts everyone — is this intentional?"
 
-Yes. Empty list = OSS-permissive default. Self-hosters may want any verified Google email; Calico's deployment sets `LUCIDA_ALLOWED_HOSTED_DOMAINS=calicolabs.com` to restrict.
+Yes. Empty list = OSS-permissive default. Self-hosters may want any verified Google email; a hosted deployment sets `LUCIDA_ALLOWED_HOSTED_DOMAINS=example.com` to restrict.
 
 ### "I want to add an admin without restarting"
 
@@ -82,6 +87,6 @@ The SQLite file accumulates `lucida.db`, `lucida.db-shm`, `lucida.db-wal` (WAL j
 
 ## Related
 
-- [[decisions/0017-configurable-from-day-one-for-oss-release]] — full OSS posture rationale
-- [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — bind-address auto-detect logic
-- [[auth]] — the subsystem these env vars configure
+- [Configurable From Day One for OSS Release](../decisions/0017-configurable-from-day-one-for-oss-release.md) — full OSS posture rationale
+- [Auth Mode Auto-Detect by Bind Address](../decisions/0018-auth-mode-auto-detect-by-bind-address.md) — bind-address auto-detect logic
+- [Authentication](../systems/subsystems/auth.md) — the subsystem these env vars configure

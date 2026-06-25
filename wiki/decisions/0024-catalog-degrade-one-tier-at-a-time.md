@@ -1,12 +1,17 @@
 ---
+type: Decision
+title: "Catalog Degradation Steps One Tier at a Time"
+description: "Chunk-only coarse/detail residency."
+tags: [lucida, decision]
+source_path: wiki/decisions/0024-catalog-degrade-one-tier-at-a-time.md
 created: 2026-05-14
-modified: 2026-05-18
+modified: 2026-06-25
 ---
 
 # Catalog Degradation Steps One Tier at a Time
 
 Status: Superseded for the chunk-only coarse/detail path by
-[[decisions/0039-chunk-only-coarse-detail-residency]]. Historical proxy-path
+[Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md). Historical proxy-path
 behavior remains documented here.
 
 ## Decision
@@ -15,7 +20,7 @@ When the asset catalog does not advertise a proxy that the desired promotion mod
 
 Tier-skipping (e.g., `well-as-proxy` → `fields-with-detail` directly) is not allowed even when both intermediate tiers' assets are unavailable. Each degrade step is recorded in `PlanStats.catalogDegradations` for telemetry.
 
-This ADR is a *ratification* — the rule has existed in the code (in `assignModes`) and in the wiki article ([[planning-domain]] under "Invariants") since the three-tier promotion landed. It is captured here so future contributors do not relax it.
+This ADR is a *ratification* — the rule has existed in the code (in `assignModes`) and in the wiki article ([Planning Domain](../systems/subsystems/planning-domain.md) under "Invariants") since the three-tier promotion landed. It is captured here so future contributors do not relax it.
 
 Cited in PRD #545.
 
@@ -23,7 +28,7 @@ Cited in PRD #545.
 
 The tier order respects the visual fidelity hierarchy (least to most detail). The amount of data fetched grows monotonically across tiers: `well-as-proxy` is one asset per visible channel; `fields-with-proxy-fallback` is real field detail chunks plus per-field proxies plus the parent's well proxy; `fields-with-detail` is real field detail chunks (potentially many more than the previous tier emits). Skipping a tier — for instance going `well-as-proxy` → `fields-with-detail` directly when no `WellProxy3D` exists — would mean responding to "we wanted one coarse asset" with "we'll fetch full per-field detail," an unbounded escalation in fetch cost.
 
-The one-tier-at-a-time rule honors [[principles/planning#1-visual-smoothness-over-fetch-optimality]] (the intermediate tier serves a real visual purpose: it bridges the gap between proxy and detail with the parent well proxy as a fallback while detail loads) and [[principles/planning#2-memory-is-the-binding-constraint]] (bounded escalation prevents catalog gaps from triggering large unanticipated fetch volumes).
+The one-tier-at-a-time rule honors [Principles — Planning Domain](../principles/planning.md#1-visual-smoothness-over-fetch-optimality) (the intermediate tier serves a real visual purpose: it bridges the gap between proxy and detail with the parent well proxy as a fallback while detail loads) and [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint) (bounded escalation prevents catalog gaps from triggering large unanticipated fetch volumes).
 
 ## Tradeoffs
 
@@ -32,13 +37,13 @@ The one-tier-at-a-time rule honors [[principles/planning#1-visual-smoothness-ove
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts::degradeForCatalog` (after the PRD #545 refactor) — owns the one-tier-at-a-time logic; the function is called once per well group during `assignModes`.
+- `lucida-web/src/pipeline/planning/modes.ts::degradeForCatalog` — owns the one-tier-at-a-time logic; the function is called once per well group during `assignModes` (same file). It is now reached only on the legacy `coarseDetailEnabled: false` branch (`plan.ts`); the default chunk-only path (`config.ts` default `true`, per the supersession header) does not call it.
 - `PlanStats.catalogDegradations` — incremented inside `degradeForCatalog` whenever a step occurs.
-- Test coverage is in `planning.test.ts` under "assignModes — three-tier with catalog," which exercises every degrade transition with stats counter assertions.
+- Test coverage for the legacy three-tier-with-catalog degrade transitions lives in the planning test suite under `pipeline/planning/`, with stats counter assertions.
 
 ## Related
 
-- [[principles/planning]] — the framework this decision lives within
-- [[planning-domain]] — subsystem article; the "Invariants" section
-- [[chunk-lifecycle]] — section 3b (promotion) and the catalog-aware degradation paragraph
+- [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
+- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; the "Invariants" section
+- [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — section 3b (promotion) and the catalog-aware degradation paragraph
 - PRD #545 — the work item during which this ADR was captured

@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Typed `FetchError` + injectable `RetryPolicy` at the fetch boundary"
+description: "ContentSource implementations now raise FetchError(kind: \"permanent\" | \"transient\" | \"abort\") at every rejection site, and CpuCache.fetchAndDecode's catch block dispatches via classifyFetchError + an injected RetryPol…"
+tags: [lucida, decision]
+source_path: wiki/decisions/0033-typed-fetch-error.md
 created: 2026-05-15
 modified: 2026-05-15
 ---
@@ -31,7 +36,7 @@ Three alternatives considered:
 
 ## Related
 
-- [[decisions/0032-cpucache-split-into-pipeline-fetch]] — parent split this slice lives inside
-- [[decisions/0006-content-source-vs-fetch-source]] — earlier source contract that this slice extends with typed errors
+- [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md) — parent split this slice lives inside
+- [ContentSource (JS) vs FetchSource (wire)](0006-content-source-vs-fetch-source.md) — earlier source contract that this slice extends with typed errors
 - PRD #592, issue #602 — the slice that landed this
 - `wiki/outputs/dechaos-fetch-decode-2026-05-15/05-contract-scan.md` — the dechaos pass that surfaced the misclassification

@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Clean two-source chunk-tier renderer"
+description: "The new coarse/detail renderer path binds and represents detail and coarse as"
+tags: [lucida, decision]
+source_path: wiki/decisions/0041-clean-two-source-chunk-tier-renderer.md
 created: 2026-05-18
 modified: 2026-05-18
 ---
@@ -52,9 +57,9 @@ decision keeps that model concrete. Generalizing descriptors now would add
 indirection before Lucida has a third tier with clear semantics.
 
 The decision follows
-[[principles/planning#2-memory-is-the-binding-constraint]] by keeping each tier's
+[Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint) by keeping each tier's
 GPU residency visible and budgetable. It follows
-[[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+[Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
 because tier source identity and residency state stay explicit in planner and
 worker state rather than being inferred from legacy proxy state.
 
@@ -88,11 +93,11 @@ worker state rather than being inferred from legacy proxy state.
 
 ## Related
 
-- [[decisions/0036-descriptor-byte-layout-ssot-and-wgsl-lock-test]]
-- [[decisions/0039-chunk-only-coarse-detail-residency]]
-- [[decisions/0040-generated-coarse-as-derived-pyramid-levels]]
-- [[principles/planning#2-memory-is-the-binding-constraint]]
-- [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+- [Descriptor byte-layout single source of truth + WGSL ↔ TS lock test](0036-descriptor-byte-layout-ssot-and-wgsl-lock-test.md)
+- [Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md)
+- [Generated coarse as derived pyramid levels](0040-generated-coarse-as-derived-pyramid-levels.md)
+- [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
+- [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
 - PRD #672
 - Issue #682
 - Issue #689

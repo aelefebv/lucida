@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Wire chunk keys: t/c are voxel coords, z/y/x are chunk-grid coords"
+description: "The wire chunk key is level/t/c/z/y/x."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/wire-chunk-key-conventions.md
 created: 2026-04-23
 modified: 2026-06-25
 ---
@@ -9,7 +14,7 @@ The wire chunk key is `level/t/c/z/y/x`. The five spatial values look symmetric,
 
 ## Why the asymmetry exists
 
-The web client's chunk planner ([[lucida-web]] `pipeline/planning/`) iterates two axes differently:
+The web client's chunk planner ([lucida-web](../systems/crates/lucida-web.md) `pipeline/planning/`) iterates two axes differently:
 
 - For **`z`, `y`, `x`** it walks chunk-grid cells (`for iz in zStart..zEnd`, etc.) — `iz` is already a chunk index by construction. Wire-coord = disk-grid-coord directly.
 - For **`t`, `c`** it picks a single voxel value: `selection.t` (the current timepoint) and each `c` in `selection.visibleChannels`. Wire-coord = voxel index — which equals disk-grid-coord *only when* `chunk_shape[axis] == 1`.
@@ -21,9 +26,9 @@ For `~99%` of OME-Zarrs the two interpretations coincide. The wire format codifi
 Both happen on the server side, in the same `lucida-store` / `lucida-server` plumbing:
 
 - **Disk path resolution** — `lucida-store::chunk_key_to_store_path(key, axes, chunk_shape)` divides wire `t` and `c` by `chunk_shape[axis]` to produce disk-grid coords. Wire `c=3` with `chunk_shape[c]=5` becomes disk c-coord `3 / 5 = 0`.
-- **Byte slicing** — `serve_chunk_from_store` (and `proxy::server_source::fetch_dense_volume`) call `level_info.chunk_byte_layout.slice_range(wire_t, wire_c)`. The method reduces to intra-chunk indices (`wire_value % chunk_size`) and returns the byte range to extract from the decompressed on-disk bytes. See [[non-canonical-axes#post-decode-byte-slicing]].
+- **Byte slicing** — `serve_chunk_from_store` (and `proxy::server_source::fetch_dense_volume`) call `level_info.chunk_byte_layout.slice_range(wire_t, wire_c)`. The method reduces to intra-chunk indices (`wire_value % chunk_size`) and returns the byte range to extract from the decompressed on-disk bytes. See [Non-canonical axes are pinned to index 0](non-canonical-axes.md#post-decode-byte-slicing).
 
-The per-level `chunk_shape` and the precomputed strides live on the server-private binding seed (`LevelBindingInfo.chunk_shape`, `ChunkByteLayout.byte_stride_t/c`, `ChunkByteLayout.chunk_size_t/c`). See [[lucida-store#binding-seed-shape]].
+The per-level `chunk_shape` and the precomputed strides live on the server-private binding seed (`LevelBindingInfo.chunk_shape`, `ChunkByteLayout.byte_stride_t/c`, `ChunkByteLayout.chunk_size_t/c`). See [lucida-store](../systems/crates/lucida-store.md#binding-seed-shape).
 
 ## Worked example: lif_test.ome.zarr
 
@@ -46,6 +51,6 @@ A side effect: the client's CPU cache holds N copies of the same disk chunk's da
 
 ## Related
 
-- [[non-canonical-axes]] — the eligibility rule that governs whether the slice is contiguous (extends to canonical-indexed `t`, `c` after PRD #451).
-- [[blosc-support]] — codec validation that runs in the same import phase as the chunk-shape eligibility check.
-- [[lucida-store]] — module map and binding-seed shape.
+- [Non-canonical axes are pinned to index 0](non-canonical-axes.md) — the eligibility rule that governs whether the slice is contiguous (extends to canonical-indexed `t`, `c` after PRD #451).
+- [Blosc support is a deliberately narrow subset](blosc-support.md) — codec validation that runs in the same import phase as the chunk-shape eligibility check.
+- [lucida-store](../systems/crates/lucida-store.md) — module map and binding-seed shape.

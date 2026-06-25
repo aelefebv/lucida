@@ -1,4 +1,9 @@
 ---
+type: Decision
+title: "Delivery state as a CpuCache sidecar"
+description: "CpuCache owns chunk/proxy delivery state as a fetch-side sidecar, next to RejectionTracker."
+tags: [lucida, decision]
+source_path: wiki/decisions/0037-delivery-state-as-cpucache-sidecar.md
 created: 2026-05-17
 modified: 2026-05-17
 ---
@@ -17,7 +22,7 @@ The state records optimistic **sent** facts, not acknowledged delivery. A chunk 
 
 The previous upload-side tracker was stateful residue across the planner/uploader boundary. Planning produced request lists, `Uploader.recordPlanForDataset` stashed them, and resend passes later joined those snapshots back to `CpuCache` cache state. That made cache residency, wanted state, rejection state, and sent state live in different owners even though every resend decision needed all four.
 
-Moving delivery state into `CpuCache` extends [[decisions/0008-cpu-cache-as-sole-fetch-path]]: the cache is not only the sole fetch path, it is also the owner of the "can this cached thing be delivered now?" predicate. It also extends [[decisions/0034-orchestrator-split-into-pipeline-upload]] by removing the last planner-staging hooks from the uploader seam.
+Moving delivery state into `CpuCache` extends [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md): the cache is not only the sole fetch path, it is also the owner of the "can this cached thing be delivered now?" predicate. It also extends [`orchestrator.ts` split into `pipeline/upload/` modules](0034-orchestrator-split-into-pipeline-upload.md) by removing the last planner-staging hooks from the uploader seam.
 
 The final shape is easier to reason about: planning submits wanted work, `CpuCache` records the wanted generation and cached bytes, and upload asks for deliverables without carrying planner snapshots.
 
@@ -39,9 +44,9 @@ The final shape is easier to reason about: planning submits wanted work, `CpuCac
 
 ## Related
 
-- [[decisions/0008-cpu-cache-as-sole-fetch-path]]
-- [[decisions/0032-cpucache-split-into-pipeline-fetch]]
-- [[decisions/0034-orchestrator-split-into-pipeline-upload]]
-- [[cpu-cache]]
-- [[upload-pipeline]]
+- [CpuCache as Sole Fetch Path](0008-cpu-cache-as-sole-fetch-path.md)
+- [`cpuCache.ts` split into `pipeline/fetch/` modules](0032-cpucache-split-into-pipeline-fetch.md)
+- [`orchestrator.ts` split into `pipeline/upload/` modules](0034-orchestrator-split-into-pipeline-upload.md)
+- [CPU Cache](../systems/subsystems/cpu-cache.md)
+- [Upload Pipeline](../systems/subsystems/upload-pipeline.md)
 - PRD #640

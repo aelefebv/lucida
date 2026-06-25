@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Axum's Default Query Extractor Drops Repeated Keys"
+description: "/api/bookmarks?dataset=urlA&dataset=urlB&dataset=urlC looks like a multi-value query — and the bookmark list endpoint defines it that way (any-overlap filter)."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/axum-query-multivalue.md
 created: 2026-05-08
 modified: 2026-05-08
 ---
@@ -37,5 +42,5 @@ If you see a handler that takes `Query<SomeStruct>` where `SomeStruct` has a `Ve
 ## Related
 
 - `lucida-server/src/bookmarks/handlers.rs::parse_dataset_params` — example workaround in production
-- [[saved-views]] — context: bookmark listing uses any-overlap on multiple `?dataset=` params
-- [[lucida-server]]
+- [Saved Views](../systems/subsystems/saved-views.md) — context: bookmark listing uses any-overlap on multiple `?dataset=` params
+- [lucida-server](../systems/crates/lucida-server.md)

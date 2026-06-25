@@ -1,4 +1,9 @@
 ---
+type: Subsystem
+title: "Worker Protocol"
+description: "lucida-web/src/renderer/workerProtocol.ts — the discriminated-union message contract between the main thread and the GPU worker."
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/worker-protocol.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -17,7 +22,7 @@ modified: 2026-06-25
 
 - `init { canvas: OffscreenCanvas }` — once, on worker start
 - `resize { width, height }` — on canvas resize
-- `coldState` — full `ColdStateMessage` payload: epochs, currentT, currentZ, visible channels, visible region, active set with per-entity detail/coarse levels, level metadata, display-state, transforms, and viewMode. **Rebuilt only when WASM epochs say something changed** — see [[scene-state-and-epochs]].
+- `coldState` — full `ColdStateMessage` payload: epochs, currentT, currentZ, visible channels, visible region, active set with per-entity detail/coarse levels, level metadata, display-state, transforms, and viewMode. **Rebuilt only when WASM epochs say something changed** — see [Scene State and Epochs](scene-state-and-epochs.md).
 - `viewHotState` — view-only fast path; carries ray-pick coords used for GPU eviction distance. Sent only when `view` epoch bumps.
 - `sliceChunkData { epochs, memberId, tier, chunks[], level, z, t, c, ... }` — typed array transfer of decoded chunks for the slice path. The owner key is **memberId** and the residency route is **tier** (`detail` or `coarse`).
 - `volumeChunkData { epochs, memberId, tier, chunks[], level, t, c, ... }` — same for volume.
@@ -58,8 +63,8 @@ The canonical way to derive a memberId from an entry is `memberIdForColdEntry(en
 
 ## Interactions
 
-- **Main side**: the [[upload-pipeline|Uploader]] is the only sender, via `client` (a thin `UploadClient` facet of `RenderClient`). It owns `coldState`, `viewHotState`, tier-labeled `sliceChunkData` / `volumeChunkData`, `proxyAssetData` emission, and the worker → main feedback callbacks.
-- **Worker side**: the ~34-LOC entry point `renderer/gpu.worker.ts` delegates to `worker/dispatch.ts`, which routes each typed message to its handler under `coldState/`, `proxy/`, `volume/`, `slice/`, `worker/`. See [[gpu-residency]] for the module layout.
+- **Main side**: the [Uploader](upload-pipeline.md) is the only sender, via `client` (a thin `UploadClient` facet of `RenderClient`). It owns `coldState`, `viewHotState`, tier-labeled `sliceChunkData` / `volumeChunkData`, `proxyAssetData` emission, and the worker → main feedback callbacks.
+- **Worker side**: the ~34-LOC entry point `renderer/gpu.worker.ts` delegates to `worker/dispatch.ts`, which routes each typed message to its handler under `coldState/`, `proxy/`, `volume/`, `slice/`, `worker/`. See [GPU Residency](gpu-residency.md) for the module layout.
 - **`renderer/workerContext.ts`** holds the worker's running state; per-session Maps live on `WorkerCtx.state: RendererState`. Renderer-class singletons and persistent GPU resources stay at module scope in `worker/resources.ts`.
 
 ## Invariants

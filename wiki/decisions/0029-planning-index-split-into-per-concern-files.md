@@ -1,6 +1,11 @@
 ---
+type: Decision
+title: "`planning/index.ts` Split into Per-Concern Files"
+description: "lucida-web/src/pipeline/planning/index.ts (1695 lines) is split into 5 sibling files inside pipeline/planning/."
+tags: [lucida, decision]
+source_path: wiki/decisions/0029-planning-index-split-into-per-concern-files.md
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # `planning/index.ts` Split into Per-Concern Files
@@ -17,7 +22,7 @@ modified: 2026-05-15
 | `emit.ts` | ~285 | `computePriority` + four `emit*Lane` helpers + `chunkDistanceFromCenter`. |
 | `plan.ts` | ~105 | `plan()` itself. |
 
-Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]] — splitting the planner core out of its support primitives sharpens the pure-function decomposition. `plan.ts` reads as the small composition it actually is; `types.ts` / `modes.ts` / `chunks.ts` / `emit.ts` are the supporting-cast modules whose purity is enforced by their lack of side effects.
+Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit) — splitting the planner core out of its support primitives sharpens the pure-function decomposition. `plan.ts` reads as the small composition it actually is; `types.ts` / `modes.ts` / `chunks.ts` / `emit.ts` are the supporting-cast modules whose purity is enforced by their lack of side effects.
 
 ## Why 5 files, not the 6 PRD-1 named
 
@@ -39,6 +44,10 @@ Every external consumer of planning types and helpers (orchestrator, cpuCache, d
 
 `planning.test.ts` (1900+ lines) could be split into `modes.test.ts` / `chunks.test.ts` / `emit.test.ts` / `plan.test.ts` to mirror the runtime split. Doing so means deciding which test belongs with which module — a separate cognitive load on top of the structural move, and one that risks masking the structural payoff with churn. Tests stay monolithic in this PRD; revisit if the test file becomes unwieldy.
 
+## Note (since)
+
+The 5-file split + barrel is intact, but the directory has grown since this ADR landed. The coarse/detail bridge ([Chunk-only coarse/detail residency](0039-chunk-only-coarse-detail-residency.md)) added `emit.ts::emitCoarseLane` (so `emit.ts` now holds **five** `emit*Lane` helpers, not four) and `modes.ts::assignCoarseDetailModes`. The directory also gained per-concern siblings beyond the original five: `config.ts`, `proxyResidency.ts`, `synthetic.ts`, `debug.ts`, `configStore.ts` (plus their `*.test.ts`). The barrel still re-exports the public surface.
+
 ## How this decision shows up in code
 
 - `lucida-web/src/pipeline/planning/types.ts` / `modes.ts` / `chunks.ts` / `emit.ts` / `plan.ts` — new files containing the relocated symbols.
@@ -47,8 +56,8 @@ Every external consumer of planning types and helpers (orchestrator, cpuCache, d
 
 ## Related
 
-- [[principles/planning]] — the framework this decision lives within
-- [[planning-domain]] — subsystem article; refreshed for the new module layout
-- [[decisions/0030-coordinate-frame-naming-discipline]] — sister decision; same PRD
-- [[decisions/0031-validate-planning-inputs-dev-mode-boundary-check]] — sister decision; same PRD
+- [Principles — Planning Domain](../principles/planning.md) — the framework this decision lives within
+- [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; refreshed for the new module layout
+- [Coordinate-Frame Naming Discipline at the JS↔WASM Boundary](0030-coordinate-frame-naming-discipline.md) — sister decision; same PRD
+- [`validatePlanningInputs` as the Dev-Mode Boundary Check](0031-validate-planning-inputs-dev-mode-boundary-check.md) — sister decision; same PRD
 - PRD #578 — the work item this ADR was created during

@@ -1,4 +1,9 @@
 ---
+type: Flow
+title: "Flow: Dataset Diagnostics"
+description: "How to diagnose dataset open, restore, source-cache, and generated-coarse"
+tags: [lucida, flow]
+source_path: wiki/flows/dataset-diagnostics.md
 created: 2026-06-10
 modified: 2026-06-10
 ---
@@ -136,9 +141,9 @@ output directory.
 
 ## Related
 
-- [[dataset-opening]] — low-level open-to-first-render trace
-- [[lucida-cli]] — CLI command tree and smoke workflow
-- [[lucida-py]] — Python client surface
-- [[decisions/0005-three-output-import-model]]
-- [[decisions/0006-content-source-vs-fetch-source]]
-- [[decisions/0042-canonical-dataset-url-form]]
+- [Flow: Dataset Opening](dataset-opening.md) — low-level open-to-first-render trace
+- [lucida-cli](../systems/crates/lucida-cli.md) — CLI command tree and smoke workflow
+- [lucida-py](../systems/crates/lucida-py.md) — Python client surface
+- [Three-Output Import Model](../decisions/0005-three-output-import-model.md)
+- [ContentSource (JS) vs FetchSource (wire)](../decisions/0006-content-source-vs-fetch-source.md)
+- [Canonical dataset URL form](../decisions/0042-canonical-dataset-url-form.md)

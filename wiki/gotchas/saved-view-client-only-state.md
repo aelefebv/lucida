@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "SavedView Mirrors WASM Presence — Client-Only State Won't Round-Trip Without a Dedicated Field"
+description: "SavedView.dataset_settings mirrors Scene::dataset_settings (the WASM-side struct exported via scene.export_dataset_presence())."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/saved-view-client-only-state.md
 created: 2026-05-09
 modified: 2026-05-09
 ---
@@ -57,7 +62,7 @@ When adding any such preference, decide upfront whether it needs to round-trip �
 
 ## Related
 
-- [[decisions/0013-url-as-app-state-for-saved-views]] — the SavedView wire format and `v` discipline
-- [[saved-views]] — subsystem that owns the SavedView round-trip
-- [[flows/saved-view-recipient-apply]] — where the apply-complete listener restores client state
+- [URL-as-App-State for Saved Views](../decisions/0013-url-as-app-state-for-saved-views.md) — the SavedView wire format and `v` discipline
+- [Saved Views](../systems/subsystems/saved-views.md) — subsystem that owns the SavedView round-trip
+- [Flow: Saved-View Recipient Apply](../flows/saved-view-recipient-apply.md) — where the apply-complete listener restores client state
 - `lucida-web/src/savedView/captureBuilder.ts` + `useSavedViewSync.ts` — the canonical wiring pattern

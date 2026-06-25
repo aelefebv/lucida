@@ -1,6 +1,11 @@
 ---
+type: Gotcha
+title: "Scene/DocumentState JSON Backward Compatibility"
+description: "Scene composes DocumentState with #[serde(flatten)] so that the on-the-wire JSON shape stayed compatible across the Document-state refactor."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/scene-document-state-json-compat.md
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-06-25
 ---
 
 # Scene/DocumentState JSON Backward Compatibility
@@ -17,11 +22,11 @@ A new `Scene`-only field accidentally serialized at the same level as `DocumentS
 
 ## The compatibility tests
 
-`scene/types.rs` and `scene/mod.rs` have tests covering:
+Backward-compat tests live across `scene/mod.rs`, `scene/types.rs`, and `command.rs`, covering:
 
-- Old JSON without new fields deserializes (defaults applied via `#[serde(default)]`).
-- New JSON with all fields round-trips through old struct shapes.
-- Specific backward-compat cases like `dataset_display_settings_backward_compat` (no `channel_settings`, no `channel_blend_mode` in old payloads).
+- Old JSON without new fields deserializes (defaults applied via `#[serde(default)]`). The scene-module example is `scene_backward_compat_deserialization_without_settings` (`scene/mod.rs`).
+- New JSON with all fields round-trips through old struct shapes (e.g. the `pin_without_view_*` tests in `scene/types.rs`).
+- Specific backward-compat cases like `dataset_display_settings_backward_compat` (no `channel_settings`, no `channel_blend_mode` in old payloads) — that one lives in `command.rs`, not the scene module.
 
 When you add a field, **add a backward-compat test** that deserializes a literal JSON string from the old shape. Without it, drift is invisible until a snapshot from an old client breaks.
 
@@ -38,5 +43,5 @@ The alternative — bumping the wire format and migrating all snapshots — woul
 
 ## Related
 
-- [[lucida-core]]
-- [[scene-state-and-epochs]]
+- [lucida-core](../systems/crates/lucida-core.md)
+- [Scene State and Epochs](../systems/subsystems/scene-state-and-epochs.md)

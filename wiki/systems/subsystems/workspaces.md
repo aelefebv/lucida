@@ -1,24 +1,29 @@
 ---
+type: Subsystem
+title: "Workspaces"
+description: "A workspace is the durable, server-stored container users return to: a set of opened datasets, a set of saved views, and a membership/access policy, all addressed by an opaque id — the browser page route is /w/:id (Wo…"
+tags: [lucida, subsystem]
+source_path: wiki/systems/subsystems/workspaces.md
 created: 2026-06-25
 modified: 2026-06-25
 ---
 
 # Workspaces
 
-A workspace is the durable, server-stored container users return to: a set of opened datasets, a set of saved views, and a membership/access policy, all addressed by an opaque id at `/ws/workspaces/:id`. It is the **unit of collaboration and of the live session** — presence, follow, the sequenced document, and the broadcast channel are all per-workspace. A workspace is *not* a browser tab, a login session, a transient WebSocket runtime, or a saved view; live sessions attach to a workspace while users are active but do not define it.
+A workspace is the durable, server-stored container users return to: a set of opened datasets, a set of saved views, and a membership/access policy, all addressed by an opaque id — the browser page route is `/w/:id` (`WorkspaceRoot.tsx`); the per-workspace WebSocket endpoint is `/ws/workspaces/{workspace_id}` (don't confuse the two). It is the **unit of collaboration and of the live session** — presence, follow, the sequenced document, and the broadcast channel are all per-workspace. A workspace is *not* a browser tab, a login session, a transient WebSocket runtime, or a saved view; live sessions attach to a workspace while users are active but do not define it.
 
 Implemented in `lucida-server/src/workspace.rs` (one large module): `WorkspaceManager` owns live orchestration + authorization + the document command flow; the `WorkspaceStore` trait (with `SqliteWorkspaceStore`) owns durable rows in the shared `lucida.db`. The web side is `WorkspaceDashboard.tsx` (`/`), `WorkspaceRoot.tsx` (`/w/:id`), `WorkspaceSharingDialog.tsx`, and `workspaceApi.ts`. All REST lives under `/api/workspaces/...`; admin override under `/admin/workspaces/...`.
 
 ## Two dataset identities — the central distinction
 
-- **`dataset_source`** — global source identity, keyed by `dataset_source_id` = `ds-{16-hex BLAKE3 of the canonicalized URL}` (`lucida-content/src/url.rs`). This deduplicates import / cache / generated-coarse work *across* workspaces. Multiple memberships, in one or many workspaces, can point at the same source and reuse its cache.
+- **`dataset_source`** — global source identity, keyed by `dataset_source_id` = `ds-{016x}` where the 16 hex chars are the **first 8 bytes of BLAKE3** of the canonicalized URL read as a little-endian `u64` (`dataset_id_for_url`, `lucida-content/src/url.rs`) — not 16 hash bytes. (A separate full 16-*byte* `dataset_url_hash16` of the same digest exists for the proxy cache.) This deduplicates import / cache / generated-coarse work *across* workspaces. Multiple memberships, in one or many workspaces, can point at the same source and reuse its cache.
 - **`workspace_dataset`** — a dataset's membership/layer *inside one workspace*, keyed by `wds-{uuid}` (random, opaque, globally unique). This is the id the client, the document, saved views, and rendering use.
 
 `DatasetOpened` and every document command carry the `wds-` id; source/cache/chunk routing maps `wds-` → `ds-` server-side. Saved views and inline `#view` payloads key dataset state by `wds-` id and intentionally omit source URLs. v0 enforces one membership per source per workspace (`unique(workspace_id, dataset_source_id)`), so a duplicate add is a no-op (`ON CONFLICT … DO NOTHING`). **Invariant:** any operation given a `wds-` id must still validate that the membership belongs to the current workspace.
 
 ## Membership, roles, and sharing
 
-Roles are `viewer < editor < owner`. Sharing has two axes: explicit members (added by email, may be pre-provisioned before that user ever signs in — see [[auth]] principals) and a link-access mode (`restricted` | `anyone_with_link`, the latter granting `viewer`/`editor` but **never** owner). Only owners manage membership, link access, rename/archive, and ownership; editors mutate content (datasets, shared saved views, active layout, default view); viewers read, follow, and copy `#view`/`#b` links.
+Roles are `viewer < editor < owner`. Sharing has two axes: explicit members (added by email, may be pre-provisioned before that user ever signs in — see [Authentication](auth.md) principals) and a link-access mode (`restricted` | `anyone_with_link`, the latter granting `viewer`/`editor` but **never** owner). Only owners manage membership, link access, rename/archive, and ownership; editors mutate content (datasets, shared saved views, active layout, default view); viewers read, follow, and copy `#view`/`#b` links.
 
 Enforcement is server-side at three points — HTTP API, WebSocket connect (viewer+), and each mutating command (editor+); button-hiding is never sufficient. The **never-leak** discipline is load-bearing: to a non-member, an existing-but-denied workspace is byte-identical to a missing one (both `NotFound`/404), so the role check runs *before* any row is read. Archived state is surfaced (`Gone`/410) only to a real member; to everyone else it too collapses to 404. Link-shared workspaces are not globally listed — a user sees one only after explicit membership or a successful link visit (recorded in `user_workspace_state`, which also holds personal pins).
 
@@ -33,9 +38,9 @@ Renaming a dataset's display label is a real document mutation, not a local edit
 
 ## Interactions
 
-- [[auth]] — members/link grants resolve through the same `AuthPrincipal` boundary; email is the v0 membership key, with provider subject stored for later hardening.
-- [[saved-views]] — workspace saved views are the third saved-view surface; they replaced the global bookmark concept once workspaces landed. Editors create/update/delete + set the `default_saved_view_id`; viewers list/open/copy.
-- [[presence-and-follow-mode]] — the session is per-workspace: each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`. Presence, peers, follow chains, and document/saved-view broadcasts are all workspace-local; `ClientId` is workspace-local live-peer identity. There is no longer a single global shared session (ADR-0020).
+- [Authentication](auth.md) — members/link grants resolve through the same `AuthPrincipal` boundary; email is the v0 membership key, with provider subject stored for later hardening.
+- [Saved Views](saved-views.md) — workspace saved views are the third saved-view surface; they replaced the global bookmark concept once workspaces landed. Editors create/update/delete + set the `default_saved_view_id`; viewers list/open/copy.
+- [Presence and Follow Mode](presence-and-follow-mode.md) — the session is per-workspace: each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`. Presence, peers, follow chains, and document/saved-view broadcasts are all workspace-local; `ClientId` is workspace-local live-peer identity. There is no longer a single global shared session (ADR-0020).
 
 ## Other gotchas / invariants
 

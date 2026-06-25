@@ -1,4 +1,9 @@
 ---
+type: Gotcha
+title: "Proxy Generator Priority Is Not Honored Yet"
+description: "lucida-server proxy::ProxyGenerator::request(spec, priority) accepts a priority: u8 parameter, but the MVP doesn't actually order requests by priority."
+tags: [lucida, gotcha]
+source_path: wiki/gotchas/proxy-priority-not-honored.md
 created: 2026-04-18
 modified: 2026-06-25
 ---
@@ -7,7 +12,7 @@ modified: 2026-06-25
 
 ## The footgun
 
-[[lucida-server]] `proxy::ProxyGenerator::request(spec, priority)` accepts a `priority: u8` parameter, **but the MVP doesn't actually order requests by priority**. The tokio `Semaphore` provides bounded concurrency in **FIFO** order. The parameter exists for API stability — when the priority scheduler lands (PRD #397 S5 follow-up), call sites won't have to change.
+[lucida-server](../systems/crates/lucida-server.md) `proxy::ProxyGenerator::request(spec, priority)` accepts a `priority: u8` parameter, **but the MVP doesn't actually order requests by priority**. The tokio `Semaphore` provides bounded concurrency in **FIFO** order. The parameter exists for API stability — when the priority scheduler lands (PRD #397 S5 follow-up), call sites won't have to change.
 
 Symptoms of relying on priority:
 
@@ -35,6 +40,6 @@ The `request` method's `priority` argument is bound as `_priority: u8` (currentl
 
 ## Related
 
-- [[lucida-server]]
-- [[lucida-proxy]]
-- [[flows/proxy-generation]]
+- [lucida-server](../systems/crates/lucida-server.md)
+- [lucida-proxy](../systems/crates/lucida-proxy.md)
+- [Flow: Proxy Generation (S5)](../flows/proxy-generation.md)
