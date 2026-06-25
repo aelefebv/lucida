@@ -1,13 +1,13 @@
 ---
 created: 2026-05-15
-modified: 2026-05-16
+modified: 2026-06-25
 ---
 
 # `cpuCache.ts` split into `pipeline/fetch/` modules
 
 ## Decision
 
-`lucida-web/src/pipeline/cpuCache.ts` (1627 lines, 35 fields, twelve responsibilities) is split into a new `lucida-web/src/pipeline/fetch/` directory of focused modules. `cpuCache.ts` becomes a thin coordinator (~250 lines) that fans out to extracted collaborators. The four pre-existing fetch/decode files (`cpuCache.ts`, `contentSource.ts`, `decodePool.ts`, `decode.worker.ts`) move into the directory together; new sibling modules extract the responsibilities that today live tangled inside `cpuCache.ts`.
+`lucida-web/src/pipeline/cpuCache.ts` (1627 lines, 35 fields, twelve responsibilities) is split into a new `lucida-web/src/pipeline/fetch/` directory of focused modules. `cpuCache.ts` becomes a coordinator that fans out to extracted collaborators. (The original plan called it "thin (~250 lines)"; in practice the landed coordinator is ~1230 lines — the responsibilities fanned out into siblings but the coordinator did not shrink as far as projected.) The four pre-existing fetch/decode files (`cpuCache.ts`, `contentSource.ts`, `decodePool.ts`, `decode.worker.ts`) move into the directory together; new sibling modules extract the responsibilities that today live tangled inside `cpuCache.ts`.
 
 The eleven sibling modules: `types.ts`, `cpuCache.ts` (coordinator), `chunkStore.ts`, `proxyStore.ts` (and possibly `overviewStore.ts` — see Slice 6 design Q), `eviction.ts`, `interactionMode.ts`, `scheduler.ts`, `retry.ts`, `telemetry.ts`, `rejection.ts`, `wireProtocol.ts`, plus the unchanged `contentSource.ts` / `decodePool.ts` / `decode.worker.ts`. `index.ts` is a barrel re-export so external consumers' import paths are unchanged.
 
@@ -41,7 +41,7 @@ Unification is captured as deferred Slice 12 — landed only when a third asset 
 ## How this decision shows up in code
 
 - `lucida-web/src/pipeline/fetch/` — the new directory.
-- `lucida-web/src/pipeline/fetch/cpuCache.ts` — thin coordinator (~250 LOC) after Slices 3–10 land.
+- `lucida-web/src/pipeline/fetch/cpuCache.ts` — the coordinator after Slices 3–10 land (~1230 LOC as landed, not the ~250 originally projected).
 - `lucida-web/src/pipeline/fetch/index.ts` — barrel re-export of the public surface.
 - The eleven sibling modules listed above.
 - `lucida-web/src/pipeline/fetch/cpuCache.test.ts` — preserved integration suite, plus the migrated `adaptive eviction` tests removed.

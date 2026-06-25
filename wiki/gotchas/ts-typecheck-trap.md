@@ -25,7 +25,9 @@ tsc -b --dry
 
 ## Why this happens
 
-The repo uses **TypeScript project references** to keep the worker config and the app config independent. The root `tsconfig.json` is a container with `references` but no own `files`/`include`. `tsc` invoked without `-p` picks up the container, sees no input files, and immediately exits clean.
+The repo uses **TypeScript project references** to keep the build-tool config and the app config independent. The root `tsconfig.json` is a container with `references` but no own `files`/`include`. `tsc` invoked without `-p` picks up the container, sees no input files, and immediately exits clean.
+
+(The app's actual Web Workers, e.g. `pipeline/fetch/decode.worker.ts`, live under `src/` and are covered by `tsconfig.app.json` — they are not a separate project.)
 
 This is documented behavior; it's just unintuitive when you're used to `tsc --noEmit` "doing the right thing" in a single-config repo.
 
@@ -33,4 +35,4 @@ This is documented behavior; it's just unintuitive when you're used to `tsc --no
 
 - `lucida-web/tsconfig.json` (the container)
 - `lucida-web/tsconfig.app.json` (the actual app config)
-- `lucida-web/tsconfig.node.json` (worker / build-tool config)
+- `lucida-web/tsconfig.node.json` (build-tool config — `vite.config.ts` only)

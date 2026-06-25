@@ -28,9 +28,9 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
      1. `contentSource.registerImage(image_id, wire_format)` per image
      2. `datasetsRef.set(datasetId, {manifest, fetch})`
      3. `initLayerMaps(datasetId)`
-     4. `set_channel_visible` per channel
+     4. **Grow per-channel settings**: when `channelCount > 1`, apply a single `set_channel_visible` for the *last* channel only — this grows the per-channel settings vec via `ensure_channel` (the `DatasetOpened` apply may have created just one channel setting; the real channel count lives in the data shape). Not a per-channel loop.
      5. `loopRef.current.addDataset(datasetId, manifest)` (which itself flips `interactiveDirty=true`), then `bumpDatasetsVersion()`
-     6. Merge generated availability updates into the client-side generated availability catalog as they arrive
+   - **Generated availability** is merged by a *separate* async handler (`applyGeneratedAvailabilityDelta` / `applyGeneratedAvailabilitySnapshots`), driven by `onGeneratedAvailabilityUpdate` and the open-time snapshot — not one of `setupFetchPipeline`'s steps. It folds readiness deltas into the client-side generated availability catalog as they arrive.
 5. **Next RAF tick** ([[chunk-lifecycle]]):
    1. TickCoordinator's `planAndFetch` runs because `interactiveDirty`.
    2. WASM `view_query(dsId)` returns visible entities with `projected_diagonal_px` and `idealTargetLod`.

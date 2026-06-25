@@ -37,17 +37,20 @@ Module-level only — see the source for signatures.
 - `camera.rs` — `Slice` (2D), `Arcball` (3D orbit), `Fly` (3D first-person)
 - `view.rs` / `query.rs` — `ViewState`, `view_query` returning per-entity projected size + ideal LOD
 - `ray.rs` — `Ray`, `RayHit` for picking
-- `chunk.rs` / `transform.rs` — chunk plan synthesis and 4×4 voxel transforms
+- `chunk.rs` — chunk plan synthesis
+- `transform.rs` — `VolumeTransform` (column-major 4×4 `model`/`inv_model` mapping voxel space → normalized world space, plus `compute_volume_transform`/`compute_member_transform`). Distinct from [[lucida-content]]'s `VoxelTransform`, which wraps the dataset's affine voxel→world calibration.
+- `mat4.rs` — `pub(crate)` column-major mat4/vec3 math helpers used by the transform/camera math
+- `wasm_log.rs` — the `wasm_log!` macro and `set_debug_categories` wasm-bindgen entry point; JS pushes the enabled category set and the macro skips payload construction when its category is off
 - `wasm.rs` — `wasm-bindgen` wrappers; only compiled for `target_arch = "wasm32"`
 - `saved_view.rs` — `SavedView` schema (capture record for [[saved-views]]); thin `#[wasm_bindgen]` shims for `dataset_id_for_url`, `normalize_dataset_url`, `is_local_dataset_url` that delegate to [[lucida-content]]'s `url` module per [[decisions/0042-canonical-dataset-url-form]]. The SPA imports the shims; Rust callers use `lucida_content::url::*` directly.
 - `auth_principal.rs` — `AuthPrincipal` struct (shared seam type for [[auth]]; consumed by [[saved-views]])
 
 ## Invariants
 
-- **`Scene::apply` is the conventional mutation path.** Every command — document or viewport — should flow through it. The only other `&mut self` method on `Scene` is `remove_dataset` (scene/mod.rs); the rule is enforced by review, not the type system. Bypassing `apply` skips epoch bumps and derived-state rebuilds (see [[scene-state-and-epochs]]). (`register_dataset` / `ensure_channel` exist, but on `DocumentState` / `ChannelSettings` in scene/types.rs, not on `Scene`.)
+- **`Scene::apply` is the conventional mutation path.** Every command — document or viewport — should flow through it. `Scene` does expose a few other `&mut self` methods (`set_mode_2d`/`set_mode_3d`/`set_mode_fly`, `remove_dataset`, `rebuild_derived`, plus `pub(crate)` `inner_set_viewport`, all in scene/mod.rs), but the rule that command effects route through `apply` is enforced by review, not the type system. Bypassing `apply` skips epoch bumps and derived-state rebuilds (see [[scene-state-and-epochs]]). (`register_dataset` / `ensure_channel` exist, but on `DocumentState` / `ChannelSettings` in scene/types.rs, not on `Scene`.)
 - **Document commands and viewport commands are disjoint enums** — `DocumentCommand` is shared/sequenced, `ViewportCommand` is local-only. The `Command` wrapper uses `#[serde(untagged)]` to deserialize either from the same JSON shape — the server uses this to decide what to broadcast (see [[decisions/0001-document-vs-viewport-split]]).
 - **Epochs only increase.** A fresh `Scene` starts at zero on every counter; `Scene::apply` is the only writer. Consumers compare epoch values to decide whether to reprocess.
-- **`SetActiveLayout` requires special ordering** in `Scene::apply` — document state is applied first, then derived state is rebuilt. All other document commands do their side effects first. The reason is that derived-state computation needs to read the freshly-applied layout selection from `document.active_layout_ids`. The explicit early-return branch lives in `DocumentState::apply`'s `SetActiveLayout` arm (command.rs).
+- **`SetActiveLayout` requires special ordering** in `Scene::apply` — document state is applied first, then derived state is rebuilt. All other document commands do their side effects first. The reason is that derived-state computation needs to read the freshly-applied layout selection from `document.active_layout_ids`. The explicit early-return branch lives in `Scene::apply`'s `SetActiveLayout` match arm (command.rs), distinct from the separate `SetActiveLayout` arm inside `DocumentState::apply` (scene/types.rs) that performs the document-level state change.
 
 ## Gotchas
 

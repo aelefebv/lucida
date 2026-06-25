@@ -1,6 +1,6 @@
 ---
 created: 2026-05-07
-modified: 2026-05-19
+modified: 2026-06-25
 ---
 
 # Topic: Storage and Import
@@ -18,7 +18,7 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 
 - [[lucida-store]] — import pipeline, codec abstraction, server-side chunk serving, storage backend routing, and server-private binding seeds
 - [[generated-coarse]] — server-managed derived coarse pyramid levels cached outside source storage
-- [[lucida-proxy]] — historical/legacy pure-compute proxy generation; no I/O, no async
+- [[lucida-proxy]] — opt-in/non-default pure-compute proxy generation (still compiled and wired); no I/O, no async
 - [[lucida-protocol]] — wire types: `DatasetOpened`, `FetchSource`, `AssetCatalog`, `AssetMessage`
 - [[lucida-content]] — pure data model for `DatasetManifest` (entities, transforms, images, layouts)
 
@@ -27,10 +27,12 @@ This page is a curated index. Articles live in their canonical homes; follow `[[
 - [[decisions/0005-three-output-import-model]] — `ImportResult` splits manifest, fetch, binding seed by audience (which client/server gets what)
 - [[decisions/0006-content-source-vs-fetch-source]] — JS-side `ContentSource` wraps wire-side `FetchSource`; don't conflate them
 - [[decisions/0011-dual-handoff-on-dataset-opened]] — `DatasetOpened` event splits into WASM `apply_command` and JS `setupFetchPipeline`
+- [[decisions/0042-canonical-dataset-url-form]] — one string-level URL normalization governs `DatasetId` hashing, proxy-cache naming, and wire-vs-display form (`lucida-content::url`)
 
-## Cross-cutting flow
+## Cross-cutting flows
 
 - [[flows/dataset-opening]] — full trace from URL paste through first chunks rendered
+- [[flows/dataset-diagnostics]] — `backend::open` failure-category trace; the cross-surface model for import/open failures
 
 ## Gotchas hit while working in this area
 

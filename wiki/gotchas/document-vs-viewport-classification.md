@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-06-25
 ---
 
 # Document vs Viewport Command Classification
@@ -25,20 +25,19 @@ The Rust enums in [[lucida-core]] `command.rs` enumerate every variant. If you'r
 
 The web client's send path is the gate. A command going through `applyDocumentCommand`:
 
-- Calls `bridge.sendCommand(json)` (round-trips through server).
-- Awaits the `Ack`/`CommandBroadcast` before applying locally.
+- Applies optimistically-locally **first** (`scene.apply_command(json)`, no await), bumps the settings generation, then calls `sendCommand(json)`. The author is excluded from the server's rebroadcast, so the local apply is what they actually see — there is no wait for an `Ack`/`CommandBroadcast`. (The in-source comment at `SliceViewer.tsx` near the annotation send spells this out.)
 
 A command going through `applyViewportCommand`:
 
-- Applies locally immediately via `wasmScene.apply_command(json)`.
-- Emits a throttled `presence` message.
+- Applies locally only via `scene.apply_command(json)` and is **not** sent to the server.
+- The presence side (throttled `presence` messages) is emitted separately by the viewport's own send path, not by `applyViewportCommand` itself.
 
 Crossing the wires at the call site is the bug.
 
 ## What to do if you suspect a misclassification
 
 1. Open `lucida-core/src/command.rs` and confirm which enum the variant lives in.
-2. Open `lucida-web/src/applyAndSend.ts` and confirm the dispatch table matches.
+2. Find the call site (SliceViewer / VolumeViewer / annotation overlays). There is no dispatch table — `applyAndSend.ts` is just two helpers (`applyDocumentCommand`, `applyViewportCommand`) that encode the send-or-not decision; classification is chosen ad hoc at each call site by which helper it invokes. Confirm the right one is called.
 3. Watch the server's seq counter (debug panel) during the suspected operation. Pan should *not* increment seq; opening a dataset *should*.
 
 ## Why it's silent

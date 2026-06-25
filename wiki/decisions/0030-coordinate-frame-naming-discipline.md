@@ -45,7 +45,7 @@ Local vars (e.g., `centerX` / `centerY` / `centerZ` in `chunkDistanceFromCenter`
 - `lucida-web/src/pipeline/planning/types.ts` — `BaseEntitySnapshot.layoutPositionVox` (renamed); inline comment distinguishing it from `centroidWorld`.
 - `lucida-web/src/pipeline/viewport.ts` — `xyBoundsVox`, `zRangeVox`, `sortCenterVox` (renamed).
 - `lucida-web/src/pipeline/planning/snapshot.ts` — translation site applies suffixes during snake_case → camelCase conversion.
-- `lucida-web/src/pipeline/orchestrator.ts`, `layoutBuilders.ts`, `pipeline/planning/chunks.ts`, `pipeline/planning/emit.ts`, `minimapPath.ts` — magic axis indices replaced with `Axis.X` / `Axis.Y` / etc.
+- `lucida-web/src/pipeline/tickCoordinator.ts` (formerly `orchestrator.ts`), `lucida-web/src/layoutBuilders.ts`, `pipeline/planning/chunks.ts`, `pipeline/planning/emit.ts`, and the top-level `lucida-web/src/minimapPath.ts` — magic axis indices replaced with `Axis.X` / `Axis.Y` / etc.
 
 ## Related
 

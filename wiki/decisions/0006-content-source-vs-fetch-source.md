@@ -10,7 +10,7 @@ modified: 2026-06-25
 Two distinct types share related-sounding names by design:
 
 - **`FetchSource`** (Rust, in [[lucida-protocol]]) — wire envelope describing how to fetch bytes. Currently `Proxied(ProxiedFetchDescriptor)`; reserved variants `Direct` and `Local`. The reserved `Local` variant is also why the open command is named `OpenRemoteDataset` (server-mediated) — it leaves room for a future `OpenLocalDataset` sibling for browser-side paths. See [[flows/dataset-opening]].
-- **`ContentSource`** (TypeScript, in `lucida-web/src/pipeline/fetch/contentSource.ts`) — in-browser fetch orchestrator. Wraps a `FetchSource` and exposes `registerImage(id, wireFormat)` and `fetch(req)` returning a binary frame promise.
+- **`ContentSource`** (TypeScript, in `lucida-web/src/pipeline/fetch/contentSource.ts`) — in-browser fetch orchestrator. `ContentSource` is the interface; `ProxiedContentSource` is the concrete implementation, constructed from a `FetchSource`. It exposes `registerImage(id, wireFormat)` and `fetch(request, signal)` (the `AbortSignal` lets in-flight fetches be cancelled), returning a binary frame promise.
 
 The split was clarified in commit `1718e9a`. The names hint at the relationship; the prefixes (`Content` vs `Fetch`) hint at the layer.
 
@@ -32,7 +32,7 @@ The `register_dataset → dataset_opened` server-event rename in commit `c1d982d
 
 - `lucida-protocol/src/fetch.rs::FetchSource` — the wire enum.
 - `lucida-web/src/manifestTypes.ts` — TS mirror of `FetchSource`.
-- `lucida-web/src/pipeline/fetch/contentSource.ts::ContentSource` — the JS class, constructed from a `FetchSource` payload.
+- `lucida-web/src/pipeline/fetch/contentSource.ts` — `ContentSource` is a JS interface; `ProxiedContentSource implements ContentSource` is the concrete impl, constructed from a `FetchSource` payload (instantiated `new ProxiedContentSource(...)` in `useBridge.ts`).
 - `lucida-web/src/hooks/useBridge.ts::setupFetchPipeline` — `contentSource.registerImage(image_id, wire_format)` per image after `DatasetOpened`.
 
 ## Tradeoff

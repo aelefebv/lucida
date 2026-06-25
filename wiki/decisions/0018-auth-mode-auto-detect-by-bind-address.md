@@ -46,9 +46,9 @@ Concrete benefits:
 
 ## Why change `LUCIDA_BIND` default
 
-The current `main.rs:163` binds `0.0.0.0:9876` unconditionally. With auto-detect-by-bind, this default would mean every contributor running `cargo run` gets the production auth requirement (and either configures Google OAuth or sets `LUCIDA_INSECURE=1`). That defeats the dev-friendliness goal.
+The original default bound `0.0.0.0:9876` unconditionally. With auto-detect-by-bind, this default would mean every contributor running `cargo run` gets the production auth requirement (and either configures Google OAuth or sets `LUCIDA_INSECURE=1`). That defeats the dev-friendliness goal.
 
-Flipping the default to `127.0.0.1` makes the dev-friendly path the default; production deployments explicitly opt into network exposure via `LUCIDA_BIND=0.0.0.0:9876` (or whatever the deployment hostname is). This is a one-line change in `main.rs` but a meaningful behavioral change worth documenting.
+Flipping the default to `127.0.0.1` makes the dev-friendly path the default; production deployments explicitly opt into network exposure via `LUCIDA_BIND=0.0.0.0:9876` (or whatever the deployment hostname is). The default now lives in `lucida-server::auth::config::DEFAULT_BIND_ADDR` (`"127.0.0.1:9876"`), read by `AuthConfig::from_env_map` — a one-constant change, but a meaningful behavioral change worth documenting.
 
 The change does have consequences:
 - Existing deployment scripts that relied on the `0.0.0.0` default break unless updated.
@@ -76,7 +76,7 @@ Both are acceptable trade-offs given the safety win. Documented in the OSS quick
 - `lucida-server::auth::config::AuthConfig::from_env_map` — performs the auto-detect logic. Reads `LUCIDA_BIND` first (default `127.0.0.1:9876`), then if `LUCIDA_AUTH` is unset infers the mode from `bind_addr.ip().is_loopback()`. The dangerous `Disabled + non-loopback` combination errors with `AuthConfigError::InsecureRequiresOptIn` unless `LUCIDA_INSECURE=1` is also set.
 - `lucida-server::auth::config::AuthMode::parse` — fails on unknown values (e.g. `LUCIDA_AUTH=microsoft` is fatal at boot, not silently fallthrough).
 - `lucida-server::main::run_serve` — calls `AuthConfig::from_env`, emits `auth.startup` (info, with mode + bind), `auth.startup.config_error` (error, before fail-fast exit), and `auth.startup.insecure_mode` (warn, when `insecure_acknowledged`).
-- `lucida-server::auth::is_dev_mode` — slice 8 gates the dev-only `/auth/dev/login` route on `mode == AuthMode::Disabled` (was `cfg!(debug_assertions)` in slice 2). A release build with auto-detected disabled mode still gets the dev shortcut; a debug build with Google OAuth configured does not.
+- `lucida-server::main` — the dev-only `/auth/dev/login` route is gated inline (`if auth_config.mode == auth::AuthMode::Disabled` near `main.rs:441`), so it's registered only in disabled mode (was `cfg!(debug_assertions)` in slice 2). A release build with auto-detected disabled mode still gets the dev shortcut; a debug build with Google OAuth configured does not. (There is no `is_dev_mode` helper; the gate is the inline `mode` check.)
 - `lucida-server/tests/auth_config_e2e.rs` — exercises every from-env permutation (loopback default, public default → Google, public + disabled → error, public + disabled + insecure → ok with banner).
 
 ## Related

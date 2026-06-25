@@ -19,9 +19,9 @@ After a dataset opens, [[lucida-server]] kicks off best-effort background pre-ge
 
 1. **Renderer decides it wants a proxy** — [[planning-domain]] in well-as-proxy or proxy-fallback mode adds a `MissingProxy { entity, kind, t, c }` to the wanted-set delta. TickCoordinator emits an `AssetMessage::AssetRequest` over the WebSocket.
 2. **Wire**: `{type: "asset_request", dataset_id, entity_id, kind, t, c}`.
-3. **Server** ([[lucida-server]] `handler.rs::serve_asset_request`):
-   - Look up the dataset's `ServerBinding`. Get its `ProxyGenerator`.
-   - Construct `ProxySpec { entity_id, kind, t, c, target_long_axis: 128 }`.
+3. **Server** ([[lucida-server]] `handler.rs`):
+   - At the `AssetRequest` call site, look up the dataset's `ServerBinding`, gate on `legacy_proxy_enabled`, and clone its `ProxyGenerator` (dropping the request with a log line if no binding exists). `serve_asset_request` itself receives the `&Arc<ProxyGenerator>` — the binding lookup is *not* inside it.
+   - Inside `serve_asset_request`: construct `ProxySpec { entity_id, kind, t, c, target_long_axis: 128 }`.
    - `generator.request(spec, priority=1).await` — see steps 4–7 below.
    - Encode binary frame (`encode_proxy_frame`).
    - Send to the requesting client's unicast channel.

@@ -9,9 +9,9 @@ modified: 2026-06-25
 
 ## Decision
 
-`lucida-web/src/pipeline/orchestrator.ts` (2027 lines, 36 fields, twenty responsibilities split across a planner role and an upload role) is split into a planner-only `Orchestrator` (~400 LOC) plus a new `Uploader` coordinator (~250 LOC) backed by a `lucida-web/src/pipeline/upload/` directory of focused modules. The upload responsibilities — ~750 LOC today, fused into the same class as planning — migrate out of `orchestrator.ts` and into the new directory; `Orchestrator` retains the planning role (`planAndFetch` body, `planningState`, `cachedResult`, `lastEpochs`, the configStore subscription, debug snapshots).
+`lucida-web/src/pipeline/orchestrator.ts` (2027 lines, 36 fields, twenty responsibilities split across a planner role and an upload role) is split into a planner-only role (the file that became `tickCoordinator.ts`, ~711 LOC as landed) plus a new `Uploader` coordinator (`uploader.ts`, ~311 LOC) backed by a `lucida-web/src/pipeline/upload/` directory of focused modules. The upload responsibilities — ~750 LOC today, fused into the same class as planning — migrate out of `orchestrator.ts` and into the new directory; `Orchestrator` retains the planning role (`planAndFetch` body, `planningState`, `cachedResult`, `lastEpochs`, the configStore subscription, debug snapshots).
 
-The `pipeline/upload/` directory mirrors the shape of `pipeline/fetch/` after [[decisions/0032-cpucache-split-into-pipeline-fetch]]: a thin coordinator (`uploader.ts`) plus sibling files for each concern, with sub-folders where related modules cluster tightly (`coldState/`, `delivery/`, `telemetry/`). The destination layout: `index.ts` (barrel), `uploader.ts` (coordinator), `constants.ts`, `proxyKeys.ts`, `devtools.ts`, `uploadClient.ts` (Slice 11, optional); `coldState/` (`build.ts`, `hotState.ts`, `roster.ts`, `displayState.ts`, `identity.ts`); `delivery/` (`tracker.ts`, `drain.ts`, `resend.ts`, `dispatch.ts`, `manifestIndex.ts`, `feedback.ts`); `telemetry/` (`upload.ts`, `coldState.ts`, `sustained.ts`). Per-module test files land alongside.
+The `pipeline/upload/` directory mirrors the shape of `pipeline/fetch/` after [[decisions/0032-cpucache-split-into-pipeline-fetch]]: a thin coordinator (`uploader.ts`) plus sibling files for each concern, with sub-folders where related modules cluster tightly (`coldState/`, `delivery/`, `telemetry/`). As landed, the layout is: `index.ts` (barrel), `uploader.ts` (coordinator), `constants.ts`, `proxyKeys.ts`, `uploadClient.ts`; `coldState/` (`build.ts`, `hotState.ts`, `roster.ts`, `displayState.ts`, `identity.ts`); `delivery/` (`dispatch.ts`, `feedback.ts`, `manifestIndex.ts`, `resources.ts`); `telemetry/` (`upload.ts`, `coldState.ts`, `sustained.ts`). The originally-planned `tracker.ts` landed as `resources.ts` (`WorkerResourceTracker`); the drain/resend passes were folded inline into `uploader.ts` rather than becoming `drain.ts`/`resend.ts` modules; the planned top-level `devtools.ts` was not created. Per-module test files land alongside.
 
 ## Why this shape
 
@@ -40,9 +40,9 @@ Each fix is a few-line diff once the surrounding structure exists. Pulling them 
 
 ## Why `Uploader` is a coordinator, not a class hierarchy
 
-`Uploader` consumes `DeliveryTracker`, `UploadTelemetry`, `ColdStateTelemetry`, the feedback handler, the upload client, and a `CpuCache` reference. Its body is composition: `sendColdState` becomes a thin wrapper around `buildColdState` + `client.coldState` + `tracker.onColdStateRebuild`; `deliverToWorker` becomes composition of `runDrainPass` + `runChunkResendPass` + `runProxyResendPass`. No inheritance, no template methods — just wiring. The previous slices (5–9) extract the collaborators; Slice 10 wires them together. By the time Slice 10 lands, the Uploader is mostly a constructor + a handful of thin delegating methods.
+`Uploader` consumes `WorkerResourceTracker` (the landed name for the planned `DeliveryTracker`), `UploadTelemetry`, `ColdStateTelemetry`, the `WorkerFeedback` handler, the upload client, and a `CpuCache` reference. Its body is composition: `sendColdState` is a thin wrapper around `buildColdState` + the client send + tracker bookkeeping; `deliverToWorker` runs the drain + chunk/proxy-resend passes inline (folded into the method via `tryDispatchDelivery`, rather than as separate `runDrainPass`/`runResendPass` helpers). No inheritance, no template methods — just wiring. The previous slices (5–9) extract the collaborators; Slice 10 wires them together. By the time Slice 10 lands, the Uploader is mostly a constructor + a handful of thin delegating methods.
 
-This matches the fetch refactor's Slice 10 (cpuCache as thin coordinator) in both intent and final LOC: `Orchestrator` shrinks from 2027 LOC to ~400 LOC (planner-only); `Uploader` is the new ~250 LOC coordinator. Total LOC across the pipeline drops modestly while reasoning load drops sharply — each file has one responsibility you can hold in your head.
+This matches the fetch refactor's Slice 10 (cpuCache as coordinator) in intent: the planner-only file (now `tickCoordinator.ts`) shrinks from 2027 LOC to ~711 LOC; `Uploader` is the new ~311 LOC coordinator. (The original "~400 / ~250" projections undershot the landed sizes — see the LOC note in [[decisions/0032-cpucache-split-into-pipeline-fetch]], where the coordinator likewise did not shrink as far as planned.) Reasoning load drops sharply — each file has one responsibility you can hold in your head.
 
 ## Why chunk/proxy unification is NOT pursued here
 
@@ -51,12 +51,12 @@ Pass 6 of the dechaos analysis explicitly recommended **against** an asset-abstr
 ## How this decision shows up in code
 
 - `lucida-web/src/pipeline/upload/` — the new directory.
-- `lucida-web/src/pipeline/upload/uploader.ts` — thin coordinator (~250 LOC) after Slices 5–10 land.
+- `lucida-web/src/pipeline/upload/uploader.ts` — the coordinator (~311 LOC as landed).
 - `lucida-web/src/pipeline/upload/index.ts` — barrel re-export of the public surface.
-- The sub-folders and modules listed under "Why this shape" above.
-- `lucida-web/src/pipeline/orchestrator.ts` — planner-only after Slice 10 (~400 LOC, down from 2027).
-- `lucida-web/src/pipeline/orchestrator.test.ts` — planner-only tests after Slice 10; upload-related blocks migrate to per-module test files.
-- New per-module test files under `pipeline/upload/` (`coldState/build.test.ts`, `delivery/tracker.test.ts`, `telemetry/upload.test.ts`, etc.).
+- The sub-folders and modules listed under "Why this shape" above (`coldState/`, `delivery/` = dispatch/feedback/manifestIndex/resources, `telemetry/`).
+- `lucida-web/src/pipeline/tickCoordinator.ts` (formerly `orchestrator.ts`) — planner-only (~711 LOC, down from 2027).
+- `lucida-web/src/pipeline/tickCoordinator.test.ts` (formerly `orchestrator.test.ts`) — planner-only tests; upload-related blocks migrated to per-module test files.
+- New per-module test files under `pipeline/upload/` (`coldState/build.test.ts`, `delivery/dispatch.test.ts`, `delivery/manifestIndex.test.ts`, `telemetry/upload.test.ts`, etc.).
 - `renderLoop.ts` rewires `client.onChunksEvicted` to `uploader.handleChunksEvicted` directly (was `orchestrator.handleChunksEvicted`).
 - `slicePath.ts` / `volumePath.ts` call `uploader.deliverToWorker` (was `orchestrator.deliverToWorker`).
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-18
+modified: 2026-06-25
 ---
 
 # Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)
@@ -36,7 +36,7 @@ By keying on `(channel)`, channels stop fighting for shared capacity; by keying 
 
 ## How this decision shows up in code
 
-- `lucida-web/src/renderer/proxyAtlas.ts` — pool implementation. 64 slots per pool, 1D X-layout. Pure LRU within pool.
+- `lucida-web/src/renderer/proxyAtlas.ts::createProxyAtlasPool` — pool implementation. Parameterized capacity, 3-D grid packing (tiled across the X/Y/Z texture axes). Pure LRU within pool. The 1-D X-only layout was abandoned because common field proxies (e.g. `128×128×1`) fit only 16 slots on devices with `maxTextureDimension3D = 2048`.
 - `lucida-web/src/renderer/workerContext.ts` — allocates pools on demand keyed by `(datasetId, kind, slotDims, channel)`.
 - The descriptor buffer's per-LOD info encodes which pool each proxy lives in (`fieldProxyPoolIndex`, `wellProxyPoolIndex`).
 

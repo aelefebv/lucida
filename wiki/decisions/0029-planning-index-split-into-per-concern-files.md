@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-06-25
 ---
 
 # `planning/index.ts` Split into Per-Concern Files
@@ -38,6 +38,10 @@ Every external consumer of planning types and helpers (orchestrator, cpuCache, d
 ## Why tests are not split in the same slice
 
 `planning.test.ts` (1900+ lines) could be split into `modes.test.ts` / `chunks.test.ts` / `emit.test.ts` / `plan.test.ts` to mirror the runtime split. Doing so means deciding which test belongs with which module — a separate cognitive load on top of the structural move, and one that risks masking the structural payoff with churn. Tests stay monolithic in this PRD; revisit if the test file becomes unwieldy.
+
+## Note (since)
+
+The 5-file split + barrel is intact, but the directory has grown since this ADR landed. The coarse/detail bridge ([[decisions/0039-chunk-only-coarse-detail-residency]]) added `emit.ts::emitCoarseLane` (so `emit.ts` now holds **five** `emit*Lane` helpers, not four) and `modes.ts::assignCoarseDetailModes`. The directory also gained per-concern siblings beyond the original five: `config.ts`, `proxyResidency.ts`, `synthetic.ts`, `debug.ts`, `configStore.ts` (plus their `*.test.ts`). The barrel still re-exports the public surface.
 
 ## How this decision shows up in code
 

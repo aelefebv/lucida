@@ -30,7 +30,7 @@ The path a `#view=<inline>` or `#b=<id>` URL takes from "user clicks a shared li
    - **Layouts** (document commands): `SetActiveLayout` for each entry in `view.active_layouts` where the link's layout differs from current. Missing layout → fall back to dataset's default + `console.warn`.
    - **Per-dataset settings** (viewport commands): `SetDatasetOrder`, then per-dataset `SetDatasetVisible` / `SetDatasetOpacity` / contrast / gamma / blend / render mode / per-channel colormap+contrast+gamma.
    - **Global display** (viewport commands): `SetContrast`, `SetGamma`, `SetMultiChannel`.
-   - **View dimensions** (viewport commands): `SetT`, `SetC`, `SetZRange`. Out-of-range values clamp silently to valid range (see [[saved-views|gotcha re: t/c not clamped]]).
+   - **View dimensions** (viewport commands): `SetT`, `SetC`, `SetZRange`. Out-of-range t/c/z clamp to the recipient's dataset extents (`clampViewIndices`); when any axis moves, a non-blocking "adjusted to fit" notice naming the moved axes (e.g. "Z and C adjusted to fit this dataset") is surfaced via `clampNotice` → `addWarning` — the clamp is no longer silent (see [[saved-views]]).
    - **Camera last** so the user doesn't see the camera yanking around mid-load.
 8. **Apply-result emission**: applier calls `emitApplyResult({ visibleDatasetIds, firstVisible })`. `useSavedViewSync` forwards via `onApplyResult` → `App.tsx::handleApplyResult` calls `setSelectedDatasetId(firstVisible)` so side-panel controls point at a visible dataset (see [[saved-views]] §"selectedDatasetId wrinkle").
 8b. **Apply-complete emission**: applier calls `subscribeApplyComplete(view)` listeners. `useSavedViewSync` uses this channel to (a) `markInteractiveDirty` + `markResidencyDirty` so the RAF loop redraws (otherwise the view doesn't refresh until next user input — bug 2), (b) push C/T/Z/viewMode back to React state from post-apply WASM state (otherwise the dim sliders show stale values — bug 3), and (c) restore client-only preferences from the applied view (e.g. `auto_contrast` — otherwise recipient's defaults silently overwrite captured values; see [[gotchas/saved-view-client-only-state]]).
@@ -81,7 +81,7 @@ Browser back/forward fires `popstate`. `urlSync` re-runs the bootstrap (`#view=�
 
 - **Apply order is fixed and load-bearing.** See above.
 - **The applier's `applyInProgress` flag is the single source of truth** for "should urlSync write right now." `urlSync` and `popstate` both read it.
-- **Partial failure surfaces inline; never aborts the whole apply.** A missing/inaccessible dataset shows in the loading banner; other datasets still apply. Out-of-range indices clamp silently rather than failing.
+- **Partial failure surfaces inline; never aborts the whole apply.** A missing/inaccessible dataset shows in the loading banner; other datasets still apply. Out-of-range t/c/z indices clamp to fit (with a non-blocking "adjusted to fit" notice) rather than failing.
 - **Self-state on apply ends with `selectedDatasetId` pointing at a visible dataset.** Maintained by `emitApplyResult`'s `firstVisible` selection. Applies even when the recipient already had a different dataset selected before opening the link.
 
 ## Gotchas

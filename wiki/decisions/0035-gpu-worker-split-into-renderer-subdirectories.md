@@ -1,6 +1,6 @@
 ---
 created: 2026-05-16
-modified: 2026-05-16
+modified: 2026-06-25
 ---
 
 # `gpu.worker.ts` split into `renderer/` subdirectories
@@ -28,7 +28,7 @@ The dechaos's Pass 8 sequencing (`wiki/outputs/dechaos-render-2026-05-16/08-refa
 - **Slice 0** — directory scaffold (empty placeholder files for the layout above).
 - **Slice 1** — renames (`chunksEvicted.datasetId` → `memberId`; same for `volumeChunkData.datasetId` / `sliceChunkData.datasetId`) + relocate `parseChunkKey` / `makeCompositeKey` / `derivePoolKey` to `chunkKeys.ts` + declare `chunkPoolKey(...)` in `poolKeys.ts`.
 - **Slice 2** — force every member-id construction through `memberIdForColdEntry`; Suite D (~80 LOC) locks the invariant and surfaces the well-as-proxy `imageId === ""` bug fix.
-- **Slice 3** — descriptor byte-layout SSoT in `descriptor/layout.ts` with named field offsets + a `descriptorWGSLLock.test.ts` that asserts agreement with the WGSL `struct EntityDescriptor` declarations.
+- **Slice 3** — descriptor byte-layout SSoT in `descriptor/layout.ts` with named field offsets + a lock test (landed as `descriptor/layout.test.ts`) that asserts agreement with the WGSL `struct EntityDescriptor` declarations.
 - **Slice 4** — extract `applyColdState` (the centerpiece, analogue of upload's "extract `Uploader`"); Suite A (~250 LOC) pins behavior pre-extraction; gpu.worker.ts shrinks ~200 LOC.
 - **Slice 5** — extract proxy upload + well→fields propagation into `proxy/upload.ts` and `proxy/propagate.ts`; Suite B (~150 LOC).
 - **Slice 6** — collapse 2D/3D duplicated primitives (`chunkDistSq`/`chunkDistSq2D`, `findFarthestSlot`/`findFarthestSlot2D`, `remapIndirection`/`remapSliceIndirection`); Suite C (~120 LOC).
@@ -70,10 +70,10 @@ Pass 8 explicitly recommends **against** producing a `RenderClient` interface sp
 - `lucida-web/src/renderer/chunkKeys.ts`, `poolKeys.ts` — extracted helpers (Slice 1).
 - `lucida-web/src/renderer/descriptor/layout.ts` — named field-offset constants, SSoT for the `EntityDescriptor` byte layout (Slice 3).
 - `lucida-web/src/renderer/descriptor/transient.ts` — second descriptor writer body (was in `volumeRenderer.setTransientDescriptor`).
-- `lucida-web/src/renderer/coldState/apply.ts` — extracted `applyColdState(ctx, msg, state)` (Slice 4).
+- `lucida-web/src/renderer/coldState/apply.ts` — extracted `applyColdState(ctx, msg)` (Slice 4).
 - `lucida-web/src/renderer/proxy/upload.ts`, `propagate.ts` — extracted proxy lifecycle (Slice 5).
 - `lucida-web/src/renderer/worker/state.ts` — `RendererState` interface owning the 14 Maps (Slice 8).
-- `lucida-web/src/renderer/descriptorWGSLLock.test.ts` — WGSL-vs-TS layout-agreement test (Slice 3).
+- `lucida-web/src/renderer/descriptor/layout.test.ts` — WGSL-vs-TS layout-agreement test (Slice 3).
 - Per-module test files alongside each new module.
 - `pipeline/upload/delivery/feedback.ts` and `pipeline/upload/delivery/dispatch.ts` — updated to use `memberId` field name (Slice 1).
 - `pipeline/upload/coldState/build.ts` — updated for `ColdStateActiveEntry` discriminated union (Slice 11).

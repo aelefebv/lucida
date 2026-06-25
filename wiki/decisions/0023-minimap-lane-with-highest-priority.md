@@ -29,11 +29,11 @@ The starvation risk on initial load is bounded: minimap chunks are small (~16 ch
 
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/index.ts` — exports `MINIMAP_LANE_OFFSET = 0` alongside the renumbered other offsets.
-- `lucida-web/src/pipeline/planning/index.ts::emitMinimapLane` — enumerates minimap chunks from `snapshot.minimapPending`, emits with `priority = MINIMAP_LANE_OFFSET` directly.
-- `lucida-web/src/pipeline/planning/snapshot.ts` — `minimapPending` is part of the planning snapshot input; the snapshot builder sources it from the orchestrator.
-- `lucida-web/src/pipeline/cpuCache.ts` — recognizes `lane: "minimap"` and routes those chunks to the overview eviction tier.
-- The orchestrator's previous inline minimap injection is deleted.
+- `lucida-web/src/pipeline/planning/config.ts` — defines `MINIMAP_LANE_OFFSET = 0` alongside the renumbered other offsets (re-exported through the `planning` barrel).
+- `lucida-web/src/pipeline/planning/emit.ts::emitMinimapLane` — enumerates minimap chunks from `snapshot.minimapPending`, emits with `priority = MINIMAP_LANE_OFFSET` directly.
+- `lucida-web/src/pipeline/planning/snapshot.ts` — `minimapPending` is part of the planning snapshot input; the snapshot builder sources it from the tick coordinator.
+- `lucida-web/src/pipeline/fetch/cpuCache.ts` — recognizes `lane: "minimap"` and routes those chunks to the overview eviction tier (the "ADR 0023" comment marks the spot).
+- The tick coordinator's previous inline minimap injection is deleted.
 
 ## Related
 
