@@ -120,6 +120,46 @@ export function LayerPanel({
   // (editor-only). Keyed by `${layerId}::${channelIndex}` so only one channel
   // across all layers is in edit mode at a time, mirroring `renamingLayerId`.
   const [renamingChannelKey, setRenamingChannelKey] = useState<string | null>(null);
+  // Ephemeral per-channel collapse state, mirroring the LAYER-level `isExpanded`
+  // disclosure. Channels are **collapsed by default** (a many-channel layer opens
+  // tidy); a channel is listed here only once it has been expanded. Keyed by the
+  // `${layerId}::${channelIndex}` channel key, so it is tracked independently per
+  // channel (no cross-channel bleed) and is decoupled from visibility — view-only
+  // React state, never persisted or broadcast.
+  const [expandedChannels, setExpandedChannels] = useState<Set<string>>(new Set());
+  const channelKeyOf = (layerId: string, chIdx: number) => `${layerId}::${chIdx}`;
+  // Flip a single channel's expanded flag without touching any other channel.
+  // A fresh Set keeps the state update immutable (so React re-renders) and the
+  // per-key add/delete guarantees siblings are untouched.
+  const toggleChannelExpanded = (channelKey: string) => {
+    setExpandedChannels((prev) => {
+      const next = new Set(prev);
+      if (next.has(channelKey)) {
+        next.delete(channelKey);
+      } else {
+        next.add(channelKey);
+      }
+      return next;
+    });
+  };
+  // Collapse-all / expand-all for ONE layer's channels at once. Keys are
+  // per-layer, so we only ever clear/add this layer's keys — other layers'
+  // collapse state is left untouched.
+  const setAllChannelsExpanded = (
+    layerId: string,
+    count: number,
+    expanded: boolean,
+  ) => {
+    setExpandedChannels((prev) => {
+      const next = new Set(
+        [...prev].filter((k) => !k.startsWith(`${layerId}::`)),
+      );
+      if (expanded) {
+        for (let i = 0; i < count; i++) next.add(channelKeyOf(layerId, i));
+      }
+      return next;
+    });
+  };
   return (
     <div className="layer-panel" style={style}>
       <div className="layer-panel-header">
@@ -238,6 +278,27 @@ export function LayerPanel({
                   />
                   {multiChannel && layer.channelSettings ? (
                     <>
+                      <div className="layer-detail-row channel-collapse-controls">
+                        <label>Channels</label>
+                        <button
+                          className="channel-collapse-all-btn"
+                          aria-label={`Collapse all channels of ${layer.name}`}
+                          onClick={() =>
+                            setAllChannelsExpanded(layer.id, layer.channelSettings?.length ?? 0, false)
+                          }
+                        >
+                          Collapse all
+                        </button>
+                        <button
+                          className="channel-collapse-all-btn"
+                          aria-label={`Expand all channels of ${layer.name}`}
+                          onClick={() =>
+                            setAllChannelsExpanded(layer.id, layer.channelSettings?.length ?? 0, true)
+                          }
+                        >
+                          Expand all
+                        </button>
+                      </div>
                       {layer.channelSettings.map((ch, chIdx) => {
                         // Display-name precedence: user override \u2192 omero label
                         // (B1) \u2192 `Ch N`. The override is the mutable per-channel
@@ -248,6 +309,12 @@ export function LayerPanel({
                           `Ch ${chIdx}`;
                         const channelKey = `${layer.id}::${chIdx}`;
                         const isRenamingChannel = renamingChannelKey === channelKey;
+                        // Expanded by default; only collapsed once the user opts
+                        // in via the per-channel toggle. Decoupled from
+                        // `ch.visible`: gating the colormap + contrast on this
+                        // (not visibility) lets a channel stay visible while its
+                        // controls are tucked away.
+                        const isChannelExpanded = expandedChannels.has(channelKey);
                         return (
                         <div key={chIdx} className="channel-sublayer">
                           <div className="channel-sublayer-header">
@@ -295,14 +362,38 @@ export function LayerPanel({
                                 {"\u270E"}
                               </button>
                             )}
-                            <ColormapSelector
-                              value={ch.colormap}
-                              label={`${layer.name} ${chName} colormap`}
-                              onChange={(cmap) => onChannelSetColormap?.(layer.id, chIdx, cmap)}
-                            />
+                            {/*
+                              Per-channel disclosure toggle. A real <button> with
+                              `aria-expanded` that controls the channel's own
+                              detail region (colormap + contrast). Mirrors the
+                              LAYER expand button (\u25B2 open / \u25BC collapsed) and
+                              its accessible-name shape, but is purely about
+                              showing/hiding controls \u2014 it never touches
+                              visibility (`onChannelSetVisible`) or any sibling
+                              channel. Lives at the row's end so the eye + name +
+                              rename keep their place and the tab order reads
+                              left-to-right.
+                            */}
+                            <button
+                              className="channel-expand-btn"
+                              title={isChannelExpanded ? "Collapse channel" : "Expand channel"}
+                              aria-label={`${isChannelExpanded ? "Collapse" : "Expand"} channel ${chName}`}
+                              aria-expanded={isChannelExpanded}
+                              onClick={() => toggleChannelExpanded(channelKey)}
+                            >
+                              {isChannelExpanded ? "\u25B2" : "\u25BC"}
+                            </button>
                           </div>
-                          {ch.visible && (
+                          {isChannelExpanded && (
                             <div className="channel-sublayer-detail">
+                              <div className="layer-detail-row">
+                                <label>Colormap</label>
+                                <ColormapSelector
+                                  value={ch.colormap}
+                                  label={`${layer.name} ${chName} colormap`}
+                                  onChange={(cmap) => onChannelSetColormap?.(layer.id, chIdx, cmap)}
+                                />
+                              </div>
                               <ContrastControls
                                 dataMin={0}
                                 dataMax={layer.fullRangeMax}

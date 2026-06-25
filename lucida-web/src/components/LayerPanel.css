@@ -199,10 +199,31 @@
   border-radius: 4px;
 }
 
+.channel-expand-btn {
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  font-size: 0.65rem;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-left: auto;
+  border-radius: 4px;
+}
+
 .channel-sublayer-detail {
   padding: 0.2rem 0 0.2rem 1.85rem;
 }
 
 .channel-sublayer-detail .contrast-controls {
   max-width: none;
+}
+
+/* Per-channel collapse-all / expand-all controls (sits above the channel list). */
+.channel-collapse-controls {
+  gap: 6px;
+}
+.channel-collapse-all-btn {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  cursor: pointer;
 }

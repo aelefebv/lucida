@@ -328,3 +328,150 @@ describe("LayerPanel channel rename", () => {
     expect(screen.getByText("DAPI")).toBeTruthy();
   });
 });
+
+describe("LayerPanel per-channel collapse", () => {
+  const channelSettings = [
+    { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+    { visible: true, colormap: "green", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+  ];
+
+  function collapseProps(
+    overrides: Partial<LayerInfo> = {},
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      ...baseProps(true, vi.fn()),
+      multiChannel: true,
+      expandedLayerId: "wds-1" as string | null,
+      layers: [
+        layer({
+          channelSettings,
+          channelInfos: [{ label: "DAPI" }, { label: "GFP" }],
+          ...overrides,
+        }),
+      ],
+      ...extra,
+    };
+  }
+
+  // The colormap selector is the per-channel "detail" the toggle discloses; its
+  // aria-label carries the `${layer} ${chName}` prefix.
+  const dapiColormap = "original.zarr DAPI colormap";
+  const gfpColormap = "original.zarr GFP colormap";
+
+  it("defaults to COLLAPSED: channels show an Expand toggle but hide their controls", () => {
+    render(<LayerPanel {...collapseProps()} />);
+    expect(screen.getByLabelText("Expand channel DAPI")).toBeTruthy();
+    expect(screen.getByLabelText("Expand channel GFP")).toBeTruthy();
+    expect(screen.queryByLabelText(dapiColormap)).toBeNull();
+    expect(screen.queryByLabelText(gfpColormap)).toBeNull();
+  });
+
+  it("the toggle is a real disclosure button, aria-expanded=false by default", () => {
+    render(<LayerPanel {...collapseProps()} />);
+    const t = screen.getByLabelText("Expand channel DAPI");
+    expect(t.tagName).toBe("BUTTON");
+    expect(t.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(t);
+    expect(screen.getByLabelText("Collapse channel DAPI").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("expanding a channel shows its controls; collapsing hides them again", () => {
+    render(<LayerPanel {...collapseProps()} />);
+    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
+    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Collapse channel DAPI"));
+    expect(screen.queryByLabelText(dapiColormap)).toBeNull();
+  });
+
+  it("expanding one channel leaves the others collapsed (no cross-channel bleed)", () => {
+    render(<LayerPanel {...collapseProps()} />);
+    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
+    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+    expect(screen.queryByLabelText(gfpColormap)).toBeNull();
+    expect(screen.getByLabelText("Expand channel GFP")).toBeTruthy();
+  });
+
+  it("Expand all expands every channel; Collapse all collapses every channel", () => {
+    render(<LayerPanel {...collapseProps()} />);
+    fireEvent.click(screen.getByLabelText("Expand all channels of original.zarr"));
+    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+    expect(screen.getByLabelText(gfpColormap)).toBeTruthy();
+    expect(screen.getByLabelText("Collapse channel DAPI")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Collapse all channels of original.zarr"));
+    expect(screen.queryByLabelText(dapiColormap)).toBeNull();
+    expect(screen.queryByLabelText(gfpColormap)).toBeNull();
+    expect(screen.getByLabelText("Expand channel DAPI")).toBeTruthy();
+  });
+
+  it("never calls onChannelSetVisible when toggling collapse, and the eye still works", () => {
+    const onChannelSetVisible = vi.fn();
+    render(<LayerPanel {...collapseProps({}, { onChannelSetVisible })} />);
+    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
+    fireEvent.click(screen.getByLabelText("Collapse channel DAPI"));
+    expect(onChannelSetVisible).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Hide original.zarr DAPI"));
+    expect(onChannelSetVisible).toHaveBeenCalledWith("wds-1", 0, false);
+  });
+
+  it("uses the display-name precedence (override > omero > Ch N) for the toggle name", () => {
+    render(<LayerPanel {...collapseProps({ channelInfos: undefined })} />);
+    expect(screen.getByLabelText("Expand channel Ch 0")).toBeTruthy();
+  });
+
+  it("shows controls for an expanded channel even when it is hidden (gate is expanded, not visible)", () => {
+    render(
+      <LayerPanel
+        {...collapseProps({
+          channelSettings: [
+            { visible: false, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+          ],
+          channelInfos: [{ label: "DAPI" }],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
+    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+  });
+
+  it("keeps the rename affordance working alongside collapse", () => {
+    const onChannelSetName = vi.fn();
+    render(<LayerPanel {...collapseProps({}, { onChannelSetName })} />);
+    fireEvent.click(screen.getByLabelText("Rename channel DAPI"));
+    const input = screen.getByLabelText("Channel name") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Nucleus" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, "Nucleus");
+  });
+
+  it("collapse/expand-all and per-channel state are per-layer (no cross-layer bleed, survive switching)", () => {
+    const props = {
+      ...baseProps(true, vi.fn()),
+      multiChannel: true,
+      expandedLayerId: "wds-1" as string | null,
+      layers: [
+        layer({ channelSettings, channelInfos: [{ label: "DAPI" }, { label: "GFP" }] }),
+        layer({
+          id: "wds-2",
+          name: "second.zarr",
+          channelSettings,
+          channelInfos: [{ label: "RFP" }, { label: "Cy5" }],
+        }),
+      ],
+    };
+    const { rerender } = render(<LayerPanel {...props} />);
+    // Expand all in layer 1.
+    fireEvent.click(screen.getByLabelText("Expand all channels of original.zarr"));
+    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+
+    // Switch to layer 2: its channels are still collapsed (default), unaffected.
+    rerender(<LayerPanel {...{ ...props, expandedLayerId: "wds-2" }} />);
+    expect(screen.getByLabelText("Expand channel RFP")).toBeTruthy();
+    expect(screen.queryByLabelText("second.zarr RFP colormap")).toBeNull();
+
+    // Back to layer 1: still expanded (state survived the switch).
+    rerender(<LayerPanel {...{ ...props, expandedLayerId: "wds-1" }} />);
+    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+  });
+});
