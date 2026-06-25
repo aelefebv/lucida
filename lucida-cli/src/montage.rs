@@ -13,7 +13,7 @@ use image::{ImageFormat, Rgba, RgbaImage};
 use lucida_content::DatasetId;
 use lucida_core::camera::{Camera, Slice};
 use lucida_core::saved_view::SavedView;
-use lucida_core::scene::DatasetDisplaySettings;
+use lucida_core::scene::{ChannelSettings, Colormap, DatasetDisplaySettings};
 use lucida_core::view::ViewState;
 
 /// Which dataset axis the montage sweeps. Picked from the dataset's shape: a
@@ -165,15 +165,23 @@ fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
 }
 
 /// Build the inline `SavedView` for one montage cell: a fit 2D camera at the
-/// cell's z/t/c with the dataset visible and auto-contrast on. Source URLs are
-/// left empty (workspace-dataset-id form — the dataset is already open in the
-/// target workspace); the caller encodes this into a `#view=` URL.
+/// cell's z/t/c with the dataset visible. Source URLs are left empty
+/// (workspace-dataset-id form — the dataset is already open in the target
+/// workspace); the caller encodes this into a `#view=` URL.
+///
+/// `contrast` controls the window: `None` leaves auto-contrast on (each cell
+/// stretches its own slice — fine for a single view, but flattens a contact
+/// sheet of a densely-labelled stack). `Some([lo, hi])` pins one **shared**
+/// window across all cells (auto off) so brightness is comparable and a clipped
+/// `lo` suppresses the background — and restores the channel's natural colormap
+/// (`default_for_channel`), which an explicit window would otherwise reset to gray.
 pub fn build_cell_view(
     ds_id: &str,
     cell: &MontageCell,
     full_x: u64,
     full_y: u64,
     viewport: [u32; 2],
+    contrast: Option<[f64; 2]>,
 ) -> SavedView {
     let mut view = SavedView::empty(viewport);
     view.camera = Camera::Slice(fit_slice_camera(full_x, full_y, viewport));
@@ -185,9 +193,35 @@ pub fn build_cell_view(
     };
     let id = DatasetId(ds_id.to_string());
     view.dataset_order = vec![id.clone()];
-    view.dataset_settings
-        .insert(id.clone(), DatasetDisplaySettings::default());
-    view.auto_contrast.insert(id, true);
+    match contrast {
+        Some([lo, hi]) => {
+            // Per-channel settings carry the colormap (an explicit dataset
+            // setting otherwise resets it to gray) and the same window, up to
+            // the active channel; the dataset-level contrast covers the
+            // single-channel render path.
+            let channel_settings = (0..=cell.c as usize)
+                .map(|i| ChannelSettings {
+                    colormap: Colormap::default_for_channel(i),
+                    contrast_min: lo,
+                    contrast_max: hi,
+                    ..ChannelSettings::default()
+                })
+                .collect();
+            let settings = DatasetDisplaySettings {
+                contrast_min: lo,
+                contrast_max: hi,
+                channel_settings,
+                ..DatasetDisplaySettings::default()
+            };
+            view.dataset_settings.insert(id.clone(), settings);
+            view.auto_contrast.insert(id, false);
+        }
+        None => {
+            view.dataset_settings
+                .insert(id.clone(), DatasetDisplaySettings::default());
+            view.auto_contrast.insert(id, true);
+        }
+    }
     view
 }
 
@@ -282,7 +316,7 @@ mod tests {
             field: 0,
             label: "z=42".into(),
         };
-        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256]);
+        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256], None);
         match view.camera {
             Camera::Slice(s) => {
                 assert_eq!(s.center, [200.0, 100.0]);
@@ -301,6 +335,33 @@ mod tests {
             view.datasets.is_empty(),
             "inline view must be workspace-id form"
         );
+    }
+
+    #[test]
+    fn shared_contrast_pins_window_and_keeps_colormap() {
+        let cell = MontageCell {
+            z: 10,
+            t: 0,
+            c: 1,
+            field: 0,
+            label: "z=10".into(),
+        };
+        let view = build_cell_view("wds-x", &cell, 256, 256, [256, 256], Some([60.0, 196.0]));
+        let id = DatasetId("wds-x".into());
+        // Auto OFF so the window is shared across all cells, not per-slice.
+        assert_eq!(view.auto_contrast.get(&id), Some(&false));
+        let settings = view.dataset_settings.get(&id).expect("settings");
+        assert_eq!(settings.contrast_min, 60.0);
+        assert_eq!(settings.contrast_max, 196.0);
+        // Channel settings exist up to the active channel and keep the natural
+        // per-channel colormap (not reset to gray) + the shared window.
+        assert_eq!(settings.channel_settings.len(), 2);
+        assert_eq!(
+            settings.channel_settings[1].colormap,
+            Colormap::default_for_channel(1)
+        );
+        assert_eq!(settings.channel_settings[1].contrast_min, 60.0);
+        assert_eq!(settings.channel_settings[1].contrast_max, 196.0);
     }
 
     #[test]

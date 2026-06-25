@@ -2096,10 +2096,53 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let plan = montage::plan_montage(dims, 1, *cells, *cols);
                 let viewport = [*cell_px, *cell_px];
 
+                // Pre-pass: read the dataset's auto-contrast window from a
+                // representative (middle) cell, then pin ONE shared,
+                // background-clipped window for every cell. Per-cell auto-contrast
+                // normalises each slice independently — which flattens a contact
+                // sheet of a densely-labelled stack (every cell ends up the same
+                // brightness). A shared clipped window keeps brightness comparable
+                // and lifts the low end to suppress the background, so structure
+                // and through-stack variation show. Best-effort: if the probe can't
+                // read a window, fall back to per-cell auto.
+                let mid = plan.cells.len() / 2;
+                let probe_saved = montage::build_cell_view(
+                    &ds_id,
+                    &plan.cells[mid],
+                    full_x,
+                    full_y,
+                    viewport,
+                    None,
+                );
+                let probe_url =
+                    montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
+                const BG_CLIP: f64 = 0.3;
+                let shared_contrast = match probe_montage_auto_contrast(
+                    &probe_url,
+                    token.as_ref(),
+                    *cell_px,
+                    *cell_px,
+                    wait,
+                )
+                .await
+                {
+                    Ok(Some([lo, hi])) if hi > lo => Some([lo + BG_CLIP * (hi - lo), hi]),
+                    _ => None,
+                };
+
                 let mut urls: Vec<String> = Vec::with_capacity(plan.cells.len());
                 let mut cell_json: Vec<serde_json::Value> = Vec::with_capacity(plan.cells.len());
                 for (index, cell) in plan.cells.iter().enumerate() {
-                    let saved = montage::build_cell_view(&ds_id, cell, full_x, full_y, viewport);
+                    // Same shared window for the sidecar drill-in URL and the
+                    // captured thumbnail, so drilling in matches the montage.
+                    let saved = montage::build_cell_view(
+                        &ds_id,
+                        cell,
+                        full_x,
+                        full_y,
+                        viewport,
+                        shared_contrast,
+                    );
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
@@ -2131,6 +2174,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     "cols": plan.cols,
                     "rows": plan.rows,
                     "cell_px": cell_px,
+                    // The shared contrast window applied to every cell (null when
+                    // the probe fell back to per-cell auto-contrast).
+                    "contrast": shared_contrast,
                     "cells": cell_json,
                 });
                 if *json {
@@ -3348,6 +3394,187 @@ async fn capture_montage_pngs(
             pngs.push(capture_cdp_png(&endpoint, url, token, width, height, wait).await?);
         }
         Ok::<Vec<Vec<u8>>, CliError>(pngs)
+    }
+    .await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
+    result
+}
+
+/// Load a viewer URL in a fresh CDP target and read back the dataset's
+/// auto-contrast data window, which the web app publishes as
+/// `window.__lucidaAutoContrast` once it has computed the slice's range.
+/// Returns `None` if the page never published one. `dataset montage` uses this
+/// to derive a single shared, background-clipped window for every cell.
+async fn capture_cdp_auto_contrast(
+    browser_ws_url: &str,
+    url: &str,
+    token: Option<&EffectiveToken>,
+    width: u32,
+    height: u32,
+    wait: Duration,
+) -> Result<Option<[f64; 2]>, CliError> {
+    let (socket, _response) = connect_async(browser_ws_url)
+        .await
+        .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))?;
+    let (mut write, mut read) = socket.split();
+    let mut id = 1_u64;
+
+    let created = cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        None,
+        "Target.createTarget",
+        json!({ "url": "about:blank" }),
+        wait,
+    )
+    .await?;
+    let target_id = created
+        .get("targetId")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP targetId was missing"))?
+        .to_string();
+    let attached = cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        None,
+        "Target.attachToTarget",
+        json!({ "targetId": target_id, "flatten": true }),
+        wait,
+    )
+    .await?;
+    let session_id = attached
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| CliError::new(ErrorKind::Protocol, "CDP sessionId was missing"))?
+        .to_string();
+
+    cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        Some(&session_id),
+        "Network.enable",
+        json!({}),
+        wait,
+    )
+    .await?;
+    if let Some(token) = token {
+        cdp_call(
+            &mut write,
+            &mut read,
+            &mut id,
+            Some(&session_id),
+            "Network.setExtraHTTPHeaders",
+            json!({ "headers": { "Authorization": format!("Bearer {}", token.token) } }),
+            wait,
+        )
+        .await?;
+    }
+    cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        Some(&session_id),
+        "Emulation.setDeviceMetricsOverride",
+        json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }),
+        wait,
+    )
+    .await?;
+    cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        Some(&session_id),
+        "Page.enable",
+        json!({}),
+        wait,
+    )
+    .await?;
+    cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        Some(&session_id),
+        "Page.navigate",
+        json!({ "url": url }),
+        wait,
+    )
+    .await?;
+    wait_for_page_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
+    wait_for_lucida_capture_ready(&mut write, &mut read, &mut id, &session_id, wait).await?;
+    let evaluated = cdp_call(
+        &mut write,
+        &mut read,
+        &mut id,
+        Some(&session_id),
+        "Runtime.evaluate",
+        json!({
+            "expression": "(() => { const a = window.__lucidaAutoContrast; return (a && Number.isFinite(a.min) && Number.isFinite(a.max)) ? [a.min, a.max] : null; })()",
+            "returnByValue": true
+        }),
+        wait,
+    )
+    .await?;
+    let window = evaluated
+        .get("result")
+        .and_then(|value| value.get("value"))
+        .and_then(|value| value.as_array())
+        .and_then(|arr| {
+            let lo = arr.first()?.as_f64()?;
+            let hi = arr.get(1)?.as_f64()?;
+            Some([lo, hi])
+        });
+    Ok(window)
+}
+
+/// Spawn one headless browser, load `url`, and return the dataset's
+/// auto-contrast window (`None` if unavailable). A small pre-pass for
+/// `dataset montage` so all cells can share one background-clipped window.
+async fn probe_montage_auto_contrast(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    width: u32,
+    height: u32,
+    wait: Duration,
+) -> Result<Option<[f64; 2]>, CliError> {
+    let browser = find_browser_binary()?;
+    let user_data_dir = chrome_user_data_dir();
+    tokio::fs::create_dir_all(&user_data_dir).await?;
+    let mut child = TokioCommand::new(&browser)
+        .arg("--headless=new")
+        .arg("--enable-unsafe-webgpu")
+        .arg("--ignore-gpu-blocklist")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", user_data_dir.display()))
+        .arg(format!("--window-size={width},{height}"))
+        .arg("about:blank")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            CliError::new(
+                ErrorKind::Config,
+                format!("failed to launch browser {browser:?}: {error}"),
+            )
+        })?;
+
+    let result = async {
+        let stderr = child.stderr.take().ok_or_else(|| {
+            CliError::new(
+                ErrorKind::Protocol,
+                "browser stderr was not available for DevTools discovery",
+            )
+        })?;
+        let endpoint = wait_for_devtools_endpoint(stderr, wait).await?;
+        capture_cdp_auto_contrast(&endpoint, url, token, width, height, wait).await
     }
     .await;
 
