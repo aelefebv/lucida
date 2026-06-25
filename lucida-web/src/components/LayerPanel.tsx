@@ -21,6 +21,13 @@ export interface LayerInfo {
   dataRange: { min: number; max: number } | null;
   fullRangeMax: number;
   channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
+  /**
+   * Per-channel display labels from the manifest's omero block, in channel
+   * order. Optional/positional: an entry may be missing for a given channel,
+   * in which case the row falls back to `Ch {i}`. Names are immutable manifest
+   * data, decoupled from the mutable `channelSettings`.
+   */
+  channelInfos?: { label: string; color?: string | null }[];
   channelBlendMode: string;
   detailLevelOverride: number | null;
   detailLevelOptions: { level: number; label: string }[];
@@ -220,22 +227,26 @@ export function LayerPanel({
                   />
                   {multiChannel && layer.channelSettings ? (
                     <>
-                      {layer.channelSettings.map((ch, chIdx) => (
+                      {layer.channelSettings.map((ch, chIdx) => {
+                        const chName =
+                          layer.channelInfos?.[chIdx]?.label?.trim() ||
+                          `Ch ${chIdx}`;
+                        return (
                         <div key={chIdx} className="channel-sublayer">
                           <div className="channel-sublayer-header">
                             <button
                               className="layer-eye-btn"
                               title={ch.visible ? "Hide channel" : "Show channel"}
-                              aria-label={`${ch.visible ? "Hide" : "Show"} ${layer.name} channel ${chIdx}`}
+                              aria-label={`${ch.visible ? "Hide" : "Show"} ${layer.name} ${chName}`}
                               aria-pressed={ch.visible}
                               onClick={() => onChannelSetVisible?.(layer.id, chIdx, !ch.visible)}
                             >
                               {ch.visible ? "\u25C9" : "\u25CB"}
                             </button>
-                            <span className="channel-label">Ch {chIdx}</span>
+                            <span className="channel-label">{chName}</span>
                             <ColormapSelector
                               value={ch.colormap}
-                              label={`${layer.name} channel ${chIdx} colormap`}
+                              label={`${layer.name} ${chName} colormap`}
                               onChange={(cmap) => onChannelSetColormap?.(layer.id, chIdx, cmap)}
                             />
                           </div>
@@ -255,12 +266,13 @@ export function LayerPanel({
                                 fullRange={false}
                                 onFullRangeToggle={() => {}}
                                 fullRangeMax={layer.fullRangeMax}
-                                labelPrefix={`${layer.name} channel ${chIdx}`}
+                                labelPrefix={`${layer.name} ${chName}`}
                               />
                             </div>
                           )}
                         </div>
-                      ))}
+                        );
+                      })}
                       <div className="layer-detail-row">
                         <label>Ch Blend</label>
                         <select

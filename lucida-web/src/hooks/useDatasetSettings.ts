@@ -416,6 +416,9 @@ export function useDatasetSettings({
         dataRange: dr,
         fullRangeMax: frMax,
         channelSettings: settings?.channel_settings,
+        // Immutable channel labels from the manifest's omero block (positional;
+        // may be absent/short — LayerPanel falls back to `Ch {i}` per index).
+        channelInfos: ds?.manifest.images[0]?.multiscale.channel_infos,
         channelBlendMode: settings?.channel_blend_mode ?? "additive",
         detailLevelOverride: settings?.detail_level_override ?? null,
         detailLevelOptions: detailLevelOptions(ds),

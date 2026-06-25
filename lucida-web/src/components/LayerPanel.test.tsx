@@ -122,3 +122,68 @@ describe("LayerPanel rename affordance", () => {
     expect(screen.queryByText("original.zarr")).toBeNull();
   });
 });
+
+describe("LayerPanel channel labels", () => {
+  const channelSettings = [
+    { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+    { visible: true, colormap: "green", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+  ];
+
+  function multiChannelProps(overrides: Partial<LayerInfo> = {}) {
+    return {
+      ...baseProps(true, vi.fn()),
+      multiChannel: true,
+      // Expanded so the per-channel sublayer rows render.
+      expandedLayerId: "wds-1" as string | null,
+      layers: [layer({ channelSettings, ...overrides })],
+    };
+  }
+
+  it("shows omero labels when present", () => {
+    render(
+      <LayerPanel
+        {...multiChannelProps({
+          channelInfos: [{ label: "DAPI" }, { label: "GFP" }],
+        })}
+      />,
+    );
+    expect(screen.getByText("DAPI")).toBeTruthy();
+    expect(screen.getByText("GFP")).toBeTruthy();
+    // No fallback labels should appear when both channels are named.
+    expect(screen.queryByText("Ch 0")).toBeNull();
+    expect(screen.queryByText("Ch 1")).toBeNull();
+  });
+
+  it("falls back to `Ch N` when channelInfos is absent", () => {
+    render(<LayerPanel {...multiChannelProps({ channelInfos: undefined })} />);
+    expect(screen.getByText("Ch 0")).toBeTruthy();
+    expect(screen.getByText("Ch 1")).toBeTruthy();
+  });
+
+  it("falls back per-index for missing/blank entries (positional)", () => {
+    render(
+      <LayerPanel
+        {...multiChannelProps({
+          // Only channel 0 has a usable label; channel 1 falls back.
+          channelInfos: [{ label: "DAPI" }],
+        })}
+      />,
+    );
+    expect(screen.getByText("DAPI")).toBeTruthy();
+    expect(screen.getByText("Ch 1")).toBeTruthy();
+    expect(screen.queryByText("Ch 0")).toBeNull();
+  });
+
+  it("falls back when a label is an empty string", () => {
+    render(
+      <LayerPanel
+        {...multiChannelProps({
+          channelInfos: [{ label: "" }, { label: "GFP" }],
+        })}
+      />,
+    );
+    // Empty label -> positional fallback for channel 0.
+    expect(screen.getByText("Ch 0")).toBeTruthy();
+    expect(screen.getByText("GFP")).toBeTruthy();
+  });
+});

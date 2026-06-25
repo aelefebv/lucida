@@ -2866,6 +2866,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    channel_infos: vec![],
                 },
             }],
             vec![],

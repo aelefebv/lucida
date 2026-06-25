@@ -137,6 +137,7 @@ pub fn single_image_graph(
                 generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
+                channel_infos: vec![],
             },
         }],
         vec![],
@@ -202,6 +203,7 @@ pub fn well_graph_with_fields(
                 generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
+                channel_infos: vec![],
             },
         });
     }

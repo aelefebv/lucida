@@ -211,6 +211,7 @@ pub async fn build_single_field_dataset(
                 generated_levels: vec![],
                 data_type: DataType::Uint16,
                 pinned_axes: vec![],
+                channel_infos: vec![],
             },
         }],
         vec![],
