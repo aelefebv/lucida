@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::saved_view::SavedView;
-use crate::scene::DatasetDisplaySettings;
+use crate::scene::{DatasetDisplaySettings, RenderMode};
 use crate::view::ViewState;
 use lucida_content::DatasetId;
 
@@ -198,6 +198,20 @@ pub enum ViewTransform {
     /// Step the current Z slice by a signed offset. Available in every mode, but
     /// no-ops away on a flat (`z_count <= 1`) or out-of-range move.
     StepZ(i32),
+    /// Tilt the arcball up/down by a signed elevation, in **degrees**.
+    /// Arcball-only — it changes the 3D camera's `phi` and is clamped away from
+    /// the poles so it can't flip the view over.
+    ElevationDelta(f64),
+    /// Step the current timepoint (T) by a signed offset. Available in every
+    /// mode, but no-ops away on a single-timepoint (`t_count <= 1`) or
+    /// out-of-range move.
+    StepT(i32),
+    /// Step the active channel (C) by a signed offset. Available in every mode,
+    /// but no-ops away on a single-channel (`c_count <= 1`) or out-of-range move.
+    StepC(i32),
+    /// Flip volume rendering between translucent and max-intensity projection.
+    /// Arcball-only — it changes how the 3D volume is rendered.
+    ToggleProjection,
 }
 
 impl ViewTransform {
@@ -213,12 +227,23 @@ impl ViewTransform {
     /// - [`Zoom`](ViewTransform::Zoom): [`Camera::Slice`] and
     ///   [`Camera::Arcball`], but **not** [`Camera::Fly`] (a fly camera moves by
     ///   flying, not by a zoom factor).
+    /// - [`ElevationDelta`](ViewTransform::ElevationDelta) and
+    ///   [`ToggleProjection`](ViewTransform::ToggleProjection): only
+    ///   [`Camera::Arcball`] — a 2D slice has no up/down tilt, and the
+    ///   projection toggle changes 3D volume rendering.
+    /// - [`StepT`](ViewTransform::StepT) and [`StepC`](ViewTransform::StepC):
+    ///   every camera (a T/C step is a dimensional move, not a camera move),
+    ///   exactly like [`StepZ`](ViewTransform::StepZ).
     pub fn applies_to(&self, cam: &Camera) -> bool {
         match self {
             ViewTransform::Home => true,
             ViewTransform::AzimuthDelta(_) => matches!(cam, Camera::Arcball(_)),
             ViewTransform::Zoom(_) => matches!(cam, Camera::Slice(_) | Camera::Arcball(_)),
             ViewTransform::StepZ(_) => true,
+            ViewTransform::ElevationDelta(_) => matches!(cam, Camera::Arcball(_)),
+            ViewTransform::StepT(_) => true,
+            ViewTransform::StepC(_) => true,
+            ViewTransform::ToggleProjection => matches!(cam, Camera::Arcball(_)),
         }
     }
 
@@ -245,6 +270,10 @@ impl ViewTransform {
                 }
             }
             ViewTransform::StepZ(d) => format!("stepz:{}", signed_int(*d)),
+            ViewTransform::ElevationDelta(deg) => format!("elevation:{}", signed_deg(*deg)),
+            ViewTransform::StepT(d) => format!("stept:{}", signed_int(*d)),
+            ViewTransform::StepC(d) => format!("stepc:{}", signed_int(*d)),
+            ViewTransform::ToggleProjection => "projection:toggle".to_string(),
         }
     }
 
@@ -287,6 +316,36 @@ impl ViewTransform {
                     "Stay on slice".to_string()
                 }
             }
+            ViewTransform::ElevationDelta(deg) => {
+                // Positive elevation tilts the camera up; negative tilts down.
+                let mag = trim_float(deg.abs());
+                if *deg > 0.0 {
+                    format!("Tilt up {mag}°")
+                } else if *deg < 0.0 {
+                    format!("Tilt down {mag}°")
+                } else {
+                    "Tilt (no change)".to_string()
+                }
+            }
+            ViewTransform::StepT(d) => {
+                if *d > 0 {
+                    "Next timepoint".to_string()
+                } else if *d < 0 {
+                    "Previous timepoint".to_string()
+                } else {
+                    "Stay on timepoint".to_string()
+                }
+            }
+            ViewTransform::StepC(d) => {
+                if *d > 0 {
+                    "Next channel".to_string()
+                } else if *d < 0 {
+                    "Previous channel".to_string()
+                } else {
+                    "Stay on channel".to_string()
+                }
+            }
+            ViewTransform::ToggleProjection => "Toggle max-intensity projection".to_string(),
         }
     }
 }
@@ -300,11 +359,14 @@ impl ViewTransform {
 /// [`None`] is returned when:
 /// - the move doesn't apply to the camera's mode
 ///   ([`ViewTransform::applies_to`] is `false`), or
-/// - a [`StepZ`](ViewTransform::StepZ) lands off the dataset (flat dataset, or
-///   target slice `< 0` / past the last slice), or
+/// - a [`StepZ`](ViewTransform::StepZ) / [`StepT`](ViewTransform::StepT) /
+///   [`StepC`](ViewTransform::StepC) lands off the dataset (a flat / single-T /
+///   single-C dataset, or a target index `< 0` / past the last index), or
 /// - the move would be a **no-op** — the child ends up byte-for-byte equal to
 ///   the input. Offering a cell that goes nowhere is just noise, so it's
-///   omitted.
+///   omitted. (An [`ElevationDelta`](ViewTransform::ElevationDelta) clamped to a
+///   pole and a [`ToggleProjection`](ViewTransform::ToggleProjection) on an
+///   empty display-settings map both fall out here.)
 pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option<SavedView> {
     // Mode gate first — a move that doesn't apply to this camera never produces
     // a child, regardless of parameters.
@@ -362,6 +424,57 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
             let z0 = z0 as u32;
             child.view.z_range = z0..z0 + 1;
         }
+        ViewTransform::ElevationDelta(deg) => match &mut child.camera {
+            Camera::Arcball(a) => {
+                // Tilt up/down, clamped just shy of the poles so the orbit can't
+                // flip over the top/bottom (which would invert the view). A clamp
+                // that lands back on the same phi makes this a no-op, dropped by
+                // the `child == *view` check below.
+                a.phi = (a.phi + deg.to_radians()).clamp(0.05, std::f64::consts::PI - 0.05);
+            }
+            // applies_to already filtered non-arcball, but stay total.
+            _ => return None,
+        },
+        ViewTransform::StepT(d) => {
+            // A single-timepoint dataset has no frames to step through.
+            if extent.t_count <= 1 {
+                return None;
+            }
+            // i64 math so a negative step from t 0 is caught by the range check
+            // rather than underflowing.
+            let t0 = view.view.t as i64 + *d as i64;
+            let last = extent.t_count as i64 - 1;
+            if t0 < 0 || t0 > last {
+                return None;
+            }
+            child.view.t = t0 as u32;
+        }
+        ViewTransform::StepC(d) => {
+            // A single-channel dataset has no channels to step through.
+            if extent.c_count <= 1 {
+                return None;
+            }
+            let c0 = view.view.c as i64 + *d as i64;
+            let last = extent.c_count as i64 - 1;
+            if c0 < 0 || c0 > last {
+                return None;
+            }
+            child.view.c = c0 as u32;
+        }
+        ViewTransform::ToggleProjection => {
+            // Nothing to toggle if no dataset has display settings yet.
+            if child.dataset_settings.is_empty() {
+                return None;
+            }
+            // Flip every dataset's volume render mode. If nothing actually
+            // changes the `child == *view` check below drops the move.
+            for settings in child.dataset_settings.values_mut() {
+                settings.render_mode = match settings.render_mode {
+                    RenderMode::Translucent => RenderMode::MaxIntensity,
+                    RenderMode::MaxIntensity => RenderMode::Translucent,
+                };
+            }
+        }
     }
 
     // No-op omission: if the move changed nothing observable, don't offer it.
@@ -390,19 +503,34 @@ pub struct Child {
 /// The canonical guided-exploration move-set, in display order.
 ///
 /// One flat list of the "trivial" single-step moves we always *try* from any
-/// view. The per-mode / no-op / range filtering all lives in [`apply`], so a
-/// move that doesn't fit the current view simply drops out of [`children`] — a
-/// 2D Slice node yields no azimuth cells, a flat dataset yields no Z-step cells,
-/// and so on. Keeping the list here (rather than inlining it) makes the offered
-/// menu one obvious, ordered thing.
-const MOVE_SET: [ViewTransform; 7] = [
+/// view, grouped into coherent families so a reader scans them in one sweep:
+/// **reframe** (Home) → **orient** (rotate/tilt) → **scale** (zoom) →
+/// **render** (projection) → **step** through the Z/T/C dimensions. The
+/// per-mode / no-op / range filtering all lives in [`apply`], so a move that
+/// doesn't fit the current view simply drops out of [`children`] — a 2D Slice
+/// node yields no azimuth/elevation/projection cells, a flat dataset yields no
+/// Z-step cells, and so on. Keeping the list here (rather than inlining it)
+/// makes the offered menu one obvious, ordered thing.
+const MOVE_SET: [ViewTransform; 14] = [
+    // Reframe.
     ViewTransform::Home,
+    // Orient: rotate (azimuth) then tilt (elevation).
     ViewTransform::AzimuthDelta(45.0),
     ViewTransform::AzimuthDelta(-45.0),
+    ViewTransform::ElevationDelta(30.0),
+    ViewTransform::ElevationDelta(-30.0),
+    // Scale.
     ViewTransform::Zoom(2.0),
     ViewTransform::Zoom(0.5),
+    // Render mode.
+    ViewTransform::ToggleProjection,
+    // Step through the non-spatial / depth dimensions: Z, then T, then C.
     ViewTransform::StepZ(1),
     ViewTransform::StepZ(-1),
+    ViewTransform::StepT(1),
+    ViewTransform::StepT(-1),
+    ViewTransform::StepC(1),
+    ViewTransform::StepC(-1),
 ];
 
 /// Enumerate the available next-steps from `view`.
@@ -412,20 +540,53 @@ const MOVE_SET: [ViewTransform; 7] = [
 /// the returned [`Vec`] already excludes moves that don't fit this view's mode,
 /// would step off the dataset, or would be no-ops — no extra logic here.
 ///
+/// Labels are [`ViewTransform::label`] except for the **projection** cell, whose
+/// copy is made *state-aware* here ([`projection_label`]): a toggle should tell
+/// the user the destination, not just "toggle". The static label remains the
+/// fallback (no display settings to read).
+///
 /// Pure: `view` is not mutated.
 pub fn children(view: &SavedView, extent: &ViewExtent) -> Vec<Child> {
     let mut out = Vec::new();
     for t in MOVE_SET.iter() {
         if let Some(child_view) = apply(view, t, extent) {
+            // The projection cell's label depends on the CURRENT render mode
+            // (what the toggle lands on); every other move uses its static label.
+            let label = match t {
+                ViewTransform::ToggleProjection => projection_label(view),
+                _ => t.label(),
+            };
             out.push(Child {
                 handle: view_handle(&child_view),
                 transform: t.id(),
-                label: t.label(),
+                label,
                 view: child_view,
             });
         }
     }
     out
+}
+
+/// State-aware label for the [`ToggleProjection`](ViewTransform::ToggleProjection)
+/// cell: name the mode the toggle would switch *to*, read from the view's
+/// primary (first) [`dataset_settings`](SavedView::dataset_settings) entry.
+///
+/// - currently [`Translucent`](RenderMode::Translucent) → `"Max-intensity
+///   projection"` (the toggle turns MIP on),
+/// - currently [`MaxIntensity`](RenderMode::MaxIntensity) → `"Volume rendering
+///   (translucent)"` (the toggle turns MIP off).
+///
+/// Falls back to the static [`ViewTransform::label`] text when there is no
+/// settings entry to read (the toggle wouldn't apply in that case anyway, so
+/// this is belt-and-braces).
+fn projection_label(view: &SavedView) -> String {
+    match view.dataset_settings.values().next() {
+        Some(settings) => match settings.render_mode {
+            RenderMode::Translucent => "Max-intensity projection".to_string(),
+            RenderMode::MaxIntensity => "Volume rendering (translucent)".to_string(),
+        },
+        None => ViewTransform::ToggleProjection.label(),
+    }
 }
 
 /// Deterministic, process-stable handle for a saved view: `"vh-<16 lowercase
@@ -855,27 +1016,324 @@ mod tests {
         assert_eq!(before, after, "apply must be pure");
     }
 
-    // --- children: mode-dependent menus ---
+    // --- ids + labels for the enriched move-set ---
 
     #[test]
-    fn children_slice_3d_dataset() {
-        // Slice + 3D dataset: Home, Zoom in, Zoom out, StepZ +/- (no azimuth).
-        let mut v = slice_view();
-        v.view.z_range = 10..11; // mid-stack so both Z steps are in range
-        let kids = children(&v, &extent_3d());
-        let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
+    fn enriched_ids() {
+        assert_eq!(ViewTransform::ElevationDelta(30.0).id(), "elevation:+30");
+        assert_eq!(ViewTransform::ElevationDelta(-30.0).id(), "elevation:-30");
+        assert_eq!(ViewTransform::StepT(1).id(), "stept:+1");
+        assert_eq!(ViewTransform::StepT(-1).id(), "stept:-1");
+        assert_eq!(ViewTransform::StepC(1).id(), "stepc:+1");
+        assert_eq!(ViewTransform::StepC(-1).id(), "stepc:-1");
+        assert_eq!(ViewTransform::ToggleProjection.id(), "projection:toggle");
+    }
+
+    #[test]
+    fn enriched_labels() {
+        assert_eq!(ViewTransform::ElevationDelta(30.0).label(), "Tilt up 30°");
         assert_eq!(
-            ids,
-            vec!["home", "zoom:in", "zoom:out", "stepz:+1", "stepz:-1"]
+            ViewTransform::ElevationDelta(-30.0).label(),
+            "Tilt down 30°"
+        );
+        assert_eq!(ViewTransform::StepT(1).label(), "Next timepoint");
+        assert_eq!(ViewTransform::StepT(-1).label(), "Previous timepoint");
+        assert_eq!(ViewTransform::StepC(1).label(), "Next channel");
+        assert_eq!(ViewTransform::StepC(-1).label(), "Previous channel");
+        assert_eq!(
+            ViewTransform::ToggleProjection.label(),
+            "Toggle max-intensity projection"
+        );
+    }
+
+    // --- apply: ElevationDelta (Arcball-only, tilts/clamps phi) ---
+
+    #[test]
+    fn apply_elevation_on_slice_is_none() {
+        let v = slice_view();
+        assert!(apply(&v, &ViewTransform::ElevationDelta(30.0), &extent_3d()).is_none());
+    }
+
+    #[test]
+    fn apply_elevation_tilts_phi() {
+        let v = arcball_view();
+        let phi0 = match &v.camera {
+            Camera::Arcball(a) => a.phi,
+            _ => unreachable!(),
+        };
+        let child = apply(&v, &ViewTransform::ElevationDelta(30.0), &extent_3d()).unwrap();
+        match &child.camera {
+            Camera::Arcball(a) => {
+                assert!((a.phi - (phi0 + 30.0_f64.to_radians())).abs() < 1e-12);
+            }
+            _ => unreachable!(),
+        }
+        // purity
+        assert!(matches!(&v.camera, Camera::Arcball(a) if a.phi == phi0));
+    }
+
+    #[test]
+    fn apply_elevation_clamps_at_pole() {
+        // phi already at the top clamp: tilting further up clamps back to the
+        // same value -> no-op -> None.
+        let mut v = arcball_view();
+        if let Camera::Arcball(a) = &mut v.camera {
+            a.phi = std::f64::consts::PI - 0.05;
+        }
+        assert!(apply(&v, &ViewTransform::ElevationDelta(30.0), &extent_3d()).is_none());
+        // Tilting DOWN from the same pole IS in range (phi decreases).
+        let child = apply(&v, &ViewTransform::ElevationDelta(-30.0), &extent_3d()).unwrap();
+        match &child.camera {
+            Camera::Arcball(a) => {
+                assert!(a.phi < std::f64::consts::PI - 0.05);
+                assert!(a.phi >= 0.05);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn apply_elevation_clamp_stays_in_range_near_bottom() {
+        // A large downward tilt clamps to the lower bound (0.05), never below.
+        let mut v = arcball_view();
+        if let Camera::Arcball(a) = &mut v.camera {
+            a.phi = 0.2;
+        }
+        let child = apply(&v, &ViewTransform::ElevationDelta(-90.0), &extent_3d()).unwrap();
+        match &child.camera {
+            Camera::Arcball(a) => assert!((a.phi - 0.05).abs() < 1e-12),
+            _ => unreachable!(),
+        }
+    }
+
+    // --- apply: StepT (gated on t_count > 1, clamps at ends) ---
+
+    #[test]
+    fn apply_stept_forward() {
+        let mut v = slice_view();
+        v.view.t = 2;
+        let child = apply(&v, &ViewTransform::StepT(1), &extent_3d()).unwrap();
+        assert_eq!(child.view.t, 3);
+    }
+
+    #[test]
+    fn apply_stept_back() {
+        let mut v = slice_view();
+        v.view.t = 2;
+        let child = apply(&v, &ViewTransform::StepT(-1), &extent_3d()).unwrap();
+        assert_eq!(child.view.t, 1);
+    }
+
+    #[test]
+    fn apply_stept_below_zero_is_none() {
+        let mut v = slice_view();
+        v.view.t = 0;
+        assert!(apply(&v, &ViewTransform::StepT(-1), &extent_3d()).is_none());
+    }
+
+    #[test]
+    fn apply_stept_past_last_is_none() {
+        let mut v = slice_view();
+        v.view.t = 4; // last timepoint (t_count = 5)
+        assert!(apply(&v, &ViewTransform::StepT(1), &extent_3d()).is_none());
+    }
+
+    #[test]
+    fn apply_stept_single_timepoint_is_none() {
+        let mut single = extent_3d();
+        single.t_count = 1;
+        let v = slice_view();
+        assert!(apply(&v, &ViewTransform::StepT(1), &single).is_none());
+        assert!(apply(&v, &ViewTransform::StepT(-1), &single).is_none());
+    }
+
+    #[test]
+    fn apply_stept_zero_count_is_none() {
+        // Degenerate: a dataset reporting t_count = 0 must not panic.
+        let mut zero = extent_3d();
+        zero.t_count = 0;
+        let v = slice_view();
+        assert!(apply(&v, &ViewTransform::StepT(1), &zero).is_none());
+    }
+
+    // --- apply: StepC (gated on c_count > 1, clamps at ends) ---
+
+    #[test]
+    fn apply_stepc_forward() {
+        let mut v = slice_view();
+        v.view.c = 0;
+        let child = apply(&v, &ViewTransform::StepC(1), &extent_3d()).unwrap();
+        assert_eq!(child.view.c, 1);
+    }
+
+    #[test]
+    fn apply_stepc_back() {
+        let mut v = slice_view();
+        v.view.c = 1;
+        let child = apply(&v, &ViewTransform::StepC(-1), &extent_3d()).unwrap();
+        assert_eq!(child.view.c, 0);
+    }
+
+    #[test]
+    fn apply_stepc_below_zero_is_none() {
+        let mut v = slice_view();
+        v.view.c = 0;
+        assert!(apply(&v, &ViewTransform::StepC(-1), &extent_3d()).is_none());
+    }
+
+    #[test]
+    fn apply_stepc_past_last_is_none() {
+        let mut v = slice_view();
+        v.view.c = 1; // last channel (c_count = 2)
+        assert!(apply(&v, &ViewTransform::StepC(1), &extent_3d()).is_none());
+    }
+
+    #[test]
+    fn apply_stepc_single_channel_is_none() {
+        let mut single = extent_3d();
+        single.c_count = 1;
+        let v = slice_view();
+        assert!(apply(&v, &ViewTransform::StepC(1), &single).is_none());
+        assert!(apply(&v, &ViewTransform::StepC(-1), &single).is_none());
+    }
+
+    #[test]
+    fn apply_stepc_zero_count_is_none() {
+        // Degenerate: a dataset reporting c_count = 0 must not panic.
+        let mut zero = extent_3d();
+        zero.c_count = 0;
+        let v = slice_view();
+        assert!(apply(&v, &ViewTransform::StepC(1), &zero).is_none());
+    }
+
+    // --- apply: ToggleProjection (Arcball-only, flips render_mode) ---
+
+    #[test]
+    fn apply_toggle_projection_on_slice_is_none() {
+        // Slice (2D) view with a settings entry: projection toggle is still
+        // Arcball-only, so it doesn't apply.
+        let mut v = default_view("wds-flat", [1, 1, 1, 512, 512], [800, 600]);
+        assert!(matches!(v.camera, Camera::Slice(_)));
+        // Force a settings entry to exist (default_view already adds one).
+        assert!(!v.dataset_settings.is_empty());
+        v.view.z_range = 0..1;
+        assert!(
+            apply(
+                &v,
+                &ViewTransform::ToggleProjection,
+                &ViewExtent::from_dims([1, 1, 1, 512, 512])
+            )
+            .is_none()
         );
     }
 
     #[test]
+    fn apply_toggle_projection_flips_render_mode() {
+        // A volume Home view (Arcball) has a default dataset_settings entry whose
+        // render_mode starts Translucent; toggling flips it to MaxIntensity.
+        let dims = [1, 1, 40, 80, 100];
+        let v = default_view("wds-vol", dims, [800, 600]);
+        assert!(matches!(v.camera, Camera::Arcball(_)));
+        // Sanity: starts translucent.
+        assert!(
+            v.dataset_settings
+                .values()
+                .all(|s| s.render_mode == RenderMode::Translucent)
+        );
+        let child = apply(
+            &v,
+            &ViewTransform::ToggleProjection,
+            &ViewExtent::from_dims(dims),
+        )
+        .unwrap();
+        assert!(
+            child
+                .dataset_settings
+                .values()
+                .all(|s| s.render_mode == RenderMode::MaxIntensity),
+            "toggle should flip every entry to max-intensity"
+        );
+        // Toggling the child back returns to translucent.
+        let back = apply(
+            &child,
+            &ViewTransform::ToggleProjection,
+            &ViewExtent::from_dims(dims),
+        )
+        .unwrap();
+        assert!(
+            back.dataset_settings
+                .values()
+                .all(|s| s.render_mode == RenderMode::Translucent)
+        );
+        // purity: original untouched.
+        assert!(
+            v.dataset_settings
+                .values()
+                .all(|s| s.render_mode == RenderMode::Translucent)
+        );
+    }
+
+    #[test]
+    fn apply_toggle_projection_empty_settings_is_none() {
+        // An Arcball view with NO dataset_settings entries has nothing to flip.
+        let v = arcball_view();
+        assert!(v.dataset_settings.is_empty());
+        assert!(apply(&v, &ViewTransform::ToggleProjection, &extent_3d()).is_none());
+    }
+
+    // --- children: mode-dependent menus ---
+
+    /// A rich 3D extent with room on EVERY dimensional axis (z/t/c all > 2), so
+    /// an interior view offers each step in both directions. Distinct from the
+    /// shared `extent_3d` (c_count = 2), which can't sit a channel between two
+    /// neighbours.
+    fn extent_rich() -> ViewExtent {
+        ViewExtent {
+            min: [0.0, 0.0, 0.0],
+            max: [100.0, 80.0, 40.0],
+            z_count: 40,
+            t_count: 5,
+            c_count: 3,
+        }
+    }
+
+    #[test]
+    fn children_slice_3d_dataset() {
+        // Slice + 3D multichannel-timeseries dataset: Home, Zoom in/out, StepZ
+        // +/-, StepT +/-, StepC +/- — but NO azimuth/elevation/projection (those
+        // are Arcball-only). Mid-stack/mid-t/mid-c so each dimensional step is in
+        // range both ways.
+        let mut v = slice_view();
+        v.view.z_range = 10..11;
+        v.view.t = 2; // t_count = 5
+        v.view.c = 1; // c_count = 3 -> 1 is interior
+        let kids = children(&v, &extent_rich());
+        let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "home", "zoom:in", "zoom:out", "stepz:+1", "stepz:-1", "stept:+1", "stept:-1",
+                "stepc:+1", "stepc:-1",
+            ]
+        );
+        // No 3D-camera-only cells on a 2D slice.
+        assert!(!ids.iter().any(|id| id.starts_with("azimuth:")));
+        assert!(!ids.iter().any(|id| id.starts_with("elevation:")));
+        assert!(!ids.iter().any(|id| id.starts_with("projection:")));
+    }
+
+    #[test]
     fn children_arcball_3d_dataset() {
-        // Arcball + 3D: Home, azimuth +/-, Zoom in/out, StepZ +/-.
+        // Arcball + 3D multichannel-timeseries, in the grouped MOVE_SET order:
+        // Home, orient (azimuth +/- then elevation +/-), scale (zoom in/out),
+        // then dimensional steps (StepZ +/-, StepT +/-, StepC +/-).
+        // (ToggleProjection needs a dataset_settings entry, which a bare
+        // arcball_view lacks — see children_arcball_full_extent_has_all_enriched_cells.)
         let mut v = arcball_view();
         v.view.z_range = 10..11;
-        let kids = children(&v, &extent_3d());
+        v.view.t = 2; // t_count = 5
+        v.view.c = 1; // c_count = 3 -> 1 is interior
+        let kids = children(&v, &extent_rich());
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert_eq!(
             ids,
@@ -883,22 +1341,137 @@ mod tests {
                 "home",
                 "azimuth:+45",
                 "azimuth:-45",
+                "elevation:+30",
+                "elevation:-30",
                 "zoom:in",
                 "zoom:out",
                 "stepz:+1",
                 "stepz:-1",
+                "stept:+1",
+                "stept:-1",
+                "stepc:+1",
+                "stepc:-1",
             ]
         );
     }
 
     #[test]
     fn children_slice_flat_dataset_no_stepz() {
+        // A truly flat single-slice, single-timepoint, single-channel image:
+        // none of the dimensional steps (stepz/stept/stepc) are offered, only
+        // Home + zoom.
         let mut flat = extent_3d();
         flat.z_count = 1;
+        flat.t_count = 1;
+        flat.c_count = 1;
         let v = slice_view();
         let kids = children(&v, &flat);
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert_eq!(ids, vec!["home", "zoom:in", "zoom:out"]);
+        assert!(!ids.iter().any(|id| id.starts_with("stepz:")));
+        assert!(!ids.iter().any(|id| id.starts_with("stept:")));
+        assert!(!ids.iter().any(|id| id.starts_with("stepc:")));
+    }
+
+    #[test]
+    fn children_arcball_full_extent_has_all_enriched_cells() {
+        // A rich volume built by default_view (which seeds a dataset_settings
+        // entry, so ToggleProjection is live) on a 3D multichannel-timeseries
+        // extent offers the full enriched menu: elevation, stept, stepc, AND
+        // projection:toggle.
+        let dims = [40, 3, 340, 512, 512]; // [T, C, Z, Y, X]
+        let mut view = default_view("wds-rich", dims, [800, 600]);
+        assert!(matches!(view.camera, Camera::Arcball(_)));
+        // default_view mid-points Z but leaves t/c at 0; sit them in the interior
+        // so the reverse T/C steps are in range too.
+        view.view.t = 20; // t_count = 40
+        view.view.c = 1; // c_count = 3
+        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
+        // Every applicable cell is offered, in the grouped MOVE_SET order:
+        // orient → scale → render → step (Z/T/C). `home` is intentionally absent:
+        // `default_view` already fits the camera to the extent, so re-applying
+        // Home is a no-op and is dropped — this view still locks the relative
+        // order of the rest.
+        assert_eq!(
+            ids,
+            vec![
+                "azimuth:+45",
+                "azimuth:-45",
+                "elevation:+30",
+                "elevation:-30",
+                "zoom:in",
+                "zoom:out",
+                "projection:toggle",
+                "stepz:+1",
+                "stepz:-1",
+                "stept:+1",
+                "stept:-1",
+                "stepc:+1",
+                "stepc:-1",
+            ]
+        );
+    }
+
+    #[test]
+    fn children_projection_label_is_state_aware() {
+        // The projection cell names the mode it switches TO, flipping with the
+        // current render mode — not the static "Toggle ..." copy.
+        let dims = [1, 1, 40, 80, 100];
+        let mut view = default_view("wds-vol", dims, [800, 600]);
+        let extent = ViewExtent::from_dims(dims);
+
+        // Currently translucent -> the toggle offers max-intensity.
+        let translucent_label = children(&view, &extent)
+            .into_iter()
+            .find(|c| c.transform == "projection:toggle")
+            .expect("projection cell present on a volume")
+            .label;
+        assert_eq!(translucent_label, "Max-intensity projection");
+
+        // Flip the view to max-intensity -> the toggle now offers volume rendering.
+        for settings in view.dataset_settings.values_mut() {
+            settings.render_mode = RenderMode::MaxIntensity;
+        }
+        let mip_label = children(&view, &extent)
+            .into_iter()
+            .find(|c| c.transform == "projection:toggle")
+            .expect("projection cell present on a volume")
+            .label;
+        assert_eq!(mip_label, "Volume rendering (translucent)");
+
+        // Neither dynamic label is the static fallback.
+        assert_ne!(translucent_label, ViewTransform::ToggleProjection.label());
+        assert_ne!(mip_label, ViewTransform::ToggleProjection.label());
+    }
+
+    #[test]
+    fn children_slice_has_no_elevation_or_projection() {
+        // A 2D Slice node never offers the Arcball-only enriched cells, even
+        // with a dataset_settings entry present.
+        let dims = [5, 3, 1, 512, 512]; // flat -> Slice Home, but multi-T/C
+        let view = default_view("wds-2d", dims, [800, 600]);
+        assert!(matches!(view.camera, Camera::Slice(_)));
+        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
+        assert!(!ids.iter().any(|id| id.starts_with("elevation:")));
+        assert!(!ids.iter().any(|id| id.starts_with("projection:")));
+        // It DOES still offer dimensional T/C steps (it's multi-T/C).
+        assert!(ids.contains(&"stept:+1"));
+        assert!(ids.contains(&"stepc:+1"));
+    }
+
+    #[test]
+    fn children_flat_single_channel_single_t_has_no_dimensional_steps() {
+        // A genuinely flat single-channel single-timepoint image: no stepz,
+        // stept, or stepc cells at all.
+        let dims = [1, 1, 1, 1024, 1024]; // [T, C, Z, Y, X]
+        let view = default_view("wds-flat", dims, [800, 600]);
+        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
+        assert!(!ids.iter().any(|id| id.starts_with("stept:")));
+        assert!(!ids.iter().any(|id| id.starts_with("stepc:")));
+        assert!(!ids.iter().any(|id| id.starts_with("stepz:")));
     }
 
     #[test]
