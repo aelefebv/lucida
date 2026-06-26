@@ -22,13 +22,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
-use lucida_core::DatasetId;
-use lucida_core::camera::Camera;
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::SavedView;
-use lucida_core::scene::{BlendMode, Colormap, DatasetDisplaySettings, RenderMode};
-use lucida_core::view::ViewState;
-use lucida_core::view_transform::{ExplorationSidecar, ViewExtent};
+use lucida_core::scene::{BlendMode, Colormap, RenderMode};
+use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -2275,7 +2272,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 })?;
                 let ds_id = info.summary.workspace_dataset_id.clone();
 
-                let extent = explore_extent(dims);
+                let extent = ViewExtent::from_dims(dims);
                 let viewport = [*cell_px, *cell_px];
 
                 // Current view: parse the caller's `--view` (the "descend" path,
@@ -2285,7 +2282,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // flat image).
                 let current = match view {
                     Some(raw) => read_view_arg(raw)?,
-                    None => default_explore_view(&ds_id, dims, viewport),
+                    None => default_view(&ds_id, dims, viewport),
                 };
 
                 // depth/breadcrumb are agent-supplied passthrough: the command is
@@ -3500,69 +3497,6 @@ fn read_view_arg(raw: &str) -> Result<SavedView, CliError> {
     parse_saved_view_json(&read_view_source(raw)?)
 }
 
-/// Build the guided-exploration [`ViewExtent`] for a dataset shape `[T,C,Z,Y,X]`.
-///
-/// The world-space box spans the full image in X/Y and the Z stack in depth;
-/// the `*_count` fields carry the non-spatial axis sizes the move-set gates on
-/// (a flat `z_count <= 1` dataset offers no slice-step cells). Pure — used by
-/// the handler and unit-tested directly.
-fn explore_extent(dims: [u64; 5]) -> ViewExtent {
-    let full_x = dims[4];
-    let full_y = dims[3];
-    let z_count = dims[2] as u32;
-    let t_count = dims[0] as u32;
-    let c_count = dims[1] as u32;
-    ViewExtent {
-        min: [0.0, 0.0, 0.0],
-        max: [full_x as f64, full_y as f64, z_count as f64],
-        z_count,
-        t_count,
-        c_count,
-    }
-}
-
-/// Synthesize the dataset's "Home" view — the exploration root when the caller
-/// gives no `--view`.
-///
-/// A volume (`z_count > 1`) opens in a 3D Arcball so the orbit/azimuth cells are
-/// offered; a flat image opens in a 2D Slice. Either way the camera is framed to
-/// the dataset's full extent ([`Camera::fit_to_bounds`] is mode-preserving), the
-/// dataset is made visible (auto-contrast on, with a default display-settings
-/// entry — mirroring the montage None-contrast branch), and the view sits on the
-/// mid-Z single slice. Pure — used by the handler and unit-tested directly.
-fn default_explore_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedView {
-    let extent = explore_extent(dims);
-    let z_count = extent.z_count;
-
-    let mut view = SavedView::empty(viewport);
-    let id = DatasetId(ds_id.to_string());
-    view.dataset_order = vec![id.clone()];
-    // Make the dataset visible: a default display-settings entry (an absent
-    // entry would otherwise reset the colormap) plus auto-contrast on, exactly
-    // as the montage cell view does in its None-contrast branch.
-    view.dataset_settings
-        .insert(id.clone(), DatasetDisplaySettings::default());
-    view.auto_contrast.insert(id, true);
-
-    // Start on a single mid-stack slice (so a StepZ in either direction is in
-    // range on a volume); a flat dataset collapses to z 0..1 anyway.
-    let z0 = z_count / 2;
-    view.view = ViewState {
-        z_range: z0..z0 + 1,
-        ..ViewState::new()
-    };
-
-    // Volume → 3D Arcball Home (rotate cells appear); flat → 2D Slice Home.
-    view.camera = if z_count > 1 {
-        Camera::new_3d(viewport)
-    } else {
-        Camera::new_2d(viewport)
-    };
-    view.camera.fit_to_bounds(extent.min, extent.max);
-
-    view
-}
-
 /// Render a labeled contact sheet of an exploration's child cells, reusing the
 /// montage capture + stitch path. Each cell is captured through the chrome-free
 /// render surface ([`montage::with_render_param`]) and laid out in a near-square
@@ -4601,6 +4535,8 @@ fn first_workspace_selector<'a>(
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use lucida_core::DatasetId;
+    use lucida_core::camera::Camera;
     use std::io::Read;
 
     fn parse(args: &[&str]) -> Cli {
@@ -5257,7 +5193,8 @@ mod tests {
 
     #[test]
     fn explore_extent_from_dims() {
-        let extent = explore_extent([1, 2, 340, 512, 512]);
+        // The CLI explore handler derives its extent via the shared core fn.
+        let extent = ViewExtent::from_dims([1, 2, 340, 512, 512]);
         assert_eq!(extent.z_count, 340);
         assert_eq!(extent.t_count, 1);
         assert_eq!(extent.c_count, 2);
@@ -5267,7 +5204,8 @@ mod tests {
 
     #[test]
     fn default_explore_view_is_3d_for_volume() {
-        let view = default_explore_view("wds-1", [1, 1, 340, 512, 512], [800, 600]);
+        // The CLI explore handler synthesizes its Home view via the shared core fn.
+        let view = default_view("wds-1", [1, 1, 340, 512, 512], [800, 600]);
         assert!(
             matches!(view.camera, Camera::Arcball(_)),
             "a volume should open in a 3D Arcball Home"
@@ -5288,7 +5226,7 @@ mod tests {
 
     #[test]
     fn default_explore_view_is_2d_for_flat() {
-        let view = default_explore_view("wds-1", [1, 3, 1, 1024, 1024], [800, 600]);
+        let view = default_view("wds-1", [1, 3, 1, 1024, 1024], [800, 600]);
         assert!(
             matches!(view.camera, Camera::Slice(_)),
             "a flat image should open in a 2D Slice Home"

@@ -520,6 +520,61 @@ class DatasetsResource:
         snapshot = self._workspace.snapshot(timeout=timeout)
         return dataset_info_from_document(snapshot.get("document", {}), dataset)
 
+    def explore(
+        self,
+        dataset: str,
+        *,
+        view: dict[str, Any] | None = None,
+        viewport: tuple[int, int] = (960, 720),
+        depth: int = 0,
+        breadcrumb: list[str] | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Plan a guided-exploration step from a view of ``dataset``.
+
+        Looks up the dataset's shape via :meth:`info`, then enumerates the
+        sensible next moves (Home / rotate / zoom / step Z) as re-openable child
+        views, returning a decoded ``ExplorationSidecar`` dict (``v``,
+        ``current``, ``cells``).
+
+        Pass ``view`` (a ``SavedView`` dict — e.g. a child cell's ``view`` from a
+        previous call) to descend from an explicit view; omit it to start from
+        the dataset's Home view (a 3D Arcball for a volume, a 2D Slice for a flat
+        image, framed to the full extent). ``depth`` and ``breadcrumb`` are
+        stamped on the returned current node so a stateless caller can keep an
+        honest trail across calls.
+
+        URLs are deferred: each cell carries a full ``view`` object, which you
+        pass back as ``view=`` to descend.
+        """
+        try:
+            from lucida.lucida import explore as _explore  # noqa: PLC0415
+        except ImportError as error:
+            raise LucidaError(
+                "config",
+                "the compiled lucida extension is unavailable; build it with "
+                "`uv run maturin develop` in lucida-py",
+            ) from error
+
+        summary = self.info(dataset, timeout=timeout)
+        dims = summary.get("dimensions")
+        if not dims or len(dims) != 5:
+            raise LucidaError(
+                "missing_resource",
+                f"dataset {dataset!r} has no 5D [T,C,Z,Y,X] dimensions to explore",
+            )
+        ds_id = summary["workspace_dataset_id"]
+        view_json = json.dumps(view) if view is not None else None
+        result = _explore(
+            ds_id,
+            tuple(dims),
+            viewport,
+            view_json,
+            depth,
+            breadcrumb or [],
+        )
+        return json.loads(result)
+
     def open(self, source: str, *, timeout: float = 300.0) -> dict[str, Any]:
         return run_sync(self.async_open(source, timeout=timeout))
 

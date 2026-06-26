@@ -37,6 +37,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::saved_view::SavedView;
+use crate::scene::DatasetDisplaySettings;
+use crate::view::ViewState;
+use lucida_content::DatasetId;
 
 /// The spatial + dimensional extent of the dataset(s) a view is exploring.
 ///
@@ -45,7 +48,7 @@ use crate::saved_view::SavedView;
 /// non-spatial axes. The counts gate dimensional moves — `z_count <= 1` means a
 /// flat dataset with no slices to step through. Supplied by the caller, which
 /// owns dataset geometry; this module treats it as read-only context.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewExtent {
     /// World-space minimum corner `[x, y, z]`.
     pub min: [f64; 3],
@@ -57,6 +60,72 @@ pub struct ViewExtent {
     pub t_count: u32,
     /// Number of channels.
     pub c_count: u32,
+}
+
+impl ViewExtent {
+    /// Build a [`ViewExtent`] from a dataset shape `dims = [T, C, Z, Y, X]`.
+    ///
+    /// The world-space box spans the full image in X/Y and the Z stack in depth
+    /// (`min` at the origin, `max` at `[X, Y, Z]`); the `*_count` fields carry
+    /// the non-spatial axis sizes the move-set gates on (a flat `z_count <= 1`
+    /// dataset offers no slice-step cells). This is the single source of the
+    /// `[T,C,Z,Y,X]` → extent mapping shared by the CLI, Python, and web tiers.
+    pub fn from_dims(dims: [u64; 5]) -> Self {
+        let [t, c, z, y, x] = dims;
+        ViewExtent {
+            min: [0.0, 0.0, 0.0],
+            max: [x as f64, y as f64, z as f64],
+            z_count: z as u32,
+            t_count: t as u32,
+            c_count: c as u32,
+        }
+    }
+}
+
+/// Synthesize a dataset's "Home" view — the exploration root when a caller gives
+/// no explicit view.
+///
+/// A volume (`z_count > 1`) opens in a 3D [`Camera::Arcball`] so the
+/// orbit/azimuth cells are offered; a flat image opens in a 2D
+/// [`Camera::Slice`]. Either way the camera is framed to the dataset's full
+/// extent ([`Camera::fit_to_bounds`] is mode-preserving), the dataset is made
+/// visible (auto-contrast on, with a default display-settings entry — an absent
+/// entry would otherwise reset the colormap), and the view sits on the mid-Z
+/// single slice (so a [`StepZ`](ViewTransform::StepZ) in either direction is in
+/// range on a volume; a flat dataset collapses to `z 0..1`).
+///
+/// `dims = [T, C, Z, Y, X]`. Pure — the single source of the exploration root,
+/// shared by the CLI, the pyo3 binding, and the web tier.
+pub fn default_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedView {
+    let extent = ViewExtent::from_dims(dims);
+    let z_count = extent.z_count;
+
+    let mut view = SavedView::empty(viewport);
+    let id = DatasetId(ds_id.to_string());
+    view.dataset_order = vec![id.clone()];
+    // Make the dataset visible: a default display-settings entry (an absent
+    // entry would otherwise reset the colormap) plus auto-contrast on.
+    view.dataset_settings
+        .insert(id.clone(), DatasetDisplaySettings::default());
+    view.auto_contrast.insert(id, true);
+
+    // Start on a single mid-stack slice (so a StepZ in either direction is in
+    // range on a volume); a flat dataset collapses to z 0..1 anyway.
+    let z0 = z_count / 2;
+    view.view = ViewState {
+        z_range: z0..z0 + 1,
+        ..ViewState::new()
+    };
+
+    // Volume → 3D Arcball Home (rotate cells appear); flat → 2D Slice Home.
+    view.camera = if z_count > 1 {
+        Camera::new_3d(viewport)
+    } else {
+        Camera::new_2d(viewport)
+    };
+    view.camera.fit_to_bounds(extent.min, extent.max);
+
+    view
 }
 
 /// One parametric move in the guided-exploration move-set.
@@ -906,5 +975,85 @@ mod tests {
         // Fly camera + degenerate extent: still no panic.
         let f = fly_view();
         let _ = children(&f, &point);
+    }
+
+    // --- ViewExtent::from_dims ---
+
+    #[test]
+    fn from_dims_maps_tczyx_to_extent() {
+        // dims = [T, C, Z, Y, X]: the box spans X/Y/Z, counts carry T/C/Z.
+        let extent = ViewExtent::from_dims([1, 2, 340, 512, 768]);
+        assert_eq!(extent.min, [0.0, 0.0, 0.0]);
+        assert_eq!(extent.max, [768.0, 512.0, 340.0]);
+        assert_eq!(extent.z_count, 340);
+        assert_eq!(extent.t_count, 1);
+        assert_eq!(extent.c_count, 2);
+    }
+
+    #[test]
+    fn from_dims_flat_dataset() {
+        // A flat (Z = 1) multichannel image: z_count = 1 gates out slice steps.
+        let extent = ViewExtent::from_dims([3, 4, 1, 1024, 2048]);
+        assert_eq!(extent.max, [2048.0, 1024.0, 1.0]);
+        assert_eq!(extent.z_count, 1);
+        assert_eq!(extent.t_count, 3);
+        assert_eq!(extent.c_count, 4);
+    }
+
+    #[test]
+    fn view_extent_round_trips_json() {
+        let extent = ViewExtent::from_dims([5, 2, 40, 80, 100]);
+        let json = serde_json::to_string(&extent).unwrap();
+        let back: ViewExtent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, extent);
+    }
+
+    // --- default_view ---
+
+    #[test]
+    fn default_view_is_arcball_for_volume() {
+        let view = default_view("wds-1", [1, 1, 340, 512, 512], [800, 600]);
+        assert!(
+            matches!(view.camera, Camera::Arcball(_)),
+            "a volume (z_count > 1) should open in a 3D Arcball Home"
+        );
+        // dataset_order names the dataset so it renders.
+        assert_eq!(view.dataset_order, vec![DatasetId("wds-1".to_string())]);
+        // Mid-stack single slice (340 / 2 = 170).
+        assert_eq!(view.view.z_range, 170..171);
+        // Dataset is made visible: auto-contrast on + default settings present.
+        assert_eq!(
+            view.auto_contrast.get(&DatasetId("wds-1".to_string())),
+            Some(&true)
+        );
+        assert!(
+            view.dataset_settings
+                .contains_key(&DatasetId("wds-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn default_view_is_slice_for_flat() {
+        let view = default_view("wds-2", [1, 3, 1, 1024, 1024], [800, 600]);
+        assert!(
+            matches!(view.camera, Camera::Slice(_)),
+            "a flat image (z_count <= 1) should open in a 2D Slice Home"
+        );
+        // A flat dataset has a single slice at z 0.
+        assert_eq!(view.view.z_range, 0..1);
+        assert_eq!(view.dataset_order, vec![DatasetId("wds-2".to_string())]);
+    }
+
+    #[test]
+    fn default_view_feeds_children() {
+        // The Home view a volume yields should offer azimuth cells (it's an
+        // Arcball) and Z-step cells (mid-stack, in range both ways).
+        let dims = [1, 1, 40, 80, 100];
+        let view = default_view("wds-3", dims, [800, 600]);
+        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
+        assert!(ids.iter().any(|id| id.starts_with("azimuth:")));
+        assert!(ids.contains(&"stepz:+1"));
+        assert!(ids.contains(&"stepz:-1"));
     }
 }
