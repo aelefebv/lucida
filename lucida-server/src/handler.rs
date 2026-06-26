@@ -149,6 +149,9 @@ async fn restore_one_workspace_binding(
         catalog: AssetCatalog {
             entries: catalog_entries.clone(),
         },
+        // Server-side workspace restore has no originating client, so no peer
+        // should auto-fit off this broadcast.
+        opener_client_id: None,
     };
 
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
@@ -1675,6 +1678,14 @@ async fn handle_open_remote_dataset(
             if let Some(doc_manifest) = sess.document.manifests.get(&existing_dataset_id) {
                 existing.manifest = doc_manifest.clone();
             }
+            // Re-stamp the opener with the CURRENT requester. This is the
+            // everyday multi-user path (someone opens a URL already loaded in
+            // the session); the binding's cached copy holds whoever first
+            // opened it (or None for a server-side restore), but the client
+            // that just requested this open is the one whose camera should
+            // auto-fit when the rebroadcast reaches it. Mirrors the lost-race
+            // re-stamp below.
+            existing.opener_client_id = Some(client_id);
             let opened = existing.clone();
             let command = DocumentCommand::DatasetOpened(existing);
             let seq = sess.seq;
@@ -1940,6 +1951,9 @@ async fn handle_open_remote_dataset(
         catalog: AssetCatalog {
             entries: catalog_entries.clone(),
         },
+        // Stamp the requesting client so the broadcast's recipients can tell
+        // whether they are the opener; only the opener auto-fits its camera.
+        opener_client_id: Some(client_id),
     };
 
     // Per-dataset proxy infrastructure. Cache root is keyed by the
@@ -2025,11 +2039,17 @@ async fn handle_open_remote_dataset(
     // presence under the lock in case a concurrent open raced ahead.
     let (seq, document) = {
         let mut sess = session.lock().await;
-        if let Some((existing_dataset_id, existing)) =
+        if let Some((existing_dataset_id, mut existing)) =
             find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
         {
             // Lost the race: another open completed the import. Drop our
             // duplicate binding/command and rebroadcast the canonical one.
+            // Re-stamp the opener with the CURRENT requester: the binding's
+            // stored copy holds whoever first opened it (or None for a
+            // server-side restore), but the client that just requested this
+            // open is the one whose camera should auto-fit when the
+            // rebroadcast reaches it.
+            existing.opener_client_id = Some(client_id);
             let seq = sess.seq;
             drop(sess);
             let broadcast_msg = ServerMessage::CommandBroadcast {
@@ -3195,6 +3215,7 @@ mod tests {
                 }],
             }),
             catalog: lucida_protocol::AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 
@@ -3251,22 +3272,27 @@ mod tests {
     /// dataset (real `Session::apply(DatasetOpened)`) and a matching
     /// `ServerBinding`, renames it through the real document path
     /// (`Session::apply(RenameDataset)`), then runs the handler's own
-    /// `find_loaded_binding` lookup + the fix's document-manifest adoption, and
-    /// asserts the resulting re-broadcast command carries the renamed name. As
-    /// a guard, it confirms the binding's own cached copy is deliberately left
-    /// stale (proving the document — not the binding — is the source of truth
-    /// for the display name).
+    /// `find_loaded_binding` lookup + the fix's document-manifest adoption +
+    /// opener re-stamp, and asserts the resulting re-broadcast command carries
+    /// the renamed name AND the re-stamped opener id. As a guard, it confirms
+    /// the binding's own cached copy is deliberately left stale (proving the
+    /// document — not the binding — is the source of truth for the display
+    /// name).
     #[test]
     fn dedup_reuse_after_rename_rebroadcasts_renamed_name() {
         const URL: &str = "gs://lucida-test/datasets/rename-me.zarr";
+        const FIRST_OPENER: ClientId = 11;
+        const SECOND_REQUESTER: ClientId = 42;
         let import_name = "import-time-name.zarr";
         let renamed = "Renamed By Editor";
 
         let dataset_id = single_image_manifest().dataset_id;
         let mut session = Session::new();
 
-        // First open: apply DatasetOpened (import-time name) + register binding.
-        let opened = dataset_opened_named(import_name);
+        // First open: apply DatasetOpened (import-time name, stamped with the
+        // first opener) + register binding.
+        let mut opened = dataset_opened_named(import_name);
+        opened.opener_client_id = Some(FIRST_OPENER);
         session.apply(DocumentCommand::DatasetOpened(opened.clone()));
         session
             .server_bindings
@@ -3296,16 +3322,26 @@ mod tests {
             "the binding cache stays at the import-time name; the fix must not \
              rely on it for the display name"
         );
+        assert_eq!(
+            session.server_bindings[&dataset_id]
+                .dataset_opened
+                .opener_client_id,
+            Some(FIRST_OPENER),
+            "precondition: the binding cache holds the FIRST opener's id"
+        );
 
-        // Re-open the SAME URL: run the handler's real reuse short-circuit.
-        // `find_loaded_binding` is the production helper; the manifest adoption
-        // immediately below is the exact fix under test.
+        // Re-open the SAME URL as a DIFFERENT client: run the handler's real
+        // reuse short-circuit. `find_loaded_binding` is the production helper;
+        // the manifest adoption + opener re-stamp immediately below are the
+        // exact fixes under test (mirroring handler.rs's dedup-reuse path).
+        let client_id: ClientId = SECOND_REQUESTER;
         let (existing_dataset_id, mut existing) =
             find_loaded_binding(&session, &dataset_id, URL, true)
                 .expect("re-open must find the existing binding (dedup short-circuit)");
         if let Some(doc_manifest) = session.document.manifests.get(&existing_dataset_id) {
             existing.manifest = doc_manifest.clone();
         }
+        existing.opener_client_id = Some(client_id);
         let rebroadcast = DocumentCommand::DatasetOpened(existing);
 
         // The re-broadcast DatasetOpened — what peers re-apply — must carry the
@@ -3321,6 +3357,15 @@ mod tests {
         assert_eq!(
             rebroadcast_opened.manifest.dataset_id, dataset_id,
             "dedup re-open must target the same dataset id"
+        );
+        // The dedup-reuse rebroadcast must re-stamp the CURRENT requester so
+        // the everyday multi-user case (open a URL already loaded in the
+        // session) auto-fits for the opener — not the original first opener.
+        assert_eq!(
+            rebroadcast_opened.opener_client_id,
+            Some(SECOND_REQUESTER),
+            "dedup re-open must re-stamp opener_client_id with the current \
+             requester, not the binding's cached first opener"
         );
     }
 }

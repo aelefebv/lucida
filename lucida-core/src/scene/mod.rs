@@ -1239,6 +1239,7 @@ pub(crate) mod test_helpers {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 
@@ -1343,6 +1344,7 @@ pub(crate) mod test_helpers {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 
@@ -1465,6 +1467,7 @@ pub(crate) mod test_helpers {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 }

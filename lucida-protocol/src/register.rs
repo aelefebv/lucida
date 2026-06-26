@@ -3,6 +3,13 @@ use crate::fetch::FetchSource;
 use lucida_content::DatasetManifest;
 use serde::{Deserialize, Serialize};
 
+/// Stable id of a connected client. Mirrors `lucida_core::protocol::ClientId`
+/// (also `u64`); defined locally because `lucida-core` depends on
+/// `lucida-protocol`, so importing it here would form a dependency cycle. The
+/// wire form is identical (a JSON number), so the two are interchangeable
+/// across the serde boundary.
+pub type ClientId = u64;
+
 /// Application-level event: a dataset has been opened on the server and
 /// should be registered by all clients. Carries the canonical dataset
 /// manifest, the client-visible fetch source, and the initial asset
@@ -16,6 +23,15 @@ pub struct DatasetOpened {
     /// with messages that omit the field (older clients/snapshots).
     #[serde(default)]
     pub catalog: AssetCatalog,
+    /// Id of the client that opened this dataset, stamped by the server on
+    /// the open path so the broadcast's recipients can tell whether THEY are
+    /// the opener. `dataset_opened` is a fan-out broadcast, so the web uses
+    /// `opener_client_id == self` to auto-fit the camera only for the opener
+    /// and leave co-present peers / followers undisturbed. `None` when there
+    /// is no originating client (e.g. server-side workspace restore, or an
+    /// older payload that omits the field — `#[serde(default)]` back-compat).
+    #[serde(default)]
+    pub opener_client_id: Option<ClientId>,
 }
 
 #[cfg(test)]
@@ -95,6 +111,7 @@ mod tests {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 
@@ -166,5 +183,51 @@ mod tests {
         val.as_object_mut().unwrap().remove("catalog");
         let back: DatasetOpened = serde_json::from_value(val).unwrap();
         assert!(back.catalog.entries.is_empty());
+    }
+
+    #[test]
+    fn dataset_opened_opener_client_id_round_trip() {
+        // A stamped opener id survives a full serde round-trip and lands on the
+        // wire as a plain JSON number under `opener_client_id`.
+        let mut event = make_dataset_opened();
+        event.opener_client_id = Some(7);
+        let json = serde_json::to_string(&event).unwrap();
+
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            val.get("opener_client_id").and_then(|v| v.as_u64()),
+            Some(7),
+            "opener_client_id should serialize as a JSON number"
+        );
+
+        let back: DatasetOpened = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.opener_client_id, Some(7));
+    }
+
+    #[test]
+    fn dataset_opened_opener_client_id_none_round_trip() {
+        // The default/no-opener case round-trips as None.
+        let event = make_dataset_opened();
+        assert_eq!(event.opener_client_id, None);
+        let json = serde_json::to_string(&event).unwrap();
+        let back: DatasetOpened = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.opener_client_id, None);
+    }
+
+    #[test]
+    fn dataset_opened_backward_compat_without_opener_client_id() {
+        // Older payloads (pre-origin-aware servers) omit `opener_client_id`
+        // entirely — `#[serde(default)]` must deserialize it as None rather
+        // than failing, so a stale client/server can still interop.
+        let event = make_dataset_opened();
+        let json = serde_json::to_string(&event).unwrap();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val.as_object_mut().unwrap().remove("opener_client_id");
+        assert!(
+            val.get("opener_client_id").is_none(),
+            "precondition: field removed from payload"
+        );
+        let back: DatasetOpened = serde_json::from_value(val).unwrap();
+        assert_eq!(back.opener_client_id, None);
     }
 }
