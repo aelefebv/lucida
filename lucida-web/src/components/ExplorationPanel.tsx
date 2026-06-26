@@ -15,8 +15,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { explore_view } from "lucida-core";
-import type { WasmScene } from "lucida-core";
-import { applyViewportCommand } from "../applyAndSend.ts";
 import type { SavedView } from "../savedView/types.ts";
 import "./BookmarkSidebar.css";
 import "./ExplorationPanel.css";
@@ -45,21 +43,14 @@ interface ExplorationSidecar {
 
 export interface ExplorationPanelProps {
   visible: boolean;
-  /** Live scene ref (read at call time, never during render) — drives the MAIN
-   *  view for the manual control buttons via `applyViewportCommand`. */
-  wasmSceneRef: React.RefObject<WasmScene | null>;
   /** Capture the current view as a `SavedView` (App's
    *  `savedViewSync.captureBuilder`). Null when no scene exists yet. */
   captureBuilder: () => SavedView | null;
   /** Descend into a view: apply it to the viewer, then notify saved-view sync.
-   *  App.tsx defines this as `savedViewApplier.apply(v)` + notify + breakFollow. */
+   *  App.tsx defines this as `savedViewApplier.apply(v)` + notify + breakFollow.
+   *  Both the candidate rows AND the manual nudge buttons go through this — a
+   *  nudge is just a shortcut to the generator's matching child view. */
   applyView: (view: SavedView) => Promise<void>;
-  /** Called after a manual camera nudge (Rotate/Zoom) mutates the scene via
-   *  `applyViewportCommand`. App.tsx wires this to mark the render loop dirty
-   *  (so the canvas repaints — `applyViewportCommand` alone does NOT), break
-   *  peer-follow, and co-tap presence/URL. Optional so the panel still works in
-   *  isolation (tests), but always supplied by App.tsx. */
-  onViewportChanged?: () => void;
   /** Bookmark the current view (App's workspace `createSavedView`). Always saved
    *  as an ephemeral PERSONAL view — guided exploration never auto-shares. */
   createSavedView: (
@@ -75,22 +66,43 @@ export interface ExplorationPanelProps {
   dims: Dims | null;
   /** Current viewport size in CSS px (for the synthesized Home camera). */
   viewport: readonly [number, number];
-  /** Whether the main view is currently in a rotatable 3D mode (arcball). The
-   *  rotate buttons drive the live camera, so they're only meaningful in 3D. */
-  is3D: boolean;
   style?: React.CSSProperties;
 }
 
-// Canonical manual-control deltas, matched to the generator's move-set so the
-// MAIN-view buttons feel like the offered cells: a 45° orbit and a 2x zoom.
-const ROTATE_RAD = 0.785; // ~45°
-// 2D slice `zoom_by` factors (> 1 zooms in).
-const ZOOM_IN = 2.0;
-const ZOOM_OUT = 0.5;
-// 3D arcball `arcball_zoom` step: `distance *= (1 + delta)`, so a NEGATIVE delta
-// pulls the eye closer (zoom in). 0.5 halves/doubles the distance, mirroring the
-// 2x slice factor.
-const ARCBALL_ZOOM_STEP = 0.5;
+// The manual nudge buttons, each keyed to the generator move (`ViewTransform::id`)
+// it is a shortcut for. A button applies the SAME candidate the generator already
+// computed for the current view (looked up in `cells` by this id), so there is no
+// move math here that could drift from the engine — and it's disabled whenever its
+// move isn't currently available (e.g. Rotate on a 2D view, Zoom-out at a limit).
+const NUDGES: ReadonlyArray<{
+  transform: string;
+  text: string;
+  testid?: string;
+  unavailableTitle: string;
+}> = [
+  {
+    transform: "azimuth:-45",
+    text: "Rotate left",
+    testid: "explore-rotate-left",
+    unavailableTitle: "Rotate is available in 3D",
+  },
+  {
+    transform: "azimuth:+45",
+    text: "Rotate right",
+    testid: "explore-rotate-right",
+    unavailableTitle: "Rotate is available in 3D",
+  },
+  {
+    transform: "zoom:in",
+    text: "Zoom in",
+    unavailableTitle: "Zoom in isn't available here",
+  },
+  {
+    transform: "zoom:out",
+    text: "Zoom out",
+    unavailableTitle: "Zoom out isn't available here",
+  },
+];
 
 /** Run the generator for `current` (or Home when `current` is null) and return
  *  the parsed result. Centralizes the JSON.stringify → wasm → JSON.parse hop so
@@ -138,16 +150,13 @@ function runExplore(
 
 export function ExplorationPanel({
   visible,
-  wasmSceneRef,
   captureBuilder,
   applyView,
-  onViewportChanged,
   createSavedView,
   datasetId,
   datasetName,
   dims,
   viewport,
-  is3D,
   style,
 }: ExplorationPanelProps) {
   const [cells, setCells] = useState<ExplorationCell[]>([]);
@@ -199,12 +208,6 @@ export function ExplorationPanel({
   // first time we're at the exploration root (empty trail) with a 3D camera, so
   // Home reads "zoom 1.0x" and a zoom-in reads ">1x". Reset on Home.
   const homeDistanceRef = useRef<number | undefined>(undefined);
-
-  // Latest onViewportChanged repaint hook, read at call time so the nudge
-  // handler identity stays stable.
-  const onViewportChangedRef = useRef(onViewportChanged);
-  // eslint-disable-next-line react-hooks/refs
-  onViewportChangedRef.current = onViewportChanged;
 
   // Latest props the imperative handlers read at call time, kept in refs so the
   // handler identities stay stable (mirrors the ref pattern in the saved-views
@@ -325,43 +328,20 @@ export function ExplorationPanel({
     refresh();
   }, [applyView, pushBack, setTrail, refresh]);
 
-  // Manual controls drive the MAIN view directly (a live camera nudge, not a
-  // generated child). `applyViewportCommand` mutates the scene but does NOT mark
-  // the render loop dirty, so we MUST call `onViewportChanged` for the canvas to
-  // repaint (it also breaks follow + co-taps presence/URL — see App.tsx). Then we
-  // record the move on the trail and regenerate the menu from the new vantage.
-  // Rotate is 3D-only.
-  const nudge = useCallback(
-    (cmd: Record<string, unknown>, label: string) => {
-      const scene = wasmSceneRef.current;
-      if (!scene) return;
-      applyViewportCommand(scene, cmd);
-      onViewportChangedRef.current?.();
-      pushTrail(label);
-      refresh();
+  // A manual nudge is a SHORTCUT to one of the generator's own offered moves: it
+  // finds the candidate in the live `cells` by transform id and descends into it
+  // exactly like clicking that row. No move math lives here — the generator owns
+  // the geometry, so a Rotate button can never drift from a Rotate cell. A nudge
+  // whose move the generator didn't offer (looked up below as a disabled button)
+  // is a no-op. Routing through `descend` means a nudge also pushes onto the Back
+  // stack, so Back undoes a manual move too.
+  const applyNudge = useCallback(
+    (transform: string) => {
+      const cell = cells.find((c) => c.transform === transform);
+      if (!cell) return;
+      void descend(cell);
     },
-    [wasmSceneRef, pushTrail, refresh],
-  );
-
-  // Zoom drives the MAIN camera. The wasm `zoom_by` command acts on the 2D slice
-  // camera only; in 3D the arcball zooms via `arcball_zoom { delta }`, where
-  // `distance *= (1 + delta)` so a NEGATIVE delta pulls the eye closer (zoom in).
-  // We map the canonical 2x / 0.5x factors to a comparable arcball delta so the
-  // button feels the same in either mode rather than being a dead no-op in 3D.
-  const zoom = useCallback(
-    (zoomIn: boolean) => {
-      const label = zoomIn ? "Zoom in" : "Zoom out";
-      if (is3D) {
-        // Negative delta = closer (zoom in); positive = farther (zoom out).
-        nudge(
-          { type: "arcball_zoom", delta: zoomIn ? -ARCBALL_ZOOM_STEP : ARCBALL_ZOOM_STEP },
-          label,
-        );
-      } else {
-        nudge({ type: "zoom_by", factor: zoomIn ? ZOOM_IN : ZOOM_OUT }, label);
-      }
-    },
-    [is3D, nudge],
+    [cells, descend],
   );
 
   const handleBookmark = useCallback(async () => {
@@ -420,44 +400,24 @@ export function ExplorationPanel({
       </div>
 
       <div className="explore-controls" data-testid="explore-controls">
-        <button
-          type="button"
-          onClick={() =>
-            nudge({ type: "arcball_rotate", d_theta: -ROTATE_RAD, d_phi: 0 }, "Rotate left 45°")
-          }
-          disabled={noDataset || !is3D}
-          title={is3D ? "Rotate the view left" : "Rotate is available in 3D"}
-          data-testid="explore-rotate-left"
-        >
-          Rotate left
-        </button>
-        <button
-          type="button"
-          onClick={() =>
-            nudge({ type: "arcball_rotate", d_theta: ROTATE_RAD, d_phi: 0 }, "Rotate right 45°")
-          }
-          disabled={noDataset || !is3D}
-          title={is3D ? "Rotate the view right" : "Rotate is available in 3D"}
-          data-testid="explore-rotate-right"
-        >
-          Rotate right
-        </button>
-        <button
-          type="button"
-          onClick={() => zoom(true)}
-          disabled={noDataset}
-          title="Zoom in"
-        >
-          Zoom in
-        </button>
-        <button
-          type="button"
-          onClick={() => zoom(false)}
-          disabled={noDataset}
-          title="Zoom out"
-        >
-          Zoom out
-        </button>
+        {NUDGES.map((n) => {
+          // Each nudge is enabled only when the generator currently offers its
+          // move (e.g. Rotate appears only on a 3D arcball, Zoom-out drops at a
+          // limit) — the button is a shortcut to that exact candidate.
+          const available = cells.some((c) => c.transform === n.transform);
+          return (
+            <button
+              key={n.transform}
+              type="button"
+              onClick={() => applyNudge(n.transform)}
+              disabled={noDataset || !available}
+              title={available ? n.text : n.unavailableTitle}
+              data-testid={n.testid}
+            >
+              {n.text}
+            </button>
+          );
+        })}
         <button
           type="button"
           onClick={() => void goHome()}

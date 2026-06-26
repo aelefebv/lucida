@@ -8,23 +8,10 @@ import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
 // Mock the wasm generator. `explore_view` returns a sidecar JSON string; tests
 // override its return per case via the typed handle below. The component parses
 // the string and renders the cells, so the mock is the seam that decides what
-// candidates appear. (lucida-core is the only wasm import in the panel's
-// dependency graph that runs at module load — applyAndSend.ts imports a type
-// only.)
-const exploreView = vi.fn(() =>
-  JSON.stringify({
-    v: 1,
-    current: { handle: "vh-0", view: arcballView() },
-    cells: [
-      {
-        handle: "vh-1",
-        transform: "azimuth:+45",
-        label: "Rotate right 45°",
-        view: rotatedView(),
-      },
-    ],
-  }),
-);
+// candidates appear — AND which manual nudge buttons are enabled (a nudge is a
+// shortcut to its matching cell, so it's live only when that transform is in the
+// sidecar's cells). lucida-core is the only wasm import in the panel.
+const exploreView = vi.fn(() => JSON.stringify(defaultSidecar()));
 
 vi.mock("lucida-core", () => ({
   explore_view: (...args: unknown[]) => exploreView(...(args as [])),
@@ -55,40 +42,92 @@ function arcballView(): SavedView {
   };
 }
 
-/** A distinct child view so an applyView call can be matched to the cell. */
-function rotatedView(): SavedView {
+/** A child view with a distinct camera `theta` so an applyView call can be
+ *  matched back to the cell that produced it. */
+function viewWithTheta(theta: number): SavedView {
   const v = arcballView();
-  (v.camera as { theta: number }).theta = 0.785;
+  (v.camera as { theta: number }).theta = theta;
   return v;
 }
 
-/** Minimal WasmScene stub: only `apply_command` is exercised by the manual
- *  controls (`applyViewportCommand`). */
-function sceneStub() {
-  return { apply_command: vi.fn() };
+/** The default sidecar: an arcball root that offers the full nudge set (both
+ *  rotates + both zooms) plus a generic StepZ row, each with a distinct child
+ *  view. Mirrors what the core generator returns for an interior 3D view, so the
+ *  manual nudge buttons (shortcuts to these cells) are all live. */
+function defaultSidecar() {
+  return {
+    v: 1,
+    current: { handle: "vh-0", view: arcballView() },
+    extent: { min: [0, 0, 0], max: [256, 256, 40], z_count: 40, t_count: 1, c_count: 1 },
+    cells: [
+      {
+        handle: "vh-rot-right",
+        transform: "azimuth:+45",
+        label: "Rotate right 45°",
+        z: 20,
+        t: 0,
+        c: 0,
+        view: viewWithTheta(0.785),
+      },
+      {
+        handle: "vh-rot-left",
+        transform: "azimuth:-45",
+        label: "Rotate left 45°",
+        z: 20,
+        t: 0,
+        c: 0,
+        view: viewWithTheta(-0.785),
+      },
+      {
+        handle: "vh-zoom-in",
+        transform: "zoom:in",
+        label: "Zoom in",
+        z: 20,
+        t: 0,
+        c: 0,
+        view: viewWithTheta(0.111),
+      },
+      {
+        handle: "vh-zoom-out",
+        transform: "zoom:out",
+        label: "Zoom out",
+        z: 20,
+        t: 0,
+        c: 0,
+        view: viewWithTheta(0.222),
+      },
+      {
+        handle: "vh-stepz",
+        transform: "stepz:+1",
+        label: "Next slice (deeper)",
+        z: 21,
+        t: 0,
+        c: 0,
+        view: viewWithTheta(0.333),
+      },
+    ],
+  };
 }
 
 function baseProps(over: Partial<ExplorationPanelProps> = {}): ExplorationPanelProps {
-  const scene = sceneStub();
   return {
     visible: true,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    wasmSceneRef: { current: scene as any },
     captureBuilder: () => arcballView(),
     applyView: vi.fn(async () => {}),
-    onViewportChanged: vi.fn(),
     createSavedView: vi.fn(async () => ({})),
     datasetId: "ds-1",
     datasetName: "sample.ome.zarr",
     dims: [1, 1, 40, 256, 256],
     viewport: [800, 600],
-    is3D: true,
     ...over,
   };
 }
 
 beforeEach(() => {
-  exploreView.mockClear();
+  // Reset BOTH call history and implementation so a test that installs a custom
+  // sidecar (mockReturnValue) can't leak into the next test.
+  exploreView.mockReset();
+  exploreView.mockImplementation(() => JSON.stringify(defaultSidecar()));
 });
 
 afterEach(() => {
@@ -104,10 +143,26 @@ async function renderPanel(over: Partial<ExplorationPanelProps> = {}) {
   return props;
 }
 
+/** The candidate row whose label matches — disambiguates now that the panel
+ *  renders several cells. */
+function cellByLabel(label: string): HTMLElement {
+  const cell = screen
+    .getAllByTestId("explore-cell")
+    .find((el) => within(el).queryByText(label));
+  if (!cell) throw new Error(`no explore-cell labelled ${label}`);
+  return cell;
+}
+
+/** A manual nudge BUTTON by its text. Targets the role so it doesn't collide
+ *  with a candidate ROW that happens to share the label (e.g. "Zoom in"). */
+function nudgeButton(text: string): HTMLButtonElement {
+  return screen.getByRole("button", { name: text }) as HTMLButtonElement;
+}
+
 describe("ExplorationPanel — candidates", () => {
   it("renders the plain-language label and its transform tag for each candidate", async () => {
     await renderPanel();
-    const cell = screen.getByTestId("explore-cell");
+    const cell = cellByLabel("Rotate right 45°");
     expect(within(cell).getByText("Rotate right 45°")).toBeTruthy();
     // The muted machine id is shown as a small tag.
     expect(within(cell).getByText("azimuth:+45")).toBeTruthy();
@@ -121,7 +176,7 @@ describe("ExplorationPanel — candidates", () => {
   it("clicking a candidate descends via applyView with that cell's view", async () => {
     const props = await renderPanel();
     await act(async () => {
-      await userEvent.click(screen.getByTestId("explore-cell"));
+      await userEvent.click(cellByLabel("Rotate right 45°"));
     });
     expect(props.applyView).toHaveBeenCalledTimes(1);
     // It applies the CELL's view (the rotated child), not the current view.
@@ -147,43 +202,60 @@ describe("ExplorationPanel — candidates", () => {
   });
 });
 
-describe("ExplorationPanel — manual controls", () => {
-  it("Rotate right issues an arcball_rotate command AND fires the repaint hook", async () => {
-    const scene = sceneStub();
-    const onViewportChanged = vi.fn();
-    await renderPanel({
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      wasmSceneRef: { current: scene as any },
-      onViewportChanged,
-    });
+describe("ExplorationPanel — manual controls (shortcuts to generator moves)", () => {
+  it("Rotate right descends into the generator's azimuth:+45 cell (no TS move math)", async () => {
+    const props = await renderPanel();
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-rotate-right"));
     });
-    expect(scene.apply_command).toHaveBeenCalled();
-    const cmd = JSON.parse(
-      scene.apply_command.mock.calls[0][0] as string,
-    ) as Record<string, unknown>;
-    expect(cmd.type).toBe("arcball_rotate");
-    expect(cmd.d_theta as number).toBeGreaterThan(0);
-    // BLOCKER #1: the nudge must mark the canvas dirty via the repaint hook
-    // (applyViewportCommand alone doesn't), or the view wouldn't move on screen.
-    expect(onViewportChanged).toHaveBeenCalledTimes(1);
+    // The nudge runs the SAME descend path as the row: applyView with the
+    // matching candidate's view (theta 0.785 from the azimuth:+45 cell).
+    expect(props.applyView).toHaveBeenCalledTimes(1);
+    const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as SavedView;
+    expect((applied.camera as { theta: number }).theta).toBeCloseTo(0.785);
   });
 
-  it("Zoom in fires the repaint hook (so the canvas repaints)", async () => {
-    const onViewportChanged = vi.fn();
-    await renderPanel({ onViewportChanged });
+  it("Zoom in descends into the generator's zoom:in cell", async () => {
+    const props = await renderPanel();
     await act(async () => {
-      await userEvent.click(screen.getByText("Zoom in"));
+      await userEvent.click(nudgeButton("Zoom in"));
     });
-    expect(onViewportChanged).toHaveBeenCalledTimes(1);
+    expect(props.applyView).toHaveBeenCalledTimes(1);
+    const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as SavedView;
+    expect((applied.camera as { theta: number }).theta).toBeCloseTo(0.111);
   });
 
-  it("disables Rotate in 2D mode", async () => {
-    await renderPanel({ is3D: false });
+  it("disables a nudge whose move the generator does not offer (Rotate on a 2D view)", async () => {
+    // A 2D slice sidecar offers no azimuth cells, so the Rotate buttons disable.
+    exploreView.mockReturnValue(
+      JSON.stringify({
+        v: 1,
+        current: { handle: "vh-2d", view: arcballView() },
+        extent: { min: [0, 0, 0], max: [256, 256, 1], z_count: 1, t_count: 1, c_count: 1 },
+        cells: [
+          {
+            handle: "vh-zoom-in",
+            transform: "zoom:in",
+            label: "Zoom in",
+            z: 0,
+            t: 0,
+            c: 0,
+            view: viewWithTheta(0.111),
+          },
+        ],
+      }),
+    );
+    await renderPanel();
     expect(
       (screen.getByTestId("explore-rotate-right") as HTMLButtonElement).disabled,
     ).toBe(true);
+    expect(
+      (screen.getByTestId("explore-rotate-left") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    // Zoom in is offered, so it stays enabled.
+    expect(nudgeButton("Zoom in").disabled).toBe(false);
   });
 
   it("Back is disabled until a descend happens, then enabled, and applies the previous view", async () => {
@@ -192,7 +264,7 @@ describe("ExplorationPanel — manual controls", () => {
     expect(back().disabled).toBe(true);
     // Descend into the rotated child; the current (theta 0) view is pushed.
     await act(async () => {
-      await userEvent.click(screen.getByTestId("explore-cell"));
+      await userEvent.click(cellByLabel("Rotate right 45°"));
     });
     expect(back().disabled).toBe(false);
 
@@ -207,6 +279,33 @@ describe("ExplorationPanel — manual controls", () => {
     expect((applyCalls[1][0] as SavedView).camera).toMatchObject({ theta: 0 });
     expect(back().disabled).toBe(true);
   });
+
+  it("a manual nudge pushes onto the Back stack — Back returns to the pre-nudge view (Part D)", async () => {
+    // captureBuilder returns the live (pre-nudge) view; after a Rotate nudge,
+    // Back must re-apply THAT view, not the nudge's child. This is the finer-Back
+    // behavior unlocked by routing nudges through the descend path.
+    const props = await renderPanel();
+    const back = () => screen.getByTestId("explore-back") as HTMLButtonElement;
+    expect(back().disabled).toBe(true);
+
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("explore-rotate-right"));
+    });
+    // The nudge descended (applied the azimuth child) AND enabled Back.
+    expect(back().disabled).toBe(false);
+
+    await act(async () => {
+      await userEvent.click(back());
+    });
+    const applyCalls = (props.applyView as ReturnType<typeof vi.fn>).mock.calls;
+    // 1st apply = the nudge's child (theta 0.785); 2nd = Back → the pre-nudge
+    // view captured before the nudge (theta 0).
+    expect(applyCalls).toHaveLength(2);
+    expect((applyCalls[0][0] as SavedView).camera).toMatchObject({ theta: 0.785 });
+    expect((applyCalls[1][0] as SavedView).camera).toMatchObject({ theta: 0 });
+    // Stack drained → Back disabled again.
+    expect(back().disabled).toBe(true);
+  });
 });
 
 describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
@@ -218,7 +317,7 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
 
     // Descend → the cell's label is appended.
     await act(async () => {
-      await userEvent.click(screen.getByTestId("explore-cell"));
+      await userEvent.click(cellByLabel("Rotate right 45°"));
     });
     expect(crumb()).toBe("Home › Rotate right 45°");
 
@@ -229,17 +328,18 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
     expect(crumb()).toBe("Home");
   });
 
-  it("pushes the nudge's plain-language label on a manual move", async () => {
+  it("pushes the matching cell's plain-language label on a manual nudge", async () => {
     await renderPanel();
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-rotate-right"));
     });
+    // The label comes from the generator's azimuth:+45 cell, not a TS literal.
     expect(screen.getByTestId("explore-breadcrumb").textContent).toBe(
       "Home › Rotate right 45°",
     );
-    // A second move appends again, proving the trail accumulates.
+    // A second nudge appends again, proving the trail accumulates.
     await act(async () => {
-      await userEvent.click(screen.getByText("Zoom in"));
+      await userEvent.click(nudgeButton("Zoom in"));
     });
     expect(screen.getByTestId("explore-breadcrumb").textContent).toBe(
       "Home › Rotate right 45° › Zoom in",
@@ -255,7 +355,7 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
 
     // After one descend the trail has length 1 → the next generate uses depth 1.
     await act(async () => {
-      await userEvent.click(screen.getByTestId("explore-cell"));
+      await userEvent.click(cellByLabel("Rotate right 45°"));
     });
     const lastCall = exploreView.mock.calls[exploreView.mock.calls.length - 1];
     expect(depthArg(lastCall)).toBe(1);

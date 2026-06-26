@@ -649,8 +649,15 @@ pub struct ExplorationNode {
     pub view: SavedView,
 }
 
-/// One offered next-step in a serialized sidecar — a [`Child`] plus optional
-/// presentation/annotation fields the higher tiers fill in later.
+/// One offered next-step in a serialized sidecar — a [`Child`] plus the
+/// destination's dimensional indices and optional presentation/annotation fields
+/// the higher tiers fill in later.
+///
+/// `z`/`t`/`c` are the child view's destination indices (`z` is the start of the
+/// view's Z slab, `t`/`c` the active timepoint/channel). They mirror the values a
+/// reader would otherwise have to dig out of `view.view`, so EVERY surface (CLI,
+/// pyo3, web) gets the same orientation a ranking agent needs without re-deriving
+/// it — see [`ExplorationSidecar::build`].
 ///
 /// `url` (a deep link), `stat` (some scalar the surface attaches, e.g. a
 /// score), and `incomplete` (the child view couldn't be fully realized — e.g.
@@ -665,6 +672,12 @@ pub struct ExplorationCell {
     pub transform: String,
     /// Plain-language label of the move ([`ViewTransform::label`]).
     pub label: String,
+    /// Destination Z slice index (the start of the child view's Z slab).
+    pub z: u32,
+    /// Destination timepoint index.
+    pub t: u32,
+    /// Destination channel index.
+    pub c: u32,
     /// The child saved view.
     pub view: SavedView,
     /// Optional deep link to this child view (filled in by a higher tier).
@@ -678,23 +691,28 @@ pub struct ExplorationCell {
     pub incomplete: bool,
 }
 
-/// A self-contained guided-exploration snapshot: the current node plus the menu
-/// of next-steps. This is the data structure the CLI / Python / web tiers
-/// serialize, ship, and render.
+/// A self-contained guided-exploration snapshot: the current node, the dataset's
+/// extent, plus the menu of next-steps. This is the data structure the CLI /
+/// Python / web tiers serialize, ship, and render.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplorationSidecar {
     /// Wire-format version ([`EXPLORATION_SIDECAR_VERSION`]).
     pub v: u32,
     /// The current "you are here" node.
     pub current: ExplorationNode,
+    /// The dataset's spatial + dimensional extent (the same context `build` used
+    /// to gate the moves). Carried so every surface can show the dataset's bounds
+    /// and per-axis counts without re-deriving them.
+    pub extent: ViewExtent,
     /// The available next-steps from `current`.
     pub cells: Vec<ExplorationCell>,
 }
 
 impl ExplorationSidecar {
     /// Build a sidecar for `current`: stamp the version, wrap `current` as the
-    /// node (carrying `depth` + `breadcrumb` from the caller's walk), and expand
-    /// its [`children`] into cells with the optional fields left empty.
+    /// node (carrying `depth` + `breadcrumb` from the caller's walk), record the
+    /// dataset `extent`, and expand its [`children`] into cells (each carrying its
+    /// destination `z`/`t`/`c`) with the optional fields left empty.
     ///
     /// Pure with respect to `current` — it is cloned into the node, never
     /// mutated.
@@ -710,6 +728,11 @@ impl ExplorationSidecar {
                 handle: c.handle,
                 transform: c.transform,
                 label: c.label,
+                // Destination indices, read off the child view so every surface
+                // gets the same orientation without re-deriving it.
+                z: c.view.view.z_range.start,
+                t: c.view.view.t,
+                c: c.view.view.c,
                 view: c.view,
                 url: None,
                 stat: None,
@@ -725,6 +748,7 @@ impl ExplorationSidecar {
                 breadcrumb,
                 view: current.clone(),
             },
+            extent: extent.clone(),
             cells,
         }
     }
@@ -1551,14 +1575,59 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_carries_extent() {
+        // The sidecar records the dataset extent it was built against, so every
+        // surface gets the bounds/counts without re-deriving them.
+        let v = arcball_view();
+        let extent = extent_3d();
+        let side = ExplorationSidecar::build(&v, &extent, 0, Vec::new());
+        assert_eq!(side.extent, extent);
+    }
+
+    #[test]
+    fn sidecar_cell_ztc_match_child_view() {
+        // Each cell's z/t/c are the destination indices of its child view, so a
+        // reader can orient on any surface without digging into `view.view`.
+        let mut v = arcball_view();
+        v.view.z_range = 10..11;
+        v.view.t = 2; // t_count = 5
+        v.view.c = 1; // c_count = 2 -> 1 is interior in one direction
+        let extent = extent_3d();
+        let side = ExplorationSidecar::build(&v, &extent, 0, Vec::new());
+        for cell in &side.cells {
+            assert_eq!(cell.z, cell.view.view.z_range.start);
+            assert_eq!(cell.t, cell.view.view.t);
+            assert_eq!(cell.c, cell.view.view.c);
+        }
+        // Sanity: a StepZ cell actually moved Z off the parent's 10.
+        let stepz = side
+            .cells
+            .iter()
+            .find(|c| c.transform == "stepz:+1")
+            .expect("stepz:+1 present mid-stack");
+        assert_eq!(stepz.z, 11);
+        // ... while leaving t/c at the parent's values.
+        assert_eq!(stepz.t, 2);
+        assert_eq!(stepz.c, 1);
+    }
+
+    #[test]
     fn sidecar_round_trips_json() {
         let v = arcball_view();
-        let side = ExplorationSidecar::build(&v, &extent_3d(), 0, Vec::new());
+        let extent = extent_3d();
+        let side = ExplorationSidecar::build(&v, &extent, 0, Vec::new());
         let json = serde_json::to_string(&side).unwrap();
         let back: ExplorationSidecar = serde_json::from_str(&json).unwrap();
         assert_eq!(back.v, side.v);
         assert_eq!(back.current.handle, side.current.handle);
+        // extent + per-cell z/t/c survive the round-trip.
+        assert_eq!(back.extent, extent);
         assert_eq!(back.cells.len(), side.cells.len());
+        for (cell, orig) in back.cells.iter().zip(side.cells.iter()) {
+            assert_eq!(cell.z, orig.z);
+            assert_eq!(cell.t, orig.t);
+            assert_eq!(cell.c, orig.c);
+        }
     }
 
     #[test]

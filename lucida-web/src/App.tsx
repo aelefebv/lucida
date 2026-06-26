@@ -82,6 +82,21 @@ interface AppProps {
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
 }
 
+/** Whether the page loaded into a specific saved view / annotation rather than a
+ *  bare workspace open: a `#view=` inline payload, a `#b=<id>` saved view, or a
+ *  `#a=<id>` annotation deep-link in the URL hash. Used to decide the Explore
+ *  panel's INITIAL open state (closed when restoring such a view, open otherwise).
+ *  SSR-safe: a missing `window`/`location` reads as "no deep-link". */
+function hasSavedViewDeepLink(): boolean {
+  if (typeof window === "undefined") return false;
+  const hash = window.location.hash;
+  return (
+    hash.includes("#view=") ||
+    hash.includes("#b=") ||
+    hash.includes("#a=")
+  );
+}
+
 function App({
   workspaceId,
   workspaceName,
@@ -925,7 +940,14 @@ function App({
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
-  const [showExplorePanel, setShowExplorePanel] = useState(false);
+  // Default the Explore panel OPEN on a fresh dataset open so a first-timer finds
+  // the guided-exploration affordance — but stay CLOSED when the page loads into a
+  // specific saved view / annotation (a `#view=` inline payload, a `#b=<id>` saved
+  // view, or a `#a=<id>` annotation deep-link): that visitor came for that exact
+  // frame, not to be nudged elsewhere. It remains a user toggle either way.
+  const [showExplorePanel, setShowExplorePanel] = useState(
+    () => !hasSavedViewDeepLink(),
+  );
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
@@ -1028,23 +1050,6 @@ function App({
     },
     [bridge, savedViewApplier, notifySavedViewChange],
   );
-
-  // After a manual camera nudge from the Explore panel (Rotate/Zoom), the panel
-  // mutated the scene via `applyViewportCommand`, which does NOT touch the render
-  // loop — so without this the WebGL canvas wouldn't repaint until some unrelated
-  // dirty event. Mark the loop dirty so the move shows immediately, and (for
-  // parity with the app's other manual camera controls — see the PlateSelector
-  // well-click) break peer-follow + co-tap presence/URL so a follower isn't
-  // snapped back and the URL tracks the new vantage. (Trips
-  // preserve-manual-memoization the same way the camera-mode toggles above do —
-  // the body reads loopRef.current while the dep is the ref; user-event-driven,
-  // so the manual deps are intentional.)
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization
-  const handleExploreNudge = useCallback(() => {
-    bridge.breakFollow();
-    emitPresenceWithUrl();
-    render.loopRef.current?.markInteractiveDirty("explore_nudge");
-  }, [bridge, emitPresenceWithUrl, render.loopRef]);
 
   const commitWorkspaceName = useCallback(() => {
     const next = workspaceNameDraft.trim();
@@ -1621,10 +1626,8 @@ function App({
       />
       <ExplorationPanel
         visible={showExplorePanel}
-        wasmSceneRef={scene.wasmSceneRef}
         captureBuilder={savedViewSync.captureBuilder}
         applyView={applyExploreView}
-        onViewportChanged={handleExploreNudge}
         createSavedView={handleExploreBookmark}
         datasetId={exploreTarget.id}
         datasetName={exploreTarget.name}
@@ -1633,7 +1636,6 @@ function App({
           render.canvasRef.current?.clientWidth ?? 800,
           render.canvasRef.current?.clientHeight ?? 600,
         ]}
-        is3D={dims.viewMode === "3d"}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />
       <WorkspaceSharingDialog

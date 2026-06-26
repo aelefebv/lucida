@@ -43,6 +43,28 @@ def test_explore_flat_dataset_has_no_azimuth_or_stepz():
     assert not any(t.startswith("stepz:") for t in transforms)
 
 
+def test_explore_sidecar_carries_extent_and_cell_ztc():
+    # Parity with the CLI: the core sidecar now carries the dataset `extent` and
+    # each cell's destination `z`/`t`/`c`, so the Python surface gets the same
+    # orientation without re-deriving it from each cell's `view`.
+    raw = lucida.explore("wds-x", (5, 3, 40, 80, 100), (800, 600))
+    sidecar = json.loads(raw)
+
+    # Top-level extent: the [T, C, Z, Y, X] dims mapped to bounds + counts.
+    extent = sidecar["extent"]
+    assert extent["z_count"] == 40
+    assert extent["t_count"] == 5
+    assert extent["c_count"] == 3
+    assert extent["max"] == [100.0, 80.0, 40.0]
+    assert extent["min"] == [0.0, 0.0, 0.0]
+
+    # Each cell carries z/t/c matching its own child view's destination indices.
+    for cell in sidecar["cells"]:
+        assert cell["z"] == cell["view"]["view"]["z_range"]["start"]
+        assert cell["t"] == cell["view"]["view"]["t"]
+        assert cell["c"] == cell["view"]["view"]["c"]
+
+
 def test_explore_descend_from_supplied_view_carries_breadcrumb():
     # Descend: feed a child's `view` back in, with an explicit depth/breadcrumb.
     root = json.loads(lucida.explore("wds-x", (1, 1, 40, 128, 128), (800, 600)))

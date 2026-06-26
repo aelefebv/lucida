@@ -2334,32 +2334,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     }
                 }
 
-                // Emit the typed sidecar enriched with the orientation an agent
-                // needs without the PNG: the dataset id, the dataset extent, and
-                // each cell's destination z/t/c (so it can rank/orient with no
-                // cursor). The typed ExplorationSidecar fields are preserved — we
-                // only add keys to the serialized Value (montage-style).
+                // Emit the typed sidecar. The core sidecar already carries the
+                // orientation an agent needs without the PNG — the dataset
+                // `extent` and each cell's destination `z`/`t`/`c` (and the
+                // per-cell `url` filled in above). The only CLI-specific addition
+                // is the top-level `dataset` (the ds_id), added to the serialized
+                // Value (montage-style) without disturbing the typed fields.
                 let mut output_value = serde_json::to_value(&sidecar)?;
                 if let Some(obj) = output_value.as_object_mut() {
                     obj.insert("dataset".to_string(), serde_json::json!(ds_id));
-                    obj.insert(
-                        "extent".to_string(),
-                        serde_json::json!({
-                            "z_count": extent.z_count,
-                            "t_count": extent.t_count,
-                            "c_count": extent.c_count,
-                        }),
-                    );
-                    if let Some(serde_json::Value::Array(cells)) = obj.get_mut("cells") {
-                        for (cell, src) in cells.iter_mut().zip(sidecar.cells.iter()) {
-                            if let Some(cell_obj) = cell.as_object_mut() {
-                                cell_obj
-                                    .insert("z".to_string(), src.view.view.z_range.start.into());
-                                cell_obj.insert("t".to_string(), src.view.view.t.into());
-                                cell_obj.insert("c".to_string(), src.view.view.c.into());
-                            }
-                        }
-                    }
                 }
 
                 let json_path = match out {
@@ -5200,6 +5183,64 @@ mod tests {
         assert_eq!(extent.c_count, 2);
         assert_eq!(extent.max, [512.0, 512.0, 340.0]);
         assert_eq!(extent.min, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn explore_output_value_has_core_fields_plus_cli_additions() {
+        // The dedup contract: the core sidecar now carries `extent` + per-cell
+        // `z`/`t`/`c`, so the CLI no longer injects them — it only fills each
+        // cell's `url` and adds the top-level `dataset`. This mirrors the handler
+        // construction (build → fill urls → to_value → add dataset) and asserts
+        // the printed JSON has all of: extent, per-cell z/t/c, dataset, url.
+        let dims = [5, 3, 40, 80, 100]; // [T, C, Z, Y, X], rich on every axis
+        let ds_id = "wds-explore";
+        let extent = ViewExtent::from_dims(dims);
+        let mut current = default_view(ds_id, dims, [320, 320]);
+        // Sit in the interior so steps in both directions are offered.
+        current.view.t = 2;
+        current.view.c = 1;
+        let mut sidecar = ExplorationSidecar::build(&current, &extent, 0, Vec::new());
+        assert!(!sidecar.cells.is_empty(), "expected some next-step cells");
+
+        // Fill the per-cell URL exactly as the handler does.
+        let target = WorkspaceTarget {
+            id: "ws-1".to_string(),
+            name: "ws".to_string(),
+            role: WorkspaceRole::Editor,
+            archived: false,
+            server_url: "http://127.0.0.1:9876".to_string(),
+            web_url: "http://127.0.0.1:9876/w/ws-1".to_string(),
+            ws_url: "ws://127.0.0.1:9876/ws/ws-1".to_string(),
+        };
+        for cell in sidecar.cells.iter_mut() {
+            cell.url = Some(viewer_inline_view_web_url(&target, &cell.view).unwrap());
+        }
+
+        let mut output_value = serde_json::to_value(&sidecar).unwrap();
+        output_value
+            .as_object_mut()
+            .unwrap()
+            .insert("dataset".to_string(), serde_json::json!(ds_id));
+
+        // Top-level: CLI `dataset` + core `extent` (no double-add).
+        assert_eq!(output_value["dataset"], serde_json::json!(ds_id));
+        assert_eq!(output_value["extent"]["z_count"], serde_json::json!(40));
+        assert_eq!(output_value["extent"]["t_count"], serde_json::json!(5));
+        assert_eq!(output_value["extent"]["c_count"], serde_json::json!(3));
+
+        // Per-cell: core z/t/c + CLI url, matching the typed sidecar cells.
+        let cells = output_value["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), sidecar.cells.len());
+        for (cell, src) in cells.iter().zip(sidecar.cells.iter()) {
+            assert_eq!(cell["z"], serde_json::json!(src.view.view.z_range.start));
+            assert_eq!(cell["t"], serde_json::json!(src.view.view.t));
+            assert_eq!(cell["c"], serde_json::json!(src.view.view.c));
+            assert_eq!(cell["url"], serde_json::json!(src.url));
+            assert!(
+                cell["url"].as_str().unwrap().contains("#view="),
+                "each cell carries a #view= drill-in URL"
+            );
+        }
     }
 
     #[test]
