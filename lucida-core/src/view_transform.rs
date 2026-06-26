@@ -128,6 +128,58 @@ pub fn default_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedVie
     view
 }
 
+/// Build a guided-exploration sidecar for the web (and any other wasm) surface,
+/// as a JSON string.
+///
+/// This is the single wasm entry point the browser calls to ask "from this view,
+/// what are the next moves?". It wraps the pure generator so the SPA never has to
+/// reconstruct a [`ViewExtent`] or a Home view in TypeScript:
+///
+/// - `view_json` is the current [`SavedView`] as JSON, or `None`/empty to start
+///   from the dataset's Home ([`default_view`]).
+/// - `t, c, z, y, x` are the dataset shape `[T, C, Z, Y, X]`; `viewport_w` /
+///   `viewport_h` size the synthesized Home camera; `depth` is recorded on the
+///   sidecar node (the caller's walk depth).
+///
+/// Returns the serialized [`ExplorationSidecar`] on success. On a malformed
+/// `view_json` it returns a JSON object string `{"error": "<message>"}` rather
+/// than panicking, so the caller can `JSON.parse` the result and branch on an
+/// `.error` field. Mirrors the `#[cfg_attr(target_arch = "wasm32", …)]` pattern
+/// used by [`dataset_id_for_url`](crate::saved_view::dataset_id_for_url): the
+/// function compiles on every target, but only wasm gets the `#[wasm_bindgen]`
+/// export.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+#[allow(clippy::too_many_arguments)]
+pub fn explore_view(
+    view_json: Option<String>,
+    ds_id: &str,
+    t: u32,
+    c: u32,
+    z: u32,
+    y: u32,
+    x: u32,
+    viewport_w: u32,
+    viewport_h: u32,
+    depth: u32,
+) -> String {
+    let dims = [t as u64, c as u64, z as u64, y as u64, x as u64];
+    let extent = ViewExtent::from_dims(dims);
+    let current = match view_json {
+        Some(j) if !j.is_empty() => match serde_json::from_str::<SavedView>(&j) {
+            Ok(v) => v,
+            Err(e) => {
+                return format!(
+                    "{{\"error\":{}}}",
+                    serde_json::to_string(&e.to_string()).unwrap()
+                );
+            }
+        },
+        _ => default_view(ds_id, dims, [viewport_w, viewport_h]),
+    };
+    let sidecar = ExplorationSidecar::build(&current, &extent, depth, Vec::new());
+    serde_json::to_string(&sidecar).unwrap_or_else(|_| "{\"error\":\"serialize\"}".to_string())
+}
+
 /// One parametric move in the guided-exploration move-set.
 ///
 /// Each variant is a *family* of move parameterized by its payload, kept
@@ -1055,5 +1107,65 @@ mod tests {
         assert!(ids.iter().any(|id| id.starts_with("azimuth:")));
         assert!(ids.contains(&"stepz:+1"));
         assert!(ids.contains(&"stepz:-1"));
+    }
+
+    // --- explore_view (the wasm-exported wrapper, exercised on the host) ---
+
+    #[test]
+    fn explore_view_home_volume_has_azimuth_cells() {
+        // No view_json -> synthesize the Home view for a volume (z_count > 1),
+        // which opens in an Arcball and so offers azimuth (rotate) cells.
+        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 0);
+        let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
+        assert_eq!(sidecar.v, EXPLORATION_SIDECAR_VERSION);
+        assert!(
+            sidecar
+                .cells
+                .iter()
+                .any(|c| c.transform.starts_with("azimuth:")),
+            "a volume Home should offer azimuth cells: {json}"
+        );
+    }
+
+    #[test]
+    fn explore_view_passes_depth_through() {
+        // The caller's walk depth is recorded on the current node.
+        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 3);
+        let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
+        assert_eq!(sidecar.current.depth, 3);
+    }
+
+    #[test]
+    fn explore_view_explicit_view_json_round_trips() {
+        // A provided (well-formed) view_json is used verbatim as the current
+        // node rather than synthesizing Home.
+        let mut v = arcball_view();
+        v.view.z_range = 10..11;
+        let view_json = serde_json::to_string(&v).unwrap();
+        let json = explore_view(Some(view_json), "wds-1", 1, 1, 40, 80, 100, 800, 600, 0);
+        let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
+        assert_eq!(sidecar.current.handle, view_handle(&v));
+    }
+
+    #[test]
+    fn explore_view_malformed_json_returns_error_string() {
+        // Malformed view_json must not panic — it returns an {"error": ...} blob.
+        let json = explore_view(
+            Some("{not valid json".to_string()),
+            "wds-1",
+            1,
+            1,
+            40,
+            80,
+            100,
+            800,
+            600,
+            0,
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("error").is_some(),
+            "malformed view_json should yield an error object: {json}"
+        );
     }
 }

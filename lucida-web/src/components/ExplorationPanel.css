@@ -1,0 +1,95 @@
+/* Explore panel — layered on top of the shared BookmarkSidebar.css so the
+   chrome (sidebar shell, header, list, rows) matches the saved-views sidebar.
+   Only the exploration-specific bits live here. */
+
+.explore-here {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.explore-here-dataset {
+  font-size: 0.85rem;
+  color: #ddd;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explore-here-detail {
+  font-size: 0.72rem;
+  color: #9a9aa6;
+  margin-top: 0.15rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* The move trail (Home › Rotate right 45° › Zoom in). Primary proof of
+   navigation while thumbnails are deferred — kept on one line, ellipsized if it
+   somehow overflows the head-truncation. */
+.explore-breadcrumb {
+  font-size: 0.72rem;
+  color: #b9b9c6;
+  margin-top: 0.2rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explore-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.explore-controls button {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  background: #2a2a2a;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.explore-controls button:hover:not(:disabled) {
+  background: #33334a;
+  border-color: #54546a;
+}
+
+.explore-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The primary call-to-action of the panel — make it read as the accent action. */
+.explore-controls button.explore-suggest {
+  flex-basis: 100%;
+  background: #646cff;
+  border-color: #646cff;
+  color: #fff;
+}
+
+.explore-controls button.explore-suggest:hover:not(:disabled) {
+  background: #535bdf;
+  border-color: #535bdf;
+}
+
+.explore-section-header {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #9a9aa6;
+  padding: 0.45rem 0.75rem 0.25rem;
+}
+
+/* Candidate rows are labelled (not thumbnails). The muted transform tag sits
+   under the plain-language label as a small machine-id hint. */
+.explore-cell-transform {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #777;
+  font-size: 0.68rem;
+}
