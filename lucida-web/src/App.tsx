@@ -1026,6 +1026,7 @@ function App({
         canEdit={canEditWorkspace}
         onChannelSetVisible={layers.handleChannelSetVisible}
         onChannelSetColormap={layers.handleChannelSetColormap}
+        onChannelSetName={layers.handleChannelSetName}
         onChannelSetContrast={layers.handleChannelSetContrast}
         onChannelSetGamma={layers.handleChannelSetGamma}
         onChannelSetBlendMode={layers.handleChannelSetBlendMode}

@@ -9,6 +9,7 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Deserialize;
 
+use lucida_content::ChannelInfo;
 use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
 
 use crate::backend::StoreError;
@@ -136,6 +137,86 @@ pub(crate) fn parse_multiscales(
     })
 }
 
+/// Parse per-channel display info from the OME `omero.channels` block of a
+/// root (or FOV) `zarr.json` value.
+///
+/// GENERIC and untrusted-input safe. The omero block is optional rendering
+/// metadata that *any* OME-Zarr producer may emit, omit, or get wrong — this
+/// helper treats it as fully untrusted and never panics, errors, or mislabels:
+///
+/// - Missing `attributes.ome.omero` or `omero.channels`, or `channels` that is
+///   not a JSON array → empty `Vec` (caller falls back to `Ch N`).
+/// - Each entry's `label` must be a non-blank string; entries that are not
+///   objects, lack `label`, or carry a non-string / whitespace-only label have
+///   *no usable label*.
+/// - **Positional integrity**: results are kept aligned to channel index. A
+///   label-less channel in the *middle* is filled with the positional
+///   `Ch {i}` fallback so every later label still lines up with its channel
+///   (dropping it would silently shift all subsequent names). A label-less
+///   *trailing* run is truncated instead — the web falls back per-index for
+///   missing entries, so trimming keeps the wire minimal without misaligning
+///   anything. If no entry has a usable label, the result is empty.
+/// - `color`, when present, must be a string; anything else (number, object,
+///   `null`) is dropped to `None`. The raw hex is carried through verbatim
+///   (no `#`, no validation) — this slice does not consume it.
+///
+/// The result is intentionally *not* reconciled against the C-axis size here.
+/// Parse stays a pure function of the metadata; if a producer's omero list
+/// disagrees with the channel count, the labels remain positional and the web
+/// falls back per-index for any channel beyond the list. See the module tests
+/// for the malformed-input matrix this guarantees.
+pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<ChannelInfo> {
+    let Some(channels) = root_json
+        .pointer("/attributes/ome/omero/channels")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    // First pass: best-effort label per position (None == no usable label).
+    let parsed: Vec<Option<ChannelInfo>> = channels
+        .iter()
+        .map(|entry| {
+            let label = entry
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            let color = entry
+                .get("color")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            Some(ChannelInfo {
+                label: label.to_string(),
+                color,
+            })
+        })
+        .collect();
+
+    // Truncate a trailing run of label-less channels: the web falls back
+    // per-index, so there's nothing to preserve past the last real label.
+    let last_labeled = parsed.iter().rposition(Option::is_some);
+    let Some(last) = last_labeled else {
+        return Vec::new(); // no usable labels anywhere
+    };
+
+    // Fill interior gaps with the positional fallback so index i always maps
+    // to channel i; keep real labels as-is.
+    parsed
+        .into_iter()
+        .take(last + 1)
+        .enumerate()
+        .map(|(i, slot)| {
+            slot.unwrap_or(ChannelInfo {
+                label: format!("Ch {i}"),
+                color: None,
+            })
+        })
+        .collect()
+}
+
 /// Read ArrayMeta for each level in the multiscale pyramid.
 /// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for plate FOVs).
 pub(crate) async fn read_level_metas(
@@ -242,6 +323,184 @@ mod tests {
             msg.contains("A/1/0: "),
             "error should contain prefix: {msg}",
         );
+    }
+
+    /// Wrap an omero value in the `attributes.ome.omero` envelope the parser
+    /// reads from. `omero` is spliced verbatim so tests can supply malformed
+    /// shapes (non-array channels, etc.).
+    fn root_with_omero(omero: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "omero": omero } }
+        })
+    }
+
+    #[test]
+    fn omero_channels_parses_labels_and_colors_in_order() {
+        let root = root_with_omero(serde_json::json!({
+            "channels": [
+                {"label": "DAPI", "color": "0000FF"},
+                {"label": "GFP", "color": "00FF00"},
+                {"label": "RFP", "color": "FF0000"}
+            ]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 3);
+        assert_eq!(infos[0].label, "DAPI");
+        assert_eq!(infos[0].color.as_deref(), Some("0000FF"));
+        assert_eq!(infos[1].label, "GFP");
+        assert_eq!(infos[2].label, "RFP");
+        assert_eq!(infos[2].color.as_deref(), Some("FF0000"));
+    }
+
+    #[test]
+    fn omero_channels_label_only_is_fine() {
+        let root = root_with_omero(serde_json::json!({
+            "channels": [{"label": "Brightfield"}]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].label, "Brightfield");
+        assert_eq!(infos[0].color, None);
+    }
+
+    #[test]
+    fn no_omero_block_yields_empty() {
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "multiscales": [] } }
+        });
+        assert!(parse_omero_channels(&root).is_empty());
+    }
+
+    #[test]
+    fn omero_without_channels_yields_empty() {
+        let root = root_with_omero(serde_json::json!({ "rdefs": {} }));
+        assert!(parse_omero_channels(&root).is_empty());
+    }
+
+    #[test]
+    fn omero_channels_not_an_array_yields_empty() {
+        // Untrusted shape: channels is an object, a string, a number, null.
+        for bad in [
+            serde_json::json!({"channels": {"label": "X"}}),
+            serde_json::json!({"channels": "DAPI"}),
+            serde_json::json!({"channels": 5}),
+            serde_json::json!({"channels": null}),
+        ] {
+            let root = root_with_omero(bad);
+            assert!(
+                parse_omero_channels(&root).is_empty(),
+                "non-array channels must degrade to empty",
+            );
+        }
+    }
+
+    #[test]
+    fn omero_empty_channels_array_yields_empty() {
+        let root = root_with_omero(serde_json::json!({ "channels": [] }));
+        assert!(parse_omero_channels(&root).is_empty());
+    }
+
+    #[test]
+    fn omero_channels_all_blank_or_missing_labels_yields_empty() {
+        // Whitespace, empty string, missing key, non-string, non-object.
+        let root = root_with_omero(serde_json::json!({
+            "channels": [
+                {"label": "   "},
+                {"label": ""},
+                {"color": "FF0000"},
+                {"label": 42},
+                "not-an-object",
+                42
+            ]
+        }));
+        assert!(
+            parse_omero_channels(&root).is_empty(),
+            "no usable label anywhere must fully fall back to Ch N (empty list)",
+        );
+    }
+
+    #[test]
+    fn omero_channels_trailing_blanks_are_truncated() {
+        // Only channel 0 has a label; the rest fall back per-index on the web,
+        // so the list is trimmed to length 1.
+        let root = root_with_omero(serde_json::json!({
+            "channels": [
+                {"label": "DAPI"},
+                {"label": "  "},
+                {}
+            ]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].label, "DAPI");
+    }
+
+    #[test]
+    fn omero_channels_interior_gaps_keep_positions_aligned() {
+        // Channel 1 has no usable label but channel 2 does: index 1 must be
+        // filled with the positional fallback so "Marker" still maps to ch 2.
+        let root = root_with_omero(serde_json::json!({
+            "channels": [
+                {"label": "DAPI"},
+                {"label": "   "},
+                {"label": "Marker"}
+            ]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 3);
+        assert_eq!(infos[0].label, "DAPI");
+        assert_eq!(infos[1].label, "Ch 1"); // positional fallback, alignment preserved
+        assert_eq!(infos[1].color, None);
+        assert_eq!(infos[2].label, "Marker");
+    }
+
+    #[test]
+    fn omero_channels_label_is_trimmed() {
+        let root = root_with_omero(serde_json::json!({
+            "channels": [{"label": "  DAPI  "}]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos[0].label, "DAPI");
+    }
+
+    #[test]
+    fn omero_channels_non_string_color_dropped() {
+        // color as number/object/null/blank must not crash and must yield None.
+        for bad_color in [
+            serde_json::json!(16711680),
+            serde_json::json!({"r": 255}),
+            serde_json::json!(null),
+            serde_json::json!("   "),
+        ] {
+            let root = root_with_omero(serde_json::json!({
+                "channels": [{"label": "C", "color": bad_color}]
+            }));
+            let infos = parse_omero_channels(&root);
+            assert_eq!(infos.len(), 1);
+            assert_eq!(infos[0].label, "C");
+            assert_eq!(
+                infos[0].color, None,
+                "non-string/blank color must degrade to None",
+            );
+        }
+    }
+
+    #[test]
+    fn omero_channels_more_than_c_axis_is_preserved_positionally() {
+        // Parse does NOT reconcile against the C-axis size — extra labels are
+        // kept; downstream/web simply won't index past the real channel count.
+        let root = root_with_omero(serde_json::json!({
+            "channels": [
+                {"label": "A"}, {"label": "B"}, {"label": "C"}, {"label": "D"}
+            ]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 4);
+        assert_eq!(infos[3].label, "D");
     }
 
     #[test]

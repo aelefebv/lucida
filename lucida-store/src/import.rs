@@ -47,6 +47,9 @@ async fn import_single_image(
     let axes_names = parsed.axes_names;
     let level_entries = parsed.level_entries;
 
+    // Channel display names from the OME omero block (generic; optional).
+    let channel_infos = parse::parse_omero_channels(root_json);
+
     let level_metas = parse::read_level_metas(store, "", &level_entries).await?;
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
@@ -86,6 +89,7 @@ async fn import_single_image(
             generated_levels: Vec::new(),
             data_type,
             pinned_axes: layout.pinned.clone(),
+            channel_infos,
         },
     };
 
@@ -265,6 +269,11 @@ async fn import_plate(
     let axes_names = rep_parsed.axes_names;
     let level_entries = rep_parsed.level_entries;
 
+    // Channel display names from the representative FOV's omero block. OME-Zarr
+    // plates require all FOVs to share one multiscale, so the representative
+    // FOV's channels apply to every field (generic; optional).
+    let channel_infos = parse::parse_omero_channels(&rep_json);
+
     let level_metas = parse::read_level_metas(store, &rep_path, &level_entries).await?;
 
     let (full_shape_5d, _full_chunk_5d) = parse::extract_full_res(&level_metas, &axes_names);
@@ -438,6 +447,7 @@ async fn import_plate(
                     generated_levels: Vec::new(),
                     data_type,
                     pinned_axes: layout.pinned.clone(),
+                    channel_infos: channel_infos.clone(),
                 },
             });
 
@@ -2042,6 +2052,143 @@ mod tests {
         assert!(
             msg.contains("blosclz"),
             "error should name 'blosclz': {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Minimal single-image 5D OME-Zarr fixture (metadata only). When
+    /// `omero` is `Some`, it is spliced verbatim into `attributes.ome.omero`
+    /// so tests can supply well-formed *or* malformed omero blocks.
+    fn create_single_image_fixture(dir: &std::path::Path, omero: Option<serde_json::Value>) {
+        fs::create_dir_all(dir).unwrap();
+
+        let mut ome = serde_json::json!({
+            "version": "0.5",
+            "multiscales": [{
+                "version": "0.5",
+                "name": "image",
+                "axes": [
+                    {"name": "t", "type": "time"},
+                    {"name": "c", "type": "channel"},
+                    {"name": "z", "type": "space"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"}
+                ],
+                "datasets": [{
+                    "path": "0",
+                    "coordinateTransformations": [{
+                        "type": "scale",
+                        "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+                    }]
+                }]
+            }]
+        });
+        if let Some(o) = omero {
+            ome["omero"] = o;
+        }
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": ome }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [1, 2, 1, 64, 64],
+            "data_type": "uint16",
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": { "chunk_shape": [1, 1, 1, 64, 64] }
+            },
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A single image whose omero block carries channel labels yields a
+    /// manifest exposing those labels (and colors) in order.
+    #[tokio::test]
+    async fn import_single_image_with_omero_channels() {
+        let dir = temp_dir("import_omero_channels");
+        create_single_image_fixture(
+            &dir,
+            Some(serde_json::json!({
+                "channels": [
+                    {"label": "DAPI", "color": "0000FF"},
+                    {"label": "GFP", "color": "00FF00"}
+                ]
+            })),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "omero-id", "Omero").await.unwrap();
+
+        let ci = &result.manifest.images()[0].multiscale.channel_infos;
+        assert_eq!(ci.len(), 2);
+        assert_eq!(ci[0].label, "DAPI");
+        assert_eq!(ci[0].color.as_deref(), Some("0000FF"));
+        assert_eq!(ci[1].label, "GFP");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A single image with NO omero block imports cleanly with empty
+    /// channel_infos (back-compat: pre-omero datasets are unaffected).
+    #[tokio::test]
+    async fn import_single_image_without_omero_has_empty_channel_infos() {
+        let dir = temp_dir("import_no_omero");
+        create_single_image_fixture(&dir, None);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "no-omero-id", "No Omero")
+            .await
+            .unwrap();
+
+        assert!(
+            result.manifest.images()[0]
+                .multiscale
+                .channel_infos
+                .is_empty(),
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A malformed omero block (channels not an array) must not fail import;
+    /// it degrades to empty channel_infos.
+    #[tokio::test]
+    async fn import_single_image_with_malformed_omero_degrades() {
+        let dir = temp_dir("import_malformed_omero");
+        create_single_image_fixture(
+            &dir,
+            Some(serde_json::json!({ "channels": "not-an-array" })),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "bad-omero-id", "Bad Omero")
+            .await
+            .expect("malformed omero must not fail import");
+
+        assert!(
+            result.manifest.images()[0]
+                .multiscale
+                .channel_infos
+                .is_empty(),
         );
 
         let _ = fs::remove_dir_all(&dir);

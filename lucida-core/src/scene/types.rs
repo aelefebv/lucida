@@ -64,6 +64,20 @@ pub struct ChannelSettings {
     pub contrast_min: f64,
     pub contrast_max: f64,
     pub gamma: f64,
+    /// User-supplied display name override for this channel. `None` (the
+    /// default) means "no override" — the UI falls back to the manifest's
+    /// omero label and then `Ch {index}`. A local-only per-channel display
+    /// setting like `colormap`/`contrast`: set via `SetChannelName`, it rides
+    /// saved views and broadcasts to followers via the selection epoch, but is
+    /// NOT durable document state (out of scope for this slice).
+    ///
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps this
+    /// strictly additive: a presence snapshot / saved view persisted before
+    /// this slice carries no `name` key and deserializes as `None`, and a
+    /// channel WITHOUT an override serializes byte-identically to a pre-slice
+    /// one (the key is omitted). No wire break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Default for ChannelSettings {
@@ -74,6 +88,7 @@ impl Default for ChannelSettings {
             contrast_min: 0.0,
             contrast_max: 65535.0,
             gamma: 1.0,
+            name: None,
         }
     }
 }

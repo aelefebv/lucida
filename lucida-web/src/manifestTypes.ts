@@ -39,6 +39,25 @@ export interface MultiscaleInfo {
    * chunks. Optional/absent on payloads from older servers.
    */
   pinned_axes?: PinnedAxis[];
+  /**
+   * Per-channel display metadata from the OME `omero.channels` block, in
+   * channel order. Optional/absent when the source has no omero block (the
+   * server omits the field for channel-less datasets), so consumers must fall
+   * back to a positional `Ch N` label. Best-effort and positional: may be
+   * shorter or longer than the actual channel count — index by channel and
+   * fall back per-index when an entry is missing.
+   */
+  channel_infos?: ChannelInfo[];
+}
+
+/**
+ * Display metadata for a single channel (mirrors `lucida-content`'s
+ * `ChannelInfo`). `label` is always a non-empty string when present; `color`
+ * is the raw omero hex (no leading `#`) and is not consumed by this slice.
+ */
+export interface ChannelInfo {
+  label: string;
+  color?: string | null;
 }
 
 export interface GeneratedLevelInfo {

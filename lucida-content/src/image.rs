@@ -23,6 +23,39 @@ pub struct MultiscaleInfo {
     /// chunks. Empty for normal datasets.
     #[serde(default)]
     pub pinned_axes: Vec<PinnedAxis>,
+    /// Per-channel display metadata parsed from the OME `omero.channels` block
+    /// (label and optional color), in channel order.
+    ///
+    /// This is immutable manifest data — channel *names* live here, not in the
+    /// mutable scene state. Empty when the source has no `omero` block (e.g.
+    /// raw OME-Zarr without rendering metadata), so consumers must fall back to
+    /// a positional `Ch N` label.
+    ///
+    /// Positional and best-effort: entries are kept in the order omero lists
+    /// them and are *not* forced to match the C-axis length. A producer whose
+    /// omero list is shorter, longer, or partly blank still yields a valid
+    /// manifest; consumers index by channel and fall back per-index when an
+    /// entry is missing. `#[serde(default)]` keeps older snapshots (written
+    /// before this field existed) deserializable, and `skip_serializing_if`
+    /// keeps channel-less datasets from emitting it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_infos: Vec<ChannelInfo>,
+}
+
+/// Display metadata for a single channel, sourced from the OME `omero.channels`
+/// block. Carries only what this slice renders — a human label and an optional
+/// color hint — leaving contrast/window and colormap to the mutable scene
+/// state (`ChannelSettings`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelInfo {
+    /// Non-empty channel label (e.g. `"DAPI"`). The parse layer drops blank /
+    /// whitespace-only labels, so any value present here is meaningful.
+    pub label: String,
+    /// Optional color hint, as the raw omero hex string without a leading `#`
+    /// (e.g. `"00FF00"`). Carried through verbatim for future use; this slice
+    /// does not apply it to colormaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 impl MultiscaleInfo {
@@ -177,6 +210,79 @@ mod tests {
         assert_eq!(info.coarse_level_index, None);
         assert!(info.generated_levels.is_empty());
         assert!(info.pinned_axes.is_empty());
+        // Old snapshots predate `channel_infos`; serde default yields empty.
+        assert!(info.channel_infos.is_empty());
+    }
+
+    fn minimal_multiscale(channel_infos: Vec<ChannelInfo>) -> MultiscaleInfo {
+        MultiscaleInfo {
+            axes: vec![Axis {
+                name: "x".to_string(),
+                kind: AxisKind::Space,
+            }],
+            levels: vec![LevelGeometry {
+                level_index: 0,
+                shape: [1, 1, 1, 1, 1],
+                chunk_shape: [1, 1, 1, 1, 1],
+                grid_shape: [1, 1, 1, 1, 1],
+                scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+            }],
+            coarse_level_index: None,
+            generated_levels: Vec::new(),
+            data_type: DataType::Uint16,
+            pinned_axes: Vec::new(),
+            channel_infos,
+        }
+    }
+
+    #[test]
+    fn channel_infos_round_trip_with_and_without_color() {
+        let info = minimal_multiscale(vec![
+            ChannelInfo {
+                label: "DAPI".to_string(),
+                color: Some("0000FF".to_string()),
+            },
+            ChannelInfo {
+                label: "GFP".to_string(),
+                color: None,
+            },
+        ]);
+        let json = serde_json::to_value(&info).unwrap();
+        let back: MultiscaleInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back.channel_infos.len(), 2);
+        assert_eq!(back.channel_infos[0].label, "DAPI");
+        assert_eq!(back.channel_infos[0].color.as_deref(), Some("0000FF"));
+        assert_eq!(back.channel_infos[1].label, "GFP");
+        assert_eq!(back.channel_infos[1].color, None);
+    }
+
+    #[test]
+    fn empty_channel_infos_is_skipped_on_the_wire() {
+        // skip_serializing_if keeps channel-less datasets from emitting the
+        // field at all, so the wire stays identical to pre-slice output.
+        let info = minimal_multiscale(Vec::new());
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("channel_infos").is_none(),
+            "empty channel_infos must not be serialized, got: {json}",
+        );
+    }
+
+    #[test]
+    fn channel_info_color_omitted_when_none() {
+        let info = ChannelInfo {
+            label: "Brightfield".to_string(),
+            color: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            json.get("label").and_then(|v| v.as_str()),
+            Some("Brightfield")
+        );
+        assert!(
+            json.get("color").is_none(),
+            "color: None must be omitted, got: {json}",
+        );
     }
 
     #[test]

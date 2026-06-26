@@ -76,6 +76,11 @@ export interface ChannelSettings {
   contrast_min: number;
   contrast_max: number;
   gamma: number;
+  /** User display-name override for this channel. Absent/`undefined` means
+   *  "no override" — the UI falls back to the omero label, then `Ch {i}`.
+   *  Mirrors `lucida_core::scene::ChannelSettings::name` (serde-skipped when
+   *  None), so it is omitted on the wire unless set. */
+  name?: string;
 }
 
 export interface DatasetDisplaySettings {
