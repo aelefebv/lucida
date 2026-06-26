@@ -343,6 +343,19 @@ export class RenderLoop {
     markMinimapOverviewSeeded(ctx, this.minimapState, datasetId, t, c);
   }
 
+  /**
+   * Tell the loop the Explore panel wants the per-dataset coarse overview
+   * textures uploaded (for thumbnail rendering) even while the minimap is
+   * hidden. Enabling schedules a residency tick so the upload starts promptly;
+   * the upload itself is the minimap overview path (`tickMinimapOverview`),
+   * shared so a thumbnail and the minimap draw the exact same texture.
+   */
+  setThumbnailOverview(enabled: boolean): void {
+    if (this.minimapState.overviewActive === enabled) return;
+    this.minimapState.overviewActive = enabled;
+    if (enabled) this.setDirty("residency", "thumbnail_overview");
+  }
+
   private scheduleIfNeeded(): void {
     if ((this.interactiveDirty || this.residencyDirty) && this.rafId === null) {
       this.rafId = requestAnimationFrame(this.tick);

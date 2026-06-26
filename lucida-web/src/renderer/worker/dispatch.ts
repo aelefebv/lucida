@@ -37,6 +37,7 @@ import {
   handleMinimapInit,
   handleMinimapRender,
   handleMinimapUploadOverviewChunks,
+  handleThumbnailRender,
   removeMinimapResources,
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
@@ -141,6 +142,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "minimapUploadOverviewChunksForLayer":
       handleMinimapUploadOverviewChunks(ctx, msg);
+      return;
+    case "thumbnailRender":
+      handleThumbnailRender(ctx, msg);
       return;
     case "minimapDestroy":
       handleMinimapDestroy();

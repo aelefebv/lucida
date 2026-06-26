@@ -230,6 +230,32 @@ export interface MinimapUploadOverviewChunksForLayerMessage {
   chunkZ: number;
 }
 
+/**
+ * Off-screen render of a single Explore-panel candidate thumbnail.
+ *
+ * Mirrors {@link MinimapRenderMessage} — same coarse per-dataset overview
+ * texture, same transient single-entity descriptor, same `renderTo` — but draws
+ * to a tiny ({@link size}px) target from the candidate child view's camera and
+ * returns one {@link ThumbnailResultMessage} carrying an `ImageBitmap`. The
+ * `id` correlates the async reply (the main thread resolves a pending promise
+ * by id); `layers` reuse the minimap's per-member model matrix + contrast +
+ * colormap so a thumbnail matches the minimap/main view.
+ *
+ * Stale-tolerant like the other render messages: if the overview texture for a
+ * layer isn't resident yet the worker simply renders whatever layers are
+ * present (possibly none → a cleared tile), and the panel will re-request.
+ */
+export interface ThumbnailRenderMessage {
+  type: "thumbnailRender";
+  /** Correlates the {@link ThumbnailResultMessage} reply. */
+  id: number;
+  layers: MinimapLayerParams[];
+  invViewProj: Float32Array;
+  eye: Float32Array;
+  /** Square edge length of the off-screen target in device pixels. */
+  size: number;
+}
+
 export interface RemoveLayerResourcesMessage {
   type: "removeLayerResources";
   datasetId: string;
@@ -427,6 +453,7 @@ export type MainToWorkerMessage =
   | MinimapRenderMessage
   | MinimapDestroyMessage
   | MinimapUploadOverviewChunksForLayerMessage
+  | ThumbnailRenderMessage
   | RemoveLayerResourcesMessage
   | UpdateCursorDataMessage
   | DestroyMessage
@@ -449,6 +476,18 @@ export interface IntensityRangeMessage {
   datasetId: string;
   min: number;
   max: number;
+}
+
+/**
+ * Reply to a {@link ThumbnailRenderMessage}, correlated by `id`. `bitmap` is the
+ * rendered tile as a transferable `ImageBitmap`, or `null` when nothing could be
+ * drawn (no resident overview for any layer yet) so the panel can fall back to
+ * the label-only row. The main thread resolves the matching pending promise.
+ */
+export interface ThumbnailResultMessage {
+  type: "thumbnailResult";
+  id: number;
+  bitmap: ImageBitmap | null;
 }
 
 export type ChunkFeedbackReason =
@@ -531,5 +570,6 @@ export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
   | IntensityRangeMessage
+  | ThumbnailResultMessage
   | ChunksEvictedMessage
   | WantedSetDeltaMessage;

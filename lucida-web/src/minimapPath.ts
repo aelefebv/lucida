@@ -12,6 +12,15 @@ export interface MinimapState {
   overviewSeeded: Set<string>;
   pendingFetch: Map<string, MinimapChunkCoord[]>;
   enabled: boolean;
+  /**
+   * The Explore panel wants the per-dataset coarse overview textures uploaded so
+   * it can render thumbnails, even when the minimap itself is hidden
+   * (`enabled === false`). This flag drives `tickMinimapOverview` (the GPU
+   * upload) WITHOUT enabling the minimap's own render in `tickMinimap` — the
+   * thumbnails are rendered on demand by the worker's `thumbnailRender`, not by
+   * the loop. Set via `RenderLoop.setThumbnailOverview`.
+   */
+  overviewActive: boolean;
   size: number;
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
   /** Hash of inputs that affect minimap output — skip render if unchanged. */
@@ -27,6 +36,7 @@ export function createMinimapState(): MinimapState {
     overviewSeeded: new Set(),
     pendingFetch: new Map(),
     enabled: false,
+    overviewActive: false,
     size: 200,
     overlayCallback: null,
     lastRenderKey: null,
@@ -172,7 +182,10 @@ export function markMinimapOverviewSeeded(
  * Returns true if there are still missing chunks (caller should schedule another frame).
  */
 export function tickMinimapOverview(ctx: TickContext, state: MinimapState): boolean {
-  if (!state.enabled) return false;
+  // Seed the coarse overview textures whenever the minimap OR the Explore-panel
+  // thumbnails need them. The minimap's own render (`tickMinimap`) stays gated on
+  // `enabled` alone — thumbnails render via the worker, not the loop.
+  if (!state.enabled && !state.overviewActive) return false;
 
   const { scene, client, datasets } = ctx;
   const t = scene.t();

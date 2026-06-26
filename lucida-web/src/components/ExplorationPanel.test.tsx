@@ -133,6 +133,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // The thumbnail tests stub IntersectionObserver via vi.stubGlobal; clear it so
+  // a fake observer can't leak into later test files.
+  vi.unstubAllGlobals();
 });
 
 async function renderPanel(over: Partial<ExplorationPanelProps> = {}) {
@@ -414,5 +417,135 @@ describe("ExplorationPanel — bookmark", () => {
       await userEvent.click(screen.getByTestId("explore-bookmark"));
     });
     expect(props.createSavedView).not.toHaveBeenCalled();
+  });
+});
+
+describe("ExplorationPanel — preview thumbnails", () => {
+  // A controllable IntersectionObserver: capture every (callback, element) pair
+  // so a test can decide WHEN a row "scrolls into view". This is the seam that
+  // lets us prove laziness — the panel must not request a render until the
+  // observer reports the row intersecting.
+  type IOEntry = { cb: IntersectionObserverCallback; el: Element; obs: IntersectionObserver };
+  let observed: IOEntry[] = [];
+
+  function installControllableIO() {
+    observed = [];
+    class FakeIO {
+      cb: IntersectionObserverCallback;
+      constructor(cb: IntersectionObserverCallback) {
+        this.cb = cb;
+      }
+      observe(el: Element) {
+        observed.push({ cb: this.cb, el, obs: this as unknown as IntersectionObserver });
+      }
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+    }
+    vi.stubGlobal("IntersectionObserver", FakeIO as unknown as typeof IntersectionObserver);
+  }
+
+  /** Fire intersection for every currently-observed row. */
+  function scrollAllIntoView() {
+    for (const { cb, el, obs } of observed) {
+      cb([{ isIntersecting: true, target: el } as IntersectionObserverEntry], obs);
+    }
+  }
+
+  beforeEach(() => {
+    installControllableIO();
+  });
+
+  /** A thumbnail requester that resolves to a stand-in bitmap, recording the
+   *  views it was asked to render. The real `ImageBitmap`/canvas isn't available
+   *  in happy-dom, so we hand back a minimal object with a `close()` (the panel
+   *  only calls `.close()` and `drawImage`, the latter guarded on a 2d context
+   *  that happy-dom returns null for). */
+  function fakeBitmap(): ImageBitmap {
+    return { width: 8, height: 8, close: vi.fn() } as unknown as ImageBitmap;
+  }
+
+  it("does NOT request a thumbnail until the row scrolls into view (lazy)", async () => {
+    const requestThumbnail = vi.fn(async () => fakeBitmap());
+    await renderPanel({ requestThumbnail });
+    // Rows are mounted, observers registered — but nothing requested yet.
+    expect(observed.length).toBeGreaterThan(0);
+    expect(requestThumbnail).not.toHaveBeenCalled();
+    // Now reveal them.
+    await act(async () => {
+      scrollAllIntoView();
+    });
+    expect(requestThumbnail).toHaveBeenCalled();
+  });
+
+  it("requests a render for a candidate with THAT candidate's child camera", async () => {
+    const requestThumbnail = vi.fn(async () => fakeBitmap());
+    await renderPanel({ requestThumbnail });
+    await act(async () => {
+      scrollAllIntoView();
+    });
+    // The default sidecar's rotate-right cell carries theta 0.785; assert some
+    // request was made with a view whose camera is that child camera (proving the
+    // tile renders from its own angle, not the current view's).
+    const views = (requestThumbnail as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => c[0] as SavedView,
+    );
+    const thetas = views.map((v) => (v.camera as { theta: number }).theta);
+    expect(thetas).toContain(0.785);
+    // Size is a positive device-pixel edge.
+    const size = (requestThumbnail as ReturnType<typeof vi.fn>).mock.calls[0][1] as number;
+    expect(size).toBeGreaterThan(0);
+  });
+
+  it("falls back to the label-only row when a thumbnail fails (null)", async () => {
+    const requestThumbnail = vi.fn(async () => null);
+    await renderPanel({ requestThumbnail });
+    await act(async () => {
+      scrollAllIntoView();
+    });
+    // The candidate's LABEL is still present (the row never breaks)...
+    expect(cellByLabel("Rotate right 45°")).toBeTruthy();
+    // ...and the failed thumbnail box unmounts (empty status → null render).
+    await act(async () => {});
+    const cell = cellByLabel("Rotate right 45°");
+    expect(within(cell).queryByTestId("explore-thumb")).toBeNull();
+  });
+
+  it("falls back gracefully when the requester throws", async () => {
+    const requestThumbnail = vi.fn(async () => {
+      throw new Error("gpu hiccup");
+    });
+    await renderPanel({ requestThumbnail });
+    await act(async () => {
+      scrollAllIntoView();
+    });
+    await act(async () => {});
+    // Row still renders by label; no thumbnail box, no error surfaced.
+    expect(cellByLabel("Rotate right 45°")).toBeTruthy();
+    expect(screen.queryByTestId("explore-error")).toBeNull();
+  });
+
+  it("hides previews (and stops requesting) when 'Show previews' is unchecked", async () => {
+    const requestThumbnail = vi.fn(async () => fakeBitmap());
+    await renderPanel({ requestThumbnail });
+    // Toggle previews OFF before revealing rows.
+    await act(async () => {
+      await userEvent.click(
+        within(screen.getByTestId("explore-previews-toggle")).getByRole("checkbox"),
+      );
+    });
+    observed = []; // ignore any observers registered before the toggle
+    await act(async () => {
+      scrollAllIntoView();
+    });
+    expect(requestThumbnail).not.toHaveBeenCalled();
+    // No thumbnail boxes are mounted.
+    expect(screen.queryByTestId("explore-thumb")).toBeNull();
+  });
+
+  it("shows no preview toggle and no thumbnails when no requester is wired", async () => {
+    await renderPanel(); // requestThumbnail omitted
+    expect(screen.queryByTestId("explore-previews-toggle")).toBeNull();
+    expect(screen.queryByTestId("explore-thumb")).toBeNull();
   });
 });
