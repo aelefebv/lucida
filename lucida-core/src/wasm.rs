@@ -446,6 +446,11 @@ impl WasmScene {
     }
 
     /// Returns the inverse model matrix for a specific member of a dataset.
+    ///
+    /// The placement math is owned by `Scene::rendering_transform` (the single
+    /// source — what is actually drawn); this only resolves the member by id and
+    /// returns that transform's inverse, so picking/upload can never desync from
+    /// the render.
     pub fn inv_member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
         let identity = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -463,62 +468,7 @@ impl WasmScene {
             Some(m) => m,
             None => return identity,
         };
-        let level0 = match member.levels.first() {
-            Some(l) => l,
-            None => return identity,
-        };
-
-        let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 {
-            t.max_physical_extent
-        } else {
-            1.0
-        };
-        let vol_shape = [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ];
-        let fov_shape = vol_shape;
-
-        let scale_x = if fov_shape[2] > 0 {
-            t.model[0] as f64 * max_phys / fov_shape[2] as f64
-        } else {
-            1.0
-        };
-        let scale_y = if fov_shape[1] > 0 {
-            t.model[5] as f64 * max_phys / fov_shape[1] as f64
-        } else {
-            1.0
-        };
-        let scale_z = if fov_shape[0] > 0 {
-            t.model[10] as f64 * max_phys / fov_shape[0] as f64
-        } else {
-            1.0
-        };
-
-        let flipped_offset = [
-            member.position[0],
-            vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64,
-        ];
-        let mt = crate::transform::compute_member_transform(
-            fov_shape,
-            [scale_z, scale_y, scale_x],
-            flipped_offset,
-            max_phys,
-        );
-
-        let global_max = self.inner.global_max_physical_extent();
-        let inv_correction = (global_max / max_phys) as f32;
-        let mut m = mt.inv_model;
-        m[0] *= inv_correction;
-        m[5] *= inv_correction;
-        m[10] *= inv_correction;
-        let phys_y = t.model[5] as f64 * max_phys;
-        let global_max_y = self.inner.global_max_physical_y();
-        let ta = ((global_max_y - phys_y) / global_max) as f32;
-        m[13] -= ta * m[5];
-        m.to_vec()
+        self.inner.rendering_transform(member).1.inv_model.to_vec()
     }
 
     // --- 3D camera methods ---
