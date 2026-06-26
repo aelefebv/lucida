@@ -4,6 +4,15 @@
 //! tested natively (the `wasm` module that calls this is `wasm32`-only). The
 //! wasm layer collects each member's model matrix plus whether its dataset is
 //! visible; this decides where the minimap camera looks and how far back it sits.
+//!
+//! The bounds **accumulation** and **center** computation live in
+//! [`crate::framing`] (shared with the main viewport camera via [`Aabb`]); this
+//! module keeps the minimap's own *overview* framing — frame the limiting axis
+//! with [`FIT_PADDING`] slack ([`orbit_overview_framing`]) — which is looser
+//! than the main camera's full-containment fit, plus the minimap-specific
+//! "which members to include" policy.
+
+use crate::framing::{Aabb, FIT_PADDING, orbit_overview_framing};
 
 /// Minimap orbit-camera target (center) and distance for a set of members.
 ///
@@ -21,50 +30,35 @@ pub fn minimap_framing_boxes(members: &[([f32; 16], bool)]) -> ([f64; 3], f64) {
     // nothing is visible so the minimap still frames content instead of going
     // blank/neutral.
     for visible_only in [true, false] {
-        let mut min = [f64::MAX; 3];
-        let mut max = [f64::MIN; 3];
-        let mut has_any = false;
+        let mut bounds = Aabb::empty();
 
         for (mat, visible) in members {
             if visible_only && !visible {
                 continue;
             }
-            accumulate_box(mat, &mut min, &mut max);
-            has_any = true;
+            accumulate_box(mat, &mut bounds);
         }
 
-        if has_any {
-            return framing_from_bounds(min, max);
+        if !bounds.is_empty() {
+            // The minimap's overview framing: limiting axis + FIT_PADDING slack.
+            // (Distinct from the main camera's full-containment fit; see #836.)
+            return orbit_overview_framing(bounds.min, bounds.max, FIT_PADDING);
         }
     }
 
-    ([0.5, 0.5, 0.5], 1.8)
+    ([0.5, 0.5, 0.5], FIT_PADDING)
 }
 
-/// Expand `min`/`max` by the world-space box of one scale+translate matrix.
-fn accumulate_box(mat: &[f32; 16], min: &mut [f64; 3], max: &mut [f64; 3]) {
+/// Expand `bounds` by the world-space box of one scale+translate matrix
+/// (column-major: `mat[0]/[5]/[10]` = scale, `mat[12]/[13]/[14]` = translate).
+fn accumulate_box(mat: &[f32; 16], bounds: &mut Aabb) {
     let sx = mat[0] as f64;
     let sy = mat[5] as f64;
     let sz = mat[10] as f64;
     let tx = mat[12] as f64;
     let ty = mat[13] as f64;
     let tz = mat[14] as f64;
-    min[0] = min[0].min(tx);
-    min[1] = min[1].min(ty);
-    min[2] = min[2].min(tz);
-    max[0] = max[0].max(tx + sx);
-    max[1] = max[1].max(ty + sy);
-    max[2] = max[2].max(tz + sz);
-}
-
-fn framing_from_bounds(min: [f64; 3], max: [f64; 3]) -> ([f64; 3], f64) {
-    let center = [
-        (min[0] + max[0]) / 2.0,
-        (min[1] + max[1]) / 2.0,
-        (min[2] + max[2]) / 2.0,
-    ];
-    let extent = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
-    (center, extent * 1.8)
+    bounds.add_box([tx, ty, tz], [tx + sx, ty + sy, tz + sz]);
 }
 
 #[cfg(test)]

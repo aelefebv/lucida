@@ -17,6 +17,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
+import { shouldAutoFitOnOpen } from "./autoFit.ts";
 
 /** Callback ref the SavedView applier registers into so it sees the
  * relevant lifecycle events without useBridge importing applier types
@@ -24,6 +25,10 @@ import { syncSceneViewState } from "./sceneViewState.ts";
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
+  /** `true` while a saved/last view is mid-restore (start of apply through its
+   * camera step). The bridge consults this to suppress auto-fit-on-open so a
+   * restore's camera wins (#700). Optional so older callers stay compatible. */
+  isInProgress?: () => boolean;
 }
 
 interface Params {
@@ -303,6 +308,47 @@ export function useBridge({
               reason: "success",
             });
             setWasmScene(scene);
+            // Auto-fit the camera to the freshly-opened dataset so it lands
+            // centered and fully in view (2D + 3D). `dataset_opened` is a
+            // BROADCAST that runs on every co-present peer; the broadcast id is a
+            // random server-minted `wds-…` with no opener id, so we can't tell
+            // the opener from a bystander (see `shouldAutoFitOnOpen`). We gate on
+            // the two unambiguously-wrong cases instead:
+            //   - !restoreInProgress: a saved/last view restoring its camera
+            //     wins (#700);
+            //   - !following: a follower stays glued to the leader's camera.
+            // The fit itself is best-effort and wrapped so a failure (e.g. a
+            // dataset with no bounds yet) can never break the open.
+            const openedDatasetId = cmd.manifest.dataset_id;
+            const restoreInProgress =
+              savedViewHooksRef?.current?.isInProgress?.() ?? false;
+            const following = followTargetRef.current !== null;
+            if (shouldAutoFitOnOpen(cmd.type, { restoreInProgress, following })) {
+              try {
+                // Untyped call: the wasm export may predate the regenerated
+                // bindings, so reach it structurally rather than via the type.
+                (
+                  scene as unknown as {
+                    fit_camera_to_dataset_bounds?: (id: string) => void;
+                  }
+                ).fit_camera_to_dataset_bounds?.(openedDatasetId);
+                loopRef.current?.markInteractiveDirty("auto_fit_on_open");
+                bridgeLog("auto_fit_on_open.applied", {
+                  datasetId: openedDatasetId,
+                });
+              } catch (e) {
+                bridgeLog("auto_fit_on_open.failed", {
+                  datasetId: openedDatasetId,
+                  error: String(e),
+                });
+              }
+            } else {
+              bridgeLog("auto_fit_on_open.suppressed", {
+                datasetId: openedDatasetId,
+                restoreInProgress,
+                following,
+              });
+            }
             // Notify the saved-view applier (if registered) so its
             // pending-open promise resolves. Safe even when the open
             // wasn't applier-initiated — `notifyDatasetOpened` is a

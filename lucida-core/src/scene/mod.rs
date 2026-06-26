@@ -209,6 +209,202 @@ impl Scene {
         if max > 0.0 { max } else { 1.0 }
     }
 
+    /// The per-member **world placement matrix** (`[f32; 16]`, column-major):
+    /// the scale-and-translate that maps the member's unit cube `[0,1]³` into the
+    /// scene's normalized world space, including the member position, the 3D Y-flip,
+    /// the multi-dataset global normalization (`global_max_physical_extent`), and
+    /// the 3D top-alignment (`global_max_physical_y`).
+    ///
+    /// This is the **single source** of member world placement: the wasm
+    /// renderer's `member_model_matrix`, the minimap's framing, and
+    /// [`Self::dataset_world_bounds`] all derive their world boxes from this one
+    /// function, so the auto-fit can never drift from what is actually drawn.
+    /// A member with no levels yields the identity matrix (matching the renderer's
+    /// fallback), so callers can fold it in without a special case.
+    pub fn member_world_matrix(&self, member: &MemberState) -> [f32; 16] {
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let Some(level0) = member.levels.first() else {
+            return identity;
+        };
+
+        let t = &member.volume_transform;
+        let max_phys = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
+        let vol_shape = [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ];
+        let fov_shape = vol_shape;
+
+        // Recover voxel scale from the volume transform.
+        let scale_x = if fov_shape[2] > 0 {
+            t.model[0] as f64 * max_phys / fov_shape[2] as f64
+        } else {
+            1.0
+        };
+        let scale_y = if fov_shape[1] > 0 {
+            t.model[5] as f64 * max_phys / fov_shape[1] as f64
+        } else {
+            1.0
+        };
+        let scale_z = if fov_shape[0] > 0 {
+            t.model[10] as f64 * max_phys / fov_shape[0] as f64
+        } else {
+            1.0
+        };
+
+        // Flip the Y offset for 3D (Y-up convention).
+        let flipped_offset = [
+            member.position[0],
+            vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64,
+        ];
+        let mt = transform::compute_member_transform(
+            fov_shape,
+            [scale_z, scale_y, scale_x],
+            flipped_offset,
+            max_phys,
+        );
+
+        // Global correction for multi-dataset scenes.
+        let global_max = self.global_max_physical_extent();
+        let correction = (max_phys / global_max) as f32;
+        let mut m = mt.model;
+        m[0] *= correction;
+        m[5] *= correction;
+        m[10] *= correction;
+        m[12] *= correction;
+        m[13] *= correction;
+        // Top-align.
+        let phys_y = t.model[5] as f64 * max_phys;
+        let global_max_y = self.global_max_physical_y();
+        m[13] += ((global_max_y - phys_y) / global_max) as f32;
+        m
+    }
+
+    /// World-space axis-aligned bounds (`(min, max)`) of **a single dataset's**
+    /// members — never the union across datasets — so the caller can frame the
+    /// newly-opened dataset alone.
+    ///
+    /// Each member's unit-cube corners are transformed by
+    /// [`Self::member_world_matrix`] (the exact matrix the renderer/minimap use)
+    /// and folded into a [`framing::Aabb`]. Returns `None` for an unknown id or a
+    /// dataset whose members contribute no box (none with levels) — that is the
+    /// "nothing to frame" signal [`Self::fit_camera_to_dataset`] checks.
+    pub fn dataset_world_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = self.derived.get(&ds_id)?;
+
+        let mut aabb = crate::framing::Aabb::empty();
+        for member in &derived.members {
+            if member.levels.is_empty() {
+                continue;
+            }
+            let matrix = self.member_world_matrix(member);
+            let vt = VolumeTransform {
+                model: matrix,
+                inv_model: [0.0; 16],
+                max_physical_extent: 1.0,
+            };
+            for corner in vt.world_corners() {
+                aabb.add_point(corner);
+            }
+        }
+
+        if aabb.is_empty() {
+            None
+        } else {
+            Some((aabb.min, aabb.max))
+        }
+    }
+
+    /// Axis-aligned bounds (`(min, max)`) of **a single dataset's** members in
+    /// the **2D Slice (voxel) space** — the coordinate system the [`Camera::Slice`]
+    /// camera actually operates in (member XY position + the level-0 XY voxel
+    /// extent), *not* the normalized unit-cube space [`Self::dataset_world_bounds`]
+    /// uses for the 3D arcball/minimap.
+    ///
+    /// This is the 2D twin of [`Self::dataset_world_bounds`]: each member with a
+    /// level 0 contributes the AABB
+    /// `[position[0], position[1]] .. [position[0] + X, position[1] + Y]` where
+    /// `X = level0.shape[4]` and `Y = level0.shape[3]` (shape is `[t,c,z,y,x]`),
+    /// using the *exact* voxel convention the slice-mode ray pick and chunk
+    /// culling use (see [`Self::ray_pick`]). The result is the min/max over all
+    /// such members. Members with no levels are skipped (they have no voxel
+    /// extent), matching the renderer's "nothing to draw" handling.
+    ///
+    /// Returns `None` for an unknown id or a dataset whose members contribute no
+    /// box (none with levels) — the "nothing to frame" signal
+    /// [`Self::fit_camera_to_dataset`] checks in 2D.
+    pub fn dataset_voxel_bounds_2d(&self, dataset_id: &str) -> Option<([f64; 2], [f64; 2])> {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = self.derived.get(&ds_id)?;
+
+        let mut min = [f64::MAX; 2];
+        let mut max = [f64::MIN; 2];
+        let mut any = false;
+        for member in &derived.members {
+            let Some(level0) = member.levels.first() else {
+                continue;
+            };
+            let x0 = member.position[0];
+            let y0 = member.position[1];
+            let x1 = x0 + level0.shape[4] as f64; // X extent
+            let y1 = y0 + level0.shape[3] as f64; // Y extent
+            min[0] = min[0].min(x0);
+            min[1] = min[1].min(y0);
+            max[0] = max[0].max(x1);
+            max[1] = max[1].max(y1);
+            any = true;
+        }
+
+        if any { Some((min, max)) } else { None }
+    }
+
+    /// Frame the named dataset's full extent in the current camera, **dispatching
+    /// on the camera mode** so each mode is fed bounds in the coordinate space it
+    /// actually uses:
+    ///
+    /// - In 2D [`Camera::Slice`] mode the Slice camera works in **voxel** space,
+    ///   so it is framed with [`Self::dataset_voxel_bounds_2d`] (member XY +
+    ///   level-0 XY voxel extent) via [`Slice::fit_to_bounds`] with
+    ///   [`crate::framing::FIT_MARGIN_2D`]. Feeding it the normalized unit-cube
+    ///   bounds instead would center on ~`[0.5, 0.5]` and zoom onto a sub-pixel
+    ///   speck at the origin while the data sits at voxel `[0..width]`.
+    /// - In 3D ([`Camera::Arcball`]/[`Camera::Fly`]) modes the camera works in the
+    ///   **normalized** world space, so it keeps using
+    ///   [`Self::dataset_world_bounds`] via [`Camera::fit_to_bounds`] — the 3D
+    ///   path is unchanged.
+    ///
+    /// Returns `true` if it framed something, `false` if the dataset has no bounds
+    /// in the active space (unknown id / no members) — in which case the camera is
+    /// left untouched. The borrow is resolved by computing the bounds *before*
+    /// mutating the camera.
+    pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
+        if let Camera::Slice(_) = self.camera {
+            // 2D: the Slice camera lives in voxel space — frame the voxel AABB.
+            let Some((min, max)) = self.dataset_voxel_bounds_2d(dataset_id) else {
+                return false;
+            };
+            if let Camera::Slice(s) = &mut self.camera {
+                s.fit_to_bounds(min, max, crate::framing::FIT_MARGIN_2D);
+            }
+            true
+        } else {
+            // 3D (Arcball/Fly): the camera lives in normalized world space.
+            let Some((min, max)) = self.dataset_world_bounds(dataset_id) else {
+                return false;
+            };
+            self.camera.fit_to_bounds(min, max);
+            true
+        }
+    }
+
     /// Return aggregate bounds for all visible image members in scene XY space.
     pub fn visible_content_bounds_2d(&self) -> Option<VisibleContentBounds2D> {
         let mut bounds: Option<VisibleContentBounds2D> = None;
@@ -1917,5 +2113,353 @@ mod tests {
             ids.contains(&&ImageId("m2-image".into())),
             "m2 should be visible"
         );
+    }
+
+    // --- dataset_world_bounds / fit_camera_to_dataset (slice 2) ---
+
+    #[test]
+    fn dataset_world_bounds_is_some_and_finite_for_known_id() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min, max) = scene
+            .dataset_world_bounds("ds1")
+            .expect("known dataset has bounds");
+        for v in min.iter().chain(max.iter()) {
+            assert!(v.is_finite(), "non-finite bound leaked: {v}");
+        }
+        // Properly ordered, non-degenerate in XY (256x256 footprint, isotropic).
+        assert!(min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2]);
+        assert!(
+            max[0] > min[0] && max[1] > min[1],
+            "XY extent should be > 0"
+        );
+    }
+
+    #[test]
+    fn dataset_world_bounds_none_for_unknown_id() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert!(scene.dataset_world_bounds("nope").is_none());
+    }
+
+    #[test]
+    fn dataset_world_bounds_frames_each_dataset_not_the_union() {
+        // A single image at the origin plus a 2-well plate offset along X. The
+        // single dataset's box must be its OWN footprint, never the union that
+        // would also include the offset plate well.
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("a", "a", 1)).into(),
+        );
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "b",
+                "b",
+                vec![("b-m1", [0.0, 0.0]), ("b-m2", [256.0, 0.0])],
+                [1, 1, 1, 256, 256],
+                [1, 1, 1, 256, 256],
+            ))
+            .into(),
+        );
+
+        let (a_min, a_max) = scene.dataset_world_bounds("a").expect("a has bounds");
+        let (b_min, b_max) = scene.dataset_world_bounds("b").expect("b has bounds");
+
+        // Each frames its own dataset → different boxes.
+        assert!(
+            a_min != b_min || a_max != b_max,
+            "per-dataset bounds must differ for differently-placed datasets"
+        );
+        // The plate spans two wells along X, so it is wider than the single image.
+        let a_width = a_max[0] - a_min[0];
+        let b_width = b_max[0] - b_min[0];
+        assert!(
+            b_width > a_width + 1e-9,
+            "plate width {b_width} should exceed single-image width {a_width}"
+        );
+        // Crucially, "a" must NOT have grown to the union: its max-x stays near
+        // its own footprint, well short of the offset plate's far edge.
+        assert!(
+            a_max[0] < b_max[0] - 1e-9,
+            "dataset_world_bounds('a') leaked the union (max-x {} vs plate max-x {})",
+            a_max[0],
+            b_max[0]
+        );
+    }
+
+    #[test]
+    fn dataset_world_bounds_matches_member_world_matrix_corners() {
+        // The bounds must be exactly the AABB of the SAME per-member world matrix
+        // the renderer/minimap use — no second, drifting path.
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "p",
+                "p",
+                vec![("p-m1", [0.0, 0.0]), ("p-m2", [256.0, 128.0])],
+                [1, 1, 4, 256, 256],
+                [1, 1, 4, 256, 256],
+            ))
+            .into(),
+        );
+
+        let mut expected = crate::framing::Aabb::empty();
+        let derived = scene
+            .derived
+            .get(&DatasetId("p".into()))
+            .expect("derived state");
+        for member in &derived.members {
+            let vt = VolumeTransform {
+                model: scene.member_world_matrix(member),
+                inv_model: [0.0; 16],
+                max_physical_extent: 1.0,
+            };
+            for corner in vt.world_corners() {
+                expected.add_point(corner);
+            }
+        }
+
+        let (min, max) = scene.dataset_world_bounds("p").expect("p has bounds");
+        assert_eq!(min, expected.min);
+        assert_eq!(max, expected.max);
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_centers_slice_on_voxel_xy_midpoint() {
+        // The Slice camera lives in VOXEL space (see ray_pick), so the 2D fit must
+        // center on the VOXEL midpoint [W/2, H/2] — not the normalized unit-cube
+        // midpoint (~0.5) that dataset_world_bounds yields for the 3D arcball.
+        // Centering on ~0.5 would frame a sub-pixel speck at the origin while the
+        // data sits at voxel [0..W] — the auto-fit bug this slice fixes.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256 XY
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min2, max2) = scene
+            .dataset_voxel_bounds_2d("ds1")
+            .expect("known dataset has voxel bounds");
+        let mid_x = (min2[0] + max2[0]) / 2.0;
+        let mid_y = (min2[1] + max2[1]) / 2.0;
+
+        assert!(scene.fit_camera_to_dataset("ds1"));
+        match &scene.camera {
+            Camera::Slice(s) => {
+                assert!(
+                    (s.center[0] - mid_x).abs() < 1e-9 && (s.center[1] - mid_y).abs() < 1e-9,
+                    "2D center {:?} should be the VOXEL XY midpoint ({mid_x}, {mid_y})",
+                    s.center
+                );
+                // Sanity: this is the voxel midpoint of a 256x256 footprint, NOT
+                // the normalized ~[0.5, 0.5] the buggy path produced.
+                assert!(
+                    (s.center[0] - 128.0).abs() < 1e-9 && (s.center[1] - 128.0).abs() < 1e-9,
+                    "2D center {:?} should be [128, 128] (256/2), not normalized ~[0.5, 0.5]",
+                    s.center
+                );
+            }
+            other => panic!("expected a Slice camera, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_targets_midpoint_in_3d_with_valid_clip() {
+        let mut scene = Scene::new([800, 600]);
+        // Put the camera in 3D arcball mode first; the fit must preserve it.
+        scene.camera = Camera::new_3d([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min, max) = scene.dataset_world_bounds("ds1").unwrap();
+        let mid = [
+            (min[0] + max[0]) / 2.0,
+            (min[1] + max[1]) / 2.0,
+            (min[2] + max[2]) / 2.0,
+        ];
+
+        assert!(scene.fit_camera_to_dataset("ds1"));
+        match &scene.camera {
+            Camera::Arcball(a) => {
+                for (axis, &m) in mid.iter().enumerate() {
+                    assert!(
+                        (a.target[axis] - m).abs() < 1e-9,
+                        "arcball target[{axis}] {} != midpoint {m}",
+                        a.target[axis],
+                    );
+                }
+                assert!(
+                    a.distance.is_finite() && a.distance > 0.0,
+                    "distance {}",
+                    a.distance
+                );
+                assert!(
+                    a.near.is_finite() && a.far.is_finite() && 0.0 < a.near && a.near < a.far,
+                    "clip range near {} far {}",
+                    a.near,
+                    a.far
+                );
+            }
+            other => panic!("expected an Arcball camera, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_unknown_id_returns_false_and_leaves_camera_unchanged() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let before = scene.camera.clone();
+        assert!(!scene.fit_camera_to_dataset("ghost"));
+        assert_eq!(
+            scene.camera, before,
+            "camera must be untouched on no-bounds"
+        );
+    }
+
+    // --- dataset_voxel_bounds_2d / mode-aware fit (slice 2) ---
+
+    #[test]
+    fn dataset_voxel_bounds_2d_is_origin_to_voxel_extent() {
+        // A single image of shape [1,1,Z,H,W] at the default origin placement
+        // must yield voxel bounds [0,0]..[W,H] — exactly the AABB the slice-mode
+        // ray pick / chunk culling test against (X = shape[4], Y = shape[3]).
+        let mut scene = Scene::new([800, 600]);
+        let (w, h) = (2048u64, 2048u64);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 16, h, w],
+            [1, 1, 1, 256, 256],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min, max) = scene
+            .dataset_voxel_bounds_2d("ds1")
+            .expect("known dataset has voxel bounds");
+        for v in min.iter().chain(max.iter()) {
+            assert!(v.is_finite(), "non-finite voxel bound leaked: {v}");
+        }
+        assert!(
+            min[0] <= max[0] && min[1] <= max[1],
+            "bounds must be ordered"
+        );
+        assert_eq!(min, [0.0, 0.0], "min should be the origin placement");
+        assert_eq!(
+            max,
+            [w as f64, h as f64],
+            "max should be the level-0 X/Y voxel extent"
+        );
+    }
+
+    #[test]
+    fn dataset_voxel_bounds_2d_none_for_unknown_id() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert!(scene.dataset_voxel_bounds_2d("nope").is_none());
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_2d_puts_data_on_screen_in_voxel_space() {
+        // The core fix: in 2D the fit must center on the VOXEL midpoint [W/2, H/2]
+        // (NOT the normalized ~[0.5, 0.5] that the 3D bounds produce) and the
+        // resulting world_bounds() must CONTAIN the full voxel footprint
+        // [0,0,W,H] — i.e. the data is actually visible, not a speck at the origin.
+        let (vw, vh) = (1280u32, 800u32);
+        let (w, h) = (2048u64, 2048u64);
+        let mut scene = Scene::new([vw, vh]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 16, h, w],
+            [1, 1, 1, 256, 256],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        scene.camera = Camera::new_2d([vw, vh]);
+        assert!(scene.fit_camera_to_dataset("ds1"));
+
+        match &scene.camera {
+            Camera::Slice(s) => {
+                assert!(
+                    (s.center[0] - w as f64 / 2.0).abs() < 1e-9
+                        && (s.center[1] - h as f64 / 2.0).abs() < 1e-9,
+                    "2D center {:?} should be the voxel midpoint [{}, {}]",
+                    s.center,
+                    w as f64 / 2.0,
+                    h as f64 / 2.0,
+                );
+                // world_bounds() = [min_x, min_y, max_x, max_y] must contain the
+                // whole footprint, so the data is on-screen with margin to spare.
+                let [bx0, by0, bx1, by1] = s.world_bounds();
+                assert!(
+                    bx0 <= 0.0 && by0 <= 0.0 && bx1 >= w as f64 && by1 >= h as f64,
+                    "visible world_bounds {:?} must contain the footprint [0,0,{w},{h}]",
+                    [bx0, by0, bx1, by1],
+                );
+            }
+            other => panic!("expected a Slice camera, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_3d_path_is_unchanged_and_uses_normalized_bounds() {
+        // The 3D dispatch must still frame the NORMALIZED unit-cube bounds via
+        // dataset_world_bounds: the arcball target is the normalized midpoint
+        // (~[0.5, 0.5, ..]) with a positive distance — proving the 3D path was
+        // left intact while only 2D became voxel-aware.
+        let (vw, vh) = (1280u32, 800u32);
+        let mut scene = Scene::new([vw, vh]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 16, 2048, 2048],
+            [1, 1, 1, 256, 256],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min3, max3) = scene
+            .dataset_world_bounds("ds1")
+            .expect("known dataset has normalized bounds");
+        let mid = [
+            (min3[0] + max3[0]) / 2.0,
+            (min3[1] + max3[1]) / 2.0,
+            (min3[2] + max3[2]) / 2.0,
+        ];
+
+        scene.camera = Camera::new_3d([vw, vh]);
+        assert!(scene.fit_camera_to_dataset("ds1"));
+
+        match &scene.camera {
+            Camera::Arcball(a) => {
+                for (axis, &m) in mid.iter().enumerate() {
+                    assert!(
+                        (a.target[axis] - m).abs() < 1e-9,
+                        "arcball target[{axis}] {} should be the normalized midpoint {m}",
+                        a.target[axis],
+                    );
+                }
+                // Normalized space → the XY midpoint is ~0.5, decidedly not voxel.
+                assert!(
+                    a.target[0] < 2.0 && a.target[1] < 2.0,
+                    "3D target {:?} should be normalized (~0.5), not voxel (~1024)",
+                    a.target,
+                );
+                assert!(
+                    a.distance.is_finite() && a.distance > 0.0,
+                    "distance {} should be finite and positive",
+                    a.distance,
+                );
+            }
+            other => panic!("expected an Arcball camera, got {other:?}"),
+        }
     }
 }
