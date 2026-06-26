@@ -199,6 +199,7 @@ function App({
   const savedViewHooksRef = useRef<{
     onDatasetOpened: (id: string) => void;
     onOpenDatasetFailed: (url: string, err: string) => void;
+    isInProgress: () => boolean;
   } | null>(null);
 
   // Domain hooks (order matters: earlier hooks use refs for later hooks' values).
@@ -371,6 +372,9 @@ function App({
   savedViewHooksRef.current = {
     onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
     onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
+    // So the bridge can suppress auto-fit-on-open while a saved/last view is
+    // restoring its own camera (#700).
+    isInProgress: () => savedViewSync.applier.isInProgress(),
   };
 
   const datasets = useDatasets({

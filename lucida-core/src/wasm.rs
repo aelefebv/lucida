@@ -120,6 +120,24 @@ impl WasmScene {
         Ok(())
     }
 
+    /// Frame the named dataset's full world extent in the main viewport,
+    /// preserving the current camera mode (2D stays 2D, 3D stays 3D). This is the
+    /// "auto-fit on open" entry point the web bridge calls for a freshly-opened
+    /// dataset; bumping the view epoch (exactly as pan/zoom/rotate do) makes the
+    /// viewport redraw with the new framing. Returns `Err` if the dataset has no
+    /// bounds (unknown id / no members), leaving the camera unchanged so the
+    /// caller can ignore it without side effects.
+    pub fn fit_camera_to_dataset_bounds(&mut self, dataset_id: &str) -> Result<(), JsError> {
+        if self.inner.fit_camera_to_dataset(dataset_id) {
+            self.inner.epochs.view += 1;
+            Ok(())
+        } else {
+            Err(JsError::new(&format!(
+                "no world bounds to fit for dataset '{dataset_id}'"
+            )))
+        }
+    }
+
     // --- Mode switching ---
 
     pub fn set_mode_slice(&mut self) {
@@ -403,6 +421,10 @@ impl WasmScene {
 
     /// Returns the model matrix for a specific member of a dataset,
     /// with the member's position offset baked into the translation.
+    ///
+    /// The placement math is owned by `Scene::member_world_matrix` (non-gated, so
+    /// the minimap and the camera auto-fit share the exact same world boxes); this
+    /// only resolves the member by id and delegates.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
         let identity = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -420,67 +442,7 @@ impl WasmScene {
             Some(m) => m,
             None => return identity,
         };
-        let level0 = match member.levels.first() {
-            Some(l) => l,
-            None => return identity,
-        };
-
-        let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 {
-            t.max_physical_extent
-        } else {
-            1.0
-        };
-        let vol_shape = [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ];
-        let fov_shape = vol_shape;
-
-        // Recover voxel scale from volume transform
-        let scale_x = if fov_shape[2] > 0 {
-            t.model[0] as f64 * max_phys / fov_shape[2] as f64
-        } else {
-            1.0
-        };
-        let scale_y = if fov_shape[1] > 0 {
-            t.model[5] as f64 * max_phys / fov_shape[1] as f64
-        } else {
-            1.0
-        };
-        let scale_z = if fov_shape[0] > 0 {
-            t.model[10] as f64 * max_phys / fov_shape[0] as f64
-        } else {
-            1.0
-        };
-
-        // Flip Y offset for 3D (Y-up convention)
-        let flipped_offset = [
-            member.position[0],
-            vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64,
-        ];
-        let mt = crate::transform::compute_member_transform(
-            fov_shape,
-            [scale_z, scale_y, scale_x],
-            flipped_offset,
-            max_phys,
-        );
-
-        // Apply global correction for multi-dataset scenes
-        let global_max = self.inner.global_max_physical_extent();
-        let correction = (max_phys / global_max) as f32;
-        let mut m = mt.model;
-        m[0] *= correction;
-        m[5] *= correction;
-        m[10] *= correction;
-        m[12] *= correction;
-        m[13] *= correction;
-        // Top-align
-        let phys_y = t.model[5] as f64 * max_phys;
-        let global_max_y = self.inner.global_max_physical_y();
-        m[13] += ((global_max_y - phys_y) / global_max) as f32;
-        m.to_vec()
+        self.inner.member_world_matrix(member).to_vec()
     }
 
     /// Returns the inverse model matrix for a specific member of a dataset.
@@ -1192,12 +1154,9 @@ impl WasmScene {
             for member in &derived.members {
                 // Model matrix is scale+translate (diagonal); the framing helper
                 // reads mat[0]/[5]/[10] (scale) and mat[12]/[13]/[14] (translate).
-                let mat = self.member_model_matrix(&ds_id.0, &member.entity_id.0);
-                if mat.len() >= 16 {
-                    let mut arr = [0.0f32; 16];
-                    arr.copy_from_slice(&mat[..16]);
-                    members.push((arr, visible));
-                }
+                // Shared with the renderer + auto-fit via `Scene::member_world_matrix`.
+                let mat = self.inner.member_world_matrix(member);
+                members.push((mat, visible));
             }
         }
 
