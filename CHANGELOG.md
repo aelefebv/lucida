@@ -226,3 +226,4 @@
 - feat(explore): Python pyo3 explore surface + shared default-view in lucida-core (slipway, reversible: git-revert)
 - feat(explore): web Explore panel + wasm-export the generator (slipway, reversible: git-revert)
 - feat(explore): enriched mode-aware move-set (elevation/time/channel/projection) (slipway, reversible: git-revert)
+- feat(explore): rendered preview thumbnails in the Explore panel (slipway, reversible: git-revert)
