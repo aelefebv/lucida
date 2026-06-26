@@ -221,3 +221,8 @@
 - fix(server): decode blosc per-block raw-stored (uncompressed) blocks (slipway, reversible: git-revert)
 - refactor(core): single-source member world-placement via rendering_transform (slipway, reversible: git-revert)
 - feat(collab): auto-fit a dataset on open only for the client that opened it (slipway, reversible: git-revert)
+- feat(explore): add pure mode-aware view-transform generator (lucida-core) (slipway, reversible: git-revert)
+- feat(explore): add `dataset explore` CLI command (JSON plan + contact-sheet) (slipway, reversible: git-revert)
+- feat(explore): Python pyo3 explore surface + shared default-view in lucida-core (slipway, reversible: git-revert)
+- feat(explore): web Explore panel + wasm-export the generator (slipway, reversible: git-revert)
+- feat(explore): enriched mode-aware move-set (elevation/time/channel/projection) (slipway, reversible: git-revert)

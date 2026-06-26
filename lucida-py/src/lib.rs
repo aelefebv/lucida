@@ -1,14 +1,18 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::wrap_pyfunction;
 
 use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
+use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{DisplayState, Scene};
 use lucida_core::view::ViewState;
+use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
 
 #[pyclass]
 struct PyScene {
@@ -33,8 +37,8 @@ impl PyScene {
     }
 
     fn apply_command(&mut self, json: &str) -> PyResult<()> {
-        let cmd: Command =
-            serde_json::from_str(json).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let cmd: Command = serde_json::from_str(json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         self.inner.apply(cmd);
         Ok(())
     }
@@ -169,16 +173,24 @@ impl PyScene {
     }
 
     fn dataset_ids(&self) -> String {
-        let ids: Vec<&str> = self.inner.document.manifests.keys().map(|id| id.0.as_str()).collect();
+        let ids: Vec<&str> = self
+            .inner
+            .document
+            .manifests
+            .keys()
+            .map(|id| id.0.as_str())
+            .collect();
         serde_json::to_string(&ids).unwrap()
     }
 
     fn dataset_name(&self, id: &str) -> String {
-        self.inner.document.manifests.get(&DatasetId(id.to_string()))
+        self.inner
+            .document
+            .manifests
+            .get(&DatasetId(id.to_string()))
             .map(|cg| cg.name.clone())
             .unwrap_or_default()
     }
-
 }
 
 #[pyclass]
@@ -204,9 +216,12 @@ impl PyStore {
     fn read_metadata(&self, name: &str) -> PyResult<String> {
         let store = self.store.clone();
         let name = name.to_string();
-        let result = self.runtime.block_on(async {
-            lucida_store::import::import_dataset(&store, "temp-id", &name).await
-        }).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let result = self
+            .runtime
+            .block_on(async {
+                lucida_store::import::import_dataset(&store, "temp-id", &name).await
+            })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
         let json = serde_json::to_string(&result)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -217,16 +232,54 @@ impl PyStore {
     fn read_chunk(&self, path: &str) -> PyResult<Vec<u8>> {
         let store = self.store.clone();
         let obj_path = object_store::path::Path::from(path);
-        let bytes = self.runtime.block_on(async {
-            store.get(&obj_path).await?.bytes().await
-        }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let bytes = self
+            .runtime
+            .block_on(async { store.get(&obj_path).await?.bytes().await })
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         Ok(bytes.to_vec())
     }
+}
+
+/// Plan a guided-exploration step for a dataset, returning a serialized
+/// `ExplorationSidecar` (JSON string).
+///
+/// `dims` is the dataset shape `(T, C, Z, Y, X)`; `viewport` is `(width,
+/// height)`. With `view_json = None` the exploration starts from the dataset's
+/// Home view (a 3D Arcball for a volume, a 2D Slice for a flat image, framed to
+/// the full extent); pass a `SavedView` JSON string to descend from an explicit
+/// view (e.g. a child cell's `view` from a previous call). `depth` and
+/// `breadcrumb` are stamped on the returned current node so a stateless caller
+/// can keep an honest trail across calls.
+///
+/// This is the same pure engine the CLI's `dataset explore` and the web panel
+/// use; the cells carry full `view` objects (URLs are deferred to higher tiers).
+#[pyfunction]
+#[pyo3(signature = (ds_id, dims, viewport, view_json=None, depth=0, breadcrumb=None))]
+fn explore(
+    ds_id: &str,
+    dims: (u64, u64, u64, u64, u64),
+    viewport: (u32, u32),
+    view_json: Option<&str>,
+    depth: u32,
+    breadcrumb: Option<Vec<String>>,
+) -> PyResult<String> {
+    let dims = [dims.0, dims.1, dims.2, dims.3, dims.4];
+    let vp = [viewport.0, viewport.1];
+    let extent = ViewExtent::from_dims(dims);
+    let current = match view_json {
+        Some(j) => serde_json::from_str::<SavedView>(j)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        None => default_view(ds_id, dims, vp),
+    };
+    let sidecar =
+        ExplorationSidecar::build(&current, &extent, depth, breadcrumb.unwrap_or_default());
+    serde_json::to_string(&sidecar).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 #[pymodule]
 fn lucida(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScene>()?;
     m.add_class::<PyStore>()?;
+    m.add_function(wrap_pyfunction!(explore, m)?)?;
     Ok(())
 }

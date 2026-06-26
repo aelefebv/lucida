@@ -21,6 +21,7 @@ import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx"
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
+import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { bumpSettingsGeneration } from "./tickCommon.ts";
@@ -52,6 +53,7 @@ import {
   getWorkspaceSharing,
   getWorkspaceUserState,
   updateWorkspaceLastView,
+  createWorkspaceSavedView,
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import "./App.css";
@@ -78,6 +80,21 @@ interface AppProps {
    *  browser and navigate into it (#697). Mirrors the dashboard entry point so
    *  the "create workspace from selection" action is reachable from both. */
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
+}
+
+/** Whether the page loaded into a specific saved view / annotation rather than a
+ *  bare workspace open: a `#view=` inline payload, a `#b=<id>` saved view, or a
+ *  `#a=<id>` annotation deep-link in the URL hash. Used to decide the Explore
+ *  panel's INITIAL open state (closed when restoring such a view, open otherwise).
+ *  SSR-safe: a missing `window`/`location` reads as "no deep-link". */
+function hasSavedViewDeepLink(): boolean {
+  if (typeof window === "undefined") return false;
+  const hash = window.location.hash;
+  return (
+    hash.includes("#view=") ||
+    hash.includes("#b=") ||
+    hash.includes("#a=")
+  );
 }
 
 function App({
@@ -923,9 +940,54 @@ function App({
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
+  // Default the Explore panel OPEN on a fresh dataset open so a first-timer finds
+  // the guided-exploration affordance — but stay CLOSED when the page loads into a
+  // specific saved view / annotation (a `#view=` inline payload, a `#b=<id>` saved
+  // view, or a `#a=<id>` annotation deep-link): that visitor came for that exact
+  // frame, not to be nudged elsewhere. It remains a user toggle either way.
+  const [showExplorePanel, setShowExplorePanel] = useState(
+    () => !hasSavedViewDeepLink(),
+  );
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
+
+  // The first VISIBLE dataset (falling back to the first loaded layer) is what
+  // the Explore panel points its guided-exploration at: its id + name for the
+  // header, and its `[T, C, Z, Y, X]` shape so the generator can frame Home and
+  // gate dimensional moves. Recomputed from the live layer list + dataset map.
+  const exploreTarget = useMemo((): {
+    id: string | null;
+    name: string | null;
+    dims: Dims | null;
+  } => {
+    const first =
+      layers.layerInfos.find((l) => l.visible) ?? layers.layerInfos[0] ?? null;
+    if (!first) return { id: null, name: null, dims: null };
+    // datasetsRef holds the live Map; datasetsVersion (in the deps) is the
+    // React-side bumper that re-runs this memo whenever it mutates, so reading
+    // .current here sees the latest manifest. Same render-time ref read as
+    // buildLayerInfos / useDimensions.
+    // eslint-disable-next-line react-hooks/refs
+    const ds = datasetsRef.current.get(first.id);
+    const shape = ds?.manifest.images[0]?.multiscale.levels[0]?.shape;
+    const dims: Dims | null =
+      shape && shape.length >= 5
+        ? [shape[0], shape[1], shape[2], shape[3], shape[4]]
+        : null;
+    return { id: first.id, name: first.name, dims };
+    // datasetsVersion drives the re-render that surfaces datasetsRef mutations.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers.layerInfos, datasetsVersion]);
+
+  // Bookmark from the Explore panel: an ephemeral PERSONAL workspace saved view
+  // (guided exploration never auto-shares). Thin wrapper over the workspace API
+  // so the panel doesn't need to mount the full saved-views list hook.
+  const handleExploreBookmark = useCallback(
+    (name: string, view: SavedView, visibility: "personal") =>
+      createWorkspaceSavedView(workspaceId, name, view, visibility),
+    [workspaceId],
+  );
 
   // Active layout name for the default saved-view name.
   // Falls back to null when no dataset/layout is selected.
@@ -974,6 +1036,20 @@ function App({
   const handleActiveSavedViewInvalidated = useCallback((savedViewId: string) => {
     setCurrentOpenSavedViewId((prev) => (prev === savedViewId ? null : prev));
   }, []);
+
+  // Descend into a guided-exploration candidate (or Home/Back) from the Explore
+  // panel: this is a deliberate navigation, so break peer-follow first, then
+  // apply the view and co-tap the URL/last-view sync. Distinct from
+  // handleOpenWorkspaceSavedView because there is no saved-view id to flag as
+  // the active row (an explored view is ephemeral until bookmarked).
+  const applyExploreView = useCallback(
+    async (view: SavedView) => {
+      bridge.breakFollow();
+      await savedViewApplier.apply(view);
+      notifySavedViewChange();
+    },
+    [bridge, savedViewApplier, notifySavedViewChange],
+  );
 
   const commitWorkspaceName = useCallback(() => {
     const next = workspaceNameDraft.trim();
@@ -1497,6 +1573,20 @@ function App({
           >
             Saved Views
           </button>
+          <button
+            onClick={() => setShowExplorePanel((v) => !v)}
+            title={showExplorePanel ? "Hide the Explore panel" : "Suggest next views to explore"}
+            data-testid="explore-toggle"
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              background: showExplorePanel ? "#646cff" : undefined,
+              color: showExplorePanel ? "#fff" : undefined,
+            }}
+          >
+            Explore
+          </button>
         </div>
         {showFileBrowser && (
           <FileBrowser
@@ -1532,6 +1622,20 @@ function App({
         currentOpenSavedViewId={currentOpenSavedViewId}
         onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
         visible={showBookmarkSidebar}
+        style={{ width: 280, minWidth: 280, height: "100vh" }}
+      />
+      <ExplorationPanel
+        visible={showExplorePanel}
+        captureBuilder={savedViewSync.captureBuilder}
+        applyView={applyExploreView}
+        createSavedView={handleExploreBookmark}
+        datasetId={exploreTarget.id}
+        datasetName={exploreTarget.name}
+        dims={exploreTarget.dims}
+        viewport={[
+          render.canvasRef.current?.clientWidth ?? 800,
+          render.canvasRef.current?.clientHeight ?? 600,
+        ]}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />
       <WorkspaceSharingDialog

@@ -14,6 +14,7 @@ pub mod saved_view;
 pub mod scene;
 pub mod transform;
 pub mod view;
+pub mod view_transform;
 pub mod wasm_log;
 
 pub use epoch::SceneEpochs;
