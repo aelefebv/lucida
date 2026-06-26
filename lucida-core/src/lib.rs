@@ -4,6 +4,7 @@ pub mod chunk;
 pub mod command;
 pub mod cursor;
 pub mod epoch;
+pub mod framing;
 pub(crate) mod mat4;
 pub mod minimap;
 pub mod protocol;
