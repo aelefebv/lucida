@@ -17,7 +17,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
-import { shouldAutoFitOnOpen } from "./autoFit.ts";
+import { shouldAutoFitOnOpen, isOpenerOf } from "./autoFit.ts";
 
 /** Callback ref the SavedView applier registers into so it sees the
  * relevant lifecycle events without useBridge importing applier types
@@ -101,6 +101,13 @@ export function useBridge({
   const [sessionReady, setSessionReady] = useState(false);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
+  // Mirror myId into a ref for the long-lived `onCommand` handler: it is
+  // registered once (inside the connection effect) and would otherwise capture
+  // the initial `myId` of 0, never matching the server-stamped opener id and so
+  // suppressing the opener's own auto-fit. The ref always holds the latest id.
+  const myIdRef = useRef<ClientId>(0);
+  // eslint-disable-next-line react-hooks/refs
+  myIdRef.current = myId;
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
   // Mirror followTarget state into a ref for handlers that read it
   // outside their declaration closure (RAF loops, websocket callbacks).
@@ -169,6 +176,12 @@ export function useBridge({
           const scene = ensureScene();
           scene.load_document(documentJson);
           setMyId(yourId);
+          // Sync the ref synchronously too (not just via the per-render mirror)
+          // so a `dataset_opened` processed in the same tick as a snapshot can
+          // never read a stale self-id when deriving `isOpener`. (Safe to write
+          // here without a rules-of-hooks disable: this runs in an event
+          // callback, not during render.)
+          myIdRef.current = yourId;
 
           const peerMap = new Map<ClientId, PresenceState>();
           for (const peer of snapshotPeers) {
@@ -310,20 +323,32 @@ export function useBridge({
             setWasmScene(scene);
             // Auto-fit the camera to the freshly-opened dataset so it lands
             // centered and fully in view (2D + 3D). `dataset_opened` is a
-            // BROADCAST that runs on every co-present peer; the broadcast id is a
-            // random server-minted `wds-…` with no opener id, so we can't tell
-            // the opener from a bystander (see `shouldAutoFitOnOpen`). We gate on
-            // the two unambiguously-wrong cases instead:
+            // BROADCAST that runs on every co-present peer, so we frame ONLY for
+            // the client that opened it: the server stamps the broadcast with
+            // `opener_client_id` and we fit only when it matches our own id.
+            // (See `shouldAutoFitOnOpen` for the full gate.) We additionally
+            // suppress the two camera-owning cases:
             //   - !restoreInProgress: a saved/last view restoring its camera
             //     wins (#700);
             //   - !following: a follower stays glued to the leader's camera.
-            // The fit itself is best-effort and wrapped so a failure (e.g. a
-            // dataset with no bounds yet) can never break the open.
+            // `isOpener` reads myIdRef (not the captured `myId`, which this
+            // long-lived handler would pin to its initial 0). The server sends
+            // the `your_id` snapshot as a client's FIRST message, before any
+            // CommandBroadcast, so by the time a `dataset_opened` is handled
+            // myIdRef holds our real id — id 0 is a legitimate first-client id
+            // here, NOT a sentinel to exclude (the single-user opener is often
+            // client 0). When the broadcast carries no opener id (older server),
+            // `isOpener` is false and no one fits — fail-safe, never a stray
+            // reframe. The fit itself is best-effort and wrapped so a failure
+            // (e.g. a dataset with no bounds yet) can never break the open.
             const openedDatasetId = cmd.manifest.dataset_id;
+            const isOpener = isOpenerOf(cmd.opener_client_id, myIdRef.current);
             const restoreInProgress =
               savedViewHooksRef?.current?.isInProgress?.() ?? false;
             const following = followTargetRef.current !== null;
-            if (shouldAutoFitOnOpen(cmd.type, { restoreInProgress, following })) {
+            if (
+              shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })
+            ) {
               try {
                 // Untyped call: the wasm export may predate the regenerated
                 // bindings, so reach it structurally rather than via the type.
@@ -345,6 +370,7 @@ export function useBridge({
             } else {
               bridgeLog("auto_fit_on_open.suppressed", {
                 datasetId: openedDatasetId,
+                isOpener,
                 restoreInProgress,
                 following,
               });

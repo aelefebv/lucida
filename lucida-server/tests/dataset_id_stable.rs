@@ -350,5 +350,6 @@ fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
         manifest,
         fetch,
         catalog: lucida_protocol::AssetCatalog::default(),
+        opener_client_id: None,
     }
 }

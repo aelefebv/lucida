@@ -219,3 +219,5 @@
 - fix(core): clear all dataset-id-keyed fields on remove_dataset; unify the traversal (slipway, reversible: git-revert)
 - fix(server): decode blosc non-filter-aligned trailing blocks (slipway, reversible: git-revert)
 - fix(server): decode blosc per-block raw-stored (uncompressed) blocks (slipway, reversible: git-revert)
+- refactor(core): single-source member world-placement via rendering_transform (slipway, reversible: git-revert)
+- feat(collab): auto-fit a dataset on open only for the client that opened it (slipway, reversible: git-revert)

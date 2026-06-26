@@ -196,6 +196,7 @@ fn make_binding(url: &str) -> ServerBinding {
             }],
         }),
         catalog: AssetCatalog::default(),
+        opener_client_id: None,
     };
     let proxy_cache = Arc::new(ProxyCache::new_disabled(
         std::path::PathBuf::from("/dev/null"),

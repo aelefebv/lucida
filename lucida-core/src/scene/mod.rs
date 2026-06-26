@@ -215,87 +215,27 @@ impl Scene {
     /// the multi-dataset global normalization (`global_max_physical_extent`), and
     /// the 3D top-alignment (`global_max_physical_y`).
     ///
-    /// This is the **single source** of member world placement: the wasm
-    /// renderer's `member_model_matrix`, the minimap's framing, and
-    /// [`Self::dataset_world_bounds`] all derive their world boxes from this one
-    /// function, so the auto-fit can never drift from what is actually drawn.
-    /// A member with no levels yields the identity matrix (matching the renderer's
-    /// fallback), so callers can fold it in without a special case.
+    /// This is a **thin wrapper** over the single source of member world
+    /// placement, [`Self::rendering_transform`]: it returns that transform's
+    /// forward `model`. The wasm renderer's `member_model_matrix`, the minimap's
+    /// framing, and [`Self::dataset_world_bounds`] all route through here, so the
+    /// auto-fit can never drift from what is actually drawn. A member with no
+    /// levels yields the identity matrix (matching the renderer's fallback), so
+    /// callers can fold it in without a special case.
     pub fn member_world_matrix(&self, member: &MemberState) -> [f32; 16] {
-        let identity = [
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ];
-        let Some(level0) = member.levels.first() else {
-            return identity;
-        };
-
-        let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 {
-            t.max_physical_extent
-        } else {
-            1.0
-        };
-        let vol_shape = [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ];
-        let fov_shape = vol_shape;
-
-        // Recover voxel scale from the volume transform.
-        let scale_x = if fov_shape[2] > 0 {
-            t.model[0] as f64 * max_phys / fov_shape[2] as f64
-        } else {
-            1.0
-        };
-        let scale_y = if fov_shape[1] > 0 {
-            t.model[5] as f64 * max_phys / fov_shape[1] as f64
-        } else {
-            1.0
-        };
-        let scale_z = if fov_shape[0] > 0 {
-            t.model[10] as f64 * max_phys / fov_shape[0] as f64
-        } else {
-            1.0
-        };
-
-        // Flip the Y offset for 3D (Y-up convention).
-        let flipped_offset = [
-            member.position[0],
-            vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64,
-        ];
-        let mt = transform::compute_member_transform(
-            fov_shape,
-            [scale_z, scale_y, scale_x],
-            flipped_offset,
-            max_phys,
-        );
-
-        // Global correction for multi-dataset scenes.
-        let global_max = self.global_max_physical_extent();
-        let correction = (max_phys / global_max) as f32;
-        let mut m = mt.model;
-        m[0] *= correction;
-        m[5] *= correction;
-        m[10] *= correction;
-        m[12] *= correction;
-        m[13] *= correction;
-        // Top-align.
-        let phys_y = t.model[5] as f64 * max_phys;
-        let global_max_y = self.global_max_physical_y();
-        m[13] += ((global_max_y - phys_y) / global_max) as f32;
-        m
+        self.rendering_transform(member).0.model
     }
 
     /// World-space axis-aligned bounds (`(min, max)`) of **a single dataset's**
     /// members — never the union across datasets — so the caller can frame the
     /// newly-opened dataset alone.
     ///
-    /// Each member's unit-cube corners are transformed by
-    /// [`Self::member_world_matrix`] (the exact matrix the renderer/minimap use)
-    /// and folded into a [`framing::Aabb`]. Returns `None` for an unknown id or a
-    /// dataset whose members contribute no box (none with levels) — that is the
-    /// "nothing to frame" signal [`Self::fit_camera_to_dataset`] checks.
+    /// Each member's unit-cube corners are transformed by the renderer's own
+    /// forward transform ([`Self::rendering_transform`], the exact matrix the
+    /// renderer/minimap use) and folded into a [`framing::Aabb`]. Returns `None`
+    /// for an unknown id or a dataset whose members contribute no box (none with
+    /// levels) — that is the "nothing to frame" signal
+    /// [`Self::fit_camera_to_dataset`] checks.
     pub fn dataset_world_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
@@ -305,13 +245,7 @@ impl Scene {
             if member.levels.is_empty() {
                 continue;
             }
-            let matrix = self.member_world_matrix(member);
-            let vt = VolumeTransform {
-                model: matrix,
-                inv_model: [0.0; 16],
-                max_physical_extent: 1.0,
-            };
-            for corner in vt.world_corners() {
+            for corner in self.rendering_transform(member).0.world_corners() {
                 aabb.add_point(corner);
             }
         }
@@ -1305,6 +1239,7 @@ pub(crate) mod test_helpers {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 
@@ -1409,6 +1344,7 @@ pub(crate) mod test_helpers {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 
@@ -1531,6 +1467,7 @@ pub(crate) mod test_helpers {
             manifest,
             fetch,
             catalog: AssetCatalog::default(),
+            opener_client_id: None,
         }
     }
 }
@@ -2225,6 +2162,167 @@ mod tests {
         let (min, max) = scene.dataset_world_bounds("p").expect("p has bounds");
         assert_eq!(min, expected.min);
         assert_eq!(max, expected.max);
+    }
+
+    /// `member_world_matrix` is now a thin wrapper over `rendering_transform`
+    /// (the single source — what is actually drawn). Assert it returns the
+    /// forward `model` element-for-element, across a single dataset, an
+    /// XY-offset member, and a multi-dataset scene, so the wrapper can never
+    /// drift from the render path.
+    #[test]
+    fn member_world_matrix_equals_rendering_transform_forward_model() {
+        let mut scene = Scene::new([800, 600]);
+        // Config 1: a single dataset at the origin (256x256 footprint).
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("solo", "solo", 1))
+                .into(),
+        );
+        // Config 2 + 3: a second, multi-member dataset — one well at the origin
+        // and one with a non-trivial XY offset + anisotropic footprint.
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "plate",
+                "plate",
+                vec![("plate-m1", [0.0, 0.0]), ("plate-m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 4, 200, 256],
+            ))
+            .into(),
+        );
+
+        let mut members_seen = 0;
+        for ds in ["solo", "plate"] {
+            let derived = scene
+                .derived
+                .get(&DatasetId(ds.into()))
+                .expect("derived state");
+            for member in &derived.members {
+                let wrapper = scene.member_world_matrix(member);
+                let canonical = scene.rendering_transform(member).0.model;
+                for i in 0..16 {
+                    assert!(
+                        (wrapper[i] - canonical[i]).abs() < 1e-6,
+                        "member_world_matrix drifted from rendering_transform at \
+                         element {i}: {} vs {} (dataset {ds})",
+                        wrapper[i],
+                        canonical[i],
+                    );
+                }
+                members_seen += 1;
+            }
+        }
+        // Guard the test itself: we really exercised ≥3 member configs.
+        assert!(
+            members_seen >= 3,
+            "expected at least 3 members across the configs, saw {members_seen}"
+        );
+    }
+
+    /// The forward and inverse halves of `rendering_transform` must compose to
+    /// the identity (within fp epsilon) — picking/upload run the inverse, the
+    /// render runs the forward, so a broken round-trip would desync them. Check
+    /// it for an offset, anisotropic member inside a multi-dataset scene (the
+    /// hardest case: non-zero translation + global correction + top-align).
+    #[test]
+    fn rendering_transform_forward_inverse_round_trips_to_identity() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("a", "a", 1)).into(),
+        );
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "b",
+                "b",
+                vec![("b-m1", [0.0, 0.0]), ("b-m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 4, 200, 256],
+            ))
+            .into(),
+        );
+
+        // Multiply two column-major 4x4 matrices: returns a*b.
+        let mul = |a: &[f32; 16], b: &[f32; 16]| -> [f32; 16] {
+            let mut out = [0.0f32; 16];
+            for col in 0..4 {
+                for row in 0..4 {
+                    let mut sum = 0.0f32;
+                    for k in 0..4 {
+                        sum += a[k * 4 + row] * b[col * 4 + k];
+                    }
+                    out[col * 4 + row] = sum;
+                }
+            }
+            out
+        };
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+
+        for ds in ["a", "b"] {
+            let derived = scene
+                .derived
+                .get(&DatasetId(ds.into()))
+                .expect("derived state");
+            for member in &derived.members {
+                let (fwd, inv) = scene.rendering_transform(member);
+                let composed = mul(&fwd.model, &inv.inv_model);
+                for i in 0..16 {
+                    assert!(
+                        (composed[i] - identity[i]).abs() < 1e-5,
+                        "model · inv_model not identity at element {i}: {} \
+                         (expected {}) for dataset {ds}",
+                        composed[i],
+                        identity[i],
+                    );
+                }
+            }
+        }
+    }
+
+    /// `dataset_world_bounds` is folded directly from
+    /// `rendering_transform(member).0.world_corners()`. Assert it returns finite,
+    /// sensible bounds that match recomputing that exact fold — the same AABB the
+    /// renderer's transform yields, with no second, drifting derivation.
+    #[test]
+    fn dataset_world_bounds_equals_rendering_transform_corner_fold() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "p",
+                "p",
+                vec![("p-m1", [0.0, 0.0]), ("p-m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 4, 200, 256],
+            ))
+            .into(),
+        );
+
+        let mut expected = crate::framing::Aabb::empty();
+        let derived = scene
+            .derived
+            .get(&DatasetId("p".into()))
+            .expect("derived state");
+        for member in &derived.members {
+            if member.levels.is_empty() {
+                continue;
+            }
+            for corner in scene.rendering_transform(member).0.world_corners() {
+                expected.add_point(corner);
+            }
+        }
+
+        let (min, max) = scene.dataset_world_bounds("p").expect("p has bounds");
+        // Folded from the same source → identical, and finite/non-degenerate.
+        assert_eq!(min, expected.min);
+        assert_eq!(max, expected.max);
+        for v in min.iter().chain(max.iter()) {
+            assert!(v.is_finite(), "non-finite bound leaked: {v}");
+        }
+        assert!(min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2]);
+        assert!(
+            max[0] > min[0] && max[1] > min[1],
+            "XY extent should be > 0"
+        );
     }
 
     #[test]
