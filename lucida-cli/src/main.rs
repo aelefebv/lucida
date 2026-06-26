@@ -22,9 +22,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use lucida_core::DatasetId;
+use lucida_core::camera::Camera;
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::SavedView;
-use lucida_core::scene::{BlendMode, Colormap, RenderMode};
+use lucida_core::scene::{BlendMode, Colormap, DatasetDisplaySettings, RenderMode};
+use lucida_core::view::ViewState;
+use lucida_core::view_transform::{ExplorationSidecar, ViewExtent};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -582,6 +586,43 @@ enum DatasetCommand {
         #[arg(long, default_value_t = 320)]
         cell_px: u32,
         /// Also write a JSON sidecar at <out>.json
+        #[arg(long)]
+        json: bool,
+        /// Seconds to wait for the workspace snapshot and each render
+        #[arg(long, default_value_t = 30)]
+        timeout_seconds: u64,
+    },
+    /// Plan a guided-exploration step from a view: enumerate the sensible next
+    /// moves (Home / rotate / zoom / step Z) as re-openable child views. Prints
+    /// a typed `ExplorationSidecar` (each cell carrying a `#view=` drill-in URL)
+    /// and, with --out, renders a labeled contact sheet of the children. Omit
+    /// --view to start from the dataset's Home view; re-invoke with a child's
+    /// `view` to descend.
+    Explore {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// Current view as `SavedView` JSON — inline, `-` for stdin, or
+        /// `@<path>` for a file. Omit to start from the dataset's Home view.
+        #[arg(long, value_name = "JSON|-|@FILE")]
+        view: Option<String>,
+        /// Exploration depth to stamp on the printed sidecar's current node.
+        /// An agent walking deep passes its own running depth so the trail is
+        /// honest across these stateless calls (the command can't infer it).
+        #[arg(long, default_value_t = 0)]
+        depth: u32,
+        /// Comma-separated breadcrumb of move labels taken to reach this view,
+        /// stamped on the current node. Likewise agent-supplied for an honest
+        /// trail across stateless calls. Empty by default.
+        #[arg(long, default_value = "")]
+        breadcrumb: String,
+        /// PNG output path for the children contact sheet. Omit to skip render
+        /// (the JSON sidecar is always printed).
+        #[arg(long)]
+        out: Option<String>,
+        /// Per-cell thumbnail size in pixels (square)
+        #[arg(long, default_value_t = 320)]
+        cell_px: u32,
+        /// Also write the JSON sidecar at <out>.json (or <dataset>.json)
         #[arg(long)]
         json: bool,
         /// Seconds to wait for the workspace snapshot and each render
@@ -2203,6 +2244,156 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     human
                 })?;
             }
+            DatasetCommand::Explore {
+                dataset,
+                view,
+                depth,
+                breadcrumb,
+                out,
+                cell_px,
+                json,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let wait = Duration::from_secs(*timeout_seconds);
+                let dataset_client =
+                    DatasetWorkspaceClient::new(target.ws_url.clone(), token.clone());
+                let (_seq, info) = dataset_client.info(dataset, wait).await?;
+                let dims = info.summary.dimensions.ok_or_else(|| {
+                    CliError::new(ErrorKind::Protocol, "dataset has no dimensions to explore")
+                })?;
+                let ds_id = info.summary.workspace_dataset_id.clone();
+
+                let extent = explore_extent(dims);
+                let viewport = [*cell_px, *cell_px];
+
+                // Current view: parse the caller's `--view` (the "descend" path,
+                // accepting inline JSON / stdin `-` / `@file` so the loop closes
+                // hands-free), else synthesize the dataset's Home view (a 3D
+                // Arcball for a volume so rotate cells appear; a 2D Slice for a
+                // flat image).
+                let current = match view {
+                    Some(raw) => read_view_arg(raw)?,
+                    None => default_explore_view(&ds_id, dims, viewport),
+                };
+
+                // depth/breadcrumb are agent-supplied passthrough: the command is
+                // stateless across calls and can't know how deep this walk is, so
+                // stamp exactly what the caller reports rather than a lie.
+                let breadcrumb_trail: Vec<String> = breadcrumb
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let mut sidecar =
+                    ExplorationSidecar::build(&current, &extent, *depth, breadcrumb_trail);
+
+                // Fill each cell's interactive drill-in URL (clean `#view=`, no
+                // render chrome) so an agent/human can open or re-explore it.
+                for cell in sidecar.cells.iter_mut() {
+                    cell.url = Some(viewer_inline_view_web_url(&target, &cell.view)?);
+                }
+
+                // The PNG (when --out) and the sidecar JSON (when --json) share
+                // the same output directory, so create it up front. Doing it here
+                // — not inside the render's Ok arm — means a best-effort render
+                // failure can't take the `<out>.json` write down with it (ENOENT).
+                if let Some(out) = out
+                    && let Some(parent) = Path::new(out).parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+
+                // Render a labeled contact sheet of the children only when asked.
+                // Best-effort: a render failure logs and leaves the JSON sidecar
+                // (the primary output) intact rather than failing the command.
+                if let Some(out) = out {
+                    match render_explore_contact_sheet(
+                        &target,
+                        &sidecar,
+                        token.as_ref(),
+                        *cell_px,
+                        wait,
+                    )
+                    .await
+                    {
+                        Ok(png) => tokio::fs::write(out, &png).await?,
+                        Err(error) => {
+                            eprintln!("warning: skipped explore contact sheet render: {error}");
+                        }
+                    }
+                }
+
+                // Emit the typed sidecar enriched with the orientation an agent
+                // needs without the PNG: the dataset id, the dataset extent, and
+                // each cell's destination z/t/c (so it can rank/orient with no
+                // cursor). The typed ExplorationSidecar fields are preserved — we
+                // only add keys to the serialized Value (montage-style).
+                let mut output_value = serde_json::to_value(&sidecar)?;
+                if let Some(obj) = output_value.as_object_mut() {
+                    obj.insert("dataset".to_string(), serde_json::json!(ds_id));
+                    obj.insert(
+                        "extent".to_string(),
+                        serde_json::json!({
+                            "z_count": extent.z_count,
+                            "t_count": extent.t_count,
+                            "c_count": extent.c_count,
+                        }),
+                    );
+                    if let Some(serde_json::Value::Array(cells)) = obj.get_mut("cells") {
+                        for (cell, src) in cells.iter_mut().zip(sidecar.cells.iter()) {
+                            if let Some(cell_obj) = cell.as_object_mut() {
+                                cell_obj
+                                    .insert("z".to_string(), src.view.view.z_range.start.into());
+                                cell_obj.insert("t".to_string(), src.view.view.t.into());
+                                cell_obj.insert("c".to_string(), src.view.view.c.into());
+                            }
+                        }
+                    }
+                }
+
+                let json_path = match out {
+                    Some(out) => format!("{out}.json"),
+                    None => format!("{dataset}.json"),
+                };
+                if *json {
+                    tokio::fs::write(&json_path, serde_json::to_vec_pretty(&output_value)?).await?;
+                }
+
+                let cell_count = sidecar.cells.len();
+                let depth = sidecar.current.depth;
+                let handle = sidecar.current.handle.clone();
+                let labels: Vec<String> = sidecar.cells.iter().map(|c| c.label.clone()).collect();
+                let (out_written, json_written) = (out.clone(), *json);
+                output.print_either(&output_value, || {
+                    let mut human = format!(
+                        "Exploration from {handle} (depth {depth}): {cell_count} next step(s)"
+                    );
+                    for label in &labels {
+                        human.push_str(&format!("\n  - {label}"));
+                    }
+                    if let Some(out) = &out_written {
+                        human.push_str(&format!("\nContact sheet: {out}"));
+                    }
+                    if json_written {
+                        human.push_str(&format!("\nSidecar: {json_path}"));
+                    }
+                    human
+                })?;
+            }
         },
         Command::View {
             viewer_profile,
@@ -3269,6 +3460,132 @@ fn viewer_profile_web_url(target: &WorkspaceTarget, profile: &str) -> Result<Str
         .map_err(|error| CliError::invalid_server(format!("invalid workspace URL: {error}")))?;
     url.query_pairs_mut().append_pair("viewer_profile", profile);
     Ok(url.to_string())
+}
+
+/// Resolve a `--view` argument's raw JSON text from its source, honoring the
+/// slice-1 `<json | - | @file>` contract: `-` reads stdin, `@<path>` reads the
+/// file at `path`, and anything else is treated as inline JSON. Split out from
+/// [`read_view_arg`] so the dispatch (inline / `@file`) is unit-testable without
+/// a live stdin.
+fn read_view_source(raw: &str) -> Result<String, CliError> {
+    if raw == "-" {
+        use std::io::Read as _;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).map_err(|error| {
+            CliError::config(format!("failed to read --view from stdin: {error}"))
+        })?;
+        Ok(buf)
+    } else if let Some(path) = raw.strip_prefix('@') {
+        std::fs::read_to_string(path).map_err(|error| {
+            CliError::config(format!("failed to read --view file {path:?}: {error}"))
+        })
+    } else {
+        Ok(raw.to_string())
+    }
+}
+
+/// Parse `SavedView` JSON text, mapping a decode failure to a config error.
+/// Pure (no I/O) so the parse path is unit-testable directly.
+fn parse_saved_view_json(json: &str) -> Result<SavedView, CliError> {
+    serde_json::from_str::<SavedView>(json)
+        .map_err(|error| CliError::new(ErrorKind::Config, format!("invalid --view JSON: {error}")))
+}
+
+/// Resolve a `--view` argument to a [`SavedView`]: read its source
+/// ([`read_view_source`] — inline / stdin `-` / `@file`) then parse it
+/// ([`parse_saved_view_json`]). This is the descend path's entry point and lets
+/// the loop close hands-free (an agent pipes a child view back in via stdin or a
+/// file rather than inlining ~700 bytes of JSON on the command line).
+fn read_view_arg(raw: &str) -> Result<SavedView, CliError> {
+    parse_saved_view_json(&read_view_source(raw)?)
+}
+
+/// Build the guided-exploration [`ViewExtent`] for a dataset shape `[T,C,Z,Y,X]`.
+///
+/// The world-space box spans the full image in X/Y and the Z stack in depth;
+/// the `*_count` fields carry the non-spatial axis sizes the move-set gates on
+/// (a flat `z_count <= 1` dataset offers no slice-step cells). Pure — used by
+/// the handler and unit-tested directly.
+fn explore_extent(dims: [u64; 5]) -> ViewExtent {
+    let full_x = dims[4];
+    let full_y = dims[3];
+    let z_count = dims[2] as u32;
+    let t_count = dims[0] as u32;
+    let c_count = dims[1] as u32;
+    ViewExtent {
+        min: [0.0, 0.0, 0.0],
+        max: [full_x as f64, full_y as f64, z_count as f64],
+        z_count,
+        t_count,
+        c_count,
+    }
+}
+
+/// Synthesize the dataset's "Home" view — the exploration root when the caller
+/// gives no `--view`.
+///
+/// A volume (`z_count > 1`) opens in a 3D Arcball so the orbit/azimuth cells are
+/// offered; a flat image opens in a 2D Slice. Either way the camera is framed to
+/// the dataset's full extent ([`Camera::fit_to_bounds`] is mode-preserving), the
+/// dataset is made visible (auto-contrast on, with a default display-settings
+/// entry — mirroring the montage None-contrast branch), and the view sits on the
+/// mid-Z single slice. Pure — used by the handler and unit-tested directly.
+fn default_explore_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedView {
+    let extent = explore_extent(dims);
+    let z_count = extent.z_count;
+
+    let mut view = SavedView::empty(viewport);
+    let id = DatasetId(ds_id.to_string());
+    view.dataset_order = vec![id.clone()];
+    // Make the dataset visible: a default display-settings entry (an absent
+    // entry would otherwise reset the colormap) plus auto-contrast on, exactly
+    // as the montage cell view does in its None-contrast branch.
+    view.dataset_settings
+        .insert(id.clone(), DatasetDisplaySettings::default());
+    view.auto_contrast.insert(id, true);
+
+    // Start on a single mid-stack slice (so a StepZ in either direction is in
+    // range on a volume); a flat dataset collapses to z 0..1 anyway.
+    let z0 = z_count / 2;
+    view.view = ViewState {
+        z_range: z0..z0 + 1,
+        ..ViewState::new()
+    };
+
+    // Volume → 3D Arcball Home (rotate cells appear); flat → 2D Slice Home.
+    view.camera = if z_count > 1 {
+        Camera::new_3d(viewport)
+    } else {
+        Camera::new_2d(viewport)
+    };
+    view.camera.fit_to_bounds(extent.min, extent.max);
+
+    view
+}
+
+/// Render a labeled contact sheet of an exploration's child cells, reusing the
+/// montage capture + stitch path. Each cell is captured through the chrome-free
+/// render surface ([`montage::with_render_param`]) and laid out in a near-square
+/// grid (capped at 4 columns) with the move label burned in. Returns the encoded
+/// PNG bytes; the caller writes the file.
+async fn render_explore_contact_sheet(
+    target: &WorkspaceTarget,
+    sidecar: &ExplorationSidecar,
+    token: Option<&EffectiveToken>,
+    cell_px: u32,
+    wait: Duration,
+) -> Result<Vec<u8>, CliError> {
+    let mut urls: Vec<String> = Vec::with_capacity(sidecar.cells.len());
+    for cell in &sidecar.cells {
+        urls.push(montage::with_render_param(&viewer_inline_view_web_url(
+            target, &cell.view,
+        )?));
+    }
+    let labels: Vec<String> = sidecar.cells.iter().map(|c| c.label.clone()).collect();
+    let cols = ((sidecar.cells.len() as f64).sqrt().ceil() as u32).clamp(1, 4);
+    let pngs = capture_montage_pngs(&urls, token, cell_px, cell_px, wait).await?;
+    montage::stitch_grid(&pngs, &labels, cols)
+        .map_err(|message| CliError::new(ErrorKind::Protocol, message))
 }
 
 fn viewer_inline_view_web_url(
@@ -4828,6 +5145,156 @@ mod tests {
             }
             _ => panic!("expected dataset retry"),
         }
+    }
+
+    #[test]
+    fn dataset_explore_parses_product_shape() {
+        let cli = parse(&[
+            "dataset",
+            "explore",
+            "wds-1",
+            "--view",
+            "{\"v\":1}",
+            "--depth",
+            "3",
+            "--breadcrumb",
+            "Home (fit dataset),Rotate right 45°",
+            "--out",
+            "kids.png",
+            "--cell-px",
+            "256",
+            "--json",
+            "--timeout-seconds",
+            "15",
+        ]);
+
+        match cli.command {
+            Command::Dataset {
+                command:
+                    DatasetCommand::Explore {
+                        dataset,
+                        view,
+                        depth,
+                        breadcrumb,
+                        out,
+                        cell_px,
+                        json,
+                        timeout_seconds,
+                    },
+            } => {
+                assert_eq!(dataset, "wds-1");
+                assert_eq!(view.as_deref(), Some("{\"v\":1}"));
+                assert_eq!(depth, 3);
+                assert_eq!(breadcrumb, "Home (fit dataset),Rotate right 45°");
+                assert_eq!(out.as_deref(), Some("kids.png"));
+                assert_eq!(cell_px, 256);
+                assert!(json);
+                assert_eq!(timeout_seconds, 15);
+            }
+            _ => panic!("expected dataset explore"),
+        }
+    }
+
+    #[test]
+    fn dataset_explore_defaults_optional_args() {
+        // Bare form: only the dataset, everything else defaulted/absent.
+        let cli = parse(&["dataset", "explore", "wds-2"]);
+        match cli.command {
+            Command::Dataset {
+                command:
+                    DatasetCommand::Explore {
+                        dataset,
+                        view,
+                        depth,
+                        breadcrumb,
+                        out,
+                        cell_px,
+                        json,
+                        timeout_seconds,
+                    },
+            } => {
+                assert_eq!(dataset, "wds-2");
+                assert!(view.is_none());
+                assert_eq!(depth, 0);
+                assert!(breadcrumb.is_empty());
+                assert!(out.is_none());
+                assert_eq!(cell_px, 320);
+                assert!(!json);
+                assert_eq!(timeout_seconds, 30);
+            }
+            _ => panic!("expected dataset explore"),
+        }
+    }
+
+    #[test]
+    fn read_view_arg_dispatches_inline_and_at_file() {
+        // Inline JSON: parsed straight through.
+        let inline = serde_json::to_string(&SavedView::empty([800, 600])).unwrap();
+        let from_inline = read_view_arg(&inline).expect("inline view parses");
+        assert_eq!(from_inline, SavedView::empty([800, 600]));
+
+        // `@<path>`: read the same JSON from a file, parse identically. Uses a
+        // unique temp path so the test is hermetic (no stdin needed to exercise
+        // the dispatch).
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("lucida-explore-view-{}.json", std::process::id()));
+        std::fs::write(&path, &inline).unwrap();
+        let arg = format!("@{}", path.display());
+        let from_file = read_view_arg(&arg).expect("@file view parses");
+        assert_eq!(from_file, SavedView::empty([800, 600]));
+        let _ = std::fs::remove_file(&path);
+
+        // A missing `@file` is a config error, not a panic.
+        let missing = read_view_arg("@/no/such/lucida/view.json");
+        assert!(missing.is_err());
+        assert_eq!(missing.unwrap_err().kind, ErrorKind::Config);
+
+        // Malformed inline JSON is a config error.
+        let bad = read_view_arg("{not json");
+        assert!(bad.is_err());
+        assert_eq!(bad.unwrap_err().kind, ErrorKind::Config);
+    }
+
+    #[test]
+    fn explore_extent_from_dims() {
+        let extent = explore_extent([1, 2, 340, 512, 512]);
+        assert_eq!(extent.z_count, 340);
+        assert_eq!(extent.t_count, 1);
+        assert_eq!(extent.c_count, 2);
+        assert_eq!(extent.max, [512.0, 512.0, 340.0]);
+        assert_eq!(extent.min, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn default_explore_view_is_3d_for_volume() {
+        let view = default_explore_view("wds-1", [1, 1, 340, 512, 512], [800, 600]);
+        assert!(
+            matches!(view.camera, Camera::Arcball(_)),
+            "a volume should open in a 3D Arcball Home"
+        );
+        assert_eq!(view.dataset_order, vec![DatasetId("wds-1".to_string())]);
+        // Mid-stack single slice (340 / 2 = 170).
+        assert_eq!(view.view.z_range, 170..171);
+        // Dataset is made visible (auto-contrast on, default settings present).
+        assert_eq!(
+            view.auto_contrast.get(&DatasetId("wds-1".to_string())),
+            Some(&true)
+        );
+        assert!(
+            view.dataset_settings
+                .contains_key(&DatasetId("wds-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn default_explore_view_is_2d_for_flat() {
+        let view = default_explore_view("wds-1", [1, 3, 1, 1024, 1024], [800, 600]);
+        assert!(
+            matches!(view.camera, Camera::Slice(_)),
+            "a flat image should open in a 2D Slice Home"
+        );
+        // A flat dataset has a single slice at z 0.
+        assert_eq!(view.view.z_range, 0..1);
     }
 
     #[test]
