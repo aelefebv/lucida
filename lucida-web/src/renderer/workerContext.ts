@@ -39,7 +39,12 @@ export interface WorkerCtx {
   getDummyTexture(): GPUTexture;
   getDummy3DTexture(): GPUTexture;
   getOrCreateLUT(name: string): GPUTexture;
-  post(msg: WorkerToMainMessage): void;
+  /**
+   * Post a message to the main thread. `transfer` moves transferable objects
+   * (e.g. an `ImageBitmap` for a thumbnail reply) instead of structured-cloning
+   * them — omit it for plain messages.
+   */
+  post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;
   /** Recompute and post wanted-set delta after eviction. */
   postWantedSet(): void;
   /**

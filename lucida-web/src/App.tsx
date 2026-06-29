@@ -22,6 +22,7 @@ import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
+import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { bumpSettingsGeneration } from "./tickCommon.ts";
@@ -980,6 +981,43 @@ function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.layerInfos, datasetsVersion]);
 
+  // Preview-thumbnail renderer for the Explore panel's contact sheet. Builds a
+  // closure that turns a candidate child view into an off-screen render of the
+  // dataset's resident coarse overview from that view's camera (reusing the
+  // minimap render path; see exploreThumbnails.ts). Rebuilt when the target
+  // dataset changes; reads scene/client/datasets via refs at call time so it
+  // always sees the live state. Undefined when there's no dataset to preview, in
+  // which case the panel just shows label-only rows.
+  const requestThumbnail = useMemo(() => {
+    const id = exploreTarget.id;
+    if (!id) return undefined;
+    // The getters read `.current` lazily (at thumbnail-request time, never during
+    // render), the same deferred-ref idiom `useSavedViewSync` uses above — so
+    // these are not render-time ref reads despite the rule's heuristic.
+    /* eslint-disable react-hooks/refs */
+    return makeThumbnailRequester({
+      getScene: () => scene.wasmSceneRef.current,
+      getClient: () => render.clientRef.current,
+      getDatasets: () => datasetsRef.current,
+      datasetId: id,
+    });
+    /* eslint-enable react-hooks/refs */
+  }, [exploreTarget.id, scene.wasmSceneRef, render.clientRef]);
+
+  // While the Explore panel is open, ask the render loop to keep the per-dataset
+  // coarse overview textures uploaded (even if the minimap is hidden) so the
+  // thumbnails have something to draw. The loop tears nothing down on disable;
+  // it just stops re-seeding, so this is cheap to toggle with the panel.
+  useEffect(() => {
+    if (!showExplorePanel) return;
+    const loop = render.loopRef.current;
+    if (!loop) return;
+    loop.setThumbnailOverview(true);
+    return () => {
+      render.loopRef.current?.setThumbnailOverview(false);
+    };
+  }, [showExplorePanel, render.loopRef, render.activeLoop, datasetsVersion]);
+
   // Bookmark from the Explore panel: an ephemeral PERSONAL workspace saved view
   // (guided exploration never auto-shares). Thin wrapper over the workspace API
   // so the panel doesn't need to mount the full saved-views list hook.
@@ -1636,6 +1674,7 @@ function App({
           render.canvasRef.current?.clientWidth ?? 800,
           render.canvasRef.current?.clientHeight ?? 600,
         ]}
+        requestThumbnail={requestThumbnail}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
       />
       <WorkspaceSharingDialog

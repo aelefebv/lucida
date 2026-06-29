@@ -219,6 +219,64 @@ impl Camera {
         }
     }
 
+    /// GPU view matrices for an off-screen volume render at `viewport`:
+    /// `(inv_view_proj, eye, view_proj)` in the exact layout the volume
+    /// renderer's uniform buffer wants (the same triple
+    /// [`crate::scene::Scene::minimap_camera`] packs).
+    ///
+    /// The `viewport` argument overrides the camera's own viewport so a
+    /// caller can render a small thumbnail of a view whose stored camera was
+    /// sized for the full canvas — the aspect ratio comes from `viewport`,
+    /// not from `self`.
+    ///
+    /// 3D modes ([`Camera::Arcball`]/[`Camera::Fly`]) project their actual
+    /// orbit/fly view, so a rotated/elevated child camera renders the volume
+    /// from that angle. A 2D [`Camera::Slice`] has no perspective view of a
+    /// volume, so this synthesizes a front-on arcball that frames the unit
+    /// `[0,1]^3` cube — mirroring how the minimap always shows the volume even
+    /// while the main view is a 2D slice. This is the thumbnail analogue of
+    /// `minimap_camera`; the scene-level framing (target/distance from the
+    /// member boxes) is applied by the caller's transient descriptor model
+    /// matrix, exactly as in the minimap path.
+    pub fn gpu_view_matrices(&self, viewport: [u32; 2]) -> ([f32; 16], [f32; 3], [f32; 16]) {
+        let (vp_f64, eye) = match self {
+            Camera::Arcball(a) => {
+                let mut a = a.clone();
+                a.viewport = viewport;
+                (a.view_proj_f64(), a.eye_position())
+            }
+            Camera::Fly(f) => {
+                let mut f = f.clone();
+                f.viewport = viewport;
+                (f.view_proj_f64(), f.eye_position())
+            }
+            // A 2D slice can't render a perspective volume; frame the unit cube
+            // head-on so the thumbnail shows the same overview the minimap does.
+            Camera::Slice(_) => {
+                let a = Arcball {
+                    target: [0.5, 0.5, 0.5],
+                    theta: 0.0,
+                    phi: std::f64::consts::FRAC_PI_2,
+                    distance: 1.8,
+                    fov: std::f64::consts::FRAC_PI_4,
+                    viewport,
+                    near: 0.01,
+                    far: 100.0,
+                    clip_distance: 0.0,
+                    clip_mode: ClipMode::default(),
+                };
+                (a.view_proj_f64(), a.eye_position())
+            }
+        };
+        let inv = invert4_f32(vp_f64);
+        let mut view_proj = [0.0f32; 16];
+        for i in 0..16 {
+            view_proj[i] = vp_f64[i] as f32;
+        }
+        let eye_f32 = [eye[0] as f32, eye[1] as f32, eye[2] as f32];
+        (inv, eye_f32, view_proj)
+    }
+
     /// Projects a world-space point to screen-space pixel coordinates.
     /// Returns `None` if the point is behind the camera (3D modes only).
     pub fn project_to_screen(&self, world_point: [f64; 3]) -> Option<[f64; 2]> {
@@ -2449,5 +2507,60 @@ mod tests {
             frac_w < frac_h,
             "width fraction should be smaller: {frac_w}"
         );
+    }
+
+    // --- gpu_view_matrices (thumbnail / minimap off-screen render) ---
+
+    /// `view_proj * inv_view_proj` should be (near) identity — the inverse is
+    /// what the volume shader unprojects with, so a bad inverse means a blank
+    /// thumbnail.
+    fn assert_vp_inv_roundtrips(view_proj: [f32; 16], inv: [f32; 16]) {
+        let a: [f64; 16] = view_proj.map(|v| v as f64);
+        let b: [f64; 16] = inv.map(|v| v as f64);
+        let prod = mul4(a, b);
+        for r in 0..4 {
+            for c in 0..4 {
+                let expected = if r == c { 1.0 } else { 0.0 };
+                let got = prod[c * 4 + r];
+                assert!(
+                    (got - expected).abs() < 1e-3,
+                    "vp*inv[{r}][{c}] = {got}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_view_matrices_arcball_roundtrips_and_overrides_viewport() {
+        let mut a = Arcball::new([800, 600]);
+        a.target = [0.5, 0.5, 0.5];
+        a.theta = 0.7;
+        a.phi = 0.9;
+        let cam = Camera::Arcball(a.clone());
+        let (inv, eye, view_proj) = cam.gpu_view_matrices([140, 140]);
+        assert_vp_inv_roundtrips(view_proj, inv);
+        // Eye matches the arcball's own eye (matrices follow the child angle).
+        let want = a.eye_position();
+        for i in 0..3 {
+            assert!((eye[i] as f64 - want[i]).abs() < 1e-4, "eye[{i}]");
+        }
+        // The square thumbnail viewport (aspect 1) differs from the stored 4:3,
+        // so the projection must differ from the camera's own view_proj.
+        let own = a.view_proj();
+        let differs = (0..16).any(|i| (view_proj[i] - own[i]).abs() > 1e-4);
+        assert!(differs, "viewport override should change the projection");
+    }
+
+    #[test]
+    fn gpu_view_matrices_slice_frames_unit_cube_head_on() {
+        // A 2D slice has no perspective volume view; the helper synthesizes a
+        // front-on arcball framing [0,1]^3, so the eye sits in front of the cube
+        // center looking down -Z (theta=0, phi=pi/2 → eye.z = target.z + dist).
+        let cam = Camera::Slice(Slice::new([800, 600]));
+        let (inv, eye, view_proj) = cam.gpu_view_matrices([140, 140]);
+        assert_vp_inv_roundtrips(view_proj, inv);
+        assert!((eye[0] as f64 - 0.5).abs() < 1e-4, "eye x centered");
+        assert!((eye[1] as f64 - 0.5).abs() < 1e-4, "eye y centered");
+        assert!(eye[2] as f64 > 0.5, "eye sits in front of the cube on +Z");
     }
 }

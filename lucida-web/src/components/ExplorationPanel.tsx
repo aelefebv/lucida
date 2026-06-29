@@ -10,8 +10,17 @@
 // `WorkspaceSavedViewsSidebar`: it reads the current view via `captureBuilder`,
 // asks the generator for candidate next-steps, renders them as plain-language
 // clickable rows, and drives navigation through the callbacks App.tsx wires in.
-// Candidates are LABELLED ROWS, not rendered thumbnails — thumbnail rendering is
-// a deferred polish, called out in the slice plan.
+//
+// Each row also shows a small PREVIEW THUMBNAIL: a live off-screen render of that
+// candidate's child view, drawn by the worker from the dataset's already-resident
+// coarse overview texture (the same texture the minimap uploads) — no per-tile
+// iframe, no re-streaming. The render is requested through the `requestThumbnail`
+// prop (App.tsx wires it to `camera_matrices` → `client.thumbnailRender`), kept
+// out of this component so it stays trivially testable. Thumbnails are a pure
+// enhancement: they're lazy (only requested when a row scrolls into view),
+// concurrency-capped, and on any failure the row silently falls back to
+// label-only. A "Show previews" toggle (default on) turns the whole contact
+// sheet off.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { explore_view } from "lucida-core";
@@ -66,6 +75,15 @@ export interface ExplorationPanelProps {
   dims: Dims | null;
   /** Current viewport size in CSS px (for the synthesized Home camera). */
   viewport: readonly [number, number];
+  /**
+   * Render a small preview of `view` and resolve with the image (or `null` when
+   * one can't be produced yet — e.g. the coarse overview isn't resident — so the
+   * row falls back to label-only). `size` is the square edge in device pixels.
+   * Optional: when omitted (or it always resolves `null`), the panel simply
+   * shows label-only rows, exactly as before. App.tsx wires this to the wasm
+   * `camera_matrices` helper + the worker's `thumbnailRender`.
+   */
+  requestThumbnail?: (view: SavedView, size: number) => Promise<ImageBitmap | null>;
   style?: React.CSSProperties;
 }
 
@@ -148,6 +166,154 @@ function runExplore(
   return { sidecar: parsed as ExplorationSidecar };
 }
 
+/** Device-pixel edge of a preview thumbnail. ~140 CSS px (per the slice plan) at
+ *  DPR 1; the worker renders the coarse overview at this size, which is cheap and
+ *  angle-independent. Kept modest so the whole contact sheet stays snappy. */
+const THUMB_CSS_SIZE = 132;
+
+/** Max thumbnails rendered concurrently. The worker services them one at a time;
+ *  this just bounds how many in-flight requests we hand it so a long candidate
+ *  list (or fast scrolling) can't flood the worker queue. */
+const THUMB_CONCURRENCY = 3;
+
+/**
+ * A tiny concurrency limiter for thumbnail requests. `run` queues a task and
+ * resolves with its result; at most {@link THUMB_CONCURRENCY} run at once. A
+ * single instance is held per panel mount (in a ref) so all rows share one
+ * budget. This is the "small concurrency cap" the slice plan asks for — it keeps
+ * the worker from being handed dozens of renders at once when many rows enter the
+ * viewport together.
+ */
+class ThumbnailScheduler {
+  private active = 0;
+  private queue: Array<() => void> = [];
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = () => {
+        this.active++;
+        task().then(resolve, reject).finally(() => {
+          this.active--;
+          const next = this.queue.shift();
+          if (next) next();
+        });
+      };
+      if (this.active < THUMB_CONCURRENCY) start();
+      else this.queue.push(start);
+    });
+  }
+}
+
+/**
+ * One row's preview thumbnail. Mounts a placeholder, and only once it scrolls
+ * into view (IntersectionObserver) does it request a render through the shared
+ * scheduler. On success it paints the returned `ImageBitmap` into a small canvas;
+ * on `null`/error it renders nothing, leaving the row's label as the sole
+ * content — so a thumbnail failure can never break the row. Re-requests when the
+ * candidate's view identity (`viewKey`) changes.
+ */
+function ExploreThumbnail({
+  view,
+  viewKey,
+  request,
+  scheduler,
+}: {
+  view: SavedView;
+  viewKey: string;
+  request: (view: SavedView, size: number) => Promise<ImageBitmap | null>;
+  scheduler: ThumbnailScheduler;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const holderRef = useRef<HTMLDivElement>(null);
+  const [status, setStatus] = useState<"pending" | "ready" | "empty">("pending");
+
+  // Latest request closure read at fire time, so the observer effect can stay
+  // keyed only on the view identity (not re-subscribe when the parent re-renders
+  // and hands a fresh `request`/`scheduler` reference).
+  const requestRef = useRef(request);
+  // eslint-disable-next-line react-hooks/refs
+  requestRef.current = request;
+  const schedulerRef = useRef(scheduler);
+  // eslint-disable-next-line react-hooks/refs
+  schedulerRef.current = scheduler;
+
+  useEffect(() => {
+    const holder = holderRef.current;
+    if (!holder) return;
+    setStatus("pending");
+
+    let cancelled = false;
+    let fired = false;
+    const fire = () => {
+      if (fired || cancelled) return;
+      fired = true;
+      const dpr = typeof devicePixelRatio === "number" ? devicePixelRatio : 1;
+      const size = Math.max(1, Math.round(THUMB_CSS_SIZE * dpr));
+      void schedulerRef.current
+        .run(() => requestRef.current(view, size))
+        .then((bitmap) => {
+          if (cancelled) {
+            bitmap?.close?.();
+            return;
+          }
+          const canvas = canvasRef.current;
+          if (!bitmap || !canvas) {
+            setStatus("empty");
+            return;
+          }
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          const cctx = canvas.getContext("2d");
+          if (cctx) cctx.drawImage(bitmap, 0, 0);
+          bitmap.close?.();
+          setStatus("ready");
+        })
+        .catch(() => {
+          // Graceful fallback: a failed render leaves the label-only row.
+          if (!cancelled) setStatus("empty");
+        });
+    };
+
+    // IntersectionObserver may be absent in test envs — fall back to firing
+    // immediately so behavior (and tests) don't depend on it.
+    if (typeof IntersectionObserver === "undefined") {
+      fire();
+      return () => {
+        cancelled = true;
+      };
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            fire();
+            observer.disconnect();
+          }
+        }
+      },
+      { rootMargin: "100px" },
+    );
+    observer.observe(holder);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [view, viewKey]);
+
+  // `empty` collapses to nothing so the row is exactly the old label-only layout.
+  if (status === "empty") return null;
+  return (
+    <div
+      ref={holderRef}
+      className={`explore-thumb explore-thumb-${status}`}
+      data-testid="explore-thumb"
+      data-thumb-status={status}
+    >
+      <canvas ref={canvasRef} className="explore-thumb-canvas" />
+    </div>
+  );
+}
+
 export function ExplorationPanel({
   visible,
   captureBuilder,
@@ -157,10 +323,19 @@ export function ExplorationPanel({
   datasetName,
   dims,
   viewport,
+  requestThumbnail,
   style,
 }: ExplorationPanelProps) {
   const [cells, setCells] = useState<ExplorationCell[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // "Show previews" toggle (default on). When off, OR when no `requestThumbnail`
+  // is wired, the panel renders label-only rows exactly as before.
+  const [showPreviews, setShowPreviews] = useState(true);
+  // One shared concurrency budget for all rows' thumbnail requests, stable across
+  // re-renders so scrolling/refresh doesn't reset it. Lazy-initialized via
+  // useState (not a ref) so it's readable during render without a ref-read.
+  const [scheduler] = useState(() => new ThumbnailScheduler());
+  const thumbnailsOn = showPreviews && !!requestThumbnail;
   // Where-you-came-from stack of SavedViews, for the Back button. The stack
   // itself lives in a ref so the async handlers can push/pop it deterministically
   // (a value read from inside a setState updater is NOT guaranteed available on
@@ -445,6 +620,16 @@ export function ExplorationPanel({
         >
           Suggest views from here
         </button>
+        {requestThumbnail && (
+          <label className="explore-previews-toggle" data-testid="explore-previews-toggle">
+            <input
+              type="checkbox"
+              checked={showPreviews}
+              onChange={(e) => setShowPreviews(e.target.checked)}
+            />
+            Show previews
+          </label>
+        )}
       </div>
 
       {error && (
@@ -469,16 +654,28 @@ export function ExplorationPanel({
           <div
             role="listitem"
             key={cell.handle + cell.transform}
-            className="bookmark-row explore-cell"
+            className={`bookmark-row explore-cell${thumbnailsOn ? " explore-cell-has-thumb" : ""}`}
             data-testid="explore-cell"
             onClick={() => void descend(cell)}
           >
-            <div className="bookmark-row-top">
-              <span className="bookmark-name" title={cell.label}>
-                {cell.label}
-              </span>
+            {thumbnailsOn && requestThumbnail && (
+              <ExploreThumbnail
+                view={cell.view}
+                // The handle is the content address of the child view, so it
+                // changes exactly when the view (hence the thumbnail) should.
+                viewKey={cell.handle}
+                request={requestThumbnail}
+                scheduler={scheduler}
+              />
+            )}
+            <div className="explore-cell-text">
+              <div className="bookmark-row-top">
+                <span className="bookmark-name" title={cell.label}>
+                  {cell.label}
+                </span>
+              </div>
+              <div className="bookmark-row-meta explore-cell-transform">{cell.transform}</div>
             </div>
-            <div className="bookmark-row-meta explore-cell-transform">{cell.transform}</div>
           </div>
         ))}
       </div>

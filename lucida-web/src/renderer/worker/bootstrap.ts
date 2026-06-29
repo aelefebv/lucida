@@ -45,7 +45,7 @@ import { proxyDescriptorKey } from "../workerContext.ts";
  */
 export async function bootstrapWorker(
   canvas: OffscreenCanvas,
-  post: (msg: WorkerToMainMessage) => void,
+  post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
   const state = createInitialState();
