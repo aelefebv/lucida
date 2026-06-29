@@ -19,6 +19,11 @@ export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
 
+  /** Pending `thumbnailRender` requests, keyed by the id sent to the worker.
+   *  Resolved when the matching `thumbnailResult` arrives. */
+  private thumbnailPending = new Map<number, (bitmap: ImageBitmap | null) => void>();
+  private thumbnailSeq = 0;
+
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ChunksEvictedHandler | null = null;
   /**
@@ -63,6 +68,16 @@ export class RenderClient implements UploadClient {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
+    } else if (msg.type === "thumbnailResult") {
+      const resolve = this.thumbnailPending.get(msg.id);
+      if (resolve) {
+        this.thumbnailPending.delete(msg.id);
+        resolve(msg.bitmap);
+      } else if (msg.bitmap) {
+        // No waiter (e.g. the request was already settled/abandoned) — release
+        // the GPU-backed bitmap rather than leak it.
+        msg.bitmap.close();
+      }
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }
@@ -256,6 +271,27 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage({ type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH });
   }
 
+  /**
+   * Render one Explore-panel candidate thumbnail off-screen and resolve with the
+   * returned `ImageBitmap` (or `null` when no coarse overview is resident yet,
+   * so the caller can fall back to a label-only row). Reuses the minimap's
+   * overview textures + renderer; `layers` are the minimap per-member params and
+   * `invViewProj`/`eye` come from the child view's camera
+   * (`lucida-core::camera_matrices`). `size` is the square edge in device pixels.
+   */
+  thumbnailRender(
+    layers: MinimapLayerParams[],
+    invViewProj: Float32Array,
+    eye: Float32Array,
+    size: number,
+  ): Promise<ImageBitmap | null> {
+    const id = this.thumbnailSeq++;
+    return new Promise<ImageBitmap | null>((resolve) => {
+      this.thumbnailPending.set(id, resolve);
+      this.worker.postMessage({ type: "thumbnailRender", id, layers, invViewProj, eye, size });
+    });
+  }
+
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
     chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
@@ -307,6 +343,10 @@ export class RenderClient implements UploadClient {
   }
 
   destroy() {
+    // Settle any in-flight thumbnail requests so their promises don't hang
+    // after the worker is gone (the id-correlated path has no fire-and-forget).
+    for (const resolve of this.thumbnailPending.values()) resolve(null);
+    this.thumbnailPending.clear();
     this.worker.postMessage({ type: "destroy" });
     this.worker.terminate();
   }

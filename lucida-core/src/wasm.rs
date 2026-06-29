@@ -12,6 +12,38 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
 }
 
+/// GPU camera matrices for an off-screen render of an *arbitrary* camera, in the
+/// exact 35-float layout the volume renderer wants:
+/// `invViewProj[16] + eye[3] + viewProj[16]` — identical to
+/// [`WasmScene::minimap_camera`]'s output, so the worker's thumbnail path can
+/// reuse the same offscreen render the minimap uses.
+///
+/// `camera_json` is a serialized [`crate::camera::Camera`] (the `camera` field of
+/// a `SavedView`); `w`/`h` size the off-screen target (its aspect overrides the
+/// camera's stored viewport, which was sized for the full canvas). This is the
+/// thumbnail counterpart to `minimap_camera`: that one synthesizes an orbit
+/// camera from `(theta, phi)`, this one takes a fully-specified child camera and
+/// just reads its matrices via [`Camera::gpu_view_matrices`] — no matrix math is
+/// reimplemented here.
+///
+/// On a malformed `camera_json` it returns an **empty** `Vec` (length 0) rather
+/// than panicking; the JS caller treats `result.length === 0` as "skip this
+/// thumbnail" and falls back to the label-only row.
+#[wasm_bindgen]
+pub fn camera_matrices(camera_json: &str, w: f64, h: f64) -> Vec<f32> {
+    let camera: Camera = match serde_json::from_str(camera_json) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let viewport = [w.max(1.0) as u32, h.max(1.0) as u32];
+    let (inv_view_proj, eye, view_proj) = camera.gpu_view_matrices(viewport);
+    let mut out = Vec::with_capacity(35);
+    out.extend_from_slice(&inv_view_proj);
+    out.extend_from_slice(&eye);
+    out.extend_from_slice(&view_proj);
+    out
+}
+
 /// Push the JS-side enabled-category set into the WASM logger. Pass a
 /// comma-separated list (matches `localStorage.debug` format). Empty
 /// string disables all WASM logging.

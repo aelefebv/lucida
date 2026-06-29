@@ -86,10 +86,72 @@
   padding: 0.45rem 0.75rem 0.25rem;
 }
 
-/* Candidate rows are labelled (not thumbnails). The muted transform tag sits
-   under the plain-language label as a small machine-id hint. */
+/* The muted transform tag sits under the plain-language label as a small
+   machine-id hint. */
 .explore-cell-transform {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #777;
   font-size: 0.68rem;
+}
+
+/* "Show previews" toggle, sitting under the accent action on its own line so it
+   reads as a sheet-level option rather than a per-move button. */
+.explore-previews-toggle {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: #b9b9c6;
+  cursor: pointer;
+  user-select: none;
+}
+
+.explore-previews-toggle input {
+  cursor: pointer;
+}
+
+/* When a row carries a preview, lay the thumbnail beside the text as a compact
+   contact-sheet row. Without a thumbnail the row keeps the default stacked
+   layout, so a missing/failed preview degrades cleanly. */
+.explore-cell-has-thumb {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.explore-cell-text {
+  min-width: 0; /* let the label ellipsize next to the thumb */
+  flex: 1 1 auto;
+}
+
+/* The thumbnail box: a fixed square that holds the rendered overview. While a
+   render is in flight it shows a faint placeholder; once painted the canvas
+   fills it. A failed/empty render unmounts the box entirely (see the component),
+   so there's no broken-image state. */
+.explore-thumb {
+  flex: 0 0 auto;
+  width: 66px;
+  height: 66px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #15151c;
+  border: 1px solid #2a2a2a;
+}
+
+.explore-thumb-pending {
+  /* Subtle pulse so an in-flight tile reads as "loading", not "broken". */
+  animation: explore-thumb-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes explore-thumb-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.85; }
+}
+
+.explore-thumb-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }

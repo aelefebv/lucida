@@ -3,6 +3,7 @@ import type {
   MinimapInitMessage,
   MinimapRenderMessage,
   MinimapUploadOverviewChunksForLayerMessage,
+  ThumbnailRenderMessage,
 } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
@@ -26,6 +27,44 @@ let minimapContext: GPUCanvasContext | null = null;
 let minimapOffscreenPool: GPUTexture[] = [];
 let minimapPoolWidth = 0;
 let minimapPoolHeight = 0;
+
+// --- Thumbnail (Explore-panel contact-sheet) off-screen render state ---
+//
+// Thumbnails reuse the minimap's per-dataset coarse overview textures
+// (`minimapOverviewPerDataset`) + the shared volume renderer/compositor, but
+// draw to their own small pool and own `OffscreenCanvas`. We composite a single
+// thumbnail's layers onto that canvas, then `transferToImageBitmap()` to hand a
+// transferable image back to the main thread (the minimap, by contrast, owns a
+// canvas transferred from the DOM and never ships pixels back).
+//
+// The pool + canvas are square (one `size`); a size change rebuilds them. One
+// render is fully submitted + read back before the next, so a single-entry pool
+// and one canvas are enough — thumbnails are requested with a small concurrency
+// cap on the main thread and serviced one message at a time here.
+let thumbnailCanvas: OffscreenCanvas | null = null;
+let thumbnailContext: GPUCanvasContext | null = null;
+let thumbnailOffscreenPool: GPUTexture[] = [];
+let thumbnailPoolSize = 0;
+
+function ensureThumbnailTargets(ctx: WorkerCtx, size: number, count: number) {
+  if (size !== thumbnailPoolSize) {
+    for (const tex of thumbnailOffscreenPool) tex.destroy();
+    thumbnailOffscreenPool = [];
+    thumbnailPoolSize = size;
+    // The canvas is reconfigured (not just resized) so its backing store matches
+    // the new size; a fresh context keeps the configure() simple.
+    thumbnailCanvas = new OffscreenCanvas(size, size);
+    thumbnailContext = thumbnailCanvas.getContext("webgpu") as GPUCanvasContext;
+    thumbnailContext.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
+  }
+  if (thumbnailCanvas && (thumbnailCanvas.width !== size || thumbnailCanvas.height !== size)) {
+    thumbnailCanvas.width = size;
+    thumbnailCanvas.height = size;
+  }
+  while (thumbnailOffscreenPool.length < count) {
+    thumbnailOffscreenPool.push(createOffscreenTarget(ctx.device, size, size));
+  }
+}
 
 function ensureMinimapOffscreenPool(device: GPUDevice, count: number, w: number, h: number) {
   if (w !== minimapPoolWidth || h !== minimapPoolHeight) {
@@ -99,6 +138,69 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
   }
 }
 
+/**
+ * Render one Explore-panel candidate thumbnail off-screen and ship it back as an
+ * `ImageBitmap`. This is `handleMinimapRender` specialized for a small,
+ * read-back target: same coarse overview texture, same transient single-entity
+ * descriptor, same `renderTo` per layer + `composite`, but the destination is a
+ * private `OffscreenCanvas` we `transferToImageBitmap()` from.
+ *
+ * Renders only at the coarse overview LOD (the overview is the single resident,
+ * angle-independent volume), so off-axis child cameras cost no streaming. If no
+ * layer has a resident overview yet, replies with `bitmap: null` and the panel
+ * falls back to its label-only row.
+ */
+export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
+  const size = Math.max(1, Math.round(msg.size));
+
+  const renderer = ctx.getVolumeRenderer();
+  const comp = ctx.getCompositor();
+  ensureThumbnailTargets(ctx, size, msg.layers.length);
+
+  const renderedLayers: CompositeLayer[] = [];
+  for (const layer of msg.layers) {
+    const overview = minimapOverviewPerDataset.get(layer.datasetId);
+    if (!overview) continue;
+
+    const idx = renderedLayers.length;
+    // Same single-LOD overview draw as the minimap: reset proxy textures, bind
+    // the active channel's LUT before setVolume (setVolume rebuilds the bind
+    // group from the current LUT), then a transient descriptor so the shader
+    // reads this layer's model matrix + contrast/gamma over the full overview.
+    renderer.setProxyTextures(null, null);
+    renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
+    renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
+    renderer.setMatrices(msg.invViewProj, msg.eye);
+    renderer.setTransientDescriptor(
+      layer.modelMatrix, layer.invModelMatrix,
+      [overview.width, overview.height, overview.depth],
+      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
+    );
+    const layerEncoder = ctx.device.createCommandEncoder();
+    renderer.renderTo(thumbnailOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, size, size);
+    ctx.device.queue.submit([layerEncoder.finish()]);
+    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: "alpha" });
+  }
+
+  if (renderedLayers.length === 0 || !thumbnailContext || !thumbnailCanvas) {
+    // No resident overview for any layer → nothing to draw; let the panel keep
+    // the label-only row. (Reply is required so the pending promise resolves.)
+    ctx.post({ type: "thumbnailResult", id: msg.id, bitmap: null });
+    return;
+  }
+
+  const compEncoder = ctx.device.createCommandEncoder();
+  comp.composite(thumbnailContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
+  ctx.device.queue.submit([compEncoder.finish()]);
+
+  // Snapshot the composited canvas into a transferable ImageBitmap. The canvas
+  // is reused for the next thumbnail, so we must capture now (not transfer the
+  // canvas). transferToImageBitmap empties the canvas, which is fine — the next
+  // render clears it again.
+  const bitmap = thumbnailCanvas.transferToImageBitmap();
+  ctx.post({ type: "thumbnailResult", id: msg.id, bitmap }, [bitmap]);
+}
+
 export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUploadOverviewChunksForLayerMessage): void {
   const { datasetId, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
   let entry = minimapOverviewPerDataset.get(datasetId);
@@ -155,6 +257,16 @@ export function handleMinimapDestroy(): void {
     minimapContext.unconfigure();
     minimapContext = null;
   }
+  // Thumbnail off-screen render state shares the overview textures + renderer
+  // with the minimap, so it's torn down here too.
+  for (const tex of thumbnailOffscreenPool) tex.destroy();
+  thumbnailOffscreenPool = [];
+  thumbnailPoolSize = 0;
+  if (thumbnailContext) {
+    thumbnailContext.unconfigure();
+    thumbnailContext = null;
+  }
+  thumbnailCanvas = null;
 }
 
 export function removeMinimapResources(datasetId: string): void {
