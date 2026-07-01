@@ -1221,6 +1221,7 @@ pub(crate) mod test_helpers {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,
@@ -1326,6 +1327,7 @@ pub(crate) mod test_helpers {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,
@@ -1427,6 +1429,7 @@ pub(crate) mod test_helpers {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             });
 
             fetch_images.push(ProxiedImageSpec {

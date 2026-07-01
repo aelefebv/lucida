@@ -5,14 +5,47 @@
 
 use std::sync::Arc;
 
-use object_store::ObjectStore;
 use object_store::path::Path;
+use object_store::{GetOptions, GetRange, ObjectStore};
 use serde::Deserialize;
 
-use lucida_content::ChannelInfo;
 use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
+use lucida_content::{ChannelInfo, LabelColor, LabelMeta, LabelProperty};
 
 use crate::backend::StoreError;
+
+/// Tight byte cap for the `labels/zarr.json` LIST read. That group only carries
+/// the array of label group *names* (`attributes.ome.labels`), which is small
+/// even for hundreds of labels, so we never need to grow this. Bounding it hard
+/// keeps a hostile/corrupt list group from ballooning memory. A list larger
+/// than this comes back truncated and simply parses to fewer names (or none).
+pub(crate) const MAX_LABEL_LIST_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Initial byte cap for a label GROUP / LEVEL `zarr.json` read. A typical
+/// label sidecar is well under this, so the common case is a single bounded
+/// GET. When a legitimate large segmentation (e.g. tens of thousands of cells
+/// with per-value `colors`/`properties`) pushes the group `zarr.json` past
+/// this, the read comes back exactly this many bytes — a truncation signal —
+/// and we retry unbounded up to [`MAX_LABEL_METADATA_BYTES`] rather than
+/// silently dropping a valid group. See [`read_zarr_json_capped`].
+pub(crate) const LABEL_METADATA_INITIAL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Hard ceiling on a label GROUP / LEVEL `zarr.json` read. Untrusted metadata
+/// never grows memory past this even on a truncation retry; a `zarr.json`
+/// larger than this is treated as malformed and the group is skipped. Set high
+/// enough that a real large-mask sidecar (a 55k-cell `image-label` block with
+/// per-value colors + properties) fits comfortably, while still bounding a
+/// hostile producer.
+pub(crate) const MAX_LABEL_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Cap on the number of label group names we will consider from a single
+/// `labels/zarr.json`. Bounds work even if a producer lists an absurd count.
+pub(crate) const MAX_LABEL_NAMES: usize = 1024;
+
+/// Cap on `image-label.colors` / `image-label.properties` entries kept per
+/// label group. Extra entries beyond the cap are dropped; malformed entries
+/// within the cap are dropped individually.
+pub(crate) const MAX_LABEL_ENTRIES: usize = 65_536;
 
 /// Intermediate per-level metadata parsed from OME multiscales.
 #[derive(Debug, Clone)]
@@ -49,6 +82,212 @@ pub(crate) async fn read_zarr_json(
     let bytes = store.get(&Path::from(path)).await?.bytes().await?;
     serde_json::from_slice(&bytes)
         .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
+}
+
+/// Fetch at most `max_bytes` of an object, returning the (possibly truncated)
+/// bytes WITHOUT parsing. `object_store`'s `Bounded(0..max_bytes)` range clamps
+/// to the object length, so a smaller object returns in full and a larger one
+/// returns exactly `max_bytes` bytes — that equality is the truncation signal
+/// [`read_zarr_json_capped`] uses. This is metadata-only; no chunk bytes are
+/// ever requested here.
+async fn get_bytes_bounded(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    max_bytes: u64,
+) -> Result<bytes::Bytes, StoreError> {
+    let opts = GetOptions {
+        range: Some(GetRange::Bounded(0..max_bytes)),
+        ..Default::default()
+    };
+    Ok(store
+        .get_opts(&Path::from(path), opts)
+        .await?
+        .bytes()
+        .await?)
+}
+
+/// Read and parse a `zarr.json` under a fixed byte cap.
+///
+/// Used for the tightly-bounded `labels/zarr.json` LIST read, where the object
+/// only carries a small array of names. We fetch at most `max_bytes`; a larger
+/// object comes back truncated and either parses to fewer names or fails to
+/// parse (treated as "no labels" by the caller). This is metadata-only.
+pub(crate) async fn read_zarr_json_bounded(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    max_bytes: u64,
+) -> Result<serde_json::Value, StoreError> {
+    let bytes = get_bytes_bounded(store, path, max_bytes).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
+}
+
+/// Read and parse a label GROUP / LEVEL `zarr.json`, keeping a legitimate large
+/// sidecar rather than truncating it, while still bounding untrusted metadata.
+///
+/// Strategy: fetch an `initial_bytes`-bounded slice first (the common case, one
+/// GET). If the response is *exactly* `initial_bytes`, the object was at least
+/// that large and our slice is (almost certainly) truncated — invalid JSON we
+/// must not skip a valid group over. In that case retry once with a
+/// `hard_ceiling`-bounded slice, which admits real large masks (tens of
+/// thousands of `colors`/`properties` entries) up to the ceiling. Only if THAT
+/// response is also exactly `hard_ceiling` (i.e. the metadata genuinely exceeds
+/// the ceiling) do we surface the resulting parse error so the caller skips the
+/// group. A malformed `zarr.json` at any size fails to parse and is likewise
+/// skipped. `initial_bytes` must be `<= hard_ceiling`. Metadata-only — no chunk
+/// bytes are ever requested here.
+pub(crate) async fn read_zarr_json_capped(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    initial_bytes: u64,
+    hard_ceiling: u64,
+) -> Result<serde_json::Value, StoreError> {
+    debug_assert!(initial_bytes <= hard_ceiling);
+
+    let bytes = get_bytes_bounded(store, path, initial_bytes).await?;
+
+    // Not truncated at the initial cap (or the two caps coincide) → parse now.
+    if (bytes.len() as u64) < initial_bytes || initial_bytes >= hard_ceiling {
+        return serde_json::from_slice(&bytes)
+            .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")));
+    }
+
+    // Suspected truncation: re-fetch up to the hard ceiling so a valid large
+    // sidecar is KEPT. A response still at the ceiling means the metadata
+    // exceeds it — the parse below fails and the caller skips the group.
+    let full = get_bytes_bounded(store, path, hard_ceiling).await?;
+    serde_json::from_slice(&full).map_err(|e| {
+        if full.len() as u64 >= hard_ceiling {
+            StoreError::Metadata(format!(
+                "label metadata in {path} exceeds the {hard_ceiling}-byte ceiling"
+            ))
+        } else {
+            StoreError::Metadata(format!("invalid JSON in {path}: {e}"))
+        }
+    })
+}
+
+/// Parse the ordered list of label group names from a `labels/zarr.json` value.
+///
+/// The list lives at `attributes.ome.labels` (an array of strings). GENERIC and
+/// untrusted-input safe:
+/// - A missing/`ome`-less/non-array `labels` yields an empty list (no labels).
+/// - Non-string / blank entries are dropped; order of the remainder is kept.
+/// - The list is truncated to [`MAX_LABEL_NAMES`] so a pathological producer
+///   cannot make us enumerate an unbounded number of groups.
+///
+/// Returned names are the raw relative group names (e.g. `"nuclei"`); they are
+/// used only to form store paths under `<base>/labels/<name>` and image ids.
+pub(crate) fn parse_labels_list(labels_json: &serde_json::Value) -> Vec<String> {
+    let Some(names) = labels_json
+        .pointer("/attributes/ome/labels")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    names
+        .iter()
+        .filter_map(|n| n.as_str().map(str::trim).filter(|s| is_safe_label_name(s)))
+        .take(MAX_LABEL_NAMES)
+        .map(str::to_string)
+        .collect()
+}
+
+/// True for a label name that is safe to compose into a store path as a single
+/// group segment. A valid OME-NGFF label group name is one path component, so
+/// we reject anything empty, containing a path separator (`/` or `\`), a NUL,
+/// or the traversal components `.`/`..`. This keeps a hostile `labels` list
+/// from steering reads outside the `labels/<name>` subtree (belt-and-suspenders
+/// on top of the store's prefix jail).
+fn is_safe_label_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+}
+
+/// Parse the OME `image-label` block of a label group's root `zarr.json` into a
+/// [`LabelMeta`].
+///
+/// Returns `None` when `attributes.ome.image-label` is absent or not a JSON
+/// object — that is the signal that a group under `labels/` is not actually a
+/// label (the caller skips it). `name` is the owning `labels/` group name (a
+/// single path segment) and is stored verbatim on [`LabelMeta::name`] so
+/// downstream can show it. Everything *inside* a present block is OPTIONAL and
+/// UNTRUSTED, so parsing never fails past that point:
+/// - `colors`: entries must be objects with an integer `label-value` (fits u32)
+///   and an `rgba` array of exactly 4 integers in `0..=255`; malformed entries
+///   are dropped, and the kept list is capped at [`MAX_LABEL_ENTRIES`].
+/// - `properties`: entries must be objects with an integer `label-value`; the
+///   remaining keys are carried verbatim as an opaque map. Capped identically.
+/// - `source.image`: carried through verbatim as an opaque relative string. It
+///   is NEVER resolved, joined onto a path, or opened.
+pub(crate) fn parse_image_label(root_json: &serde_json::Value, name: &str) -> Option<LabelMeta> {
+    let block = root_json
+        .pointer("/attributes/ome/image-label")
+        .and_then(|v| v.as_object())?;
+
+    let colors = block
+        .get("colors")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(parse_label_color)
+                .take(MAX_LABEL_ENTRIES)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let properties = block
+        .get("properties")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(parse_label_property)
+                .take(MAX_LABEL_ENTRIES)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let source_image = block
+        .get("source")
+        .and_then(|s| s.get("image"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    Some(LabelMeta {
+        name: name.to_string(),
+        colors,
+        properties,
+        source_image,
+    })
+}
+
+/// Parse one `image-label.colors` entry, or `None` if malformed.
+fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
+    let value = label_value(entry)?;
+    let rgba_arr = entry.get("rgba").and_then(|v| v.as_array())?;
+    if rgba_arr.len() != 4 {
+        return None;
+    }
+    let mut rgba = [0u8; 4];
+    for (slot, component) in rgba.iter_mut().zip(rgba_arr) {
+        *slot = u8::try_from(component.as_u64()?).ok()?;
+    }
+    Some(LabelColor { value, rgba })
+}
+
+/// Parse one `image-label.properties` entry, or `None` if malformed. The
+/// `label-value` key is stripped; all other keys are carried verbatim.
+fn parse_label_property(entry: &serde_json::Value) -> Option<LabelProperty> {
+    let value = label_value(entry)?;
+    let mut fields = entry.as_object()?.clone();
+    fields.remove("label-value");
+    Some(LabelProperty { value, fields })
+}
+
+/// Extract a `label-value` as a `u32`, or `None` if missing / not a
+/// non-negative integer that fits `u32`.
+fn label_value(entry: &serde_json::Value) -> Option<u32> {
+    u32::try_from(entry.get("label-value")?.as_u64()?).ok()
 }
 
 /// Parsed OME multiscales metadata.
@@ -501,6 +740,196 @@ mod tests {
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 4);
         assert_eq!(infos[3].label, "D");
+    }
+
+    fn labels_root(labels: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "labels": labels } }
+        })
+    }
+
+    #[test]
+    fn parse_labels_list_reads_names_in_order() {
+        let root = labels_root(serde_json::json!(["nuclei", "cells"]));
+        assert_eq!(parse_labels_list(&root), vec!["nuclei", "cells"]);
+    }
+
+    #[test]
+    fn parse_labels_list_missing_or_bad_yields_empty() {
+        // No ome block, no labels key, and non-array labels all degrade to [].
+        let no_ome = serde_json::json!({"zarr_format": 3, "attributes": {}});
+        assert!(parse_labels_list(&no_ome).is_empty());
+        let no_key = labels_root(serde_json::json!(null));
+        assert!(parse_labels_list(&no_key).is_empty());
+        for bad in [
+            serde_json::json!("nuclei"),
+            serde_json::json!({"0": "nuclei"}),
+            serde_json::json!(5),
+        ] {
+            assert!(parse_labels_list(&labels_root(bad)).is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_labels_list_drops_blank_and_non_string_entries() {
+        let root = labels_root(serde_json::json!(["nuclei", "  ", "", 42, "cells"]));
+        assert_eq!(parse_labels_list(&root), vec!["nuclei", "cells"]);
+    }
+
+    #[test]
+    fn parse_labels_list_rejects_path_traversal_names() {
+        // A hostile list must not smuggle path separators or traversal
+        // components through as group names — only single in-tree segments.
+        let root = labels_root(serde_json::json!([
+            "nuclei",
+            "../../etc/passwd",
+            "..",
+            ".",
+            "sub/dir",
+            "back\\slash",
+            "cells"
+        ]));
+        assert_eq!(parse_labels_list(&root), vec!["nuclei", "cells"]);
+    }
+
+    #[test]
+    fn parse_labels_list_is_capped() {
+        let many: Vec<serde_json::Value> = (0..(MAX_LABEL_NAMES + 50))
+            .map(|i| serde_json::json!(format!("l{i}")))
+            .collect();
+        let root = labels_root(serde_json::json!(many));
+        assert_eq!(parse_labels_list(&root).len(), MAX_LABEL_NAMES);
+    }
+
+    fn image_label_root(image_label: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "image-label": image_label } }
+        })
+    }
+
+    #[test]
+    fn parse_image_label_absent_or_non_object_is_none() {
+        let no_block = serde_json::json!({
+            "attributes": { "ome": { "multiscales": [] } }
+        });
+        assert!(parse_image_label(&no_block, "n").is_none());
+        // Present but not an object → not a label group.
+        assert!(parse_image_label(&image_label_root(serde_json::json!("x")), "n").is_none());
+        assert!(parse_image_label(&image_label_root(serde_json::json!([1, 2])), "n").is_none());
+    }
+
+    #[test]
+    fn parse_image_label_populates_group_name() {
+        // The owning `labels/` group name rides onto LabelMeta.name verbatim so
+        // downstream can show it instead of a synthetic id.
+        let meta =
+            parse_image_label(&image_label_root(serde_json::json!({})), "mitochondria").unwrap();
+        assert_eq!(meta.name, "mitochondria");
+    }
+
+    #[test]
+    fn parse_image_label_empty_object_yields_default_meta_plus_name() {
+        // A present but empty `image-label` marks a valid label group with no
+        // colors/properties/source — Some(default) apart from the group name.
+        let meta = parse_image_label(&image_label_root(serde_json::json!({})), "nuclei").unwrap();
+        assert_eq!(
+            meta,
+            LabelMeta {
+                name: "nuclei".to_string(),
+                ..LabelMeta::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_image_label_parses_colors_properties_source() {
+        let root = image_label_root(serde_json::json!({
+            "version": "0.5",
+            "colors": [
+                {"label-value": 1, "rgba": [255, 0, 0, 255]},
+                {"label-value": 2, "rgba": [0, 255, 0, 128]}
+            ],
+            "properties": [
+                {"label-value": 1, "area": 100, "name": "cell-1"}
+            ],
+            "source": {"image": "../../"}
+        }));
+        let meta = parse_image_label(&root, "cells").unwrap();
+        assert_eq!(meta.name, "cells");
+        assert_eq!(
+            meta.colors,
+            vec![
+                LabelColor {
+                    value: 1,
+                    rgba: [255, 0, 0, 255]
+                },
+                LabelColor {
+                    value: 2,
+                    rgba: [0, 255, 0, 128]
+                },
+            ]
+        );
+        assert_eq!(meta.properties.len(), 1);
+        assert_eq!(meta.properties[0].value, 1);
+        // label-value is stripped; arbitrary keys survive verbatim.
+        assert!(!meta.properties[0].fields.contains_key("label-value"));
+        assert_eq!(
+            meta.properties[0].fields.get("area"),
+            Some(&serde_json::json!(100))
+        );
+        assert_eq!(
+            meta.properties[0].fields.get("name"),
+            Some(&serde_json::json!("cell-1"))
+        );
+        assert_eq!(meta.source_image.as_deref(), Some("../../"));
+    }
+
+    #[test]
+    fn parse_image_label_drops_malformed_color_entries() {
+        let root = image_label_root(serde_json::json!({
+            "colors": [
+                {"label-value": 1, "rgba": [255, 0, 0, 255]}, // ok
+                {"label-value": 2, "rgba": [255, 0, 0]},      // too short
+                {"label-value": 3, "rgba": [255, 0, 0, 999]}, // out of u8 range
+                {"rgba": [1, 2, 3, 4]},                        // no label-value
+                {"label-value": -1, "rgba": [1, 2, 3, 4]},     // negative value
+                {"label-value": 4},                            // no rgba
+                "not-an-object"
+            ]
+        }));
+        let meta = parse_image_label(&root, "n").unwrap();
+        assert_eq!(
+            meta.colors,
+            vec![LabelColor {
+                value: 1,
+                rgba: [255, 0, 0, 255]
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_image_label_never_resolves_source_image() {
+        // A hostile source.image path is carried verbatim, never joined/opened.
+        let root = image_label_root(serde_json::json!({
+            "source": {"image": "../../../../etc/passwd"}
+        }));
+        let meta = parse_image_label(&root, "n").unwrap();
+        assert_eq!(meta.source_image.as_deref(), Some("../../../../etc/passwd"));
+        assert!(meta.colors.is_empty());
+    }
+
+    #[test]
+    fn parse_image_label_caps_entries() {
+        let colors: Vec<serde_json::Value> = (0..(MAX_LABEL_ENTRIES + 10))
+            .map(|i| serde_json::json!({"label-value": i, "rgba": [0, 0, 0, 255]}))
+            .collect();
+        let root = image_label_root(serde_json::json!({ "colors": colors }));
+        let meta = parse_image_label(&root, "n").unwrap();
+        assert_eq!(meta.colors.len(), MAX_LABEL_ENTRIES);
     }
 
     #[test]

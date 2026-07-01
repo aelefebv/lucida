@@ -2819,7 +2819,8 @@ mod tests {
     use super::*;
     use lucida_content::{
         Axis, AxisKind, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
-        EntityLabels, GeneratedLevelInfo, GeneratedLevelProvenance, LevelGeometry, MultiscaleInfo,
+        EntityLabels, GeneratedLevelInfo, GeneratedLevelProvenance, ImageRole, LevelGeometry,
+        MultiscaleInfo,
     };
     use lucida_store::codec::StorageCompression;
     use lucida_store::import_types::{ImageBindingSeed, LevelBindingInfo, ServerBindingSeed};
@@ -2909,6 +2910,7 @@ mod tests {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,

@@ -18,7 +18,7 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use lucida_content::{
     Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
-    EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
+    EntityKind, EntityLabels, ImageId, ImageRole, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_server::binding::ChunkResolver;
 use lucida_store::cache::CachedStore;
@@ -213,6 +213,7 @@ pub async fn build_single_field_dataset(
                 pinned_axes: vec![],
                 channel_infos: vec![],
             },
+            role: ImageRole::Intensity,
         }],
         vec![],
         None,

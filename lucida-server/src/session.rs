@@ -322,6 +322,7 @@ mod tests {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,

@@ -7,6 +7,70 @@ pub struct ImageSpec {
     pub image_id: ImageId,
     pub owner: EntityId,
     pub multiscale: MultiscaleInfo,
+    /// What this image *is* to the viewer: a normal intensity image, or a
+    /// segmentation label overlay parsed from an OME-NGFF `labels/` group.
+    ///
+    /// `#[serde(default)]` keeps snapshots written before this field existed
+    /// (all of which were intensity images) deserializable — an absent `role`
+    /// decodes to [`ImageRole::Intensity`].
+    #[serde(default)]
+    pub role: ImageRole,
+}
+
+impl ImageSpec {
+    /// True when this image is a segmentation label (as opposed to intensity).
+    pub fn is_label(&self) -> bool {
+        matches!(self.role, ImageRole::Label(_))
+    }
+}
+
+/// The semantic role of an [`ImageSpec`]. Intensity images are the ordinary
+/// pixel data; `Label` images are segmentation masks parsed from an OME-NGFF
+/// `labels/` group and carry their (untrusted) [`LabelMeta`] sidecar.
+///
+/// `Default` is [`ImageRole::Intensity`] — every image predating this enum was
+/// intensity, so an absent/defaulted role decodes to intensity.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum ImageRole {
+    #[default]
+    Intensity,
+    Label(LabelMeta),
+}
+
+/// Sidecar metadata for a label image, parsed from the OME-NGFF `image-label`
+/// block. Every field is OPTIONAL and UNTRUSTED: producers may omit it, emit
+/// partial data, or get it wrong, so nothing here is required for the label to
+/// import and none of it is ever resolved into a fetch. `source_image` in
+/// particular is carried verbatim as an opaque relative string and is never
+/// joined onto a path or opened.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LabelMeta {
+    /// The `labels/` group name this label was parsed from (e.g.
+    /// `"mitochondria"`) — a single path segment, not the store prefix. Carried
+    /// so downstream can show a real name instead of a synthetic `labels/0`.
+    /// Defaults to `""` (the derived `Default`); populated at import time.
+    pub name: String,
+    pub colors: Vec<LabelColor>,
+    pub properties: Vec<LabelProperty>,
+    pub source_image: Option<String>,
+}
+
+/// A single `image-label.colors` entry: an RGBA color assigned to a label
+/// value. Malformed entries are dropped during parsing, so any value present
+/// here had a well-formed `label-value` and a 4-element `rgba`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LabelColor {
+    pub value: u32,
+    pub rgba: [u8; 4],
+}
+
+/// A single `image-label.properties` entry: arbitrary key/value metadata keyed
+/// by a label value. `fields` carries the producer's object verbatim (minus the
+/// `label-value` key); it is opaque to lucida.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LabelProperty {
+    pub value: u32,
+    pub fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +347,65 @@ mod tests {
             json.get("color").is_none(),
             "color: None must be omitted, got: {json}",
         );
+    }
+
+    fn image_spec_with_role(role: ImageRole) -> ImageSpec {
+        ImageSpec {
+            image_id: ImageId("img".to_string()),
+            owner: EntityId("owner".to_string()),
+            multiscale: minimal_multiscale(Vec::new()),
+            role,
+        }
+    }
+
+    #[test]
+    fn image_role_defaults_to_intensity() {
+        assert_eq!(ImageRole::default(), ImageRole::Intensity);
+        let spec = image_spec_with_role(ImageRole::default());
+        assert!(!spec.is_label());
+    }
+
+    #[test]
+    fn is_label_true_for_label_role() {
+        let spec = image_spec_with_role(ImageRole::Label(LabelMeta::default()));
+        assert!(spec.is_label());
+    }
+
+    #[test]
+    fn image_spec_without_role_deserializes_as_intensity() {
+        // Back-compat: snapshots written before `role` existed omit the field;
+        // serde default must yield an intensity image, not an error.
+        let json = serde_json::json!({
+            "image_id": "img",
+            "owner": "owner",
+            "multiscale": serde_json::to_value(minimal_multiscale(Vec::new())).unwrap()
+        });
+        let spec: ImageSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.role, ImageRole::Intensity);
+        assert!(!spec.is_label());
+    }
+
+    #[test]
+    fn label_role_round_trips_with_meta() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("area".to_string(), serde_json::json!(42));
+        let meta = LabelMeta {
+            name: "mitochondria".to_string(),
+            colors: vec![LabelColor {
+                value: 7,
+                rgba: [255, 0, 128, 255],
+            }],
+            properties: vec![LabelProperty { value: 7, fields }],
+            source_image: Some("../../".to_string()),
+        };
+        let spec = image_spec_with_role(ImageRole::Label(meta.clone()));
+        let json = serde_json::to_value(&spec).unwrap();
+        let back: ImageSpec = serde_json::from_value(json).unwrap();
+        assert!(back.is_label());
+        match back.role {
+            ImageRole::Label(got) => assert_eq!(got, meta),
+            ImageRole::Intensity => panic!("expected Label role after round-trip"),
+        }
     }
 
     #[test]

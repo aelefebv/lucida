@@ -153,7 +153,7 @@ mod tests {
 
     use lucida_content::{
         Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
-        EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
+        EntityKind, EntityLabels, ImageId, ImageRole, ImageSpec, LevelGeometry, MultiscaleInfo,
     };
     use lucida_core::protocol::{ClientId, ServerMessage};
     use lucida_protocol::{
@@ -220,6 +220,7 @@ mod tests {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,

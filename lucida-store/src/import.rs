@@ -91,7 +91,30 @@ async fn import_single_image(
             pinned_axes: layout.pinned.clone(),
             channel_infos,
         },
+        role: ImageRole::Intensity,
     };
+
+    // Detect + parse any sibling `labels/` group. Label images share the base
+    // image's owner and are appended AFTER it, in `labels` list order. A bad
+    // label group is skipped inside the helper — the base image still imports.
+    let labels = import_labels(store, id, "", &entity_id, &format!("{id}:label:")).await;
+
+    let mut images = vec![image];
+    images.extend(labels.images);
+
+    let mut fetch_images = vec![ProxiedImageSpec {
+        image_id: image_id.clone(),
+        wire_format: WireFormat::Raw { data_type },
+    }];
+    fetch_images.extend(labels.fetch_images);
+
+    let mut binding_images = vec![ImageBindingSeed {
+        image_id,
+        axes_names,
+        store_prefix: None,
+        levels: level_bindings,
+    }];
+    binding_images.extend(labels.binding_images);
 
     let default_layout_id = LayoutId("source".to_string());
     let source_layout = LayoutSpec {
@@ -109,25 +132,17 @@ async fn import_single_image(
         DatasetKind::Single,
         vec![entity],
         vec![],
-        vec![image],
+        images,
         vec![source_layout],
         Some(default_layout_id),
     );
 
     let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
-        images: vec![ProxiedImageSpec {
-            image_id: image_id.clone(),
-            wire_format: WireFormat::Raw { data_type },
-        }],
+        images: fetch_images,
     });
 
     let binding_seed = ServerBindingSeed {
-        images: vec![ImageBindingSeed {
-            image_id,
-            axes_names,
-            store_prefix: None,
-            levels: level_bindings,
-        }],
+        images: binding_images,
     };
 
     Ok(ImportResult {
@@ -435,7 +450,7 @@ async fn import_plate(
 
             images.push(ImageSpec {
                 image_id: image_id.clone(),
-                owner: field_entity_id,
+                owner: field_entity_id.clone(),
                 multiscale: MultiscaleInfo {
                     axes: axes.clone(),
                     levels: levels.clone(),
@@ -449,6 +464,7 @@ async fn import_plate(
                     pinned_axes: layout.pinned.clone(),
                     channel_infos: channel_infos.clone(),
                 },
+                role: ImageRole::Intensity,
             });
 
             fetch_images.push(ProxiedImageSpec {
@@ -462,6 +478,22 @@ async fn import_plate(
                 store_prefix: Some(fov.store_prefix.clone()),
                 levels: level_bindings.clone(),
             });
+
+            // Per-FOV labels: `<well>/<field>/labels/...`. Only some FOVs may
+            // have them. Label images share this FOV's field entity as owner and
+            // are appended right after the FOV's intensity image. A bad label
+            // group is skipped inside the helper without failing the plate.
+            let fov_labels = import_labels(
+                store,
+                id,
+                &fov.store_prefix,
+                &field_entity_id,
+                &format!("{id}:label:{}/", fov.store_prefix),
+            )
+            .await;
+            images.extend(fov_labels.images);
+            fetch_images.extend(fov_labels.fetch_images);
+            binding_images.extend(fov_labels.binding_images);
         }
     }
 
@@ -525,6 +557,269 @@ async fn import_plate(
         fetch,
         binding_seed,
     })
+}
+
+/// What the label-import helper appends to the manifest for one dataset (or one
+/// FOV of a plate). Kept as three parallel `Vec`s so callers can extend their
+/// existing image / fetch / binding lists in place, mirroring intensity images.
+struct LabelImports {
+    images: Vec<ImageSpec>,
+    fetch_images: Vec<ProxiedImageSpec>,
+    binding_images: Vec<ImageBindingSeed>,
+}
+
+/// Detect and parse the OME-NGFF `labels/` group that may sit beside an image
+/// (a single image's root, or a plate FOV) and build a tagged label
+/// [`ImageSpec`] + fetch + binding seed for each valid label group.
+///
+/// `base_prefix` is the store path of the owning image group: `""` for a single
+/// image, `"<well>/<field>"` for a plate FOV. `owner` is the entity that owns
+/// the source intensity image — label images share it so they live in the same
+/// scene node. `id_prefix` is prepended to each label name to form the label
+/// image id (`"<dataset>:label:"` single, `"<dataset>:label:<fov>/"` plate).
+///
+/// Failure isolation is total: a missing `labels/zarr.json` yields no labels;
+/// a malformed *individual* group (no/!object `image-label`, empty/bad
+/// multiscale, unsupported dtype/codec, oversized metadata) is skipped with an
+/// `eprintln!` warning while the base image and every *other* valid group still
+/// import. The open never fails because of a bad label group. This is
+/// metadata-only — no label chunk bytes are ever fetched.
+async fn import_labels(
+    store: &Arc<dyn ObjectStore>,
+    dataset_id: &str,
+    base_prefix: &str,
+    owner: &EntityId,
+    id_prefix: &str,
+) -> LabelImports {
+    let mut out = LabelImports {
+        images: Vec::new(),
+        fetch_images: Vec::new(),
+        binding_images: Vec::new(),
+    };
+
+    // `labels/` sits beside the image group. Compose paths without a leading
+    // slash so single-image (`labels/...`) and plate (`<fov>/labels/...`) share
+    // one code path.
+    let labels_group_prefix = if base_prefix.is_empty() {
+        "labels".to_string()
+    } else {
+        format!("{base_prefix}/labels")
+    };
+    let labels_json_path = format!("{labels_group_prefix}/zarr.json");
+
+    // Absent `labels/zarr.json` → no labels (unchanged import). Any read/parse
+    // error at the group level is also treated as "no labels" — we never fail
+    // the dataset for a missing or unreadable labels group. The LIST group only
+    // carries the array of names, so it stays TIGHTLY bounded (no truncation
+    // retry): a pathological list is simply clipped.
+    let labels_json =
+        match parse::read_zarr_json_bounded(store, &labels_json_path, parse::MAX_LABEL_LIST_BYTES)
+            .await
+        {
+            Ok(json) => json,
+            Err(_) => return out,
+        };
+
+    // De-duplicate group names before building anything: two identical names
+    // would mint two label `ImageSpec`s with the SAME `image_id` (and identical
+    // fetch/binding), colliding downstream. Keep the first occurrence in list
+    // order; drop later dups with a warning.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for name in parse::parse_labels_list(&labels_json) {
+        if !seen.insert(name.clone()) {
+            eprintln!(
+                "[lucida-store] dataset {dataset_id:?}: duplicate label group name \
+                 '{labels_group_prefix}/{name}' in labels list; keeping the first, \
+                 skipping this one",
+            );
+            continue;
+        }
+        match import_one_label(
+            store,
+            dataset_id,
+            &labels_group_prefix,
+            &name,
+            owner,
+            id_prefix,
+        )
+        .await
+        {
+            Ok(built) => {
+                out.images.push(built.image);
+                out.fetch_images.push(built.fetch);
+                out.binding_images.push(built.binding);
+            }
+            Err(msg) => {
+                eprintln!(
+                    "[lucida-store] dataset {dataset_id:?}: skipping label group \
+                     '{labels_group_prefix}/{name}': {msg}",
+                );
+            }
+        }
+    }
+
+    out
+}
+
+/// The three parallel artifacts for one successfully-parsed label group.
+struct BuiltLabel {
+    image: ImageSpec,
+    fetch: ProxiedImageSpec,
+    binding: ImageBindingSeed,
+}
+
+/// Parse a single label group at `<labels_group_prefix>/<name>` into a tagged
+/// label [`ImageSpec`] plus its fetch/binding artifacts. Returns `Err(reason)`
+/// for any malformed group so the caller can skip just this group; the reason
+/// is surfaced in the warning. Reuses the exact intensity-image helpers so a
+/// label's multiscale/codec/level handling is identical to an intensity image.
+async fn import_one_label(
+    store: &Arc<dyn ObjectStore>,
+    dataset_id: &str,
+    labels_group_prefix: &str,
+    name: &str,
+    owner: &EntityId,
+    id_prefix: &str,
+) -> Result<BuiltLabel, String> {
+    let group_prefix = format!("{labels_group_prefix}/{name}");
+    let group_json_path = format!("{group_prefix}/zarr.json");
+
+    // Group metadata read is capped but truncation-aware: a legitimate large
+    // segmentation (tens of thousands of per-value colors/properties) is KEPT
+    // by retrying up to the hard ceiling; only genuinely oversized or malformed
+    // metadata errors out and is skipped.
+    let root_json = parse::read_zarr_json_capped(
+        store,
+        &group_json_path,
+        parse::LABEL_METADATA_INITIAL_BYTES,
+        parse::MAX_LABEL_METADATA_BYTES,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // A group under `labels/` is only a label if it carries `image-label`.
+    // Absent/!object → not a label; skip. Everything inside is untrusted. The
+    // group name rides onto `LabelMeta.name`.
+    let label_meta = parse::parse_image_label(&root_json, name)
+        .ok_or("missing or non-object image-label block")?;
+
+    // Multiscale is parsed with the SAME helper as intensity images. A label
+    // typically has no channel axis (t,z,y,x) — classify_axes/normalize handle
+    // that identically to any other axis set.
+    let parsed = parse::parse_multiscales(&root_json, &format!("{group_prefix}: "))
+        .map_err(|e| e.to_string())?;
+    let axes_names = parsed.axes_names;
+    let level_entries = parsed.level_entries;
+
+    // Level metadata is on the untrusted label path, so read each level's
+    // `zarr.json` with the same capped/truncation-aware helper as the group.
+    let level_metas = read_label_level_metas(store, &group_prefix, &level_entries)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Guard silent geometry corruption: `normalize_to_5d` maps on-disk dims to
+    // canonical positions by axis NAME/order and ignores any extra/missing
+    // dims, so a `shape` whose rank disagrees with the declared `axes` would be
+    // attached with mis-mapped geometry. `chunk_shape` rank is already checked
+    // (in `compute_chunk_byte_layout`); apply the SAME check to `shape` and
+    // skip the whole group on mismatch rather than attach wrong geometry.
+    for (i, meta) in level_metas.iter().enumerate() {
+        if meta.shape.len() != axes_names.len() {
+            return Err(format!(
+                "level {i}: shape rank {} != axes rank {} (axes: {:?})",
+                meta.shape.len(),
+                axes_names.len(),
+                axes_names,
+            ));
+        }
+    }
+
+    // Validate the dtype against the shared allow-list; unsupported → skip.
+    let data_type = parse_data_type(&level_metas[0].data_type).map_err(|e| e.to_string())?;
+    let layout = classify_axes(&axes_names, &level_metas[0].shape);
+    warn_pinned_axes(dataset_id, &layout.pinned);
+    let axes = build_axes(&layout.canonical_names);
+    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+    let coarse_level_index =
+        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
+    // Validates the codec chain against the shared allow-list; unsupported → skip.
+    let level_bindings = build_level_binding_infos(
+        &axes_names,
+        &level_metas,
+        data_type_size(data_type),
+        &layout.pinned,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let image_id = ImageId(format!("{id_prefix}{name}"));
+
+    let image = ImageSpec {
+        image_id: image_id.clone(),
+        owner: owner.clone(),
+        multiscale: MultiscaleInfo {
+            axes,
+            levels,
+            coarse_level_index,
+            generated_levels: Vec::new(),
+            data_type,
+            pinned_axes: layout.pinned.clone(),
+            // Labels are segmentation masks; they carry no omero channel display
+            // metadata (and typically no channel axis at all).
+            channel_infos: Vec::new(),
+        },
+        role: ImageRole::Label(label_meta),
+    };
+
+    let fetch = ProxiedImageSpec {
+        image_id: image_id.clone(),
+        wire_format: WireFormat::Raw { data_type },
+    };
+
+    let binding = ImageBindingSeed {
+        image_id,
+        axes_names,
+        store_prefix: Some(group_prefix),
+        levels: level_bindings,
+    };
+
+    Ok(BuiltLabel {
+        image,
+        fetch,
+        binding,
+    })
+}
+
+/// Read the per-level [`parse::ArrayMeta`] for a label group, capping each
+/// level's `zarr.json` read the same truncation-aware way as the group read.
+///
+/// This is the untrusted-path analogue of [`parse::read_level_metas`] (which
+/// reads unbounded and is used only for trusted intensity images). A legitimate
+/// large array `zarr.json` is KEPT via the truncation retry; oversized or
+/// malformed level metadata errors, and the caller skips the whole group.
+async fn read_label_level_metas(
+    store: &Arc<dyn ObjectStore>,
+    base_prefix: &str,
+    level_entries: &[parse::LevelEntry],
+) -> Result<Vec<parse::ArrayMeta>, StoreError> {
+    let mut level_metas: Vec<parse::ArrayMeta> = Vec::with_capacity(level_entries.len());
+    for entry in level_entries {
+        let level_path = if base_prefix.is_empty() {
+            format!("{}/zarr.json", entry.path)
+        } else {
+            format!("{base_prefix}/{}/zarr.json", entry.path)
+        };
+        let value = parse::read_zarr_json_capped(
+            store,
+            &level_path,
+            parse::LABEL_METADATA_INITIAL_BYTES,
+            parse::MAX_LABEL_METADATA_BYTES,
+        )
+        .await?;
+        let meta: parse::ArrayMeta = serde_json::from_value(value)
+            .map_err(|e| StoreError::Metadata(format!("{level_path}: {e}")))?;
+        level_metas.push(meta);
+    }
+    Ok(level_metas)
 }
 
 fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
@@ -2189,6 +2484,687 @@ mod tests {
                 .multiscale
                 .channel_infos
                 .is_empty(),
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Label import (OME-NGFF v0.5 `labels/` group) -------------------
+
+    /// Write a `labels/zarr.json` group listing `names` under `<base>/labels`.
+    /// `base` is the image group dir (the fixture root for single images, or a
+    /// FOV dir for plates).
+    fn write_labels_index(base: &std::path::Path, names: &[&str]) {
+        let labels_dir = base.join("labels");
+        fs::create_dir_all(&labels_dir).unwrap();
+        let names_json: Vec<serde_json::Value> =
+            names.iter().map(|n| serde_json::json!(n)).collect();
+        let group = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "labels": names_json } }
+        });
+        fs::write(
+            labels_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&group).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Write one label group `<base>/labels/<name>` with a single-level
+    /// multiscale (axes t,z,y,x — no channel, as labels typically have) and a
+    /// uint32 array. `image_label` is spliced verbatim into
+    /// `attributes.ome.image-label` when `Some`; when `None`, NO `image-label`
+    /// block is written (mimicking a non-label group under `labels/`).
+    /// `data_type`/`codecs` default to a valid uint32 raw array unless
+    /// overridden, so tests can exercise the unsupported-dtype / bad-codec
+    /// skip paths.
+    fn write_label_group(
+        base: &std::path::Path,
+        name: &str,
+        image_label: Option<serde_json::Value>,
+        data_type: &str,
+        codecs: serde_json::Value,
+    ) {
+        let group_dir = base.join("labels").join(name);
+        fs::create_dir_all(&group_dir).unwrap();
+
+        let mut ome = serde_json::json!({
+            "version": "0.5",
+            "multiscales": [{
+                "version": "0.5",
+                "name": name,
+                "axes": [
+                    {"name": "t", "type": "time"},
+                    {"name": "z", "type": "space"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"}
+                ],
+                "datasets": [{
+                    "path": "0",
+                    "coordinateTransformations": [{
+                        "type": "scale",
+                        "scale": [1.0, 1.0, 1.0, 1.0]
+                    }]
+                }]
+            }]
+        });
+        if let Some(il) = image_label {
+            ome["image-label"] = il;
+        }
+
+        let group_root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": ome }
+        });
+        fs::write(
+            group_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&group_root).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = group_dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [1, 1, 64, 64],
+            "data_type": data_type,
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": { "chunk_shape": [1, 1, 64, 64] }
+            },
+            "codecs": codecs,
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The default valid label array codec chain: raw little-endian bytes.
+    fn raw_codecs() -> serde_json::Value {
+        serde_json::json!([{"name": "bytes", "configuration": {"endian": "little"}}])
+    }
+
+    /// A well-formed `image-label` block with one color, one property, and a
+    /// source image reference.
+    fn sample_image_label() -> serde_json::Value {
+        serde_json::json!({
+            "version": "0.5",
+            "colors": [{"label-value": 1, "rgba": [255, 0, 0, 255]}],
+            "properties": [{"label-value": 1, "area": 512}],
+            "source": {"image": "../../"}
+        })
+    }
+
+    /// A single image with a `labels/` group attaches each label as a tagged
+    /// label image: appended AFTER the base image, sharing its owner, carrying
+    /// the parsed `LabelMeta`, with a matching fetch spec and a binding seed
+    /// whose store_prefix points under `labels/<name>`.
+    #[tokio::test]
+    async fn import_single_image_attaches_labels() {
+        let dir = temp_dir("import_labels_single");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["nuclei", "cells"]);
+        write_label_group(
+            &dir,
+            "nuclei",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+        write_label_group(
+            &dir,
+            "cells",
+            Some(serde_json::json!({"version": "0.5"})),
+            "uint32",
+            raw_codecs(),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "lbl", "Labeled").await.unwrap();
+
+        let images = result.manifest.images();
+        // Base image first, then labels in list order.
+        assert_eq!(images.len(), 3);
+        assert!(!images[0].is_label(), "base image must stay intensity");
+        assert!(images[1].is_label());
+        assert!(images[2].is_label());
+        assert_eq!(images[1].image_id, ImageId("lbl:label:nuclei".into()));
+        assert_eq!(images[2].image_id, ImageId("lbl:label:cells".into()));
+
+        // Labels share the base image's owner entity.
+        assert_eq!(images[1].owner, images[0].owner);
+        assert_eq!(images[2].owner, images[0].owner);
+
+        // The parsed LabelMeta rides along on the role.
+        match &images[1].role {
+            ImageRole::Label(meta) => {
+                assert_eq!(meta.colors.len(), 1);
+                assert_eq!(meta.colors[0].value, 1);
+                assert_eq!(meta.colors[0].rgba, [255, 0, 0, 255]);
+                assert_eq!(meta.properties.len(), 1);
+                assert_eq!(meta.properties[0].value, 1);
+                assert_eq!(meta.source_image.as_deref(), Some("../../"));
+            }
+            ImageRole::Intensity => panic!("expected Label role on nuclei"),
+        }
+
+        // Label multiscale mirrors the on-disk t,z,y,x axes and uint32 dtype.
+        assert_eq!(images[1].multiscale.data_type, DataType::Uint32);
+        let axis_names: Vec<&str> = images[1]
+            .multiscale
+            .axes
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(axis_names, vec!["t", "z", "y", "x"]);
+
+        // Fetch + binding gained one entry per label, in the same order.
+        if let FetchSource::Proxied(ref proxied) = result.fetch {
+            assert_eq!(proxied.images.len(), 3);
+            assert_eq!(
+                proxied.images[1].image_id,
+                ImageId("lbl:label:nuclei".into())
+            );
+            assert!(matches!(
+                proxied.images[1].wire_format,
+                WireFormat::Raw {
+                    data_type: DataType::Uint32
+                }
+            ));
+        } else {
+            panic!("expected Proxied fetch");
+        }
+
+        assert_eq!(result.binding_seed.images.len(), 3);
+        assert_eq!(
+            result.binding_seed.images[1].store_prefix.as_deref(),
+            Some("labels/nuclei"),
+        );
+        assert_eq!(
+            result.binding_seed.images[2].store_prefix.as_deref(),
+            Some("labels/cells"),
+        );
+        // Metadata-only: one level binding, no chunk bytes were read.
+        assert_eq!(result.binding_seed.images[1].levels.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A dataset with NO `labels/` group imports exactly as before: one image,
+    /// intensity, no extra fetch/binding entries.
+    #[tokio::test]
+    async fn import_single_image_without_labels_is_unchanged() {
+        let dir = temp_dir("import_no_labels");
+        create_single_image_fixture(&dir, None);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "plain", "Plain").await.unwrap();
+
+        assert_eq!(result.manifest.images().len(), 1);
+        assert!(!result.manifest.images()[0].is_label());
+        if let FetchSource::Proxied(ref proxied) = result.fetch {
+            assert_eq!(proxied.images.len(), 1);
+        } else {
+            panic!("expected Proxied fetch");
+        }
+        assert_eq!(result.binding_seed.images.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A malformed label group is skipped without failing the open, and the
+    /// base image plus every OTHER valid label group still import. Covers each
+    /// distinct failure mode: no `image-label`, unsupported dtype, and a bad
+    /// codec chain.
+    #[tokio::test]
+    async fn import_skips_malformed_label_groups_without_failing() {
+        let dir = temp_dir("import_labels_malformed");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(
+            &dir,
+            &["good", "not_a_label", "bad_dtype", "bad_codec", "also_good"],
+        );
+        // Valid.
+        write_label_group(
+            &dir,
+            "good",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+        // Missing image-label block → not a label → skipped.
+        write_label_group(&dir, "not_a_label", None, "uint32", raw_codecs());
+        // Unsupported dtype (not in the allow-list) → skipped.
+        write_label_group(
+            &dir,
+            "bad_dtype",
+            Some(sample_image_label()),
+            "complex128",
+            raw_codecs(),
+        );
+        // Bad codec (big-endian bytes) → skipped.
+        write_label_group(
+            &dir,
+            "bad_codec",
+            Some(sample_image_label()),
+            "uint32",
+            serde_json::json!([{"name": "bytes", "configuration": {"endian": "big"}}]),
+        );
+        // Valid again → proves iteration continues past the bad ones.
+        write_label_group(
+            &dir,
+            "also_good",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "mix", "Mixed")
+            .await
+            .expect("a bad label group must never fail the open");
+
+        let images = result.manifest.images();
+        // Base + the two valid labels only.
+        assert_eq!(images.len(), 3);
+        assert!(!images[0].is_label());
+        let label_ids: Vec<&str> = images[1..].iter().map(|i| i.image_id.0.as_str()).collect();
+        assert_eq!(label_ids, vec!["mix:label:good", "mix:label:also_good"]);
+
+        // Fetch/binding stay in lockstep with the images.
+        assert_eq!(result.binding_seed.images.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An empty / non-array `labels` list means no labels, and the import is
+    /// unchanged (the presence of an empty `labels/zarr.json` alone must not
+    /// add or fail anything).
+    #[tokio::test]
+    async fn import_empty_labels_list_adds_nothing() {
+        let dir = temp_dir("import_labels_empty");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &[]);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "empty", "Empty").await.unwrap();
+
+        assert_eq!(result.manifest.images().len(), 1);
+        assert!(!result.manifest.images()[0].is_label());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A plate carries labels PER FOV under `<well>/<field>/labels/...`, and
+    /// only some FOVs have them. Each label attaches to its own field entity
+    /// with a FOV-scoped id and store prefix; FOVs without labels are
+    /// unchanged, and a bad group on one FOV doesn't disturb the others.
+    #[tokio::test]
+    async fn import_plate_attaches_per_fov_labels() {
+        let dir = temp_dir("import_labels_plate");
+        create_plate_fixture(
+            &dir,
+            "labeled_plate",
+            &["A"],
+            &["1"],
+            &[("A", "1", 0, 0, 2)],
+            [1, 1, 10, 256, 256],
+            [1, 1, 1, 128, 128],
+            1,
+        );
+
+        // FOV A/1/0 has a valid label; FOV A/1/1 has none.
+        let fov0 = dir.join("A").join("1").join("0");
+        write_labels_index(&fov0, &["nuclei"]);
+        write_label_group(
+            &fov0,
+            "nuclei",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "plate", "Plate").await.unwrap();
+
+        let images = result.manifest.images();
+        // 2 intensity FOVs + 1 label on FOV 0.
+        let labels: Vec<&ImageSpec> = images.iter().filter(|i| i.is_label()).collect();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            labels[0].image_id,
+            ImageId("plate:label:A/1/0/nuclei".into()),
+        );
+
+        // The label's owner is the FOV-0 field entity (the same owner as the
+        // FOV-0 intensity image).
+        let fov0_intensity = images
+            .iter()
+            .find(|i| i.image_id == ImageId("plate:image:A/1/0".into()))
+            .expect("FOV 0 intensity image");
+        assert_eq!(labels[0].owner, fov0_intensity.owner);
+
+        // Binding prefix is FOV-scoped.
+        let label_binding = result
+            .binding_seed
+            .images
+            .iter()
+            .find(|b| b.image_id == ImageId("plate:label:A/1/0/nuclei".into()))
+            .expect("label binding seed");
+        assert_eq!(
+            label_binding.store_prefix.as_deref(),
+            Some("A/1/0/labels/nuclei")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Write a label group `<base>/labels/<name>` whose `image-label.colors`
+    /// array has `n_colors` entries, serialized COMPACTLY so the on-disk
+    /// `zarr.json` size is predictable. Used to build a legitimately large
+    /// segmentation sidecar (bigger than the initial read cap, under the hard
+    /// ceiling, with more colors than the per-group entry cap). The array is a
+    /// valid single-level uint32 t,z,y,x group like [`write_label_group`].
+    fn write_label_group_with_n_colors(base: &std::path::Path, name: &str, n_colors: usize) {
+        let group_dir = base.join("labels").join(name);
+        fs::create_dir_all(&group_dir).unwrap();
+
+        let colors: Vec<serde_json::Value> = (0..n_colors)
+            .map(|i| serde_json::json!({"label-value": i as u64, "rgba": [1, 2, 3, 4]}))
+            .collect();
+
+        let ome = serde_json::json!({
+            "version": "0.5",
+            "image-label": { "version": "0.5", "colors": colors },
+            "multiscales": [{
+                "version": "0.5",
+                "name": name,
+                "axes": [
+                    {"name": "t", "type": "time"},
+                    {"name": "z", "type": "space"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"}
+                ],
+                "datasets": [{
+                    "path": "0",
+                    "coordinateTransformations": [{
+                        "type": "scale",
+                        "scale": [1.0, 1.0, 1.0, 1.0]
+                    }]
+                }]
+            }]
+        });
+        let group_root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": ome }
+        });
+        // Compact (not pretty) so size ≈ n_colors * ~43 bytes — predictable.
+        fs::write(
+            group_dir.join("zarr.json"),
+            serde_json::to_string(&group_root).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = group_dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [1, 1, 64, 64],
+            "data_type": "uint32",
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": { "chunk_shape": [1, 1, 64, 64] }
+            },
+            "codecs": raw_codecs(),
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A LARGE but VALID label group is KEPT (not skipped): its group
+    /// `zarr.json` is bigger than the initial read cap, so a naive bounded read
+    /// would truncate and drop it, but the truncation-aware retry reads it in
+    /// full (still under the hard ceiling). Colors are length-capped at
+    /// [`parse::MAX_LABEL_ENTRIES`] rather than the whole group being lost.
+    #[tokio::test]
+    async fn import_keeps_large_valid_label_with_capped_colors() {
+        let dir = temp_dir("import_labels_large_valid");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["cells"]);
+
+        // Enough colors that the COMPACT group zarr.json exceeds the initial
+        // read cap (≈43 bytes/entry) yet stays far under the hard ceiling, and
+        // the count itself is well past the per-group entry cap.
+        let n_colors =
+            (parse::LABEL_METADATA_INITIAL_BYTES as usize / 40) + parse::MAX_LABEL_ENTRIES + 1;
+        write_label_group_with_n_colors(&dir, "cells", n_colors);
+
+        // Sanity: the fixture really did exceed the initial cap (otherwise the
+        // test wouldn't exercise the retry path it's meant to guard).
+        let group_json = dir.join("labels").join("cells").join("zarr.json");
+        let on_disk = fs::metadata(&group_json).unwrap().len();
+        assert!(
+            on_disk > parse::LABEL_METADATA_INITIAL_BYTES,
+            "fixture must exceed the initial read cap to exercise the retry; got {on_disk} bytes",
+        );
+        assert!(
+            on_disk < parse::MAX_LABEL_METADATA_BYTES,
+            "fixture must stay under the hard ceiling; got {on_disk} bytes",
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "big", "Big")
+            .await
+            .expect("a large VALID label must not fail the open");
+
+        // The label is KEPT (base + label), not dropped.
+        let images = result.manifest.images();
+        assert_eq!(
+            images.len(),
+            2,
+            "large valid label must be kept, not skipped"
+        );
+        assert!(images[1].is_label());
+        match &images[1].role {
+            ImageRole::Label(meta) => {
+                assert_eq!(meta.name, "cells");
+                // Colors are length-capped, not truncated-to-parse-failure.
+                assert_eq!(meta.colors.len(), parse::MAX_LABEL_ENTRIES);
+            }
+            ImageRole::Intensity => panic!("expected Label role"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A label group whose array `shape` rank disagrees with its declared
+    /// `axes` rank is SKIPPED with a warning (never attached with silently
+    /// position-mapped geometry), while the base image and other valid groups
+    /// still import.
+    #[tokio::test]
+    async fn import_skips_label_with_shape_rank_mismatch() {
+        let dir = temp_dir("import_labels_rank_mismatch");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["bad_rank", "good"]);
+
+        // 4 declared axes (t,z,y,x) but a 3-element shape/chunk → rank mismatch.
+        let group_dir = dir.join("labels").join("bad_rank");
+        fs::create_dir_all(&group_dir).unwrap();
+        let ome = serde_json::json!({
+            "version": "0.5",
+            "image-label": {"version": "0.5"},
+            "multiscales": [{
+                "version": "0.5",
+                "name": "bad_rank",
+                "axes": [
+                    {"name": "t", "type": "time"},
+                    {"name": "z", "type": "space"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"}
+                ],
+                "datasets": [{
+                    "path": "0",
+                    "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0]}]
+                }]
+            }]
+        });
+        fs::write(
+            group_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "zarr_format": 3, "node_type": "group", "attributes": {"ome": ome}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let level_dir = group_dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        // `chunk_shape` rank MATCHES the 4 axes (so the pre-existing chunk-rank
+        // check passes) but `shape` rank is 3 — isolating the NEW shape-rank
+        // check as the sole reason this group is skipped.
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [64, 64, 64],
+                "data_type": "uint32",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 1, 64, 64]}},
+                "codecs": raw_codecs(),
+                "fill_value": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // A well-formed 4D group proves iteration continues past the bad one.
+        write_label_group(
+            &dir,
+            "good",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "rank", "Rank")
+            .await
+            .expect("a rank-mismatched label must not fail the open");
+
+        let images = result.manifest.images();
+        // Base + the single well-formed label; the mismatched one was skipped.
+        assert_eq!(images.len(), 2);
+        let label_ids: Vec<&str> = images[1..].iter().map(|i| i.image_id.0.as_str()).collect();
+        assert_eq!(label_ids, vec!["rank:label:good"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `labels` list with a duplicate name must not mint two label
+    /// `ImageSpec`s with the same `image_id`: the first occurrence wins and the
+    /// later dup is dropped, so ids never collide.
+    #[tokio::test]
+    async fn import_dedups_duplicate_label_names() {
+        let dir = temp_dir("import_labels_dedup");
+        create_single_image_fixture(&dir, None);
+        // "nuclei" listed twice, plus a distinct "cells".
+        write_labels_index(&dir, &["nuclei", "nuclei", "cells"]);
+        write_label_group(
+            &dir,
+            "nuclei",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+        write_label_group(
+            &dir,
+            "cells",
+            Some(sample_image_label()),
+            "uint32",
+            raw_codecs(),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "dup", "Dup").await.unwrap();
+
+        let images = result.manifest.images();
+        // Base + exactly one "nuclei" + one "cells" — no duplicate id.
+        assert_eq!(images.len(), 3);
+        let label_ids: Vec<&str> = images[1..].iter().map(|i| i.image_id.0.as_str()).collect();
+        assert_eq!(label_ids, vec!["dup:label:nuclei", "dup:label:cells"]);
+
+        // Ids are unique across ALL images (the collision this guards against).
+        let mut all_ids: Vec<&str> = images.iter().map(|i| i.image_id.0.as_str()).collect();
+        let before = all_ids.len();
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        assert_eq!(all_ids.len(), before, "label image_ids must not collide");
+
+        // Fetch + binding stay in lockstep (also de-duplicated).
+        assert_eq!(result.binding_seed.images.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Directly exercise the capped/truncation-aware reader with SMALL caps so
+    /// the three byte-size regimes are covered cheaply (no multi-MiB fixtures):
+    /// a small object is returned whole; a large-but-valid object (over the
+    /// initial cap, under the ceiling) is read in full via the retry; an object
+    /// over the ceiling errors so the caller skips it.
+    #[tokio::test]
+    async fn read_zarr_json_capped_keeps_large_valid_and_rejects_over_ceiling() {
+        let dir = temp_dir("read_capped");
+        fs::create_dir_all(&dir).unwrap();
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+
+        // Helper: write a valid JSON object padded so its serialized length is
+        // AT LEAST `target` bytes, via a filler string key.
+        let write_sized = |rel: &str, target: usize| {
+            let mut v = serde_json::json!({"ok": true, "pad": ""});
+            let base = serde_json::to_string(&v).unwrap().len();
+            let fill = target.saturating_sub(base);
+            v["pad"] = serde_json::json!("z".repeat(fill));
+            let s = serde_json::to_string(&v).unwrap();
+            assert!(s.len() >= target);
+            fs::write(dir.join(rel), s).unwrap();
+        };
+
+        let initial = 4096u64;
+        let ceiling = 16384u64;
+
+        // 1) Small object (< initial): returned whole.
+        write_sized("small.json", 100);
+        let v = parse::read_zarr_json_capped(&store, "small.json", initial, ceiling)
+            .await
+            .expect("small object parses");
+        assert_eq!(v["ok"], serde_json::json!(true));
+
+        // 2) Large-but-valid (> initial, < ceiling): retry reads it in full.
+        write_sized("mid.json", 8000);
+        let v = parse::read_zarr_json_capped(&store, "mid.json", initial, ceiling)
+            .await
+            .expect("large-but-valid object is kept via the retry");
+        assert_eq!(v["ok"], serde_json::json!(true));
+
+        // 3) Over the ceiling: errors, so the caller skips the group.
+        write_sized("huge.json", (ceiling as usize) + 4096);
+        let err = parse::read_zarr_json_capped(&store, "huge.json", initial, ceiling)
+            .await
+            .expect_err("over-ceiling metadata must error");
+        assert!(
+            matches!(err, StoreError::Metadata(_)),
+            "expected a Metadata error, got {err:?}",
         );
 
         let _ = fs::remove_dir_all(&dir);

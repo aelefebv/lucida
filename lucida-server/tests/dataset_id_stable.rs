@@ -28,7 +28,7 @@ use std::sync::Arc;
 use lucida_content::url::{dataset_id_for_url, normalize_dataset_url};
 use lucida_content::{
     Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
-    EntityKind, EntityLabels, ImageSpec, LevelGeometry, MultiscaleInfo,
+    EntityKind, EntityLabels, ImageRole, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_protocol::{
     DatasetOpened, FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat,
@@ -334,6 +334,7 @@ fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
                 pinned_axes: vec![],
                 channel_infos: vec![],
             },
+            role: ImageRole::Intensity,
         }],
         vec![],
         None,

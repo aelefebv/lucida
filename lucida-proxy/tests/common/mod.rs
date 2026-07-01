@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use lucida_content::{
     Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
-    EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo, TransformEdge,
-    VoxelTransform,
+    EntityKind, EntityLabels, ImageId, ImageRole, ImageSpec, LevelGeometry, MultiscaleInfo,
+    TransformEdge, VoxelTransform,
 };
 use lucida_proxy::{FieldVolume, ProxySourceData, SourceError};
 
@@ -139,6 +139,7 @@ pub fn single_image_graph(
                 pinned_axes: vec![],
                 channel_infos: vec![],
             },
+            role: ImageRole::Intensity,
         }],
         vec![],
         None,
@@ -205,6 +206,7 @@ pub fn well_graph_with_fields(
                 pinned_axes: vec![],
                 channel_infos: vec![],
             },
+            role: ImageRole::Intensity,
         });
     }
 

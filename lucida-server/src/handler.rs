@@ -2832,7 +2832,7 @@ mod tests {
     use super::*;
     use lucida_content::{
         Axis, AxisKind, DataType, DatasetKind, Entity, EntityId, EntityKind, EntityLabels,
-        LevelGeometry, MultiscaleInfo,
+        ImageRole, LevelGeometry, MultiscaleInfo,
     };
     use lucida_proxy::{ProxyDtype, ProxyHeader};
 
@@ -2888,6 +2888,7 @@ mod tests {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,

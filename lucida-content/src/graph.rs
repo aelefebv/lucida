@@ -71,7 +71,7 @@ mod tests {
     use super::*;
     use crate::entity::{EntityKind, EntityLabels};
     use crate::id::{EntityId, ImageId};
-    use crate::image::{Axis, AxisKind, DataType, LevelGeometry, MultiscaleInfo};
+    use crate::image::{Axis, AxisKind, DataType, ImageRole, LevelGeometry, MultiscaleInfo};
     use crate::transform::VoxelTransform;
 
     fn make_single_image_graph() -> DatasetManifest {
@@ -135,6 +135,7 @@ mod tests {
                     pinned_axes: vec![],
                     channel_infos: vec![],
                 },
+                role: ImageRole::Intensity,
             }],
             vec![],
             None,
