@@ -227,3 +227,35 @@
   padding: 2px 8px;
   cursor: pointer;
 }
+
+/* Count badge on a dataset row indicating it ships segmentation labels. A
+   small pill next to the name; purely informational (expand to interact). */
+.layer-label-badge {
+  flex-shrink: 0;
+  min-width: 1.1rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: #3a3f4b;
+  color: #cbd5e1;
+  font-size: 0.65rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* The Labels disclosure inside a layer's detail — its own section, distinct
+   from the channel list, reusing the channel-sublayer visuals for the rows. */
+.label-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.label-section-header {
+  gap: 0.35rem;
+}
+.label-section-count {
+  color: #888;
+  font-size: 0.7rem;
+}
+.label-sublayer {
+  border-left-color: #5a6b8c;
+}

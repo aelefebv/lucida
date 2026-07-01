@@ -373,7 +373,7 @@ impl WasmScene {
             Some(d) => d,
             None => return vec![0.0, 0.0],
         };
-        let member = match derived.members.first() {
+        let member = match derived.primary_member() {
             Some(m) => m,
             None => return vec![0.0, 0.0],
         };
@@ -395,15 +395,16 @@ impl WasmScene {
     }
 
     /// Returns the visible region for a dataset as JSON.
-    /// The region is computed using the first member's volume transform and shape,
-    /// giving the global viewport bounds before per-member position offsets.
+    /// The region is computed using the primary (non-label) member's volume
+    /// transform and shape, giving the global viewport bounds before per-member
+    /// position offsets.
     pub fn visible_region(&self, dataset_id: &str) -> String {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = match self.inner.derived.get(&ds_id) {
             Some(d) => d,
             None => return "null".to_string(),
         };
-        let member = match derived.members.first() {
+        let member = match derived.primary_member() {
             Some(m) => m,
             None => return "null".to_string(),
         };
@@ -426,26 +427,37 @@ impl WasmScene {
 
     /// Returns member positions as JSON: `{"entity_id": [x, y], ...}`.
     /// These are the composed layout+transform positions used by chunk planning.
+    ///
+    /// **Hidden label overlays are omitted**, mirroring the core fetch/query
+    /// gate ([`Scene::chunk_plan_for`] / [`Scene::view_query`]): a label member
+    /// contributes a position only once its overlay is toggled on, so the
+    /// planner never routes fetches to a mask the renderer isn't drawing.
     pub fn member_positions(&self, dataset_id: &str) -> String {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = match self.inner.derived.get(&ds_id) {
             Some(d) => d,
             None => return "{}".to_string(),
         };
+        // Read the per-label visibility slice once, not per member.
+        let label_settings = self.inner.label_settings_slice(&ds_id);
         let mut map = std::collections::HashMap::new();
         for member in &derived.members {
+            if Scene::label_member_hidden(member, label_settings) {
+                continue;
+            }
             map.insert(&member.entity_id.0, member.position);
         }
         serde_json::to_string(&map).unwrap()
     }
 
-    /// Returns the full volume shape [Z, Y, X] for a dataset.
+    /// Returns the full volume shape [Z, Y, X] for a dataset's primary
+    /// (non-label) member.
     pub fn dataset_volume_shape(&self, dataset_id: &str) -> Vec<u32> {
         let ds_id = DatasetId(dataset_id.to_string());
         self.inner
             .derived
             .get(&ds_id)
-            .and_then(|d| d.members.first())
+            .and_then(|d| d.primary_member())
             .and_then(|m| m.levels.first())
             .map(|l| vec![l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
             .unwrap_or_else(|| vec![1, 1, 1])
@@ -574,7 +586,7 @@ impl WasmScene {
             .derived
             .values()
             .next()
-            .and_then(|d| d.members.first());
+            .and_then(|d| d.primary_member());
         let t = match first_member {
             Some(m) => &m.volume_transform,
             None => return 1.0,
@@ -834,7 +846,7 @@ impl WasmScene {
             .inner
             .derived
             .get(&ds_id)
-            .and_then(|d| d.members.first());
+            .and_then(|d| d.primary_member());
         match member {
             Some(m) => {
                 let t = &m.volume_transform;
@@ -869,7 +881,7 @@ impl WasmScene {
             .inner
             .derived
             .get(&ds_id)
-            .and_then(|d| d.members.first());
+            .and_then(|d| d.primary_member());
         match member {
             Some(m) => {
                 let t = &m.volume_transform;
@@ -990,6 +1002,20 @@ impl WasmScene {
     /// [`Scene::label_overlays`].
     pub fn label_overlays(&self, dataset_id: &str) -> String {
         serde_json::to_string(&self.inner.label_overlays(dataset_id)).unwrap()
+    }
+
+    /// Whether `dataset_id` has at least one label image — the cheap signal the
+    /// layer panel uses to decide whether to show the Labels section and the
+    /// one-time "labels available" hint. See [`Scene::dataset_has_labels`].
+    pub fn dataset_has_labels(&self, dataset_id: &str) -> bool {
+        self.inner.dataset_has_labels(dataset_id)
+    }
+
+    /// How many label images `dataset_id` has — the count the layer panel shows
+    /// as a per-dataset badge. `0` for an intensity-only or unknown dataset. See
+    /// [`Scene::label_count`].
+    pub fn label_count(&self, dataset_id: &str) -> usize {
+        self.inner.label_count(dataset_id)
     }
 
     // --- Layout management ---

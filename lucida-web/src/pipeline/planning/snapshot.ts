@@ -38,6 +38,17 @@ interface VisibleEntityRow {
   centroid_world: [number, number, number];
   ideal_target_lod: number;
   importance: number;
+  /**
+   * Whether this entity is a segmentation **label** overlay (added in the
+   * label-discoverability slice). Optional/absent on rows from an older core.
+   * Hidden labels are already excluded from `view_query` by the core gate, so
+   * the fetch/plan loop needs no extra filtering here — this is carried through
+   * only so downstream (roster/telemetry) can distinguish label members without
+   * re-joining the manifest.
+   */
+  is_label?: boolean;
+  /** Label-relative index for a label row; absent for intensity. */
+  label_index?: number;
 }
 
 /** Wire shape of `view_query`'s top-level object. */

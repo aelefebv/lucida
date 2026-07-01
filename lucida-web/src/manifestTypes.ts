@@ -86,10 +86,75 @@ export interface LevelGeometry {
   scale: number[];
 }
 
+/**
+ * A single `image-label.colors` entry: an RGBA color assigned to a label value.
+ * Mirrors `lucida-content`'s `LabelColor`.
+ */
+export interface LabelColor {
+  value: number;
+  rgba: [number, number, number, number];
+}
+
+/**
+ * Sidecar metadata for a label image, parsed from the OME-NGFF `image-label`
+ * block (mirrors `lucida-content`'s `LabelMeta`). Every field is optional and
+ * untrusted; `source_image` is carried verbatim as an opaque relative string
+ * and is never resolved.
+ */
+export interface LabelMeta {
+  name: string;
+  colors?: LabelColor[];
+  properties?: { value: number; fields: Record<string, unknown> }[];
+  source_image?: string | null;
+}
+
+/**
+ * The semantic role of an {@link ImageSpec}, mirroring the Rust `ImageRole`
+ * externally-tagged serde enum: the unit string `"Intensity"` for ordinary
+ * pixel data, or `{ Label: LabelMeta }` for a segmentation mask parsed from a
+ * `labels/` group. Absent (older payloads) ⇒ treat as intensity.
+ */
+export type ImageRole = "Intensity" | { Label: LabelMeta };
+
+/** True when an {@link ImageRole} is the `Label` variant. */
+export function isLabelRole(role: ImageRole | undefined): role is { Label: LabelMeta } {
+  return typeof role === "object" && role !== null && "Label" in role;
+}
+
 export interface ImageSpec {
   image_id: string;
   owner: string;
   multiscale: MultiscaleInfo;
+  /**
+   * What this image is to the viewer: intensity vs a `Label` overlay. Optional
+   * (`#[serde(default)]` on the Rust side): a payload from before labels
+   * existed omits it and is treated as {@link ImageRole} `"Intensity"`.
+   */
+  role?: ImageRole;
+}
+
+/**
+ * One label overlay's joined metadata + effective display state — the TS mirror
+ * of the Rust `LabelOverlayView` (`WasmScene::label_overlays` JSON). One entry
+ * per label image in a dataset, in manifest order, addressed by the
+ * label-relative {@link index} the `SetLabelVisible`/`SetLabelOpacity` commands
+ * carry.
+ */
+export interface LabelOverlayView {
+  /** The label image's `ImageSpec.image_id` — the stable join key. */
+  image_id: string;
+  /** Label-relative index (the N-th label image, skipping intensity). */
+  index: number;
+  /** The `labels/` group name (may be empty if the producer omitted it). */
+  name: string;
+  /** Effective visibility (default off until toggled). */
+  visible: boolean;
+  /** Effective blend opacity in [0,1] (default 0.5). */
+  opacity: number;
+  /** How many `image-label.colors` entries the label declares. */
+  num_colors: number;
+  /** The opaque `source-image` string, carried verbatim (never resolved). */
+  source_image: string | null;
 }
 
 export interface LayoutSpec {

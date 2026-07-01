@@ -3,6 +3,7 @@ import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
+import type { LabelOverlayView } from "../manifestTypes.ts";
 import "./LayerPanel.css";
 
 export interface LayerInfo {
@@ -32,6 +33,15 @@ export interface LayerInfo {
   channelBlendMode: string;
   detailLevelOverride: number | null;
   detailLevelOptions: { level: number; label: string }[];
+  /**
+   * Segmentation label overlays for this dataset, one per label image (from
+   * `WasmScene::label_overlays`). Absent/empty for a dataset with no labels —
+   * the Labels section is only rendered when this has entries. Each carries the
+   * label's name and its effective visibility/opacity (default off / 0.5).
+   * Independent of `multiChannel`: a single-channel dataset can still have
+   * labels.
+   */
+  labels?: LabelOverlayView[];
 }
 
 interface Props {
@@ -68,6 +78,15 @@ interface Props {
   onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
   onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
   onChannelSetBlendMode?: (id: string, blendMode: string) => void;
+  /**
+   * Toggle a label overlay's visibility. `index` is the label-relative index
+   * (the N-th label image). Dispatches `SetLabelVisible` via the same
+   * apply-and-send path channel visibility uses. Optional so a viewer/host that
+   * doesn't wire labels still type-checks.
+   */
+  onSetLabelVisible?: (id: string, index: number, visible: boolean) => void;
+  /** Set a label overlay's blend opacity in [0,1]. Dispatches `SetLabelOpacity`. */
+  onSetLabelOpacity?: (id: string, index: number, opacity: number) => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
   debugToggle?: { label: string; active: boolean; onClick: () => void };
@@ -106,6 +125,8 @@ export function LayerPanel({
   onChannelSetContrast,
   onChannelSetGamma,
   onChannelSetBlendMode,
+  onSetLabelVisible,
+  onSetLabelOpacity,
   viewModeToggle,
   cameraModeToggle,
   debugToggle,
@@ -246,6 +267,15 @@ export function LayerPanel({
                   >
                     {"✎"}
                   </button>
+                )}
+                {layer.labels && layer.labels.length > 0 && (
+                  <span
+                    className="layer-label-badge"
+                    title={`${layer.labels.length} segmentation ${layer.labels.length === 1 ? "label" : "labels"} available — expand to show`}
+                    aria-label={`${layer.labels.length} ${layer.labels.length === 1 ? "label" : "labels"}`}
+                  >
+                    {layer.labels.length}
+                  </span>
                 )}
                 <input
                   type="range"
@@ -456,6 +486,23 @@ export function LayerPanel({
                       </div>
                     </>
                   )}
+                  {/*
+                    Labels section — a distinct disclosure listing each
+                    segmentation label by name with a visibility eye + opacity
+                    slider (NO colormap/contrast; a label is tinted by its own
+                    colors). Rendered only when the dataset has labels, and NOT
+                    gated behind `multiChannel` (a single-channel dataset can
+                    have labels too).
+                  */}
+                  {layer.labels && layer.labels.length > 0 && (
+                    <LabelSection
+                      layerId={layer.id}
+                      layerName={layer.name}
+                      labels={layer.labels}
+                      onSetLabelVisible={onSetLabelVisible}
+                      onSetLabelOpacity={onSetLabelOpacity}
+                    />
+                  )}
                   <div className="layer-detail-row">
                     <label>Blend</label>
                     <select
@@ -627,5 +674,91 @@ function ChannelNameInput({
         }
       }}
     />
+  );
+}
+
+/**
+ * The per-dataset **Labels** disclosure: a "Labels" header that expands to a
+ * list of the dataset's segmentation labels, each with a visibility eye and an
+ * opacity slider. Deliberately spare — a label is a mask tinted by its own
+ * colors, so there is NO colormap/contrast here (that is the whole difference
+ * from a channel sublayer).
+ *
+ * Mirrors the channel-sublayer controls' look (eye + name + slider on
+ * `channel-sublayer`/`channel-sublayer-header`), and — like channels — starts
+ * COLLAPSED so a labelled dataset opens tidy; the header carries the label
+ * count so the presence of labels is visible even while collapsed. Not gated
+ * behind `multiChannel`; the parent only renders it when the dataset has
+ * labels. Own expanded state (view-only React state; never persisted or
+ * broadcast), so it doesn't disturb the existing channel collapse state.
+ */
+function LabelSection({
+  layerId,
+  layerName,
+  labels,
+  onSetLabelVisible,
+  onSetLabelOpacity,
+}: {
+  layerId: string;
+  layerName: string;
+  labels: LabelOverlayView[];
+  onSetLabelVisible?: (id: string, index: number, visible: boolean) => void;
+  onSetLabelOpacity?: (id: string, index: number, opacity: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="label-section">
+      <div className="layer-detail-row label-section-header">
+        <label>Labels</label>
+        <span className="label-section-count" aria-hidden="true">
+          {labels.length}
+        </span>
+        <button
+          className="layer-expand-btn"
+          aria-label={`${expanded ? "Collapse" : "Expand"} labels of ${layerName}`}
+          aria-expanded={expanded}
+          title={expanded ? "Collapse labels" : "Expand labels"}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "▲" : "▼"}
+        </button>
+      </div>
+      {expanded &&
+        labels.map((lbl) => {
+          // Empty producer name → a positional fallback so every label has a
+          // legible handle (mirrors the channel `Ch N` fallback).
+          const labelName = lbl.name?.trim() || `Label ${lbl.index}`;
+          return (
+            <div key={lbl.index} className="channel-sublayer label-sublayer">
+              <div className="channel-sublayer-header">
+                <button
+                  className="layer-eye-btn"
+                  title={lbl.visible ? "Hide label" : "Show label"}
+                  aria-label={`${lbl.visible ? "Hide" : "Show"} ${layerName} ${labelName}`}
+                  aria-pressed={lbl.visible}
+                  onClick={() => onSetLabelVisible?.(layerId, lbl.index, !lbl.visible)}
+                >
+                  {lbl.visible ? "◉" : "○"}
+                </button>
+                <span className="channel-label" title={labelName}>
+                  {labelName}
+                </span>
+                <input
+                  type="range"
+                  className="layer-opacity-slider"
+                  aria-label={`${layerName} ${labelName} opacity`}
+                  min={0}
+                  max={100}
+                  value={Math.round(lbl.opacity * 100)}
+                  title={`Opacity: ${Math.round(lbl.opacity * 100)}%`}
+                  onChange={(e) =>
+                    onSetLabelOpacity?.(layerId, lbl.index, Number(e.target.value) / 100)
+                  }
+                />
+              </div>
+            </div>
+          );
+        })}
+    </div>
   );
 }

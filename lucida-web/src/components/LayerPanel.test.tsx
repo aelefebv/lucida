@@ -475,3 +475,137 @@ describe("LayerPanel per-channel collapse", () => {
     expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
   });
 });
+
+describe("LayerPanel labels section", () => {
+  function labelOverlay(overrides: Partial<import("../manifestTypes.ts").LabelOverlayView> = {}) {
+    return {
+      image_id: "wds-1-nuclei",
+      index: 0,
+      name: "nuclei",
+      visible: false,
+      opacity: 0.5,
+      num_colors: 1,
+      source_image: null,
+      ...overrides,
+    };
+  }
+
+  // Expanded row so the Labels section renders. Labels are independent of
+  // multiChannel — assert with multiChannel FALSE (single-channel dataset).
+  function labelProps(
+    labels: import("../manifestTypes.ts").LabelOverlayView[],
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      ...baseProps(true, vi.fn()),
+      multiChannel: false,
+      expandedLayerId: "wds-1" as string | null,
+      layers: [layer({ labels })],
+      ...extra,
+    };
+  }
+
+  it("renders a Labels section listing each label by name (single-channel dataset)", () => {
+    render(
+      <LayerPanel
+        {...labelProps([
+          labelOverlay({ index: 0, name: "nuclei" }),
+          labelOverlay({ index: 1, name: "membrane", image_id: "wds-1-membrane" }),
+        ])}
+      />,
+    );
+    // The section header + both label names.
+    expect(screen.getByLabelText("Expand labels of original.zarr")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Expand labels of original.zarr"));
+    expect(screen.getByText("nuclei")).toBeTruthy();
+    expect(screen.getByText("membrane")).toBeTruthy();
+  });
+
+  it("shows a count badge on the dataset row for labelled datasets", () => {
+    render(
+      <LayerPanel
+        {...labelProps([
+          labelOverlay({ index: 0, name: "nuclei" }),
+          labelOverlay({ index: 1, name: "membrane" }),
+        ])}
+      />,
+    );
+    expect(screen.getByLabelText("2 labels")).toBeTruthy();
+  });
+
+  it("clicking a label eye calls onSetLabelVisible with the toggled state", () => {
+    const onSetLabelVisible = vi.fn();
+    render(
+      <LayerPanel
+        {...labelProps([labelOverlay({ index: 0, name: "nuclei", visible: false })], {
+          onSetLabelVisible,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Expand labels of original.zarr"));
+    fireEvent.click(screen.getByLabelText("Show original.zarr nuclei"));
+    expect(onSetLabelVisible).toHaveBeenCalledTimes(1);
+    expect(onSetLabelVisible).toHaveBeenCalledWith("wds-1", 0, true);
+  });
+
+  it("the opacity slider calls onSetLabelOpacity with a 0..1 value", () => {
+    const onSetLabelOpacity = vi.fn();
+    render(
+      <LayerPanel
+        {...labelProps([labelOverlay({ index: 0, name: "nuclei", opacity: 0.5 })], {
+          onSetLabelOpacity,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Expand labels of original.zarr"));
+    const slider = screen.getByLabelText("original.zarr nuclei opacity") as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: "80" } });
+    expect(onSetLabelOpacity).toHaveBeenCalledTimes(1);
+    expect(onSetLabelOpacity).toHaveBeenCalledWith("wds-1", 0, 0.8);
+  });
+
+  it("falls back to `Label N` when a label name is empty", () => {
+    render(<LayerPanel {...labelProps([labelOverlay({ index: 0, name: "" })])} />);
+    fireEvent.click(screen.getByLabelText("Expand labels of original.zarr"));
+    expect(screen.getByText("Label 0")).toBeTruthy();
+  });
+
+  it("renders NO Labels section for an unlabelled dataset", () => {
+    // No `labels` prop at all.
+    render(
+      <LayerPanel
+        {...{
+          ...baseProps(true, vi.fn()),
+          multiChannel: false,
+          expandedLayerId: "wds-1" as string | null,
+        }}
+      />,
+    );
+    expect(screen.queryByLabelText("Expand labels of original.zarr")).toBeNull();
+    expect(screen.queryByLabelText("2 labels")).toBeNull();
+  });
+
+  it("renders NO Labels section for an empty labels array", () => {
+    render(<LayerPanel {...labelProps([])} />);
+    expect(screen.queryByLabelText("Expand labels of original.zarr")).toBeNull();
+  });
+
+  it("shows the Labels section even in multi-channel mode (not gated by multiChannel)", () => {
+    render(
+      <LayerPanel
+        {...labelProps([labelOverlay({ index: 0, name: "nuclei" })], {
+          multiChannel: true,
+          layers: [
+            layer({
+              labels: [labelOverlay({ index: 0, name: "nuclei" })],
+              channelSettings: [
+                { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+              ],
+            }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByLabelText("Expand labels of original.zarr")).toBeTruthy();
+  });
+});

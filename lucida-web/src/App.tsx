@@ -4,6 +4,7 @@ import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
 import { FocalDepthControl } from "./components/FocalDepthControl.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
+import { LabelsAvailableHint } from "./components/LabelsAvailableHint.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { AnnotationOverlay, type Annotation, type AnnotationOverlayHandle } from "./components/AnnotationOverlay.tsx";
@@ -981,6 +982,23 @@ function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.layerInfos, datasetsVersion]);
 
+  // One-time "labels available" hint. Labels default OFF, so without a nudge a
+  // user might never notice a labelled dataset ships masks. When a dataset that
+  // has labels first becomes the selected layer, show the transient hint ONCE
+  // per dataset id (tracked in a ref Set so re-selecting it later doesn't nag).
+  const labelsHintedRef = useRef<Set<string>>(new Set());
+  const [labelsHint, setLabelsHint] = useState<{ datasetId: string; count: number } | null>(null);
+  useEffect(() => {
+    if (!selectedDatasetId) return;
+    if (labelsHintedRef.current.has(selectedDatasetId)) return;
+    const layerInfo = layers.layerInfos.find((l) => l.id === selectedDatasetId);
+    const count = layerInfo?.labels?.length ?? 0;
+    if (count === 0) return;
+    labelsHintedRef.current.add(selectedDatasetId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLabelsHint({ datasetId: selectedDatasetId, count });
+  }, [selectedDatasetId, layers.layerInfos]);
+
   // Preview-thumbnail renderer for the Explore panel's contact sheet. Builds a
   // closure that turns a candidate child view into an off-screen render of the
   // dataset's resident coarse overview from that view's camera (reusing the
@@ -1148,6 +1166,8 @@ function App({
         onChannelSetContrast={layers.handleChannelSetContrast}
         onChannelSetGamma={layers.handleChannelSetGamma}
         onChannelSetBlendMode={layers.handleChannelSetBlendMode}
+        onSetLabelVisible={layers.handleSetLabelVisible}
+        onSetLabelOpacity={layers.handleSetLabelOpacity}
         onAddLayer={() => setShowFileBrowser(true)}
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
@@ -1391,6 +1411,14 @@ function App({
               viewMode={dims.viewMode}
             />
             <FpsCounter />
+            {/* One-time transient nudge that the selected dataset ships labels
+                (labels default off, so this is how a user discovers them). Same
+                ephemeral pattern as the fly-camera hint. */}
+            <LabelsAvailableHint
+              visible={labelsHint !== null && labelsHint.datasetId === selectedDatasetId}
+              count={labelsHint?.count ?? 0}
+              onDismiss={() => setLabelsHint(null)}
+            />
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Non-blocking graceful-degrade notice from the LIGHT annotation
                 -view restore (slice 2): shown when an author's captured z/t/c had

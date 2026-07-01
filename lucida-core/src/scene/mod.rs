@@ -28,6 +28,26 @@ pub struct DatasetDerivedState {
     pub members: Vec<MemberState>,
 }
 
+impl DatasetDerivedState {
+    /// The dataset's **primary member** — the one that stands in for "the
+    /// volume": the first **non-label** member, falling back to the first member
+    /// of any kind when a (degenerate) dataset has only labels.
+    ///
+    /// Everything that treats a single member as "the dataset's image" —
+    /// [`Scene::volume_shape`], [`Scene::volume_transform`], annotation
+    /// anchoring, and the wasm volume-shape/scene-matrix accessors — resolves it
+    /// through here so a label overlay (which may sort first, or have a larger
+    /// footprint) can never be mistaken for the intensity data. This is the
+    /// single-member twin of the `is_label` filter the bounds/normalization
+    /// folds already apply.
+    pub fn primary_member(&self) -> Option<&MemberState> {
+        self.members
+            .iter()
+            .find(|m| !m.is_label)
+            .or_else(|| self.members.first())
+    }
+}
+
 /// Precomputed per image-bearing entity.
 #[derive(Debug, Clone)]
 pub struct MemberState {
@@ -46,6 +66,19 @@ pub struct MemberState {
     /// [`Scene::dataset_voxel_bounds_2d`], and
     /// [`Scene::global_max_physical_extent`].
     pub is_label: bool,
+    /// For a **label** member, its **label-relative index** — `Some(i)` for the
+    /// i-th LABEL image in manifest order (intensity images are skipped, so the
+    /// index stays dense). `None` for an intensity member.
+    ///
+    /// This is the join key the hot-path fetch/query gates use to look up the
+    /// member's [`LabelSettings`] slot (visibility + opacity) in
+    /// [`DatasetDisplaySettings::label_settings`] — the same index space
+    /// [`Scene::label_overlays`], `SetLabelVisible`/`SetLabelOpacity`, and
+    /// [`DatasetDisplaySettings::ensure_label`] all address — so the gate is a
+    /// single `label_settings.get(i)` per member with no per-member re-count.
+    /// `MemberState` is derived state (rebuilt from the manifest, never
+    /// serialized), so this field carries no serde attribute.
+    pub label_index: Option<u32>,
 }
 
 /// Aggregate XY extent for visible image content in scene coordinates.
@@ -142,21 +175,21 @@ impl Scene {
         }
     }
 
-    /// Get the volume transform for the first dataset's first image.
+    /// Get the volume transform for the first dataset's primary (non-label) image.
     pub fn volume_transform(&self) -> Option<&VolumeTransform> {
         self.derived
             .values()
             .next()
-            .and_then(|d| d.members.first())
+            .and_then(|d| d.primary_member())
             .map(|m| &m.volume_transform)
     }
 
-    /// Get the volume shape [Z, Y, X] for the first dataset's first image.
+    /// Get the volume shape [Z, Y, X] for the first dataset's primary (non-label) image.
     pub fn volume_shape(&self) -> Option<[u32; 3]> {
         self.derived
             .values()
             .next()
-            .and_then(|d| d.members.first())
+            .and_then(|d| d.primary_member())
             .and_then(|m| m.levels.first())
             .map(|l| [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
     }
@@ -414,6 +447,32 @@ impl Scene {
         out
     }
 
+    /// How many **label images** `dataset_id` has in its manifest (0 for an
+    /// intensity-only or unknown dataset). The count the layer panel shows as a
+    /// per-dataset badge and the cheap "does this dataset have labels?" signal
+    /// [`Self::dataset_has_labels`] is built on.
+    ///
+    /// Reads the manifest (where the [`ImageRole`] lives), not derived members,
+    /// so it is correct even before derived state is (re)built — and counts
+    /// every label regardless of its current visibility (a hidden label still
+    /// exists and still belongs in the count).
+    pub fn label_count(&self, dataset_id: &str) -> usize {
+        let ds_id = DatasetId(dataset_id.to_string());
+        match self.document.manifests.get(&ds_id) {
+            Some(manifest) => manifest.images().iter().filter(|i| i.is_label()).count(),
+            None => 0,
+        }
+    }
+
+    /// Whether `dataset_id` has **at least one** label image — the cheap
+    /// discoverability signal the web uses to decide whether to show the Labels
+    /// section / the "labels available" hint at all. `false` for an
+    /// intensity-only or unknown dataset. Thin wrapper over
+    /// [`Self::label_count`].
+    pub fn dataset_has_labels(&self, dataset_id: &str) -> bool {
+        self.label_count(dataset_id) > 0
+    }
+
     /// Frame the named dataset's full extent in the current camera, **dispatching
     /// on the camera mode** so each mode is fed bounds in the coordinate space it
     /// actually uses:
@@ -551,6 +610,48 @@ impl Scene {
         ChunkRequestPlan { needed, prefetch }
     }
 
+    /// The dataset's per-label display slice (`&[LabelSettings]`), read ONCE so
+    /// the hot-path fetch/query gates ([`Self::chunk_plan_for`],
+    /// [`Self::view_query`], [`Self::ray_pick`]) can test a member's visibility
+    /// without a `HashMap` lookup per member. Returns an empty slice for a
+    /// dataset with no settings yet (every label then reads its default — OFF).
+    ///
+    /// `pub(crate)` so the wasm bridge (`WasmScene::member_positions`) can apply
+    /// the exact same read-once gate the pure-Rust hot paths use.
+    pub(crate) fn label_settings_slice(&self, dataset_id: &DatasetId) -> &[LabelSettings] {
+        self.dataset_settings
+            .get(dataset_id)
+            .map(|s| s.label_settings.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Whether a member should be **skipped** by the fetch/query hot paths
+    /// because it is a *hidden* label overlay.
+    ///
+    /// Intensity members (`label_index == None`) are never skipped. A label
+    /// member is skipped unless its [`LabelSettings`] slot in `label_settings`
+    /// says `visible` — and, crucially, a label with **no** materialized slot
+    /// (nothing toggled yet) defaults to hidden (`unwrap_or(false)`), so a
+    /// freshly-opened dataset fetches and picks only its intensity data until
+    /// the user opts a label in. This is the fetch/query twin of the default-off
+    /// state [`Self::label_overlays`] reports and [`LabelSettings::default`]
+    /// defines.
+    ///
+    /// `pub(crate)` so the wasm bridge shares this one gate definition rather
+    /// than re-deriving the "hidden label" rule.
+    pub(crate) fn label_member_hidden(
+        member: &MemberState,
+        label_settings: &[LabelSettings],
+    ) -> bool {
+        match member.label_index {
+            Some(index) => !label_settings
+                .get(index as usize)
+                .map(|s| s.visible)
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
     /// Compute the chunk request plan for a specific dataset by ID.
     ///
     /// Returns one `MemberChunkPlan` per visible member. For the common
@@ -560,14 +661,27 @@ impl Scene {
     /// For multi-member datasets (plates), each member's AABB is checked
     /// against the visible region, and chunk planning is done in
     /// member-local coordinates.
+    ///
+    /// **Hidden label overlays are skipped**: a label member is planned only
+    /// once its [`LabelSettings`] slot is `visible` (see
+    /// [`Self::label_member_hidden`]), so a freshly-opened dataset never fetches
+    /// mask chunks until the user turns a label on. Intensity members are
+    /// unaffected.
     pub fn chunk_plan_for(&self, dataset_id: &DatasetId) -> Option<Vec<MemberChunkPlan>> {
         let derived = self.derived.get(dataset_id)?;
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
+        // Read the per-label visibility slice once, not per member.
+        let label_settings = self.label_settings_slice(dataset_id);
 
         let mut plans = Vec::new();
         for member in &derived.members {
             if member.levels.is_empty() {
+                continue;
+            }
+            // Skip a label whose overlay is off — don't fetch mask chunks the
+            // renderer won't draw.
+            if Self::label_member_hidden(member, label_settings) {
                 continue;
             }
 
@@ -771,9 +885,16 @@ impl Scene {
         let derived = self.derived.get(dataset_id)?;
         let world_ray = self.camera.unproject_ray(screen_x, screen_y);
         let is_2d = matches!(self.camera, Camera::Slice(_));
+        // Read the per-label visibility slice once, not per member.
+        let label_settings = self.label_settings_slice(dataset_id);
         let mut closest: Option<crate::ray::RayHit> = None;
 
         for member in &derived.members {
+            // A hidden label overlay isn't drawn, so it must not be pickable —
+            // the cursor should fall through to the intensity data beneath it.
+            if Self::label_member_hidden(member, label_settings) {
+                continue;
+            }
             let level0 = match member.levels.first() {
                 Some(l) => l,
                 None => continue,
@@ -847,7 +968,10 @@ impl Scene {
     /// volume), so depth is consistent between drop and render.
     fn annotation_member(&self, dataset_id: &DatasetId) -> Option<(&MemberState, [f64; 3])> {
         let derived = self.derived.get(dataset_id)?;
-        let member = derived.members.first()?;
+        // Anchor against the primary (non-label) member so pin depth is measured
+        // against the intensity volume, never a label overlay that happens to
+        // sort first.
+        let member = derived.primary_member()?;
         let level0 = member.levels.first()?;
         let shape = [
             level0.shape[4] as f64, // X
@@ -981,8 +1105,16 @@ impl Scene {
         let mut results = Vec::with_capacity(derived.members.len());
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
+        // Read the per-label visibility slice once, not per member.
+        let label_settings = self.label_settings_slice(dataset_id);
 
         for member in &derived.members {
+            // A hidden label overlay contributes no fetch/roster row — the
+            // planner never plans for it and the roster never lists it until it
+            // is toggled on.
+            if Self::label_member_hidden(member, label_settings) {
+                continue;
+            }
             let pos = member.position;
 
             // Compute screen-space bounding box.
@@ -1097,6 +1229,8 @@ impl Scene {
                 centroid_world: centroid,
                 ideal_target_lod,
                 importance,
+                is_label: member.is_label,
+                label_index: member.label_index,
             });
         }
 
@@ -1159,6 +1293,11 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
     // Build per-image member state
     let mut members = Vec::new();
     let mut volume_transforms = HashMap::new();
+    // Running count of LABEL images emitted so far — a label member's
+    // `label_index` is its position among labels only (intensity images do not
+    // consume a slot), matching the label-relative index space `label_overlays`
+    // enumerates and `SetLabelVisible`/`SetLabelOpacity` address.
+    let mut next_label_index: u32 = 0;
 
     for image in manifest.images() {
         // Find position from layout placements
@@ -1192,6 +1331,17 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
 
         volume_transforms.insert(image.image_id.clone(), vt.clone());
 
+        let is_label = image.is_label();
+        // Assign a dense label-relative index only to label images; intensity
+        // members get `None` and do not advance the counter.
+        let label_index = if is_label {
+            let i = next_label_index;
+            next_label_index += 1;
+            Some(i)
+        } else {
+            None
+        };
+
         members.push(MemberState {
             entity_id: image.owner.clone(),
             image_id: image.image_id.clone(),
@@ -1199,7 +1349,8 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
             volume_transform: vt,
             levels: image.multiscale.levels.clone(),
             data_type: image.multiscale.data_type,
-            is_label: image.is_label(),
+            is_label,
+            label_index,
         });
     }
 
@@ -3000,5 +3151,245 @@ mod tests {
         assert!(scene.dataset_world_bounds("ds1").is_none());
         assert!(scene.dataset_voxel_bounds_2d("ds1").is_none());
         assert_eq!(scene.label_overlays("ds1").len(), 1);
+    }
+
+    // --- Label discoverability + fetch/query gating (slice 003) ---
+
+    /// Turn a dataset into "intensity SECOND, label FIRST" — the adversarial
+    /// ordering that makes the role-aware primary-member selection meaningful
+    /// (a naive `members.first()` would pick the label). The reordered manifest
+    /// keeps the intensity image (`x`/`y`) and a single leading label
+    /// (`lx`/`ly`).
+    fn scene_with_label_first(id: &str, x: u64, y: u64, lx: u64, ly: u64) -> Scene {
+        let reg = test_helpers::make_dataset_with_labels(id, x, y, &[("lead", lx, ly)]);
+        let mut manifest = reg.manifest;
+        // Swap so the label image is at index 0 and the intensity at index 1.
+        manifest.images_mut().swap(0, 1);
+        let reg = lucida_protocol::DatasetOpened { manifest, ..reg };
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene
+    }
+
+    #[test]
+    fn build_derived_state_assigns_dense_label_indices() {
+        // Intensity members carry None; label members get a dense 0,1,... in
+        // manifest order regardless of intensity images interleaved before them.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels(
+            "ds1",
+            256,
+            256,
+            &[("nuclei", 256, 256), ("membrane", 256, 256)],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let members = &scene.derived[&DatasetId("ds1".into())].members;
+        assert_eq!(members.len(), 3);
+        assert_eq!(members[0].label_index, None, "intensity has no label index");
+        assert_eq!(members[1].label_index, Some(0), "first label → 0");
+        assert_eq!(members[2].label_index, Some(1), "second label → 1");
+    }
+
+    #[test]
+    fn chunk_plan_excludes_hidden_labels_and_includes_them_once_visible() {
+        // A hidden label contributes no chunk plan (its mask isn't fetched);
+        // toggling it on brings its member into the plan. The intensity member
+        // is always planned.
+        let mut scene = Scene::new([512, 512]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        let plans = scene.chunk_plan_for(&ds_id).unwrap();
+        assert_eq!(plans.len(), 1, "only the intensity member is planned");
+        assert_eq!(plans[0].image_id, ImageId("ds1-image".into()));
+
+        // Turn the label on → now both members plan.
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 0,
+                visible: true,
+            }
+            .into(),
+        );
+        let plans = scene.chunk_plan_for(&ds_id).unwrap();
+        let ids: Vec<&str> = plans.iter().map(|p| p.image_id.0.as_str()).collect();
+        assert_eq!(plans.len(), 2, "intensity + now-visible label");
+        assert!(ids.contains(&"ds1-image"));
+        assert!(ids.contains(&"ds1-nuclei-image"));
+
+        // Turn it back off → back to intensity only.
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 0,
+                visible: false,
+            }
+            .into(),
+        );
+        assert_eq!(scene.chunk_plan_for(&ds_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn view_query_gates_labels_and_flags_visible_ones() {
+        // Hidden labels are absent from the roster; a visible label appears with
+        // is_label = true and its label-relative index. Intensity rows carry
+        // is_label = false / label_index = None.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        let roster = scene.view_query(&ds_id).unwrap().visible_entities;
+        assert_eq!(roster.len(), 1, "hidden label excluded from roster");
+        assert!(!roster[0].is_label);
+        assert_eq!(roster[0].label_index, None);
+
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 0,
+                visible: true,
+            }
+            .into(),
+        );
+        let roster = scene.view_query(&ds_id).unwrap().visible_entities;
+        assert_eq!(roster.len(), 2, "visible label now in roster");
+        let label_row = roster
+            .iter()
+            .find(|r| r.image_id == ImageId("ds1-nuclei-image".into()))
+            .expect("label row present");
+        assert!(label_row.is_label);
+        assert_eq!(label_row.label_index, Some(0));
+        let intensity_row = roster
+            .iter()
+            .find(|r| r.image_id == ImageId("ds1-image".into()))
+            .expect("intensity row present");
+        assert!(!intensity_row.is_label);
+        assert_eq!(intensity_row.label_index, None);
+    }
+
+    #[test]
+    fn ray_pick_falls_through_hidden_label_to_intensity() {
+        // A hidden label overlay (even one covering the whole intensity image)
+        // must not be pickable — the pick returns the intensity entity. When the
+        // label is toggled on, it can be picked.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        let hit = scene.ray_pick(&ds_id, 400.0, 300.0).expect("center hits");
+        assert_eq!(
+            hit.entity_id,
+            EntityId::from("ds1-entity"),
+            "hidden label must not intercept the pick"
+        );
+
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 0,
+                visible: true,
+            }
+            .into(),
+        );
+        // With the label visible it participates in picking (2D: first member
+        // whose voxel AABB contains the ray wins; both cover the point, so a hit
+        // is returned — the point is that picking no longer skips the label).
+        assert!(
+            scene.ray_pick(&ds_id, 400.0, 300.0).is_some(),
+            "a visible label is pickable"
+        );
+    }
+
+    #[test]
+    fn dataset_has_labels_and_label_count() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "labelled",
+                256,
+                256,
+                &[("nuclei", 256, 256), ("membrane", 128, 128)],
+            ))
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("plain", "plain", 2))
+                .into(),
+        );
+
+        assert!(scene.dataset_has_labels("labelled"));
+        assert_eq!(scene.label_count("labelled"), 2);
+        assert!(!scene.dataset_has_labels("plain"));
+        assert_eq!(scene.label_count("plain"), 0);
+        // Unknown dataset is a clean zero, never a panic.
+        assert!(!scene.dataset_has_labels("nope"));
+        assert_eq!(scene.label_count("nope"), 0);
+    }
+
+    #[test]
+    fn primary_member_prefers_intensity_over_a_leading_label() {
+        // With the label at index 0 and the intensity at index 1, the primary
+        // member (and everything routed through it) must still be the intensity
+        // image — its voxel shape, not the label's.
+        let scene = scene_with_label_first("ds1", 200, 100, 4096, 4096);
+        let derived = &scene.derived[&DatasetId("ds1".into())];
+        let primary = derived.primary_member().expect("has a primary member");
+        assert!(!primary.is_label, "primary must be the intensity member");
+
+        // volume_shape reads the primary member's level-0 [Z,Y,X]; it must be
+        // the intensity's 100x200 (Y,X), NOT the giant label's 4096.
+        let [_z, y, x] = scene.volume_shape().expect("volume shape");
+        assert_eq!([y, x], [100, 200], "volume shape came from the label");
+    }
+
+    #[test]
+    fn annotation_anchors_against_intensity_not_a_leading_label() {
+        // Pin anchoring resolves the primary member via `annotation_member`. With
+        // a label at index 0 and the intensity at index 1, the resolved anchor
+        // member must be the intensity, and its voxel shape the intensity's
+        // (200x100 XY), NOT the giant 4096 label's — so a pin's depth is measured
+        // against the intensity volume.
+        let scene = scene_with_label_first("ds1", 200, 100, 4096, 4096);
+        let id = DatasetId::from("ds1");
+        let (member, shape) = scene
+            .annotation_member(&id)
+            .expect("dataset has an anchorable member");
+        assert!(
+            !member.is_label,
+            "anchor member must be the intensity image"
+        );
+        // shape is [X, Y, Z]; the intensity is 200x100x1, not the 4096 label.
+        assert_eq!(
+            [shape[0], shape[1]],
+            [200.0, 100.0],
+            "anchor shape {shape:?} came from the label, not the intensity"
+        );
+    }
+
+    #[test]
+    fn opacity_toggle_alone_does_not_reveal_a_label_in_the_plan() {
+        // Setting opacity (without visibility) must NOT bring a hidden label into
+        // the fetch plan — visibility is the gate, opacity is just blend strength.
+        let mut scene = Scene::new([512, 512]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: 1.0,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.chunk_plan_for(&ds_id).unwrap().len(),
+            1,
+            "opacity alone must not un-hide the label for fetching"
+        );
     }
 }

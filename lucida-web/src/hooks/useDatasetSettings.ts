@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { LayerInfo } from "../components/LayerPanel.tsx";
+import type { LabelOverlayView } from "../manifestTypes.ts";
 import type { DatasetState } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
@@ -237,6 +238,36 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
+  // Toggle a label overlay's visibility — a viewport/display command exactly
+  // like handleChannelSetVisible: apply locally for instant feedback, break
+  // follow, mark dirty, and emit presence so followers see it via the labels
+  // epoch. `index` is the label-relative index the `SetLabelVisible` command
+  // carries. Bumps the layer-settings version so the panel re-reads the new
+  // effective state from `label_overlays`.
+  const handleSetLabelVisible = useCallback((id: string, index: number, visible: boolean) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_label_visible", dataset_id: id, label: index, visible });
+      loopRef.current?.markInteractiveDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  // Set a label overlay's blend opacity — the label sibling of
+  // handleSetLabelVisible, dispatching `SetLabelOpacity`.
+  const handleSetLabelOpacity = useCallback((id: string, index: number, opacity: number) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_label_opacity", dataset_id: id, label: index, opacity });
+      loopRef.current?.markInteractiveDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
   const handleLayerSetBlendMode = useCallback((id: string, mode: string) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -417,6 +448,16 @@ export function useDatasetSettings({
 
       const chSettings = settings?.channel_settings?.[currentC];
 
+      // Segmentation label overlays for this dataset (empty for an
+      // intensity-only dataset). Parsed defensively — a malformed payload
+      // degrades to "no labels" rather than throwing out the whole row.
+      let labels: LabelOverlayView[] = [];
+      try {
+        labels = JSON.parse(scene.label_overlays(id)) as LabelOverlayView[];
+      } catch {
+        labels = [];
+      }
+
       return {
         id,
         name: scene.dataset_name(id),
@@ -439,6 +480,7 @@ export function useDatasetSettings({
         channelBlendMode: settings?.channel_blend_mode ?? "additive",
         detailLevelOverride: settings?.detail_level_override ?? null,
         detailLevelOptions: detailLevelOptions(ds),
+        labels,
       };
     });
   };
@@ -481,6 +523,8 @@ export function useDatasetSettings({
     handleChannelSetContrast,
     handleChannelSetGamma,
     handleChannelSetBlendMode,
+    handleSetLabelVisible,
+    handleSetLabelOpacity,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
     handleLayerSetDetailLevelOverride,
