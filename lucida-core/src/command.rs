@@ -376,6 +376,30 @@ pub enum ViewportCommand {
         dataset_id: String,
         blend_mode: BlendMode,
     },
+    // Label overlays
+    /// Toggle a label overlay's visibility. `label` is a **label-relative
+    /// index** (the N-th label image in the dataset, skipping intensity
+    /// images) — the same index space [`Scene::label_overlays`] enumerates and
+    /// [`crate::scene::DatasetDisplaySettings::ensure_label`] addresses. A
+    /// local-only per-label display setting, mirroring [`Self::SetChannelVisible`]:
+    /// applied locally, emitted as a presence update, persisted in saved views.
+    /// Bumps `epochs.labels`. An out-of-range index is a harmless no-op
+    /// (`ensure_label` grows to fit; a stray entry past the real label count is
+    /// inert until a label occupies that slot).
+    SetLabelVisible {
+        dataset_id: String,
+        label: u32,
+        visible: bool,
+    },
+    /// Set a label overlay's blend opacity (the label sibling of
+    /// [`Self::SetDatasetOpacity`]). `label` is a label-relative index, exactly
+    /// as [`Self::SetLabelVisible`]. Bumps `epochs.labels`. Out-of-range index
+    /// is a harmless no-op.
+    SetLabelOpacity {
+        dataset_id: String,
+        label: u32,
+        opacity: f32,
+    },
 }
 
 /// Wrapper enum for serde compatibility. Deserializes from the same
@@ -802,6 +826,31 @@ impl Scene {
                     s.channel_blend_mode = blend_mode;
                 }
                 self.epochs.selection += 1;
+            }
+            ViewportCommand::SetLabelVisible {
+                dataset_id,
+                label,
+                visible,
+            } => {
+                // Mirror SetChannelVisible: grow-to-fit via ensure_label so an
+                // out-of-range index never panics (a stray entry past the real
+                // label count is inert). Bump the dedicated `labels` epoch, not
+                // `selection`, so a renderer can invalidate just the label
+                // overlay pass.
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
+                    s.ensure_label(label as usize).visible = visible;
+                }
+                self.epochs.labels += 1;
+            }
+            ViewportCommand::SetLabelOpacity {
+                dataset_id,
+                label,
+                opacity,
+            } => {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
+                    s.ensure_label(label as usize).opacity = opacity;
+                }
+                self.epochs.labels += 1;
             }
         }
     }
@@ -2053,6 +2102,7 @@ mod tests {
             selection: 4,
             asset: 5,
             annotation: 6,
+            labels: 7,
         };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
@@ -4957,5 +5007,243 @@ mod tests {
             .map(|m| m.position)
             .collect();
         assert_eq!(positions_before, positions_after);
+    }
+
+    // --- Label overlay commands (slice 002) ---
+
+    #[test]
+    fn set_label_visible_round_trips() {
+        let cmd = ViewportCommand::SetLabelVisible {
+            dataset_id: "ds1".into(),
+            label: 2,
+            visible: true,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        // Exact snake_case wire shape the web client emits.
+        assert_eq!(
+            json,
+            r#"{"type":"set_label_visible","dataset_id":"ds1","label":2,"visible":true}"#
+        );
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetLabelVisible {
+                dataset_id,
+                label,
+                visible,
+            } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(label, 2);
+                assert!(visible);
+            }
+            _ => panic!("expected SetLabelVisible"),
+        }
+    }
+
+    #[test]
+    fn set_label_opacity_round_trips() {
+        let cmd = ViewportCommand::SetLabelOpacity {
+            dataset_id: "ds1".into(),
+            label: 0,
+            opacity: 0.25,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"set_label_opacity","dataset_id":"ds1","label":0,"opacity":0.25}"#
+        );
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetLabelOpacity {
+                dataset_id,
+                label,
+                opacity,
+            } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(label, 0);
+                assert_eq!(opacity, 0.25);
+            }
+            _ => panic!("expected SetLabelOpacity"),
+        }
+    }
+
+    #[test]
+    fn label_commands_parse_as_viewport_not_document() {
+        // They are local-only display state, exactly like the channel commands.
+        for wire in [
+            r#"{"type":"set_label_visible","dataset_id":"x","label":0,"visible":true}"#,
+            r#"{"type":"set_label_opacity","dataset_id":"x","label":0,"opacity":0.5}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DocumentCommand>(wire).is_err(),
+                "must NOT parse as DocumentCommand: {wire}"
+            );
+            assert!(
+                serde_json::from_str::<ViewportCommand>(wire).is_ok(),
+                "must parse as ViewportCommand: {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_set_label_visible_and_opacity_flip_state() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels(
+            "ds1",
+            256,
+            256,
+            &[("nuclei", 256, 256), ("membrane", 256, 256)],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 1,
+                visible: true,
+            }
+            .into(),
+        );
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 1,
+                opacity: 0.9,
+            }
+            .into(),
+        );
+
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        assert!(ls.len() >= 2);
+        // Label 0 is still the default (off, 0.5) — a grown slot, untouched.
+        assert!(!ls[0].visible);
+        assert_eq!(ls[0].opacity, 0.5);
+        // Label 1 flipped on at the new opacity.
+        assert!(ls[1].visible);
+        assert_eq!(ls[1].opacity, 0.9);
+    }
+
+    #[test]
+    fn set_label_commands_bump_only_labels_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let before = scene.epochs.clone();
+
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 0,
+                visible: true,
+            }
+            .into(),
+        );
+        assert_eq!(scene.epochs.labels, before.labels + 1);
+        // No other epoch moved (labels are their own invalidation category).
+        assert_eq!(scene.epochs.selection, before.selection);
+        assert_eq!(scene.epochs.view, before.view);
+        assert_eq!(scene.epochs.content, before.content);
+        assert_eq!(scene.epochs.layout, before.layout);
+
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: 0.3,
+            }
+            .into(),
+        );
+        assert_eq!(scene.epochs.labels, before.labels + 2);
+    }
+
+    #[test]
+    fn out_of_range_label_index_is_harmless_no_op() {
+        // A label index far past the real label count must not panic. It grows
+        // the settings vec (mirroring ensure_channel) but the stray entries are
+        // inert: label_overlays (joined against the manifest) still reports only
+        // the real single label, at its default state.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 99,
+                visible: true,
+            }
+            .into(),
+        );
+
+        // Did not panic; the accessor still shows exactly one (real) label, and
+        // it is at its default OFF state (the stray index 99 is not a real label).
+        let overlays = scene.label_overlays("ds1");
+        assert_eq!(overlays.len(), 1);
+        assert!(!overlays[0].visible);
+    }
+
+    #[test]
+    fn set_label_on_unknown_dataset_is_no_op() {
+        // No dataset settings entry → the command changes nothing and doesn't
+        // panic. (Epoch still bumps, mirroring SetChannel* on an unknown id.)
+        let mut scene = Scene::new([800, 600]);
+        let before = scene.epochs.labels;
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ghost".into(),
+                label: 0,
+                visible: true,
+            }
+            .into(),
+        );
+        assert!(
+            !scene
+                .dataset_settings
+                .contains_key(&DatasetId("ghost".into()))
+        );
+        assert_eq!(scene.epochs.labels, before + 1);
+    }
+
+    #[test]
+    fn label_settings_serde_additive_when_omitted() {
+        // A DatasetDisplaySettings blob written before labels existed carries no
+        // `label_settings` key and must deserialize as an empty Vec (no wire
+        // break) — the additive guarantee, mirroring channel_settings.
+        let json = r#"{
+            "visible": true,
+            "opacity": 1.0,
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0,
+            "blend_mode": "alpha"
+        }"#;
+        let settings: crate::scene::DatasetDisplaySettings = serde_json::from_str(json).unwrap();
+        assert!(settings.label_settings.is_empty());
+    }
+
+    #[test]
+    fn label_settings_round_trips() {
+        use crate::scene::LabelSettings;
+        let ls = LabelSettings {
+            visible: true,
+            opacity: 0.42,
+        };
+        let json = serde_json::to_string(&ls).unwrap();
+        let parsed: LabelSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ls);
+        // The default is OFF at half opacity.
+        assert!(!LabelSettings::default().visible);
+        assert_eq!(LabelSettings::default().opacity, 0.5);
+    }
+
+    #[test]
+    fn scene_epochs_without_labels_key_deserializes() {
+        use crate::epoch::SceneEpochs;
+        // An epochs blob from before the `labels` counter existed must load with
+        // labels = 0 (additive #[serde(default)]).
+        let json = r#"{"content":1,"layout":2,"view":3,"selection":4,"asset":5,"annotation":6}"#;
+        let parsed: SceneEpochs = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.labels, 0);
+        assert_eq!(parsed.annotation, 6);
     }
 }

@@ -982,6 +982,16 @@ impl WasmScene {
             .unwrap_or_else(|| id.to_string())
     }
 
+    /// JSON array of the dataset's label overlays — one entry per label image,
+    /// each `{index, name, visible, opacity, num_colors, source_image}` — for a
+    /// label-overlay panel. Joins each label's `image-label` metadata with its
+    /// effective display state (defaults: off, opacity 0.5). `"[]"` for an
+    /// unknown dataset id or a dataset with no labels. See
+    /// [`Scene::label_overlays`].
+    pub fn label_overlays(&self, dataset_id: &str) -> String {
+        serde_json::to_string(&self.inner.label_overlays(dataset_id)).unwrap()
+    }
+
     // --- Layout management ---
 
     /// Register a new layout for a dataset. The layout is parsed from JSON.
@@ -1134,6 +1144,11 @@ impl WasmScene {
                 .map(|s| s.visible)
                 .unwrap_or(true);
             for member in &derived.members {
+                // Skip label overlays: a label with a larger footprint must not
+                // widen the minimap framing (mirrors the Scene bounds folds).
+                if member.is_label {
+                    continue;
+                }
                 // Model matrix is scale+translate (diagonal); the framing helper
                 // reads mat[0]/[5]/[10] (scale) and mat[12]/[13]/[14] (translate).
                 // Shared with the renderer + auto-fit via `Scene::member_world_matrix`.

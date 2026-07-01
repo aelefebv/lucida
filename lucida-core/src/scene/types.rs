@@ -93,6 +93,36 @@ impl Default for ChannelSettings {
     }
 }
 
+/// Per-label-image display state, the label sibling of [`ChannelSettings`].
+///
+/// One entry per LABEL image in a dataset, addressed by **label-relative index**
+/// (the N-th label image, skipping intensity images) — the same index space
+/// [`crate::scene::Scene::label_overlays`] enumerates and the
+/// `SetLabelVisible`/`SetLabelOpacity` viewport commands carry, so an intensity
+/// image never consumes a label slot. Deliberately spare: a label is a mask
+/// tinted by its own `image-label.colors`, so it has no colormap/contrast/gamma
+/// of its own — only whether it is drawn (`visible`) and how strongly
+/// (`opacity`).
+///
+/// The default is **OFF at half opacity**: a freshly-opened dataset shows its
+/// intensity pixels unobstructed, and toggling a label on blends it at 0.5 so
+/// the underlying image stays legible beneath the mask — a segmentation overlay
+/// the user opts into, not one that hides the data the moment it loads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LabelSettings {
+    pub visible: bool,
+    pub opacity: f32,
+}
+
+impl Default for LabelSettings {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            opacity: 0.5,
+        }
+    }
+}
+
 fn default_channel_blend_mode() -> BlendMode {
     BlendMode::Additive
 }
@@ -109,6 +139,27 @@ pub struct DatasetDisplaySettings {
     pub render_mode: RenderMode,
     #[serde(default)]
     pub channel_settings: Vec<ChannelSettings>,
+    /// Per-label-image display state (visibility + opacity), indexed by
+    /// label-relative index — the label sibling of `channel_settings`. Grown
+    /// on demand by [`Self::ensure_label`].
+    ///
+    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]` keeps this
+    /// strictly additive AND wire-invisible until used, mirroring how
+    /// `ChannelSettings::name` handles its own additive field:
+    /// - a settings object persisted (saved view / presence snapshot) before
+    ///   labels existed carries no `label_settings` key and deserializes as an
+    ///   empty Vec (`default`), and
+    /// - a dataset with no label overrides (the common case — labels default
+    ///   off and are only materialized on first toggle) serializes with NO
+    ///   `label_settings` key, byte-identical to a pre-slice settings object.
+    ///
+    /// The skip is load-bearing for the "server rebroadcast is byte-identical
+    /// to the inbound client wire" invariant (see the `saved_view`
+    /// determinism tests): a browser that predates labels emits no
+    /// `label_settings`, so the parse→reserialize rebroadcast must not inject
+    /// one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label_settings: Vec<LabelSettings>,
     #[serde(default = "default_channel_blend_mode")]
     pub channel_blend_mode: BlendMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +179,26 @@ impl DatasetDisplaySettings {
         }
         &mut self.channel_settings[index]
     }
+
+    /// Get a mutable reference to the label settings at `index` (a
+    /// label-relative index), growing the vec with [`LabelSettings::default`]
+    /// entries as needed — the label sibling of [`Self::ensure_channel`].
+    ///
+    /// Because it grows to fit, this NEVER panics on an out-of-range index: a
+    /// `SetLabelVisible`/`SetLabelOpacity` for a label index that has no entry
+    /// yet simply materializes the intervening defaults (off, 0.5) and returns
+    /// the requested one. Any grown-but-untouched entries keep the default
+    /// off/half-opacity, so touching a high index doesn't switch lower labels
+    /// on. (Whether that index actually maps to a real label image is the
+    /// caller's / accessor's concern — the effective state read by
+    /// [`crate::scene::Scene::label_overlays`] is joined against the manifest,
+    /// so a stray entry past the real label count is inert.)
+    pub fn ensure_label(&mut self, index: usize) -> &mut LabelSettings {
+        while self.label_settings.len() <= index {
+            self.label_settings.push(LabelSettings::default());
+        }
+        &mut self.label_settings[index]
+    }
 }
 
 impl Default for DatasetDisplaySettings {
@@ -141,6 +212,7 @@ impl Default for DatasetDisplaySettings {
             blend_mode: BlendMode::Alpha,
             render_mode: RenderMode::Translucent,
             channel_settings: Vec::new(),
+            label_settings: Vec::new(),
             channel_blend_mode: BlendMode::Additive,
             detail_level_override: None,
         }

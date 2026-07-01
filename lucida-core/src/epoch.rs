@@ -26,4 +26,11 @@ pub struct SceneEpochs {
     /// `MoveAnnotation` / `AddComment` / `RemoveComment` / `EditComment`.
     #[serde(default)]
     pub annotation: u64,
+    /// Label overlay display state changed (a label's visibility or opacity).
+    /// Bumped by `ViewportCommand::SetLabelVisible` / `SetLabelOpacity`. Kept
+    /// distinct from `selection` so a renderer can invalidate just the label
+    /// overlay pass when a mask is toggled, without re-deriving the intensity
+    /// channels' selection state.
+    #[serde(default)]
+    pub labels: u64,
 }

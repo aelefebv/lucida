@@ -2,7 +2,8 @@ mod types;
 
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
-    DatasetDisplaySettings, DisplayState, DocumentState, MemberChunkPlan, RenderMode,
+    DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
+    RenderMode,
 };
 
 use std::collections::HashMap;
@@ -36,6 +37,15 @@ pub struct MemberState {
     pub volume_transform: VolumeTransform,
     pub levels: Vec<LevelGeometry>,
     pub data_type: DataType,
+    /// Whether this member is a segmentation **label** image (as opposed to
+    /// intensity), copied from the source [`ImageSpec::is_label`] at derive
+    /// time. Label members are drawn as tinted overlays *on top of* the
+    /// intensity data, so every framing/bounds/normalization fold skips them —
+    /// a label with a larger footprint must never widen the camera fit or shift
+    /// the 3D normalization. See [`Scene::dataset_world_bounds`],
+    /// [`Scene::dataset_voxel_bounds_2d`], and
+    /// [`Scene::global_max_physical_extent`].
+    pub is_label: bool,
 }
 
 /// Aggregate XY extent for visible image content in scene coordinates.
@@ -64,6 +74,35 @@ impl VisibleContentBounds2D {
     pub fn center_y(&self) -> f64 {
         (self.min_y + self.max_y) / 2.0
     }
+}
+
+/// A single label overlay's joined metadata + effective display state, one per
+/// label image in a dataset. Produced by [`Scene::label_overlays`] and exposed
+/// to the web via `WasmScene::label_overlays` (as JSON). The label counterpart
+/// of the per-channel settings the layer panel already reads.
+///
+/// - `image_id` — the label image's [`ImageSpec::image_id`] as a plain string
+///   (the inner value of [`ImageId`]), the stable join key the web/renderer
+///   uses to map an overlay row (or a rendered member) back to this label's
+///   settings + colors without re-deriving the label-relative `index`.
+/// - `index` — label-relative index (the N-th label image), the value
+///   `SetLabelVisible`/`SetLabelOpacity` carry.
+/// - `name` — the `labels/` group name from [`LabelMeta`] (may be empty if the
+///   producer omitted it).
+/// - `visible` / `opacity` — the *effective* display state (default off / 0.5
+///   until toggled).
+/// - `num_colors` — how many `image-label.colors` entries the label declares.
+/// - `source_image` — the label's opaque `source-image` string, carried
+///   verbatim and never resolved (see [`LabelMeta::source_image`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LabelOverlayView {
+    pub image_id: String,
+    pub index: u32,
+    pub name: String,
+    pub visible: bool,
+    pub opacity: f32,
+    pub num_colors: usize,
+    pub source_image: Option<String>,
 }
 
 /// The complete viewer state.
@@ -176,11 +215,17 @@ impl Scene {
     /// Returns the maximum `max_physical_extent` across all datasets.
     /// Used to apply a global normalization correction so multi-dataset
     /// scenes preserve relative physical sizes in 3D.
+    ///
+    /// **Label members are excluded** (`is_label`): a segmentation overlay is
+    /// drawn on top of the intensity data and must never drive the global
+    /// normalization, or a label with a larger physical footprint would shrink
+    /// every intensity volume in the scene.
     pub fn global_max_physical_extent(&self) -> f64 {
         let max = self
             .derived
             .values()
             .flat_map(|d| d.members.iter())
+            .filter(|m| !m.is_label)
             .map(|m| {
                 let e = m.volume_transform.max_physical_extent;
                 if e > 0.0 { e } else { 1.0 }
@@ -191,11 +236,16 @@ impl Scene {
 
     /// Returns the maximum physical Y extent across all datasets.
     /// Used to top-align datasets in 3D mode.
+    ///
+    /// **Label members are excluded** (`is_label`), for the same reason as
+    /// [`Self::global_max_physical_extent`]: a label overlay must not move the
+    /// intensity data's top-alignment reference.
     pub fn global_max_physical_y(&self) -> f64 {
         let max = self
             .derived
             .values()
             .flat_map(|d| d.members.iter())
+            .filter(|m| !m.is_label)
             .map(|m| {
                 let t = &m.volume_transform;
                 let ds_max = if t.max_physical_extent > 0.0 {
@@ -242,7 +292,9 @@ impl Scene {
 
         let mut aabb = crate::framing::Aabb::empty();
         for member in &derived.members {
-            if member.levels.is_empty() {
+            // Skip label overlays: a label with a larger footprint must never
+            // widen the framing bounds (the intensity data is what we frame).
+            if member.is_label || member.levels.is_empty() {
                 continue;
             }
             for corner in self.rendering_transform(member).0.world_corners() {
@@ -283,6 +335,11 @@ impl Scene {
         let mut max = [f64::MIN; 2];
         let mut any = false;
         for member in &derived.members {
+            // Skip label overlays (mirrors dataset_world_bounds): a larger label
+            // must not widen the 2D voxel framing.
+            if member.is_label {
+                continue;
+            }
             let Some(level0) = member.levels.first() else {
                 continue;
             };
@@ -298,6 +355,63 @@ impl Scene {
         }
 
         if any { Some((min, max)) } else { None }
+    }
+
+    /// One [`LabelOverlayView`] per **label image** in `dataset_id`, in manifest
+    /// order, joining each label's [`LabelMeta`] (name, color count, source
+    /// image) with its **effective** display state (visibility + opacity).
+    ///
+    /// The web calls this to populate a label-overlay panel; a test calls it to
+    /// assert defaults and command effects. It is the label sibling of the
+    /// per-channel settings read.
+    ///
+    /// - **Index** is label-relative — the N-th label image, skipping intensity
+    ///   images — so it lines up with the `label` field of
+    ///   [`crate::command::ViewportCommand::SetLabelVisible`]/`SetLabelOpacity`
+    ///   and the [`DatasetDisplaySettings::label_settings`] slot they write.
+    /// - **Effective state**: when no `LabelSettings` entry exists yet (nothing
+    ///   has been toggled), it reports the [`LabelSettings::default`] — visible
+    ///   = false, opacity = 0.5 — rather than omitting the label, so the panel
+    ///   shows every label the moment the dataset opens.
+    /// - Reads metadata from the manifest, not derived members, because
+    ///   [`LabelMeta`] (name/colors/source_image) lives on the [`ImageSpec`]'s
+    ///   role, which `MemberState` does not carry.
+    ///
+    /// Returns an **empty** Vec for an unknown dataset id or a dataset with no
+    /// label images.
+    pub fn label_overlays(&self, dataset_id: &str) -> Vec<LabelOverlayView> {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let Some(manifest) = self.document.manifests.get(&ds_id) else {
+            return Vec::new();
+        };
+        let settings = self.dataset_settings.get(&ds_id);
+
+        let mut out = Vec::new();
+        let mut label_index = 0u32;
+        for image in manifest.images() {
+            // Only label images occupy a label slot; intensity images are
+            // skipped so the label-relative index stays dense.
+            let ImageRole::Label(meta) = &image.role else {
+                continue;
+            };
+            // Effective display state: fall back to the default (off, 0.5) when
+            // no LabelSettings entry has been materialized for this slot yet.
+            let effective = settings
+                .and_then(|s| s.label_settings.get(label_index as usize))
+                .cloned()
+                .unwrap_or_default();
+            out.push(LabelOverlayView {
+                image_id: image.image_id.0.clone(),
+                index: label_index,
+                name: meta.name.clone(),
+                visible: effective.visible,
+                opacity: effective.opacity,
+                num_colors: meta.colors.len(),
+                source_image: meta.source_image.clone(),
+            });
+            label_index += 1;
+        }
+        out
     }
 
     /// Frame the named dataset's full extent in the current camera, **dispatching
@@ -372,6 +486,12 @@ impl Scene {
         };
 
         for member in &derived.members {
+            // Label overlays don't define the visible content extent (they ride
+            // on top of the intensity data) — skip them, mirroring the other
+            // bounds folds.
+            if member.is_label {
+                continue;
+            }
             let Some(level) = member.levels.first() else {
                 continue;
             };
@@ -1079,6 +1199,7 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
             volume_transform: vt,
             levels: image.multiscale.levels.clone(),
             data_type: image.multiscale.data_type,
+            is_label: image.is_label(),
         });
     }
 
@@ -1345,6 +1466,135 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
+            catalog: AssetCatalog::default(),
+            opener_client_id: None,
+        }
+    }
+
+    /// Build an `ImageSpec` with an explicit role and XY shape (t=c=1, z=1),
+    /// sharing the standard 5-axis layout. Used to compose datasets that mix
+    /// intensity and label images.
+    fn image_spec(id: &str, role: ImageRole, x: u64, y: u64) -> ImageSpec {
+        let entity_id = EntityId(format!("{id}-entity"));
+        let image_id = ImageId(format!("{id}-image"));
+        ImageSpec {
+            image_id,
+            owner: entity_id,
+            multiscale: MultiscaleInfo {
+                axes: vec![
+                    Axis {
+                        name: "t".to_string(),
+                        kind: AxisKind::Time,
+                    },
+                    Axis {
+                        name: "c".to_string(),
+                        kind: AxisKind::Channel,
+                    },
+                    Axis {
+                        name: "z".to_string(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "y".to_string(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "x".to_string(),
+                        kind: AxisKind::Space,
+                    },
+                ],
+                levels: vec![LevelGeometry {
+                    level_index: 0,
+                    shape: [1, 1, 1, y, x],
+                    chunk_shape: [1, 1, 1, y.min(128), x.min(128)],
+                    grid_shape: [1, 1, 1, 1, 1],
+                    scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                }],
+                coarse_level_index: None,
+                generated_levels: vec![],
+                data_type: DataType::Uint16,
+                pinned_axes: vec![],
+                channel_infos: vec![],
+            },
+            role,
+        }
+    }
+
+    /// A single-dataset `DatasetOpened` carrying one intensity image (`x`/`y`
+    /// voxels) plus `labels` label images, each a label-relative bigger square
+    /// (`label_x`/`label_y`) with a name `label{i}` and one color. The label
+    /// footprint is deliberately allowed to exceed the intensity footprint so
+    /// the bounds-exclusion tests are meaningful.
+    pub fn make_dataset_with_labels(
+        id: &str,
+        x: u64,
+        y: u64,
+        labels: &[(&str, u64, u64)],
+    ) -> DatasetOpened {
+        let intensity_entity = EntityId(format!("{id}-entity"));
+
+        let mut entities = vec![Entity {
+            id: intensity_entity.clone(),
+            kind: EntityKind::Image,
+            parent: None,
+            labels: EntityLabels {
+                name: Some(id.to_string()),
+                ..Default::default()
+            },
+        }];
+        let mut images = vec![image_spec(id, ImageRole::Intensity, x, y)];
+        let mut fetch_images = vec![ProxiedImageSpec {
+            image_id: ImageId(format!("{id}-image")),
+            wire_format: WireFormat::Raw {
+                data_type: DataType::Uint16,
+            },
+        }];
+
+        for (name, lx, ly) in labels {
+            let sub_id = format!("{id}-{name}");
+            entities.push(Entity {
+                id: EntityId(format!("{sub_id}-entity")),
+                kind: EntityKind::Image,
+                parent: None,
+                labels: EntityLabels {
+                    name: Some((*name).to_string()),
+                    ..Default::default()
+                },
+            });
+            let meta = LabelMeta {
+                name: (*name).to_string(),
+                colors: vec![LabelColor {
+                    value: 1,
+                    rgba: [255, 0, 0, 255],
+                }],
+                properties: vec![],
+                source_image: Some("../../0".to_string()),
+            };
+            images.push(image_spec(&sub_id, ImageRole::Label(meta), *lx, *ly));
+            fetch_images.push(ProxiedImageSpec {
+                image_id: ImageId(format!("{sub_id}-image")),
+                wire_format: WireFormat::Raw {
+                    data_type: DataType::Uint16,
+                },
+            });
+        }
+
+        let manifest = DatasetManifest::new(
+            DatasetId(id.to_string()),
+            id.to_string(),
+            DatasetKind::Single,
+            entities,
+            vec![],
+            images,
+            vec![],
+            None,
+        );
+
+        DatasetOpened {
+            manifest,
+            fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
+                images: fetch_images,
+            }),
             catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
@@ -2562,5 +2812,193 @@ mod tests {
             }
             other => panic!("expected an Arcball camera, got {other:?}"),
         }
+    }
+
+    // --- Label overlays (slice 002) ---
+
+    #[test]
+    fn build_derived_state_flags_label_members() {
+        // A label image's member is marked is_label; intensity is not.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels("ds1", 256, 256, &[("nuclei", 256, 256)]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let derived = &scene.derived[&DatasetId("ds1".into())];
+        assert_eq!(derived.members.len(), 2);
+        assert!(!derived.members[0].is_label, "intensity member");
+        assert!(derived.members[1].is_label, "label member");
+    }
+
+    #[test]
+    fn label_overlays_default_off_and_named() {
+        // Every label image appears (manifest order), default OFF at 0.5 opacity,
+        // with its metadata joined in; an intensity-only dataset yields none.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels(
+            "ds1",
+            256,
+            256,
+            &[("nuclei", 256, 256), ("membrane", 128, 128)],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let overlays = scene.label_overlays("ds1");
+        assert_eq!(overlays.len(), 2);
+
+        assert_eq!(overlays[0].index, 0);
+        assert_eq!(
+            overlays[0].image_id, "ds1-nuclei-image",
+            "image_id is the label image's ImageSpec.image_id join key"
+        );
+        assert_eq!(overlays[0].name, "nuclei");
+        assert!(!overlays[0].visible, "labels default OFF");
+        assert_eq!(overlays[0].opacity, 0.5, "labels default 0.5 opacity");
+        assert_eq!(overlays[0].num_colors, 1);
+        assert_eq!(overlays[0].source_image.as_deref(), Some("../../0"));
+
+        assert_eq!(overlays[1].index, 1);
+        assert_eq!(overlays[1].image_id, "ds1-membrane-image");
+        assert_eq!(overlays[1].name, "membrane");
+        assert!(!overlays[1].visible);
+    }
+
+    #[test]
+    fn label_overlays_empty_for_no_labels_and_unknown_id() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "plain", 2);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        // A dataset with only intensity images has no label overlays.
+        assert!(scene.label_overlays("ds1").is_empty());
+        // An unknown id is empty, not a panic.
+        assert!(scene.label_overlays("nope").is_empty());
+    }
+
+    #[test]
+    fn label_overlays_reflect_toggled_state() {
+        // After SetLabelVisible/SetLabelOpacity, the accessor reports the new
+        // effective state for the addressed label only.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_with_labels(
+            "ds1",
+            256,
+            256,
+            &[("nuclei", 256, 256), ("membrane", 256, 256)],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 1,
+                visible: true,
+            }
+            .into(),
+        );
+        scene.apply(
+            crate::command::ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 1,
+                opacity: 0.8,
+            }
+            .into(),
+        );
+
+        let overlays = scene.label_overlays("ds1");
+        // Label 0 untouched.
+        assert!(!overlays[0].visible);
+        assert_eq!(overlays[0].opacity, 0.5);
+        // Label 1 flipped on at the new opacity.
+        assert!(overlays[1].visible);
+        assert_eq!(overlays[1].opacity, 0.8);
+    }
+
+    #[test]
+    fn label_excluded_from_world_and_voxel_bounds() {
+        // A label with a MUCH larger footprint than the intensity image must not
+        // widen either the 3D world bounds or the 2D voxel bounds. Compare a
+        // dataset with a giant label against the intensity-only baseline.
+        let mut with_label = Scene::new([800, 600]);
+        with_label.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[("huge", 4096, 4096)],
+            ))
+            .into(),
+        );
+
+        let mut baseline = Scene::new([800, 600]);
+        baseline.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[],
+            ))
+            .into(),
+        );
+
+        // 2D voxel bounds: identical to the label-free baseline (the 4096 label
+        // did not stretch the [0,256] footprint).
+        let (lmin, lmax) = with_label.dataset_voxel_bounds_2d("ds1").unwrap();
+        let (bmin, bmax) = baseline.dataset_voxel_bounds_2d("ds1").unwrap();
+        assert_eq!((lmin, lmax), (bmin, bmax));
+        assert_eq!(lmax, [256.0, 256.0], "label must not widen voxel bounds");
+
+        // 3D world bounds: identical too (label excluded from the corner fold).
+        let (w_lmin, w_lmax) = with_label.dataset_world_bounds("ds1").unwrap();
+        let (w_bmin, w_bmax) = baseline.dataset_world_bounds("ds1").unwrap();
+        assert_eq!((w_lmin, w_lmax), (w_bmin, w_bmax));
+    }
+
+    #[test]
+    fn label_excluded_from_global_max_physical_extent() {
+        // A dataset whose ONLY oversize member is a label must report the same
+        // global normalization extent as the label-free baseline.
+        let mut with_label = Scene::new([800, 600]);
+        with_label.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[("huge", 8192, 8192)],
+            ))
+            .into(),
+        );
+        let mut baseline = Scene::new([800, 600]);
+        baseline.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[],
+            ))
+            .into(),
+        );
+        assert_eq!(
+            with_label.global_max_physical_extent(),
+            baseline.global_max_physical_extent(),
+            "a label must not drive the global normalization extent",
+        );
+    }
+
+    #[test]
+    fn label_only_dataset_has_no_frameable_bounds() {
+        // Defensive: a (degenerate) dataset whose sole image is a label yields
+        // no framing bounds — labels never frame the camera on their own — yet
+        // the label still surfaces as an overlay.
+        let reg = test_helpers::make_dataset_with_labels("ds1", 64, 64, &[]);
+        let mut manifest = reg.manifest;
+        // Turn the single intensity image into a label.
+        manifest.images_mut()[0].role = ImageRole::Label(LabelMeta {
+            name: "solo".into(),
+            ..Default::default()
+        });
+        let reg = lucida_protocol::DatasetOpened { manifest, ..reg };
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert!(scene.dataset_world_bounds("ds1").is_none());
+        assert!(scene.dataset_voxel_bounds_2d("ds1").is_none());
+        assert_eq!(scene.label_overlays("ds1").len(), 1);
     }
 }
