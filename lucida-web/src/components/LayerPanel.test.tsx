@@ -475,3 +475,115 @@ describe("LayerPanel per-channel collapse", () => {
     expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
   });
 });
+
+describe("LayerPanel labels", () => {
+  const labelRows = [
+    { index: 0, name: "mitochondria", visible: true, opacity: 0.5 },
+    { index: 1, name: "cells", visible: false, opacity: 0.25 },
+  ];
+
+  function labelProps(
+    overrides: Partial<LayerInfo> = {},
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      ...baseProps(true, vi.fn()),
+      // Expanded so the Labels subsection (inside the layer detail) renders.
+      expandedLayerId: "wds-1" as string | null,
+      layers: [
+        layer({
+          labelRows,
+          ...overrides,
+        }),
+      ],
+      ...extra,
+    };
+  }
+
+  it("renders a Labels section with per-label eye + opacity controls", () => {
+    render(<LayerPanel {...labelProps()} />);
+    expect(screen.getByTestId("labels-section-wds-1")).toBeTruthy();
+    expect(screen.getByText("mitochondria")).toBeTruthy();
+    expect(screen.getByText("cells")).toBeTruthy();
+    // Row 0 is visible → its eye offers "Hide"; row 1 is hidden → "Show".
+    expect(screen.getByLabelText("Hide original.zarr mitochondria")).toBeTruthy();
+    expect(screen.getByLabelText("Show original.zarr cells")).toBeTruthy();
+    // Each row exposes an opacity slider (keyed by manifest index).
+    expect(screen.getByTestId("label-opacity-wds-1-0")).toBeTruthy();
+    expect(screen.getByTestId("label-opacity-wds-1-1")).toBeTruthy();
+  });
+
+  it("toggling a label eye fires onLabelSetVisible(id, index, !visible)", () => {
+    const onLabelSetVisible = vi.fn();
+    render(<LayerPanel {...labelProps({}, { onLabelSetVisible })} />);
+    // Visible label → toggles OFF.
+    fireEvent.click(screen.getByTestId("label-eye-wds-1-0"));
+    expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 0, false);
+    // Hidden label → toggles ON.
+    fireEvent.click(screen.getByTestId("label-eye-wds-1-1"));
+    expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 1, true);
+  });
+
+  it("uses the row's MANIFEST index (not row position) for the handler", () => {
+    // Only label index 2 is drawable (0/1 were ineligible and omitted upstream).
+    // The single rendered row must still target index 2.
+    const onLabelSetVisible = vi.fn();
+    const onLabelSetOpacity = vi.fn();
+    render(
+      <LayerPanel
+        {...labelProps(
+          { labelRows: [{ index: 2, name: "seg", visible: true, opacity: 0.5 }] },
+          { onLabelSetVisible, onLabelSetOpacity },
+        )}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("label-eye-wds-1-2"));
+    expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 2, false);
+    fireEvent.change(screen.getByTestId("label-opacity-wds-1-2"), { target: { value: "10" } });
+    expect(onLabelSetOpacity).toHaveBeenCalledWith("wds-1", 2, 0.1);
+  });
+
+  it("dragging a label opacity slider fires onLabelSetOpacity(id, index, value)", () => {
+    const onLabelSetOpacity = vi.fn();
+    render(<LayerPanel {...labelProps({}, { onLabelSetOpacity })} />);
+    const slider = screen.getByTestId("label-opacity-wds-1-0") as HTMLInputElement;
+    // Slider is 0..100; the handler receives the 0..1 fraction.
+    fireEvent.change(slider, { target: { value: "20" } });
+    expect(onLabelSetOpacity).toHaveBeenCalledWith("wds-1", 0, 0.2);
+  });
+
+  it("reflects the current per-label opacity on the slider", () => {
+    render(<LayerPanel {...labelProps()} />);
+    // opacity 0.5 → 50, opacity 0.25 → 25.
+    expect((screen.getByTestId("label-opacity-wds-1-0") as HTMLInputElement).value).toBe("50");
+    expect((screen.getByTestId("label-opacity-wds-1-1") as HTMLInputElement).value).toBe("25");
+  });
+
+  it("falls back to `Label N` when a label name is blank", () => {
+    render(
+      <LayerPanel
+        {...labelProps({
+          labelRows: [
+            { index: 0, name: "mito", visible: true, opacity: 0.5 },
+            { index: 1, name: "", visible: false, opacity: 0.5 },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("mito")).toBeTruthy();
+    expect(screen.getByText("Label 1")).toBeTruthy();
+  });
+
+  it("shows a discoverability count badge counting the drawable labels", () => {
+    render(<LayerPanel {...labelProps()} />);
+    const badge = screen.getByTestId("layer-label-count-wds-1");
+    expect(badge.textContent).toContain("2");
+    expect(badge.getAttribute("aria-label")).toBe("2 labels");
+  });
+
+  it("renders NO Labels section or badge when the dataset has no drawable labels", () => {
+    render(<LayerPanel {...{ ...labelProps(), layers: [layer()] }} />);
+    expect(screen.queryByTestId("labels-section-wds-1")).toBeNull();
+    expect(screen.queryByTestId("layer-label-count-wds-1")).toBeNull();
+  });
+});

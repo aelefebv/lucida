@@ -2,14 +2,96 @@
 import { Axis } from "./axes.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
+import type { DatasetManifest } from "./manifestTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { computeScissorRect } from "./pipeline/upload/scissor.ts";
+import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
+import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
+
+/**
+ * The scene bindings {@link pushLabelVolumeLayers} needs to place a label at
+ * its source image's world position: the source member's model matrix and
+ * inverse. A narrow structural facet of the WASM scene so the function stays
+ * unit-testable.
+ */
+export interface LabelVolumeScene {
+  member_model_matrix(datasetId: string, memberId: string): Float32Array;
+  inv_member_model_matrix(datasetId: string, memberId: string): Float32Array;
+}
+
+/**
+ * Append a first-hit categorical overlay layer for each of the dataset's
+ * VISIBLE labels, composited over the intensity volume already pushed. The
+ * visible set + each label's opacity come from `labelSettings` (the dataset's
+ * per-label display state); with no settings this falls back to the single
+ * default label at the default opacity, so behavior matches the 2D path.
+ *
+ * The set drawn here MUST match what {@link computeLabelChunkRequests}
+ * fetches in `volume` mode, so both resolve through the shared
+ * {@link resolveVisibleLabels}. A label overlays its source image's physical
+ * extent, so it renders in the SOURCE member's world placement (its model
+ * matrix + inverse) — a coarser label still covers the same field of view,
+ * aligned by its own scale in the shader. Declared `image-label.colors` are
+ * forwarded so authored palettes render exactly. Labels never change the
+ * camera or bounds.
+ */
+export function pushLabelVolumeLayers(
+  layers: VolumeLayerParams[],
+  scene: LabelVolumeScene,
+  datasetId: string,
+  manifest: DatasetManifest,
+  members: MemberRosterEntry[],
+  viewProj: Float32Array,
+  canvasW: number,
+  canvasH: number,
+  labelSettings?: LabelViewSetting[],
+): void {
+  // `mode: "volume"` so the render path resolves the SAME eligible set the
+  // volume fetch did — a label too large for a 3D texture is skipped by both
+  // (never fetched-but-blank or drawn-but-unfetched).
+  for (const resolved of resolveVisibleLabels(manifest, labelSettings, { mode: "volume" })) {
+    const { label, source, opacity } = resolved;
+    const sourceImageId = label.source_image_id;
+    // Anchor to the source member's world placement so the overlay lands on
+    // the image it annotates (well-as-proxy entries carry their own matrices).
+    const sourceMember = members.find((m) => m.imageId === sourceImageId);
+    const sourceModel = sourceMember?.modelMatrix
+      ?? new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
+    const sourceInv = sourceMember?.invModelMatrix
+      ?? new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
+    // Scale the source placement to the LABEL's own physical extent, so a
+    // coarser/differently-scaled label stays aligned by its own scale (the
+    // 3D analog of the 2D `labelFootprint`). Identity for a same-extent label.
+    const { model, inv } = labelModelMatrices(
+      sourceModel,
+      sourceInv,
+      source.multiscale.levels[0],
+      label.image.multiscale.levels[0],
+    );
+    // Confine the ray-march to the label's screen footprint (off-screen →
+    // skip), mirroring the intensity layers.
+    const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
+    if (!scissorRect) continue;
+    layers.push({
+      datasetId: label.image.image_id,
+      blendMode: "alpha",
+      renderMode: "translucent",
+      scissorRect,
+      entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
+      isLabel: true,
+      opacity,
+      labelColors: label.colors,
+      modelMatrix: model,
+      invModelMatrix: inv,
+    });
+  }
+}
 
 export type VolumeState = Record<string, never>;
 
@@ -129,6 +211,21 @@ function uploadAndRenderVolume(
         });
       }
     }
+    // First-hit categorical label overlays, composited on top of this
+    // dataset's intensity volume. Honors the per-label visible set + opacity;
+    // never affects camera/bounds.
+    pushLabelVolumeLayers(
+      layers,
+      scene,
+      dsId,
+      dsVol.manifest,
+      members,
+      viewProj,
+      canvasW,
+      canvasH,
+      dsSettings.label_settings,
+    );
+
     const added = layers.length - layersBefore;
     if (added > 0) passesByDataset[dsId] = added;
   }

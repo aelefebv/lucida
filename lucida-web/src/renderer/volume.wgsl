@@ -67,8 +67,8 @@ struct EntityDescriptor {
   opacity: f32,
   colormapLutIndex: u32,
   lodCount: u32,
-  _pad_tail0: u32,
-  _pad_tail1: u32,
+  colormapMode: u32,
+  labelOpacity: f32,
   lods: array<LodInfo, 8>,
   detailSource: ChunkTierSource,
   coarseSource: ChunkTierSource,
@@ -90,6 +90,9 @@ struct EntityDescriptor {
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
+// Declared label palette for categorical draws: flat [id, packedRgba]
+// pairs; `currentEntity.index.y` holds the pair count (0 for intensity).
+@group(1) @binding(2) var<storage, read> labelColors: array<u32>;
 
 // Active entity descriptor for the current fragment, populated once at
 // the top of fs() and read by sampleWithFallback per ray sample. Reading
@@ -343,6 +346,65 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
   return 0xFFFFFFFFu;
 }
 
+// Integer avalanche (MurmurHash3 finalizer). Native u32 wrap matches the
+// `Math.imul`/`>>> 0` port in labelColors.ts.
+fn labelFmix32(value: u32) -> u32 {
+  var h = value;
+  h = h ^ (h >> 16u);
+  h = h * 0x85ebca6bu;
+  h = h ^ (h >> 13u);
+  h = h * 0xc2b2ae35u;
+  h = h ^ (h >> 16u);
+  return h;
+}
+
+// Categorical color for an integer label id. Fixed-point integer HSV so
+// the on-screen color matches labelColors.ts `glasbeyRgb` bit-for-bit
+// (locked by labelColorParity.test.ts). Hashes the FULL id — never masked
+// to 16 bits — so ids above 65535 stay distinct. Returns rgb in 0..1.
+fn labelGlasbey(id: u32) -> vec3f {
+  let a = labelFmix32(id);
+  let b = labelFmix32(a);
+
+  let hue = a % 1530u;              // six 255-wide sextants
+  let sat = 200u + (b % 56u);      // 200..255
+  let val = 205u + ((b / 256u) % 51u); // 205..255
+
+  let seg = hue / 255u;
+  let off = hue % 255u;
+
+  let p = val * (255u - sat) / 255u;
+  let q = val * (255u - (sat * off) / 255u) / 255u;
+  let t = val * (255u - (sat * (255u - off)) / 255u) / 255u;
+
+  var rgb = vec3<u32>(val, p, q);
+  if (seg == 0u) { rgb = vec3<u32>(val, t, p); }
+  else if (seg == 1u) { rgb = vec3<u32>(q, val, p); }
+  else if (seg == 2u) { rgb = vec3<u32>(p, val, t); }
+  else if (seg == 3u) { rgb = vec3<u32>(p, q, val); }
+  else if (seg == 4u) { rgb = vec3<u32>(t, p, val); }
+  return vec3f(f32(rgb.x), f32(rgb.y), f32(rgb.z)) / 255.0;
+}
+
+// Resolve a label id to rgba (0..1), honoring the declared OME palette:
+// a linear scan of `count` [id, packedRgba] pairs (declared colors are
+// few), falling back to the glasbey hash (alpha 1) for undeclared ids.
+// Mirrors labelColors.ts `labelColor`. Packed rgba = r | g<<8 | b<<16 | a<<24.
+fn labelColorFor(id: u32, count: u32) -> vec4f {
+  for (var i = 0u; i < count; i = i + 1u) {
+    if (labelColors[2u * i] == id) {
+      let packed = labelColors[2u * i + 1u];
+      return vec4f(
+        f32(packed & 0xFFu) / 255.0,
+        f32((packed >> 8u) & 0xFFu) / 255.0,
+        f32((packed >> 16u) & 0xFFu) / 255.0,
+        f32((packed >> 24u) & 0xFFu) / 255.0,
+      );
+    }
+  }
+  return vec4f(labelGlasbey(id), 1.0);
+}
+
 struct FsOut {
   @location(0) color: vec4f,
   @builtin(frag_depth) depth: f32,
@@ -441,6 +503,45 @@ fn fs(input: VSOut) -> FsOut {
 
   let rayLen = tEnd - tStart;
   let adaptiveStep = max(stepSize, rayLen / 512.0);
+
+  // Categorical label overlay: a first-hit colored surface, NOT translucent
+  // accumulation (which yields noisy haze). March until the first non-zero
+  // label voxel, paint its categorical color opaque at the per-label opacity,
+  // record frag depth, and stop. `0xFFFFFFFFu` (not resident) and `0u`
+  // (background) are transparent so the intensity volume shows through.
+  // Declared OME colors win; the glasbey hash covers the rest. Nearest
+  // sampling (integer ids never interpolate).
+  if (entity.colormapMode == 1u) {
+    let labelSteps = min(i32(ceil(rayLen / adaptiveStep)), 512);
+    var lt = tStart;
+    for (var i = 0; i < labelSteps; i++) {
+      let pos = ro + rd * lt;
+      let id = sampleWithFallback(pos);
+      if (id != 0xFFFFFFFFu && id != 0u) {
+        let labelRgba = labelColorFor(id, currentEntity.index.y);
+        let labelOp = entity.labelOpacity * labelRgba.a;
+        // Record frag depth at the surface so the cursor occludes correctly.
+        let worldHit = entity.modelMatrix * vec4f(pos, 1.0);
+        let clipHit = u.viewProj * worldHit;
+        var hit: FsOut;
+        hit.depth = clipHit.z / clipHit.w * 0.5 + 0.5;
+        // Opaque paint at the per-label opacity (folds in the declared
+        // alpha); premultiplied for the alpha-blend composite. Non-accumulated.
+        hit.color = vec4f(labelRgba.rgb * labelOp, labelOp);
+        return hit;
+      }
+      lt += adaptiveStep;
+    }
+    // No label voxel along this ray: contribute nothing AND leave the
+    // intensity volume's depth intact. `discard` skips both the color and
+    // the frag_depth write — returning a far depth here would clobber the
+    // intensity depth and break cursor occlusion behind the overlay.
+    var labelMiss: FsOut;
+    labelMiss.color = vec4f(0.0, 0.0, 0.0, 0.0);
+    labelMiss.depth = 1.0;
+    discard;
+    return labelMiss;
+  }
 
   // Front-to-back compositing
   var color = vec3f(0.0);

@@ -83,6 +83,15 @@ export interface ChannelSettings {
   name?: string;
 }
 
+/** Per-label overlay display state (mirrors `lucida_core::scene::LabelSettings`),
+ *  captured + restored so a saved view reproduces the author's visible-label set
+ *  and per-label opacity. `#[serde(default)]` on the Rust side keeps it additive:
+ *  absent on views persisted before per-label controls existed. */
+export interface LabelSettings {
+  visible: boolean;
+  opacity: number;
+}
+
 export interface DatasetDisplaySettings {
   visible: boolean;
   opacity: number;
@@ -92,6 +101,9 @@ export interface DatasetDisplaySettings {
   blend_mode: BlendMode;
   render_mode?: RenderMode;
   channel_settings?: ChannelSettings[];
+  /** Per-label overlay settings, positional by manifest label order. Optional
+   *  in the wire format — absent on views persisted before per-label controls. */
+  label_settings?: LabelSettings[];
   channel_blend_mode?: BlendMode;
   detail_level_override?: number | null;
 }

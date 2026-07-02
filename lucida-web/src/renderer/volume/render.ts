@@ -7,14 +7,159 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
+import type { VolumeLayerParams, VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
 import {
   type AtlasState,
+  type LabelVolumePool,
   type LodIndirectionMeta,
   ensureDepthTexture,
   getDepthTexture,
   getDummyIndirection,
 } from "./atlas.ts";
+import { serializeTransientDescriptor } from "../descriptor/transient.ts";
+import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
+import { packLabelPalette } from "../labelColors.ts";
+
+/** Identity 4×4 (column-major) — the fallback model transform for a label
+ *  layer that somehow arrives without matrices (defensive; a real label
+ *  layer always carries the source member's matrices). */
+const IDENTITY_4X4 = new Float32Array([
+  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+]);
+
+/** Default overlay opacity for a label layer that omits one. */
+const DEFAULT_LABEL_OPACITY = 0.5;
+
+/**
+ * The transient categorical descriptor for a label volume pool. The buffer
+ * is allocated once and rewritten in place each frame (the model matrix can
+ * change on a layout epoch, so — unlike the 2D label descriptor cached by
+ * opacity — it isn't cached). Single-LOD (grid 1×1×1) covering the whole
+ * tile, `colormapMode == 1` to select the shader's first-hit branch.
+ */
+function ensureLabelVolumeDescriptor(
+  ctx: WorkerCtx,
+  pool: LabelVolumePool,
+  opacity: number,
+  modelMatrix: Float32Array,
+  invModelMatrix: Float32Array,
+): GPUBuffer {
+  const descBytes = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+  serializeTransientDescriptor(descBytes, {
+    modelMatrix,
+    invModelMatrix,
+    volumeDims: [pool.width, pool.height, pool.depth],
+    // Unused in categorical mode, but kept well-formed.
+    contrastMin: 0,
+    contrastMax: 1,
+    gamma: 1,
+    opacity: 1,
+    colormapMode: 1,
+    labelOpacity: opacity,
+  });
+  if (!pool.descBuffer) {
+    pool.descBuffer = ctx.device.createBuffer({
+      size: DESCRIPTOR_ENTRY_SIZE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+  }
+  ctx.device.queue.writeBuffer(pool.descBuffer, 0, descBytes);
+  return pool.descBuffer;
+}
+
+/**
+ * The declared-palette storage buffer for a label volume pool: flat [id,
+ * packedRgba] pairs from `image-label.colors`, built once (cached by pair
+ * count). Mirrors the 2D label palette; `packedRgba = r | g<<8 | b<<16 |
+ * a<<24`, matching `labelColorFor` in volume.wgsl.
+ */
+function ensureLabelVolumePalette(
+  ctx: WorkerCtx,
+  pool: LabelVolumePool,
+  colors: VolumeLayerParams["labelColors"],
+): { buffer: GPUBuffer | null; count: number } {
+  const packed = colors && colors.length > 0 ? packLabelPalette(colors) : null;
+  const count = packed ? packed.length / 2 : 0;
+  if (pool.labelColorCount === count) {
+    return { buffer: pool.labelColorBuffer ?? null, count };
+  }
+  pool.labelColorBuffer?.destroy();
+  pool.labelColorBuffer = undefined;
+  if (packed && count > 0) {
+    const buffer = ctx.device.createBuffer({
+      size: packed.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    ctx.device.queue.writeBuffer(buffer, 0, packed);
+    pool.labelColorBuffer = buffer;
+  }
+  pool.labelColorCount = count;
+  return { buffer: pool.labelColorBuffer ?? null, count };
+}
+
+/**
+ * Draw one categorical label overlay from its r32uint volume pool as a
+ * first-hit colored surface over the intensity volume already composited.
+ *
+ * A label pool is a single-tile 3D texture covering the label's chosen level,
+ * so a single-LOD transient descriptor (grid 1×1×1) reads it directly. It is
+ * placed by the SOURCE member's model matrix (a label overlays its source's
+ * physical extent), so a coarser label still covers the same field of view.
+ * Declared OME colors are honored via the palette buffer; the rest use the
+ * glasbey hash. Composited OVER the intensity (alpha blend, not first layer).
+ * Returns true when a draw was issued, false when the pool has no resident
+ * volume yet.
+ */
+function renderLabelVolumeLayer(
+  ctx: WorkerCtx,
+  msg: VolumeRenderMultiPassMessage,
+  layer: VolumeLayerParams,
+  target: GPUTexture,
+  canvasView: GPUTextureView,
+  comp: ReturnType<WorkerCtx["getCompositor"]>,
+  isFirstLayer: boolean,
+): boolean {
+  const memberId = layer.datasetId;
+  const pool = ctx.state.labelVolumePools.get(memberId);
+  if (!pool) return false;
+
+  const opacity = layer.opacity ?? DEFAULT_LABEL_OPACITY;
+  const model = layer.modelMatrix ?? IDENTITY_4X4;
+  const invModel = layer.invModelMatrix ?? IDENTITY_4X4;
+  const descBuffer = ensureLabelVolumeDescriptor(ctx, pool, opacity, model, invModel);
+  const palette = ensureLabelVolumePalette(ctx, pool, layer.labelColors);
+
+  const renderer = ctx.getVolumeRenderer();
+  renderer.setProxyTextures(null, null);
+  // Categorical shading computes color from the id in-shader; the LUT is
+  // bound (a valid gray ramp) but unread on this path.
+  renderer.setColormapTexture(ctx.getOrCreateLUT("gray"));
+  renderer.setAtlas(
+    pool.texture,
+    pool.indirectionBuf,
+    [1, 1, 1],
+    [pool.width, pool.height, pool.depth],
+  );
+  renderer.setRenderMode(0);
+  renderer.setMatrices(
+    msg.invViewProj,
+    msg.eye,
+    msg.viewProj,
+    msg.camForward,
+    msg.clipDistance,
+    msg.clipMode,
+  );
+  renderer.setLabelColorBuffer(palette.buffer);
+  renderer.setDescriptorBinding(descBuffer, 0, palette.count);
+
+  const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+  const depthView = depth.createView();
+  const encoder = ctx.device.createCommandEncoder();
+  renderer.renderTo(target.createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect);
+  comp.composite(canvasView, [{ view: target.createView(), blendMode: layer.blendMode }], encoder, isFirstLayer);
+  ctx.device.queue.submit([encoder.finish()]);
+  return true;
+}
 
 export function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
@@ -40,6 +185,16 @@ export function handleVolumeRenderMultiPass(
 
   for (const layer of msg.layers) {
     const memberId = layer.datasetId;
+
+    // Categorical label overlays render from their own r32uint volume pool
+    // via a transient descriptor (first-hit surface), independent of the
+    // cold-state chunk pipeline. Composited OVER the intensity already drawn.
+    if (layer.isLabel) {
+      const drew = renderLabelVolumeLayer(ctx, msg, layer, pool[0], canvasView, comp, isFirstLayer);
+      if (drew) isFirstLayer = false;
+      continue;
+    }
+
     const resolved = layerToPool(memberId);
     if (!resolved) continue;
 
@@ -149,6 +304,9 @@ export function handleVolumeRenderMultiPass(
 
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
     renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
+    // Intensity draws carry no declared palette; bind the dummy (count 0) so
+    // a prior label draw's palette buffer never leaks into this bind group.
+    renderer.setLabelColorBuffer(null);
     renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
     const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
     const depthView = depth.createView();

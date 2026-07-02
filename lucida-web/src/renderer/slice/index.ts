@@ -10,10 +10,14 @@
 export {
   type SliceAtlasState,
   type SliceEntityZInfo,
+  type LabelSlicePool,
   destroyAllSliceAtlasResources,
+  destroyAllLabelSlicePools,
   destroySliceAtlas,
   getDummySliceIndirection,
   getOrCreateSlicePool,
+  getOrCreateLabelSlicePool,
+  removeLabelSlicePool,
   removeSliceAtlas,
   resizeSliceIndirection,
 } from "./atlas.ts";
@@ -29,7 +33,7 @@ export {
 
 export { remapSliceIndirection } from "./remap.ts";
 
-export { handleSliceChunkData } from "./upload.ts";
+export { handleSliceChunkData, handleLabelSliceChunkData } from "./upload.ts";
 
 export { handleSliceRenderMultiPass } from "./render.ts";
 
@@ -37,6 +41,8 @@ export { computeTargetChunkZ } from "./zRetarget.ts";
 
 import {
   destroyAllSliceAtlasResources,
+  destroyAllLabelSlicePools,
+  removeLabelSlicePool,
   removeSliceAtlas,
 } from "./atlas.ts";
 import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
@@ -52,11 +58,13 @@ import type { WorkerCtx } from "../workerContext.ts";
  */
 export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
   removeSliceAtlas(ctx, idOrMember);
+  removeLabelSlicePool(ctx, idOrMember);
   clearCameraUVForMember(ctx.state, idOrMember);
 }
 
 /** Tear down every slice pool, the dummy indirection buffer, and all camera-UV state. */
 export function destroyAllSliceResources(ctx: WorkerCtx): void {
   destroyAllSliceAtlasResources(ctx);
+  destroyAllLabelSlicePools(ctx);
   clearAllCameraUVs(ctx.state);
 }

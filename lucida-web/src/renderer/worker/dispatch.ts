@@ -22,12 +22,14 @@ import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
 import { applyColdState } from "../coldState/index.ts";
 import { handleProxyUpload } from "../proxy/index.ts";
 import {
+  handleLabelSliceChunkData,
   handleSliceChunkData,
   handleSliceRenderMultiPass,
   removeSliceResources,
 } from "../slice/index.ts";
 import {
   applyViewHotState,
+  handleLabelVolumeChunkData,
   handleVolumeChunkData,
   handleVolumeRenderMultiPass,
   removeVolumeResources,
@@ -75,6 +77,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
       return;
     }
+    case "labelSliceChunkData":
+      handleLabelSliceChunkData(ctx, msg);
+      return;
     case "sliceRenderMultiPass":
       handleSliceRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =
@@ -108,6 +113,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
       return;
     }
+    case "labelVolumeChunkData":
+      handleLabelVolumeChunkData(ctx, msg);
+      return;
     case "volumeRenderMultiPass":
       handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =

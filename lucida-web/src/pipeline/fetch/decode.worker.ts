@@ -100,6 +100,11 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
     case "uint8":
       // Conversion to u16 happens at GPU upload to avoid doubling memory here.
       return buf;
+    case "uint32":
+      // Label ids are kept at full 32-bit width and uploaded to an
+      // r32uint atlas. Narrowing to u16 here would collapse distinct ids
+      // above 65535 onto one value.
+      return buf;
     case "bool": {
       const src = new Uint8Array(buf);
       const dst = new Uint16Array(src.length);

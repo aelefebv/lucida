@@ -29,6 +29,15 @@ export interface LayerInfo {
    * user's per-channel `name` override that takes precedence over these).
    */
   channelInfos?: { label: string; color?: string | null }[];
+  /**
+   * Per-label overlay rows for the "Labels" subsection + count badge — ONLY the
+   * DRAWABLE (renderable) labels, so a control never lies about a label that
+   * can't draw (e.g. a uint8/uint16 mask). Each row carries its MANIFEST index
+   * (the key the toggle/opacity handlers pass), name, and current visibility +
+   * opacity. Absent/empty when the dataset has no drawable labels — the
+   * subsection + badge are gated on this having entries.
+   */
+  labelRows?: { index: number; name: string; visible: boolean; opacity: number }[];
   channelBlendMode: string;
   detailLevelOverride: number | null;
   detailLevelOptions: { level: number; label: string }[];
@@ -68,6 +77,10 @@ interface Props {
   onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
   onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
   onChannelSetBlendMode?: (id: string, blendMode: string) => void;
+  /** Toggle a single label overlay's visibility. */
+  onLabelSetVisible?: (id: string, label: number, visible: boolean) => void;
+  /** Set a single label overlay's opacity (0..1). */
+  onLabelSetOpacity?: (id: string, label: number, opacity: number) => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
   debugToggle?: { label: string; active: boolean; onClick: () => void };
@@ -106,6 +119,8 @@ export function LayerPanel({
   onChannelSetContrast,
   onChannelSetGamma,
   onChannelSetBlendMode,
+  onLabelSetVisible,
+  onLabelSetOpacity,
   viewModeToggle,
   cameraModeToggle,
   debugToggle,
@@ -235,6 +250,25 @@ export function LayerPanel({
                     onDoubleClick={canEdit ? (e) => { e.stopPropagation(); setRenamingLayerId(layer.id); } : undefined}
                   >
                     {layer.name}
+                  </span>
+                )}
+                {/*
+                  Discoverability affordance: a small count pill on the row when
+                  the dataset carries DRAWABLE segmentation labels, so the user
+                  knows to expand the layer and reach the "Labels" panel (toggle +
+                  opacity). Counts only renderable labels (matches the rows the
+                  panel shows) so the badge never over-promises. Non-interactive
+                  (the row/expand button owns disclosure); its title + aria-label
+                  carry the meaning. Mirrors the MentionsOfMe count-pill style.
+                */}
+                {layer.labelRows && layer.labelRows.length > 0 && (
+                  <span
+                    className="layer-label-badge"
+                    data-testid={`layer-label-count-${layer.id}`}
+                    aria-label={`${layer.labelRows.length} label${layer.labelRows.length === 1 ? "" : "s"}`}
+                    title={`This dataset has ${layer.labelRows.length} segmentation label${layer.labelRows.length === 1 ? "" : "s"}. Expand the layer to toggle them or adjust their opacity in the Labels panel.`}
+                  >
+                    {`◰ ${layer.labelRows.length}`}
                   </span>
                 )}
                 {canEdit && renamingLayerId !== layer.id && (
@@ -455,6 +489,58 @@ export function LayerPanel({
                         />
                       </div>
                     </>
+                  )}
+                  {/*
+                    Labels subsection — the per-label overlay controls, a sibling
+                    of the channel controls above but independent of multi-channel
+                    mode (labels overlay the intensity image regardless). Shows a
+                    row per DRAWABLE label (ineligible ones are omitted, so no inert
+                    control). Each row: an eye toggle (hide/show the overlay) + an
+                    opacity slider ("adjust opacity so we can see the data
+                    underneath"). Handlers pass the label's MANIFEST index (row.index)
+                    — not the row position — so they hit the right label even when
+                    earlier labels were skipped. Neither ever reframes the camera.
+                    The enclosing `.layer-detail` already stops row-click
+                    propagation, so these controls don't need their own.
+                  */}
+                  {layer.labelRows && layer.labelRows.length > 0 && (
+                    <div className="layer-labels-section" data-testid={`labels-section-${layer.id}`}>
+                      <div className="layer-detail-row">
+                        <label>Labels</label>
+                      </div>
+                      {layer.labelRows.map((row) => {
+                        const labelName = row.name.trim() || `Label ${row.index}`;
+                        const labelPct = Math.round((row.opacity ?? 0.5) * 100);
+                        return (
+                          <div key={row.index} className="label-sublayer">
+                            <div className="label-sublayer-header">
+                              <button
+                                className="layer-eye-btn"
+                                title={row.visible ? "Hide label" : "Show label"}
+                                aria-label={`${row.visible ? "Hide" : "Show"} ${layer.name} ${labelName}`}
+                                aria-pressed={row.visible}
+                                data-testid={`label-eye-${layer.id}-${row.index}`}
+                                onClick={() => onLabelSetVisible?.(layer.id, row.index, !row.visible)}
+                              >
+                                {row.visible ? "◉" : "○"}
+                              </button>
+                              <span className="label-name" title={labelName}>{labelName}</span>
+                              <input
+                                type="range"
+                                className="label-opacity-slider"
+                                aria-label={`${layer.name} ${labelName} opacity`}
+                                data-testid={`label-opacity-${layer.id}-${row.index}`}
+                                min={0}
+                                max={100}
+                                value={labelPct}
+                                title={`Label opacity: ${labelPct}%`}
+                                onChange={(e) => onLabelSetOpacity?.(layer.id, row.index, Number(e.target.value) / 100)}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                   <div className="layer-detail-row">
                     <label>Blend</label>

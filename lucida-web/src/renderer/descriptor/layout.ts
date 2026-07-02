@@ -30,8 +30,8 @@
  *   204: opacity             f32             (4)
  *   208: colormapLutIndex    u32             (4)
  *   212: lodCount            u32             (4)
- *   216: _pad_tail0          u32             (4)
- *   220: _pad_tail1          u32             (4)
+ *   216: colormapMode        u32             (4) — 0 = continuous ramp, 1 = categorical label
+ *   220: labelOpacity        f32             (4) — overlay opacity in categorical mode
  *   224: lods                LodInfo[8]      (512)
  *
  *   736: detailSource        ChunkTierSource (64)
@@ -89,8 +89,11 @@ export const OFFSET_GAMMA = 200;                 // f32
 export const OFFSET_OPACITY = 204;               // f32
 export const OFFSET_COLORMAP_LUT_INDEX = 208;    // u32
 export const OFFSET_LOD_COUNT = 212;             // u32
-export const OFFSET_PAD_TAIL0 = 216;             // u32 (pad)
-export const OFFSET_PAD_TAIL1 = 220;             // u32 (pad)
+/** 0 = continuous colormap ramp (intensity images); 1 = categorical
+ *  label overlay (id → distinct color, id 0 transparent). */
+export const OFFSET_COLORMAP_MODE = 216;         // u32
+/** Overlay opacity used when `colormapMode` is categorical. */
+export const OFFSET_LABEL_OPACITY = 220;         // f32
 /** Alias for {@link DESCRIPTOR_LODS_OFFSET}, kept for symmetry with the
  *  other `OFFSET_*` constants when reading layout side-by-side with the
  *  WGSL struct. */

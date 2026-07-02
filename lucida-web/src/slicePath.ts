@@ -1,6 +1,9 @@
 /** Slice render path: upload chunks + render multi-pass. */
 import { Axis } from "./axes.ts";
+import { labelFootprint } from "./renderer/labelLayout.ts";
+import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
+import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
@@ -13,6 +16,63 @@ import { debugStats } from "./debug/debugStats.ts";
 export type SliceState = Record<string, never>;
 
 export function createSliceState(): SliceState { return {}; }
+
+/**
+ * Append a categorical overlay layer for each of the dataset's VISIBLE labels,
+ * composited over the intensity layers already pushed. The visible set + each
+ * label's opacity come from `labelSettings` (the dataset's per-label display
+ * state); with no settings this falls back to the single default label at the
+ * default opacity, so behavior is unchanged until the user interacts.
+ *
+ * The set drawn here MUST match what {@link computeLabelChunkRequests} fetches,
+ * so both resolve through the shared {@link resolveVisibleLabels} (each
+ * manifest-order label that is VISIBLE per settings and a uint32 mask with a
+ * resolvable source, a positive footprint, and a level within the caps).
+ * Rendering a label whose chunks were never fetched would draw nothing; fetching
+ * a hidden label would waste bandwidth.
+ *
+ * Each overlay is sized to the SOURCE image's full-resolution voxel footprint
+ * via {@link labelFootprint} (so a coarser label stays aligned rather than
+ * shrinking) and placed at the source member's position. Declared
+ * `image-label.colors` are forwarded so authored palettes render exactly.
+ * Labels never change the camera or bounds.
+ */
+export function pushLabelLayers(
+  layers: SliceLayerParams[],
+  manifest: DatasetManifest,
+  members: MemberRosterEntry[],
+  labelSettings?: LabelViewSetting[],
+  memberPositions?: Record<string, [number, number]>,
+): void {
+  for (const resolved of resolveVisibleLabels(manifest, labelSettings)) {
+    const { label, source, opacity } = resolved;
+    const sourceLevel0 = source.multiscale.levels[0];
+    const labelLevel0 = label.image.multiscale.levels[0];
+    const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
+    // Fields can be offset within a plate/layout; place the overlay at the
+    // source member's position so it lands on the image it annotates. The
+    // source field is frequently ABSENT from the active-set roster — in a plate
+    // a whole well renders as a single proxy, and off-view fields aren't active
+    // at all — so fall back to the scene's authoritative per-member layout
+    // position (keyed by the source ENTITY id, the same space as the roster's
+    // positions). Falling back to the origin instead would stack every
+    // off-roster label on the first well (the bug this repairs).
+    const sourceMember = members.find((m) => m.imageId === label.source_image_id);
+    const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
+    layers.push({
+      datasetId: label.image.image_id,
+      dataW,
+      dataH,
+      blendMode: "alpha",
+      offsetX: position[0],
+      offsetY: position[1],
+      entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
+      isLabel: true,
+      opacity,
+      labelColors: label.colors,
+    });
+  }
+}
 
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
@@ -129,6 +189,21 @@ function uploadAndRenderSlice(
         });
       }
     }
+    // Categorical label overlays, composited on top of this dataset's
+    // intensity layers. Honors the per-label visible set + opacity; never
+    // affects camera/bounds. A label's source field is often not in the active
+    // roster (plate wells proxy; off-view fields), so hand the scene's full
+    // per-member position map (entity id -> [x, y]) as the placement fallback.
+    let labelMemberPositions: Record<string, [number, number]> | undefined;
+    if (ds.manifest.labels && ds.manifest.labels.length > 0) {
+      try {
+        labelMemberPositions = JSON.parse(scene.member_positions(dsId)) as Record<string, [number, number]>;
+      } catch {
+        labelMemberPositions = undefined;
+      }
+    }
+    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions);
+
     const added = layers.length - layersBefore;
     if (added > 0) passesByDataset[dsId] = added;
   }

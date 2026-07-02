@@ -3028,6 +3028,8 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetChannelContrast { .. } => "channel contrast",
         ViewportCommand::SetChannelGamma { .. } => "channel gamma",
         ViewportCommand::SetChannelBlendMode { .. } => "channel blend-mode",
+        ViewportCommand::SetLabelVisible { .. } => "label visibility",
+        ViewportCommand::SetLabelOpacity { .. } => "label opacity",
     }
 }
 

@@ -14,6 +14,100 @@ import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 
+/**
+ * A label overlay's slice pool: one `r32uint` texture holding the current
+ * Z-slice of the label mask at full width, plus a single-slot indirection
+ * buffer so the categorical shader path reads it as one tile. Kept minimal
+ * and self-contained (no shared LRU slots) because a label overlay is a
+ * single member covering a bounded 2D footprint, unlike the shared
+ * intensity atlas that packs many members.
+ *
+ * The texture is written IN PLACE as new Z/T slices arrive (never destroyed
+ * on a scrub), mirroring the intensity atlas' stale-then-overwrite so a
+ * label never blanks mid-scrub — the previous slice stays visible until the
+ * new one lands.
+ */
+export interface LabelSlicePool {
+  texture: GPUTexture; // r32uint, size [width, height]
+  /** Single-entry indirection ([0]) so the one tile is always slot 0. */
+  indirectionBuf: GPUBuffer;
+  width: number;
+  height: number;
+  /**
+   * Cached per-member entity descriptor (a persistent buffer, not a
+   * per-frame allocation) + the overlay opacity it was built for. Rebuilt
+   * only when the opacity changes. Populated by the render path.
+   */
+  descBuffer?: GPUBuffer;
+  descOpacity?: number;
+  /**
+   * Cached declared-palette storage buffer ([id, packedRgba] pairs) + its
+   * pair count, built once from the label's `image-label.colors`.
+   */
+  labelColorBuffer?: GPUBuffer;
+  labelColorCount?: number;
+}
+
+/**
+ * Get or create a label slice pool for `memberId` sized to the label
+ * level's 2D dimensions (clamped to the device's max 2D texture dimension
+ * so an oversized/whole-slide level can never throw at `createTexture`).
+ * Reused IN PLACE when the dims are unchanged — a Z/T scrub overwrites the
+ * existing texture rather than destroying + recreating it, so the overlay
+ * never blanks. Recreated only when the dims actually change (a new level).
+ */
+export function getOrCreateLabelSlicePool(
+  ctx: WorkerCtx,
+  memberId: string,
+  width: number,
+  height: number,
+): LabelSlicePool {
+  const limit = getDeviceLimits(ctx.device).maxTextureDimension2D;
+  const w = Math.max(1, Math.min(width, limit));
+  const h = Math.max(1, Math.min(height, limit));
+
+  const pools = ctx.state.labelSlicePools;
+  const existing = pools.get(memberId);
+  if (existing && existing.width === w && existing.height === h) {
+    return existing;
+  }
+  if (existing) destroyLabelSlicePool(existing);
+
+  const texture = createSliceTexture(ctx.device, w, h, null, "r32uint");
+  const indirectionBuf = ctx.device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  // Single tile lives at slot 0.
+  ctx.device.queue.writeBuffer(indirectionBuf, 0, new Uint32Array([0]));
+
+  const pool: LabelSlicePool = { texture, indirectionBuf, width: w, height: h };
+  pools.set(memberId, pool);
+  return pool;
+}
+
+export function destroyLabelSlicePool(pool: LabelSlicePool): void {
+  pool.texture.destroy();
+  pool.indirectionBuf.destroy();
+  pool.descBuffer?.destroy();
+  pool.labelColorBuffer?.destroy();
+}
+
+/** Remove a member's label pool (no-op if absent). */
+export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
+  const pool = ctx.state.labelSlicePools.get(memberId);
+  if (pool) {
+    destroyLabelSlicePool(pool);
+    ctx.state.labelSlicePools.delete(memberId);
+  }
+}
+
+/** Destroy every label pool. */
+export function destroyAllLabelSlicePools(ctx: WorkerCtx): void {
+  for (const pool of ctx.state.labelSlicePools.values()) destroyLabelSlicePool(pool);
+  ctx.state.labelSlicePools.clear();
+}
+
 /** Per-entity Z metadata for slice mode (drives Z-chunk filtering and re-slice detection). */
 export interface SliceEntityZInfo {
   chunkZ: number;

@@ -65,6 +65,33 @@ export interface UploadClient {
     tier?: ResidencyTier,
   ): void;
 
+  /**
+   * Deliver PRE-SLICED uint32 label planes to the r32uint label pool
+   * (categorical overlay path). Distinct from {@link sliceChunkData}: routed
+   * by the label image id; each `chunk.data` is a single 2D Z-plane already
+   * extracted for the current view (so only ~64 KB crosses, not the ~8 MB
+   * 3D chunk).
+   */
+  labelSliceChunkData(
+    memberId: string,
+    chunks: {
+      data: ArrayBuffer;
+      dataType: string;
+      x: number;
+      y: number;
+      z: number;
+      key: string;
+    }[],
+    level: number,
+    t: number,
+    c: number,
+    levelWidth: number,
+    levelHeight: number,
+    chunkX: number,
+    chunkY: number,
+    epochs: SceneEpochs,
+  ): void;
+
   volumeChunkData(
     memberId: string,
     chunks: {
@@ -86,6 +113,37 @@ export interface UploadClient {
     chunkZ: number,
     epochs: SceneEpochs,
     tier?: ResidencyTier,
+  ): void;
+
+  /**
+   * Deliver WHOLE uint32 label chunks to the r32uint label VOLUME pool
+   * (categorical first-hit overlay path). Distinct from {@link volumeChunkData}:
+   * routed by the label image id and drawn as a colored surface, not
+   * accumulated as intensity. Unlike {@link labelSliceChunkData}, the full 3D
+   * chunk crosses (no plane extraction) — the 3D surface needs the whole
+   * volume.
+   */
+  labelVolumeChunkData(
+    memberId: string,
+    datasetId: string,
+    chunks: {
+      data: ArrayBuffer;
+      dataType: string;
+      x: number;
+      y: number;
+      z: number;
+      key: string;
+    }[],
+    level: number,
+    t: number,
+    c: number,
+    levelWidth: number,
+    levelHeight: number,
+    levelDepth: number,
+    chunkX: number,
+    chunkY: number,
+    chunkZ: number,
+    epochs: SceneEpochs,
   ): void;
 
   proxyAssetData(

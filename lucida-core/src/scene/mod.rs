@@ -2,7 +2,8 @@ mod types;
 
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
-    DatasetDisplaySettings, DisplayState, DocumentState, MemberChunkPlan, RenderMode,
+    DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
+    RenderMode,
 };
 
 use std::collections::HashMap;
@@ -1346,6 +1347,81 @@ pub(crate) mod test_helpers {
             catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
+    }
+
+    /// Create a DatasetOpened whose manifest carries `n_labels` uint32
+    /// segmentation labels attached to its single image — for exercising the
+    /// per-label display-settings path (seeding on open, per-label commands).
+    pub fn make_dataset_opened_with_labels(
+        id: &str,
+        name: &str,
+        channels: u64,
+        n_labels: usize,
+    ) -> DatasetOpened {
+        make_dataset_opened_with_label_dtypes(id, name, channels, &vec![DataType::Uint32; n_labels])
+    }
+
+    /// Like [`make_dataset_opened_with_labels`] but with an explicit per-label
+    /// dtype list, so tests can exercise mixed-dtype ordering (e.g. a uint16
+    /// label sorting before a uint32 one), which drives the "first DRAWABLE
+    /// label visible" seeding policy.
+    pub fn make_dataset_opened_with_label_dtypes(
+        id: &str,
+        name: &str,
+        channels: u64,
+        dtypes: &[DataType],
+    ) -> DatasetOpened {
+        let mut opened = make_dataset_opened(id, name, channels);
+        let source_image_id = ImageId(format!("{id}-image"));
+        let owner = EntityId(format!("{id}-entity"));
+        let labels = dtypes
+            .iter()
+            .enumerate()
+            .map(|(i, &dtype)| LabelSpec {
+                name: format!("label-{i}"),
+                source_image_id: source_image_id.clone(),
+                image: ImageSpec {
+                    image_id: ImageId(format!("{id}-image:label:{i}")),
+                    owner: owner.clone(),
+                    multiscale: MultiscaleInfo {
+                        axes: vec![
+                            Axis {
+                                name: "t".to_string(),
+                                kind: AxisKind::Time,
+                            },
+                            Axis {
+                                name: "z".to_string(),
+                                kind: AxisKind::Space,
+                            },
+                            Axis {
+                                name: "y".to_string(),
+                                kind: AxisKind::Space,
+                            },
+                            Axis {
+                                name: "x".to_string(),
+                                kind: AxisKind::Space,
+                            },
+                        ],
+                        levels: vec![LevelGeometry {
+                            level_index: 0,
+                            shape: [1, 1, 1, 64, 64],
+                            chunk_shape: [1, 1, 1, 64, 64],
+                            grid_shape: [1, 1, 1, 1, 1],
+                            scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                        }],
+                        coarse_level_index: None,
+                        generated_levels: vec![],
+                        data_type: dtype,
+                        pinned_axes: vec![],
+                        channel_infos: vec![],
+                    },
+                },
+                colors: vec![],
+                source_declared: true,
+            })
+            .collect();
+        opened.manifest = opened.manifest.with_labels(labels);
+        opened
     }
 
     /// Create a DatasetOpened for a plate with multiple image members.

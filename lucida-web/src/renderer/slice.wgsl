@@ -59,8 +59,8 @@ struct EntityDescriptor {
   opacity: f32,
   colormapLutIndex: u32,
   lodCount: u32,
-  _pad_tail0: u32,
-  _pad_tail1: u32,
+  colormapMode: u32,
+  labelOpacity: f32,
   lods: array<LodInfo, 8>,
   detailSource: ChunkTierSource,
   coarseSource: ChunkTierSource,
@@ -80,6 +80,9 @@ struct EntityDescriptor {
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
+// Declared label palette for categorical draws: flat [id, packedRgba]
+// pairs; `currentEntity.index.y` holds the pair count (0 for intensity).
+@group(1) @binding(2) var<storage, read> labelColors: array<u32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -200,6 +203,65 @@ fn sampleCoarse2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   return textureLoad(coarseTex, atlasCoord, 0).r;
 }
 
+// Integer avalanche (MurmurHash3 finalizer). Native u32 wrap matches the
+// `Math.imul`/`>>> 0` port in labelColors.ts.
+fn labelFmix32(value: u32) -> u32 {
+  var h = value;
+  h = h ^ (h >> 16u);
+  h = h * 0x85ebca6bu;
+  h = h ^ (h >> 13u);
+  h = h * 0xc2b2ae35u;
+  h = h ^ (h >> 16u);
+  return h;
+}
+
+// Categorical color for an integer label id. Fixed-point integer HSV so
+// the on-screen color matches labelColors.ts `glasbeyRgb` bit-for-bit
+// (locked by labelColorParity.test.ts). Hashes the FULL id — never masked
+// to 16 bits — so ids above 65535 stay distinct. Returns rgb in 0..1.
+fn labelGlasbey(id: u32) -> vec3f {
+  let a = labelFmix32(id);
+  let b = labelFmix32(a);
+
+  let hue = a % 1530u;              // six 255-wide sextants
+  let sat = 200u + (b % 56u);      // 200..255
+  let val = 205u + ((b / 256u) % 51u); // 205..255
+
+  let seg = hue / 255u;
+  let off = hue % 255u;
+
+  let p = val * (255u - sat) / 255u;
+  let q = val * (255u - (sat * off) / 255u) / 255u;
+  let t = val * (255u - (sat * (255u - off)) / 255u) / 255u;
+
+  var rgb = vec3<u32>(val, p, q);
+  if (seg == 0u) { rgb = vec3<u32>(val, t, p); }
+  else if (seg == 1u) { rgb = vec3<u32>(q, val, p); }
+  else if (seg == 2u) { rgb = vec3<u32>(p, val, t); }
+  else if (seg == 3u) { rgb = vec3<u32>(p, q, val); }
+  else if (seg == 4u) { rgb = vec3<u32>(t, p, val); }
+  return vec3f(f32(rgb.x), f32(rgb.y), f32(rgb.z)) / 255.0;
+}
+
+// Resolve a label id to rgba (0..1), honoring the declared OME palette:
+// a linear scan of `count` [id, packedRgba] pairs (declared colors are
+// few), falling back to the glasbey hash (alpha 1) for undeclared ids.
+// Mirrors labelColors.ts `labelColor`. Packed rgba = r | g<<8 | b<<16 | a<<24.
+fn labelColorFor(id: u32, count: u32) -> vec4f {
+  for (var i = 0u; i < count; i = i + 1u) {
+    if (labelColors[2u * i] == id) {
+      let packed = labelColors[2u * i + 1u];
+      return vec4f(
+        f32(packed & 0xFFu) / 255.0,
+        f32((packed >> 8u) & 0xFFu) / 255.0,
+        f32((packed >> 16u) & 0xFFu) / 255.0,
+        f32((packed >> 24u) & 0xFFu) / 255.0,
+      );
+    }
+  }
+  return vec4f(labelGlasbey(id), 1.0);
+}
+
 @fragment
 fn fs(input: VSOut) -> @location(0) vec4f {
   // Apply inverse transform to get texture UV
@@ -211,18 +273,22 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
-  // FOV member border: detect fragments within 1.5 px of the member edge
-  let border_width = 1.5;
-  let edge_x = min(texUV.x, 1.0 - texUV.x);
-  let edge_y = min(texUV.y, 1.0 - texUV.y);
-  let dist_x_px = edge_x * u.memberScreenSize.x;
-  let dist_y_px = edge_y * u.memberScreenSize.y;
-  let edge_min_px = min(dist_x_px, dist_y_px);
-  if (edge_min_px < border_width) {
-    return vec4f(0.3, 0.3, 0.3, 1.0);
-  }
-
   let entity = entityDescriptors[currentEntity.index.x];
+
+  // FOV member border: a gray frame 1.5 px inside the member edge. Skip it
+  // for a label overlay (categorical) — an opaque frame around a sub-footprint
+  // mask would sit on top of the intensity image it annotates.
+  if (entity.colormapMode != 1u) {
+    let border_width = 1.5;
+    let edge_x = min(texUV.x, 1.0 - texUV.x);
+    let edge_y = min(texUV.y, 1.0 - texUV.y);
+    let dist_x_px = edge_x * u.memberScreenSize.x;
+    let dist_y_px = edge_y * u.memberScreenSize.y;
+    let edge_min_px = min(dist_x_px, dist_y_px);
+    if (edge_min_px < border_width) {
+      return vec4f(0.3, 0.3, 0.3, 1.0);
+    }
+  }
 
   let intensityMin = entity.contrastMin;
   let intensityMax = entity.contrastMax;
@@ -296,6 +362,20 @@ fn fs(input: VSOut) -> @location(0) vec4f {
         if (v != 0xFFFFFFFFu) { chunkVal = v; }
       }
     }
+  }
+
+  // Categorical label overlay: the sampled value is an integer id, not an
+  // intensity. Nearest id -> distinct color; id 0 (background) and misses
+  // are transparent so the intensity image shows through underneath.
+  // Declared OME colors win; the glasbey hash covers the rest. The final
+  // opacity folds in the declared alpha (hash alpha is 1).
+  if (entity.colormapMode == 1u) {
+    if (chunkVal == 0xFFFFFFFFu || chunkVal == 0u) {
+      return vec4f(0.0, 0.0, 0.0, 0.0);
+    }
+    let labelRgba = labelColorFor(chunkVal, currentEntity.index.y);
+    let labelOp = entity.labelOpacity * labelRgba.a;
+    return vec4f(labelRgba.rgb * labelOp, labelOp);
   }
 
   if (chunkVal == 0xFFFFFFFFu) {

@@ -7,6 +7,7 @@ import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { Axis } from "../axes.ts";
+import { eligibleLabelInfos } from "../pipeline/planning/labelRequests.ts";
 
 /** Apply a settings command and invalidate the settings cache. */
 function applySettingsCommand(scene: WasmScene, cmd: Record<string, unknown>): void {
@@ -26,6 +27,110 @@ function detailLevelOptions(ds: DatasetState | undefined): { level: number; labe
       level: level.level_index,
       label: `${level.shape[Axis.X]} x ${level.shape[Axis.Y]}`,
     }));
+}
+
+/** The per-dataset display settings shape `scene.all_dataset_settings()`
+ *  serializes (mirrors `lucida_core::scene::DatasetDisplaySettings`). */
+interface RawDatasetSettings {
+  visible: boolean;
+  opacity: number;
+  contrast_min: number;
+  contrast_max: number;
+  gamma: number;
+  blend_mode: string;
+  render_mode?: string;
+  channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
+  label_settings?: { visible: boolean; opacity: number }[];
+  channel_blend_mode?: string;
+  detail_level_override?: number | null;
+}
+
+/**
+ * Derive the layer panel's per-layer view models from the live scene + dataset
+ * state. Pure and standalone (no refs/React) so the scene→`LayerInfo` seam —
+ * in particular that per-channel AND per-label settings from
+ * `scene.all_dataset_settings()` reach the panel — is unit-testable with a stub
+ * scene, which a component-with-injected-props test cannot cover.
+ *
+ * Label rows expose ONLY the DRAWABLE (eligible) labels via
+ * {@link eligibleLabelInfos}, each carrying its MANIFEST index so the toggle /
+ * opacity handlers target the right `label_settings` entry even when earlier
+ * (ineligible) labels are omitted — a control never lies about a label that
+ * can't render.
+ */
+export function buildLayerInfos(
+  scene: WasmScene,
+  datasets: Map<string, DatasetState>,
+  maps: {
+    autoContrast: Map<string, boolean>;
+    fullRange: Map<string, boolean>;
+    dataRange: Map<string, { min: number; max: number }>;
+  },
+): LayerInfo[] {
+  let layerOrder: string[];
+  let allSettings: Record<string, RawDatasetSettings>;
+  try {
+    layerOrder = JSON.parse(scene.dataset_order());
+    allSettings = JSON.parse(scene.all_dataset_settings());
+  } catch {
+    return [];
+  }
+
+  const currentC = scene.c();
+
+  return layerOrder.slice().reverse().map((id) => {
+    const settings = allSettings[id];
+    const ds = datasets.get(id);
+    const dr = maps.dataRange.get(id) ?? null;
+    const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
+
+    const chSettings = settings?.channel_settings?.[currentC];
+
+    // One row per DRAWABLE label, keyed by manifest index. Visibility mirrors
+    // `resolveVisibleLabels` (the render path) EXACTLY so the toggle state and
+    // the drawn set never disagree: with settings present, the stored flag (a
+    // missing/short entry → hidden); with NO settings (a snapshot predating
+    // per-label seeding), only the FIRST drawable label shows.
+    const rawLabelSettings = settings?.label_settings;
+    const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
+    const labelRows = ds
+      ? eligibleLabelInfos(ds.manifest).map((e, orderIdx) => {
+          const ls = rawLabelSettings?.[e.index];
+          return {
+            index: e.index,
+            name: e.name,
+            visible: hasLabelSettings ? (ls?.visible ?? false) : orderIdx === 0,
+            opacity: ls?.opacity ?? 0.5,
+          };
+        })
+      : [];
+
+    return {
+      id,
+      name: scene.dataset_name(id),
+      visible: settings?.visible ?? true,
+      opacity: settings?.opacity ?? 1,
+      contrastMin: chSettings?.contrast_min ?? settings?.contrast_min ?? 0,
+      contrastMax: chSettings?.contrast_max ?? settings?.contrast_max ?? 65535,
+      gamma: chSettings?.gamma ?? settings?.gamma ?? 1,
+      colormap: chSettings?.colormap ?? "gray",
+      blendMode: settings?.blend_mode ?? "alpha",
+      renderMode: settings?.render_mode ?? "translucent",
+      autoContrast: maps.autoContrast.get(id) ?? true,
+      fullRange: maps.fullRange.get(id) ?? false,
+      dataRange: dr,
+      fullRangeMax: frMax,
+      channelSettings: settings?.channel_settings,
+      // Immutable channel labels from the manifest's omero block (positional;
+      // may be absent/short — LayerPanel falls back to `Ch {i}` per index).
+      channelInfos: ds?.manifest.images[0]?.multiscale.channel_infos,
+      // Per-label rows for the Labels subsection + count badge (drawable only).
+      labelRows: labelRows.length > 0 ? labelRows : undefined,
+      channelBlendMode: settings?.channel_blend_mode ?? "additive",
+      detailLevelOverride: settings?.detail_level_override ?? null,
+      detailLevelOptions: detailLevelOptions(ds),
+    };
+  });
 }
 
 export interface BridgeCallbacks {
@@ -237,6 +342,33 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
+  // Per-label overlay handlers. Mirror handleChannelSetVisible exactly (a
+  // viewport/display command — applies locally, breaks follow, marks dirty,
+  // emits presence so followers see it via the selection epoch), scoped to a
+  // single label overlay. Toggling / adjusting a label NEVER reframes the
+  // camera (view-state only), mirroring the per-channel behavior.
+  const handleLabelSetVisible = useCallback((id: string, label: number, visible: boolean) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_label_visible", dataset_id: id, label, visible });
+      loopRef.current?.markInteractiveDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  const handleLabelSetOpacity = useCallback((id: string, label: number, opacity: number) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_label_opacity", dataset_id: id, label, opacity });
+      loopRef.current?.markInteractiveDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
   const handleLayerSetBlendMode = useCallback((id: string, mode: string) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -383,72 +515,22 @@ export function useDatasetSettings({
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
-  const buildLayerInfos = (): LayerInfo[] => {
-    const scene = wasmSceneRef.current;
-    if (!scene) return [];
-
-    let layerOrder: string[];
-    let allSettings: Record<string, {
-      visible: boolean;
-      opacity: number;
-      contrast_min: number;
-      contrast_max: number;
-      gamma: number;
-      blend_mode: string;
-      render_mode: string;
-      channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
-      channel_blend_mode?: string;
-      detail_level_override?: number | null;
-    }>;
-    try {
-      layerOrder = JSON.parse(scene.dataset_order());
-      allSettings = JSON.parse(scene.all_dataset_settings());
-    } catch {
-      return [];
-    }
-
-    const currentC = scene.c();
-
-    return layerOrder.slice().reverse().map(id => {
-      const settings = allSettings[id];
-      const ds = datasetsRef.current.get(id);
-      const dr = dataRangeMap.get(id) ?? null;
-      const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
-
-      const chSettings = settings?.channel_settings?.[currentC];
-
-      return {
-        id,
-        name: scene.dataset_name(id),
-        visible: settings?.visible ?? true,
-        opacity: settings?.opacity ?? 1,
-        contrastMin: chSettings?.contrast_min ?? settings?.contrast_min ?? 0,
-        contrastMax: chSettings?.contrast_max ?? settings?.contrast_max ?? 65535,
-        gamma: chSettings?.gamma ?? settings?.gamma ?? 1,
-        colormap: chSettings?.colormap ?? "gray",
-        blendMode: settings?.blend_mode ?? "alpha",
-        renderMode: settings?.render_mode ?? "translucent",
-        autoContrast: autoContrastMap.get(id) ?? true,
-        fullRange: fullRangeMap.get(id) ?? false,
-        dataRange: dr,
-        fullRangeMax: frMax,
-        channelSettings: settings?.channel_settings,
-        // Immutable channel labels from the manifest's omero block (positional;
-        // may be absent/short — LayerPanel falls back to `Ch {i}` per index).
-        channelInfos: ds?.manifest.images[0]?.multiscale.channel_infos,
-        channelBlendMode: settings?.channel_blend_mode ?? "additive",
-        detailLevelOverride: settings?.detail_level_override ?? null,
-        detailLevelOptions: detailLevelOptions(ds),
-      };
-    });
-  };
-
-  // buildLayerInfos closes over autoContrastMapRef + datasetsRef; both
-  // are mirrored from state via the version counters above (datasetsVersion,
-  // remoteDocumentVersion, layerSettingsVersion) so re-renders pick up
-  // the latest values. Calling during render is intentional.
+  // buildLayerInfos (the module-scope pure fn) reads the scene + datasets refs
+  // and the state maps; all are mirrored from state via the version counters
+  // above (datasetsVersion, remoteDocumentVersion, layerSettingsVersion) so
+  // re-renders pick up the latest values. Reading the refs during render is
+  // intentional here (the layer panel view models are derived per render).
   // eslint-disable-next-line react-hooks/refs
-  const layerInfos = buildLayerInfos();
+  const scene = wasmSceneRef.current;
+  // eslint-disable-next-line react-hooks/refs
+  const datasets = datasetsRef.current;
+  const layerInfos = scene
+    ? buildLayerInfos(scene, datasets, {
+        autoContrast: autoContrastMap,
+        fullRange: fullRangeMap,
+        dataRange: dataRangeMap,
+      })
+    : [];
   void datasetsVersion;
   void remoteDocumentVersion;
   void layerSettingsVersion;
@@ -481,6 +563,8 @@ export function useDatasetSettings({
     handleChannelSetContrast,
     handleChannelSetGamma,
     handleChannelSetBlendMode,
+    handleLabelSetVisible,
+    handleLabelSetOpacity,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
     handleLayerSetDetailLevelOverride,

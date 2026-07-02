@@ -380,6 +380,73 @@ describe("epoch caching", () => {
       debugStats.enabled = previousDebugEnabled;
     }
   });
+
+  // A uint32 label over `img-0` with a 4-deep, 2-chunk-Z level: slice mode
+  // fetches one z-plane (1 chunk), volume mode the whole volume (2 z-chunks).
+  function labeledContent(): DatasetManifest {
+    const manifest = createMockContent();
+    (manifest as DatasetManifest).labels = [{
+      name: "mito",
+      source_image_id: "img-0",
+      image: {
+        image_id: "img-0:label:mito",
+        owner: "field-0",
+        multiscale: {
+          axes: [],
+          data_type: "Uint32",
+          levels: [{
+            level_index: 0,
+            shape: [1, 1, 4, 64, 64],
+            chunk_shape: [1, 1, 2, 64, 64],
+            grid_shape: [1, 1, 2, 1, 1],
+            scale: [1, 1, 1, 1, 1],
+          }],
+        },
+      },
+      colors: [],
+    }];
+    return manifest;
+  }
+
+  function labelRequestsFromSubmit(cpuCache: CpuCache) {
+    const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
+    return submitted.requests.filter((r) => r.imageId === "img-0:label:mito");
+  }
+
+  it("merges the label's FULL z-grid into the fetch plan in volume mode", () => {
+    const scene = createMockScene();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: labeledContent() }]]);
+    const orch = makeOrch();
+    const cpuCache = createMockCpuCache();
+    const ctx = makeCtx(scene, datasets);
+    ctx.cpuCache = cpuCache;
+    ctx.mode = "volume";
+
+    orch.planAndFetch(ctx, emptyMinimap);
+
+    const labelReqs = labelRequestsFromSubmit(cpuCache);
+    // gz=2 z-chunks (the whole label volume), not a single mapped plane.
+    expect(labelReqs.length).toBe(2);
+    expect(new Set(labelReqs.map((r) => r.z))).toEqual(new Set([0, 1]));
+    // Scoped under the label's own image id, so intensity eviction is untouched.
+    expect(labelReqs.every((r) => r.imageId === "img-0:label:mito")).toBe(true);
+  });
+
+  it("merges only the mapped z-plane in slice mode (unchanged)", () => {
+    const scene = createMockScene();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: labeledContent() }]]);
+    const orch = makeOrch();
+    const cpuCache = createMockCpuCache();
+    const ctx = makeCtx(scene, datasets);
+    ctx.cpuCache = cpuCache;
+    ctx.mode = "slice";
+
+    orch.planAndFetch(ctx, emptyMinimap);
+
+    const labelReqs = labelRequestsFromSubmit(cpuCache);
+    expect(labelReqs.length).toBe(1); // single z-plane
+    expect(new Set(labelReqs.map((r) => r.z))).toEqual(new Set([0]));
+  });
 });
 
 // ===========================================================================

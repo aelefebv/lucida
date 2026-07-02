@@ -665,6 +665,17 @@ export function useBridge({
         sessionRef.current!.contentSource.registerImage(spec.image_id, spec.wire_format);
         registeredImages++;
       }
+      // Labels carry their OWN image (distinct id + integer dtype) and are
+      // kept out of `images`, so register them separately so their chunks
+      // are fetchable when a label overlay requests them. The server serves
+      // a label image by its own id; wire format is derived from the
+      // label's declared dtype (e.g. Uint32).
+      for (const label of manifest.labels ?? []) {
+        sessionRef.current!.contentSource.registerImage(label.image.image_id, {
+          Raw: { data_type: label.image.multiscale.data_type },
+        });
+        registeredImages++;
+      }
     } else {
       bridgeLog("setup_fetch_pipeline.fetch_variant_unsupported", {
         datasetId,

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use lucida_content::{DatasetId, DatasetKind, EntityId, LayoutId, LayoutSpec};
+use lucida_content::{
+    DataType, DatasetId, DatasetKind, DatasetManifest, EntityId, LayoutId, LayoutSpec,
+};
 use lucida_protocol::AssetCatalog;
 
 use crate::chunk::ChunkCoord;
@@ -97,6 +99,31 @@ fn default_channel_blend_mode() -> BlendMode {
     BlendMode::Additive
 }
 
+/// Per-label overlay display state: whether a segmentation-mask label is drawn,
+/// and how strongly it composites over the intensity image. The per-label
+/// analogue of [`ChannelSettings`] — a local, per-client display setting that
+/// rides presence and saved views (via the enclosing [`DatasetDisplaySettings`])
+/// but is not durable document state.
+///
+/// `visible` defaults to `true` and `opacity` to `0.5`: a freshly opened dataset
+/// shows its label overlay at half strength — the same fixed opacity used before
+/// per-label controls existed — leaving the intensity data visible underneath.
+/// The user can then hide individual labels or tune each one's opacity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabelSettings {
+    pub visible: bool,
+    pub opacity: f32,
+}
+
+impl Default for LabelSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            opacity: 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetDisplaySettings {
     pub visible: bool,
@@ -109,6 +136,15 @@ pub struct DatasetDisplaySettings {
     pub render_mode: RenderMode,
     #[serde(default)]
     pub channel_settings: Vec<ChannelSettings>,
+    /// Per-label overlay settings, positional by manifest (OME `labels`) order:
+    /// index `i` controls the visibility/opacity of the `i`-th attached label.
+    /// Seeded on open from the manifest's label count. `#[serde(default)]` keeps
+    /// this additive — a presence snapshot or saved view persisted before
+    /// per-label controls existed carries no `label_settings` key and
+    /// deserializes as an empty Vec (the render path then falls back to the
+    /// default single-label overlay), so there is no wire break.
+    #[serde(default)]
+    pub label_settings: Vec<LabelSettings>,
     #[serde(default = "default_channel_blend_mode")]
     pub channel_blend_mode: BlendMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +164,74 @@ impl DatasetDisplaySettings {
         }
         &mut self.channel_settings[index]
     }
+
+    /// Get a mutable reference to label settings at the given index, growing
+    /// the vec with defaults if needed. The per-label mirror of
+    /// [`Self::ensure_channel`]: a per-label edit that targets an index past
+    /// the seeded count back-fills intervening entries with the default
+    /// (visible, 0.5) rather than panicking. Callers bound the index to the
+    /// dataset's real label count first (see the `SetLabel*` apply arms), so a
+    /// stray/huge index can never balloon the vec.
+    pub fn ensure_label(&mut self, index: usize) -> &mut LabelSettings {
+        while self.label_settings.len() <= index {
+            self.label_settings.push(LabelSettings::default());
+        }
+        &mut self.label_settings[index]
+    }
+
+    /// Build the complete default per-dataset display settings for a freshly
+    /// opened OR restored dataset: one channel-settings entry per channel
+    /// (cycling the default colormaps) and one label-settings entry per attached
+    /// label. This is the single seeding source shared by the `DatasetOpened`
+    /// apply path and the document-restore path (`load_document`), so both
+    /// produce identical, COMPLETE settings — the layer panel and render path
+    /// depend on `label_settings` / `channel_settings` being present and
+    /// full-length however the dataset entered the scene.
+    ///
+    /// Label policy: only the first DRAWABLE-dtype (uint32) label is visible by
+    /// default (the rest start hidden), all at opacity 0.5 — one clean overlay on
+    /// open, the user reveals the others via the per-label toggles. This keeps a
+    /// labeled plate from fetching + pooling every mask on open and avoids
+    /// stacking masks into a muddy first impression, while still exposing the
+    /// full set for control.
+    ///
+    /// The render/fetch path only draws uint32 masks, so seeding a NON-uint32
+    /// label (uint8/uint16 are common) visible would open BLANK. Picking the
+    /// first uint32 label instead keeps the "one clean overlay on open" intent
+    /// even when a non-uint32 label sorts first. If no label is uint32, none is
+    /// visible (nothing can draw); the layer panel's count badge still surfaces
+    /// that labels exist. Footprint/level ineligibility isn't visible here (it is
+    /// a render-side, device-dependent check) — the web `resolveVisibleLabels`
+    /// falls back to the first eligible label to cover that.
+    pub fn seeded_for(manifest: &DatasetManifest) -> Self {
+        let channel_count = manifest
+            .images()
+            .first()
+            .and_then(|img| img.multiscale.levels.first())
+            .map(|l| l.shape[1] as usize)
+            .unwrap_or(1);
+        let labels = manifest.label_specs();
+        // Index of the first uint32 (drawable-dtype) label, or `None` if the
+        // dataset has no uint32 label. Only that one is seeded visible.
+        let default_visible = labels
+            .iter()
+            .position(|l| l.image.multiscale.data_type == DataType::Uint32);
+        Self {
+            channel_settings: (0..channel_count)
+                .map(|i| ChannelSettings {
+                    colormap: Colormap::default_for_channel(i),
+                    ..Default::default()
+                })
+                .collect(),
+            label_settings: (0..labels.len())
+                .map(|i| LabelSettings {
+                    visible: Some(i) == default_visible,
+                    opacity: 0.5,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for DatasetDisplaySettings {
@@ -141,6 +245,7 @@ impl Default for DatasetDisplaySettings {
             blend_mode: BlendMode::Alpha,
             render_mode: RenderMode::Translucent,
             channel_settings: Vec::new(),
+            label_settings: Vec::new(),
             channel_blend_mode: BlendMode::Additive,
             detail_level_override: None,
         }
