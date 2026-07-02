@@ -108,20 +108,43 @@ export function writeVolumeChunk(
   );
 }
 
+/**
+ * Single-channel unsigned-integer texture formats the slice atlas can
+ * hold: `r16uint` for intensity images (2 bytes/voxel, `Uint16Array`) and
+ * `r32uint` for label masks whose ids exceed 16 bits (4 bytes/voxel,
+ * `Uint32Array`). Both bind to the shader's `texture_2d<u32>` sampler.
+ */
+export type SliceTextureFormat = "r16uint" | "r32uint";
+
+/** A slice payload matching its texture format's element size. */
+export type SliceVoxels = Uint16Array | Uint32Array;
+
+function bytesPerVoxelFor(format: SliceTextureFormat): number {
+  return format === "r32uint" ? 4 : 2;
+}
+
+function makeLike(source: SliceVoxels, length: number): SliceVoxels {
+  return source instanceof Uint32Array
+    ? new Uint32Array(length)
+    : new Uint16Array(length);
+}
+
 export function createSliceTexture(
   device: GPUDevice,
   width: number,
   height: number,
-  data?: Uint16Array | null,
+  data?: SliceVoxels | null,
+  format: SliceTextureFormat = "r16uint",
 ): GPUTexture {
+  const bpv = bytesPerVoxelFor(format);
   const texture = device.createTexture({
     size: [width, height],
-    format: "r16uint",
+    format,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 
   if (data) {
-    const bytesPerRow = width * 2;
+    const bytesPerRow = width * bpv;
     const alignedBytesPerRow = Math.ceil(bytesPerRow / 256) * 256;
 
     if (alignedBytesPerRow === bytesPerRow) {
@@ -133,8 +156,8 @@ export function createSliceTexture(
       );
     } else {
       // Pad rows to satisfy WebGPU 256-byte alignment
-      const paddedWidth = alignedBytesPerRow / 2;
-      const padded = new Uint16Array(paddedWidth * height);
+      const paddedWidth = alignedBytesPerRow / bpv;
+      const padded = makeLike(data, paddedWidth * height);
       for (let y = 0; y < height; y++) {
         padded.set(data.subarray(y * width, y * width + width), y * paddedWidth);
       }
@@ -153,14 +176,16 @@ export function createSliceTexture(
 export function writeSliceRegion(
   device: GPUDevice,
   texture: GPUTexture,
-  data: Uint16Array,
+  data: SliceVoxels,
   srcRowStride: number,
   dstX: number,
   dstY: number,
   chunkW: number,
   chunkH: number,
+  format: SliceTextureFormat = "r16uint",
 ): void {
-  const bytesPerRow = chunkW * 2;
+  const bpv = bytesPerVoxelFor(format);
+  const bytesPerRow = chunkW * bpv;
   const alignedBytesPerRow = Math.ceil(bytesPerRow / 256) * 256;
 
   // Extract chunk rows from source data (which may have a different stride)
@@ -177,8 +202,8 @@ export function writeSliceRegion(
     return;
   }
 
-  const paddedWidth = alignedBytesPerRow / 2;
-  const padded = new Uint16Array(paddedWidth * chunkH);
+  const paddedWidth = alignedBytesPerRow / bpv;
+  const padded = makeLike(data, paddedWidth * chunkH);
   for (let y = 0; y < chunkH; y++) {
     padded.set(data.subarray(y * srcRowStride, y * srcRowStride + chunkW), y * paddedWidth);
   }

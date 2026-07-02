@@ -28,8 +28,10 @@ import {
   OFFSET_FIELD_PROXY_DIMS,
   OFFSET_FIELD_PROXY_POOL_INDEX,
   OFFSET_FIELD_PROXY_SLOT_INDEX,
+  OFFSET_COLORMAP_MODE,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
+  OFFSET_LABEL_OPACITY,
   OFFSET_LOD_COUNT,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
@@ -46,6 +48,13 @@ export interface TransientDescriptorParams {
   contrastMax: number;
   gamma: number;
   opacity: number;
+  /**
+   * `0` (default) = continuous colormap ramp; `1` = categorical label
+   * overlay (integer id → distinct color, id 0 transparent).
+   */
+  colormapMode?: number;
+  /** Overlay opacity used in categorical mode (default `1`). */
+  labelOpacity?: number;
 }
 
 /**
@@ -94,6 +103,8 @@ export function serializeTransientDescriptor(
   f32[OFFSET_CONTRAST_MAX / 4] = params.contrastMax;
   f32[OFFSET_GAMMA / 4]        = params.gamma;
   f32[OFFSET_OPACITY / 4]      = params.opacity;
+  u32[OFFSET_COLORMAP_MODE / 4] = (params.colormapMode ?? 0) >>> 0;
+  f32[OFFSET_LABEL_OPACITY / 4] = params.labelOpacity ?? 1;
 
   // Single LOD covering the full volume (single-slot atlas).
   u32[OFFSET_LOD_COUNT / 4] = 1;

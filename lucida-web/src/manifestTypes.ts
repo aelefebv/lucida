@@ -98,6 +98,34 @@ export interface LayoutSpec {
   placements: { entity_id: string; position: [number, number] }[];
 }
 
+/**
+ * One entry of an OME `image-label` color table (mirrors lucida-content's
+ * `LabelColor`). `value` is the integer label id — carried as a number
+ * because ids routinely exceed the 16-bit range; `rgba` is `[r, g, b, a]`
+ * with each component `0..255`.
+ */
+export interface LabelColor {
+  value: number;
+  rgba: [number, number, number, number];
+}
+
+/**
+ * A segmentation-mask label attached to a source intensity image (mirrors
+ * lucida-content's `LabelSpec`). A label carries its OWN multiscale image
+ * — distinct axes, per-level geometry, scale, and integer dtype (e.g.
+ * `Uint32`) from the source — so it can be streamed and drawn as an
+ * overlay aligned by its own coordinate scale. `image.owner` is the entity
+ * id owning the source image, used to place the overlay.
+ */
+export interface LabelSpec {
+  name: string;
+  source_image_id: string;
+  image: ImageSpec;
+  /** `image-label.colors`; absent on the wire when empty. */
+  colors?: LabelColor[];
+  source_declared?: boolean;
+}
+
 export interface DatasetManifest {
   dataset_id: string;
   name: string;
@@ -107,6 +135,14 @@ export interface DatasetManifest {
   images: ImageSpec[];
   source_layouts: LayoutSpec[];
   default_layout_id: string | null;
+  /**
+   * Segmentation labels attached to images in this dataset. Kept separate
+   * from `images` so a label never renders as an ordinary intensity image.
+   * Absent on the wire (and on manifests written before labels existed)
+   * when the dataset has none — consumers must tolerate `undefined`, like
+   * `channel_infos`.
+   */
+  labels?: LabelSpec[];
 }
 
 /** Externally tagged enum: { "Proxied": { images: [...] } } */

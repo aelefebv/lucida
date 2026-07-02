@@ -8,16 +8,67 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { SliceChunkDataMessage } from "../workerProtocol.ts";
+import type {
+  LabelSliceChunkDataMessage,
+  SliceChunkDataMessage,
+} from "../workerProtocol.ts";
 import { writeSliceRegion } from "../gpuContext.ts";
 import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint16Slice } from "../dataTypeUtil.ts";
+import { asUint16Slice, asUint32Slice } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
+import { getOrCreateLabelSlicePool } from "./atlas.ts";
+
+/**
+ * Write pre-sliced uint32 label planes into the member's r32uint label
+ * pool. The delivery path (`dispatchLabelChunkDelivery`) already extracted
+ * the single Z-plane for the current view, so each `chunk.data` is a 2D
+ * plane of `chunkY*chunkX` ids (~64 KB, not the full ~8 MB 3D chunk) — this
+ * just places it at the chunk's `(x, y)` offset. The pool is reused in
+ * place, so a Z/T scrub overwrites the resident slice without blanking. Ids
+ * stay at full 32-bit width — no intensity-range sampling (categorical, not
+ * scalar). Writes are clamped to the (possibly device-limited) texture.
+ */
+export function handleLabelSliceChunkData(
+  ctx: WorkerCtx,
+  msg: LabelSliceChunkDataMessage,
+): void {
+  // Drop an out-of-date delivery (e.g. a previous timepoint's plane racing
+  // in after the view moved on) so it can't overwrite the pool with the
+  // wrong T/Z — same stale guard the intensity path uses.
+  if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
+
+  const { memberId, levelWidth, levelHeight, chunkX, chunkY } = msg;
+
+  const pool = getOrCreateLabelSlicePool(ctx, memberId, levelWidth, levelHeight);
+
+  for (const chunk of msg.chunks) {
+    const xOff = chunk.x * chunkX;
+    const yOff = chunk.y * chunkY;
+    // Clamp to the resident texture (dims may be device-limited below the
+    // requested level); skip tiles that fall entirely outside it.
+    if (xOff >= pool.width || yOff >= pool.height) continue;
+    const chunkW = Math.min(chunkX, pool.width - xOff);
+    const chunkH = Math.min(chunkY, pool.height - yOff);
+    if (chunkW <= 0 || chunkH <= 0) continue;
+    const plane = asUint32Slice(chunk.data, 0, chunkY * chunkX);
+    writeSliceRegion(
+      ctx.device,
+      pool.texture,
+      plane,
+      chunkX,
+      xOff,
+      yOff,
+      chunkW,
+      chunkH,
+      "r32uint",
+    );
+  }
+}
 
 export function handleSliceChunkData(
   ctx: WorkerCtx,

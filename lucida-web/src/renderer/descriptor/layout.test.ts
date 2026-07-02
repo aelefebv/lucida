@@ -27,9 +27,11 @@ import {
   OFFSET_CHANNEL_MASK,
   OFFSET_COARSE_SOURCE,
   OFFSET_COLORMAP_LUT_INDEX,
+  OFFSET_COLORMAP_MODE,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
   OFFSET_DETAIL_SOURCE,
+  OFFSET_LABEL_OPACITY,
   OFFSET_FIELD_PROXY_DIMS,
   OFFSET_FIELD_PROXY_POOL_INDEX,
   OFFSET_FIELD_PROXY_SLOT_INDEX,
@@ -181,6 +183,8 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.opacity).toBe(OFFSET_OPACITY);
     expect(offsets.colormapLutIndex).toBe(OFFSET_COLORMAP_LUT_INDEX);
     expect(offsets.lodCount).toBe(OFFSET_LOD_COUNT);
+    expect(offsets.colormapMode).toBe(OFFSET_COLORMAP_MODE);
+    expect(offsets.labelOpacity).toBe(OFFSET_LABEL_OPACITY);
     expect(offsets.lods).toBe(OFFSET_LODS);
     expect(offsets.lods).toBe(DESCRIPTOR_LODS_OFFSET);
     expect(offsets.detailSource).toBe(OFFSET_DETAIL_SOURCE);

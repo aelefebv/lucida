@@ -89,3 +89,23 @@ describe("computeAtlasGeometry — 2D", () => {
     expect(geom.atlasH).toBe(5000);
   });
 });
+
+describe("computeAtlasGeometry — bytes-per-voxel (r32uint label atlas)", () => {
+  it("4 bytes/voxel halves the budget-implied slot count vs. 2 bytes", () => {
+    // 128x128 chunk, 64 MB budget.
+    //   r16 (2B): maxSlots = 64MB / (16384*2) = 2048 → floor(sqrt) = 45
+    //   r32 (4B): maxSlots = 64MB / (16384*4) = 1024 → floor(sqrt) = 32
+    const r16 = computeAtlasGeometry(SPEC_LIMITS, [128, 128], 64 * MB, "2d", 2);
+    const r32 = computeAtlasGeometry(SPEC_LIMITS, [128, 128], 64 * MB, "2d", 4);
+    expect(r16.slotsX).toBe(45);
+    expect(r32.slotsX).toBe(32);
+    expect(r32.slotsY).toBe(32);
+    expect(r32.totalSlots).toBe(32 * 32);
+  });
+
+  it("defaults to 2 bytes/voxel when the param is omitted", () => {
+    const explicit = computeAtlasGeometry(SPEC_LIMITS, [64, 64], 64 * MB, "2d", 2);
+    const implied = computeAtlasGeometry(SPEC_LIMITS, [64, 64], 64 * MB, "2d");
+    expect(implied).toEqual(explicit);
+  });
+});

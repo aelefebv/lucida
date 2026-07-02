@@ -92,6 +92,22 @@ describe("normalize", () => {
     expect(out).toBe(src);
   });
 
+  it("uint32: passes label bytes through without narrowing to u16", () => {
+    // 92801 and 92801+65536 must survive as distinct 32-bit ids.
+    const src = new Uint32Array([0, 92801, 92801 + 65536, 4_294_967_295]).buffer;
+    const out = normalize(src, "uint32");
+    expect(out).toBe(src);
+    expect(Array.from(new Uint32Array(out))).toEqual([
+      0, 92801, 92801 + 65536, 4_294_967_295,
+    ]);
+  });
+
+  it("Uint32 (PascalCase, as serialized by the Rust DataType enum): passthrough", () => {
+    const src = new Uint32Array([70000, 200000]).buffer;
+    const out = normalize(src, "Uint32");
+    expect(out).toBe(src);
+  });
+
   it("float32: normalizes unit-range samples to u16", () => {
     const src = new Float32Array([-1, 0, 0.5, 1, 2, Number.NaN]).buffer;
     const out = new Uint16Array(normalize(src, "float32"));

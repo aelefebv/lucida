@@ -171,6 +171,41 @@ export class RenderClient implements UploadClient {
     );
   }
 
+  labelSliceChunkData(
+    memberId: string,
+    chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
+    level: number,
+    t: number,
+    c: number,
+    levelWidth: number,
+    levelHeight: number,
+    chunkX: number,
+    chunkY: number,
+    epochs: SceneEpochs,
+  ) {
+    const transferList: ArrayBuffer[] = [];
+    const workerChunks: Chunk[] = chunks.map(chunk => {
+      // The delivery path extracted a fresh per-plane buffer, but copy +
+      // transfer keeps the API uniform with the other chunk senders.
+      const buf = chunk.data.slice(0);
+      transferList.push(buf);
+      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+    });
+    this.worker.postMessage(
+      {
+        type: "labelSliceChunkData",
+        epochs,
+        memberId,
+        chunks: workerChunks,
+        level,
+        t, c,
+        levelWidth, levelHeight,
+        chunkX, chunkY,
+      },
+      transferList,
+    );
+  }
+
   coldState(msg: ColdStateMessage) {
     this.worker.postMessage(msg);
   }

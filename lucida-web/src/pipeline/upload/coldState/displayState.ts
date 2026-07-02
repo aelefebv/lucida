@@ -24,6 +24,10 @@ export function buildDisplayStateByChannel(
       opacity,
       colormapName: chSettings?.colormap ?? "gray",
       channelMask: 1 << (ch & 31),
+      // Intensity channels always use the continuous colormap ramp;
+      // categorical mode is reserved for label overlays.
+      colormapMode: 0,
+      labelOpacity: 1,
     };
   }
   return out;

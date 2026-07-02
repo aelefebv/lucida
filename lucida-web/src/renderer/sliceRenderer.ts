@@ -21,6 +21,8 @@ export class SliceRenderer {
   private bindGroup: GPUBindGroup | null = null;
   private descriptorBindGroup: GPUBindGroup | null = null;
   private currentDescriptorBuffer: GPUBuffer | null = null;
+  private currentLabelColorBuffer: GPUBuffer | null = null;
+  private labelColorBuffer: GPUBuffer | null = null;
 
   private detailAtlasTexture: GPUTexture | null = null;
   private detailIndirectionBuffer: GPUBuffer | null = null;
@@ -28,6 +30,7 @@ export class SliceRenderer {
   private coarseIndirectionBuffer: GPUBuffer | null = null;
   private dummyTexture: GPUTexture;
   private dummyIndirectionBuffer: GPUBuffer;
+  private dummyLabelColorBuffer: GPUBuffer;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
 
@@ -108,6 +111,13 @@ export class SliceRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "uniform" },
         },
+        // Declared label palette: [id, packedRgba] pairs scanned in-shader
+        // for categorical draws. A 1-entry dummy is bound for intensity.
+        {
+          binding: 2,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
+        },
       ],
     });
 
@@ -150,6 +160,14 @@ export class SliceRenderer {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(this.dummyIndirectionBuffer, 0, dummyData);
+
+    // Dummy declared-palette buffer (one u32) for non-categorical draws;
+    // the shader scans 0 pairs (count comes from the entity ref).
+    this.dummyLabelColorBuffer = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.dummyLabelColorBuffer, 0, new Uint32Array([0]));
 
     // Default 1x1 white LUT (renders grayscale when no colormap is set)
     this.lutTexture = device.createTexture({
@@ -233,21 +251,38 @@ export class SliceRenderer {
   }
 
   /**
-   * Bind the per-dataset entity descriptor buffer + write the entity
-   * index for the next draw.
+   * Set the declared-label-palette storage buffer for the next categorical
+   * draw ([id, packedRgba] pairs). Pass `null` (or omit) for intensity
+   * draws — a dummy is bound so the layout stays satisfied.
    */
-  setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number) {
-    if (this.currentDescriptorBuffer !== descriptorBuffer || !this.descriptorBindGroup) {
+  setLabelColorBuffer(buffer: GPUBuffer | null) {
+    this.labelColorBuffer = buffer;
+  }
+
+  /**
+   * Bind the per-dataset entity descriptor buffer + write the entity
+   * index (and, for categorical label draws, the declared-palette count)
+   * for the next draw.
+   */
+  setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number, labelColorCount = 0) {
+    const labelColors = this.labelColorBuffer ?? this.dummyLabelColorBuffer;
+    if (
+      this.currentDescriptorBuffer !== descriptorBuffer ||
+      this.currentLabelColorBuffer !== labelColors ||
+      !this.descriptorBindGroup
+    ) {
       this.currentDescriptorBuffer = descriptorBuffer;
+      this.currentLabelColorBuffer = labelColors;
       this.descriptorBindGroup = this.device.createBindGroup({
         layout: this.descriptorBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: descriptorBuffer } },
           { binding: 1, resource: { buffer: this.entityRefBuffer } },
+          { binding: 2, resource: { buffer: labelColors } },
         ],
       });
     }
-    const refData = new Uint32Array([entityIndex >>> 0, 0, 0, 0]);
+    const refData = new Uint32Array([entityIndex >>> 0, labelColorCount >>> 0, 0, 0]);
     this.device.queue.writeBuffer(this.entityRefBuffer, 0, refData);
   }
 

@@ -1,6 +1,9 @@
 /** Slice render path: upload chunks + render multi-pass. */
 import { Axis } from "./axes.ts";
+import { labelFootprint } from "./renderer/labelLayout.ts";
+import { resolveDefaultLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
+import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
@@ -13,6 +16,58 @@ import { debugStats } from "./debug/debugStats.ts";
 export type SliceState = Record<string, never>;
 
 export function createSliceState(): SliceState { return {}; }
+
+/** Overlay opacity for labels on open — visible without hiding the image. */
+const LABEL_DEFAULT_OPACITY = 0.5;
+
+/**
+ * Append a categorical overlay layer for the dataset's default label,
+ * composited over the intensity layers already pushed. Exactly ONE label
+ * is shown by default (at {@link LABEL_DEFAULT_OPACITY}) — stacking every
+ * label muddies the view (e.g. a broad "foreground" mask washing out the
+ * interesting "mitochondria"); per-label toggles to reveal the rest arrive
+ * in a later slice.
+ *
+ * The label chosen here MUST be the same one {@link computeLabelChunkRequests}
+ * fetches, so both call the shared {@link resolveDefaultLabel} (first
+ * manifest-order label that is a uint32 mask with a resolvable source, a
+ * positive footprint, and a level within the caps). Rendering a label whose
+ * chunks were never fetched would draw nothing.
+ *
+ * The overlay is sized to the SOURCE image's full-resolution voxel
+ * footprint via {@link labelFootprint} (so a coarser label stays aligned
+ * rather than shrinking) and placed at the source member's position.
+ * Declared `image-label.colors` are forwarded so authored palettes render
+ * exactly. Labels never change the camera or bounds.
+ */
+export function pushLabelLayers(
+  layers: SliceLayerParams[],
+  manifest: DatasetManifest,
+  members: MemberRosterEntry[],
+): void {
+  const resolved = resolveDefaultLabel(manifest);
+  if (!resolved) return;
+  const { label, source } = resolved;
+  const sourceLevel0 = source.multiscale.levels[0];
+  const labelLevel0 = label.image.multiscale.levels[0];
+  const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
+  // Fields can be offset within a plate/layout; place the overlay at the
+  // source member's position so it lands on the image it annotates.
+  const sourceMember = members.find((m) => m.imageId === label.source_image_id);
+  const position = sourceMember?.position ?? [0, 0];
+  layers.push({
+    datasetId: label.image.image_id,
+    dataW,
+    dataH,
+    blendMode: "alpha",
+    offsetX: position[0],
+    offsetY: position[1],
+    entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
+    isLabel: true,
+    opacity: LABEL_DEFAULT_OPACITY,
+    labelColors: label.colors,
+  });
+}
 
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
@@ -129,6 +184,10 @@ function uploadAndRenderSlice(
         });
       }
     }
+    // Categorical label overlays, composited on top of this dataset's
+    // intensity layers. Default-on; never affect camera/bounds.
+    pushLabelLayers(layers, ds.manifest, members);
+
     const added = layers.length - layersBefore;
     if (added > 0) passesByDataset[dsId] = added;
   }

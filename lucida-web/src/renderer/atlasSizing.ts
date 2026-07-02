@@ -36,23 +36,24 @@ export interface AtlasGeometry {
  * footprint and a byte budget. Honors the device's max texture
  * dimension for the relevant arity (2D or 3D).
  *
- * Assumes 2 bytes per voxel (the `r16uint` format used by both the
- * volume and slice atlases). Slot count is bounded BOTH by the byte
- * budget (slots-per-axis = floor(cbrt or sqrt of maxSlots)) AND by the
- * texture-dimension limit (slots-per-axis <= floor(limit / chunkN)).
+ * Slot count is bounded BOTH by the byte budget (slots-per-axis =
+ * floor(cbrt or sqrt of maxSlots)) AND by the texture-dimension limit
+ * (slots-per-axis <= floor(limit / chunkN)).
  *
  * @param chunkDims `[X, Y]` for 2D, `[X, Y, Z]` for 3D. Matches the
  *   WebGPU `size` tuple order — NOT `LodIndirectionMeta.chunkDims`.
+ * @param bytesPerVoxel Storage per voxel: `2` for the `r16uint`
+ *   intensity atlas (default), `4` for the `r32uint` label atlas.
  */
 export function computeAtlasGeometry(
   limits: DeviceLimits,
   chunkDims: [number, number] | [number, number, number],
   budgetBytes: number,
   dimArity: "2d" | "3d",
+  bytesPerVoxel: number = 2,
 ): AtlasGeometry {
   const chunkTexels = chunkDims.reduce((a, b) => a * b, 1);
-  // 2 bytes per voxel (r16uint).
-  const maxSlots = Math.floor(budgetBytes / (chunkTexels * 2));
+  const maxSlots = Math.floor(budgetBytes / (chunkTexels * bytesPerVoxel));
 
   if (dimArity === "3d") {
     const [chunkX, chunkY, chunkZ] = chunkDims as [number, number, number];

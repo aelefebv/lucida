@@ -62,6 +62,31 @@ export interface SliceChunkDataMessage {
   fullResZ: number;
 }
 
+/**
+ * A batch of PRE-SLICED uint32 label planes for one label overlay member,
+ * routed to the r32uint label pool and drawn categorically. Each
+ * `chunk.data` is a single 2D Z-plane of `chunkY*chunkX` ids (the delivery
+ * path extracts it from the 3D chunk, so ~64 KB crosses the wire, not the
+ * full ~8 MB 3D chunk — critical so a whole label lands within one upload
+ * budget). `chunk.dataType` is `"Uint32"`; ids are never narrowed to 16
+ * bits. `level`/`t`/`c` are informational; `chunk.z` is the plane's own
+ * (already-resolved) index and is unused by the writer.
+ */
+export interface LabelSliceChunkDataMessage {
+  type: "labelSliceChunkData";
+  epochs: SceneEpochs;
+  /** Label overlay member id (the label image id, possibly source-scoped). */
+  memberId: string;
+  chunks: Chunk[];
+  level: number;
+  t: number;
+  c: number;
+  levelWidth: number;
+  levelHeight: number;
+  chunkX: number;
+  chunkY: number;
+}
+
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
@@ -166,6 +191,26 @@ export interface SliceLayerParams {
   entityId?: string;
   /** See {@link VolumeLayerParams.entityIndex}. */
   entityIndex: number;
+  /**
+   * Categorical label overlay marker. When true the layer is drawn from
+   * the r32uint label atlas with the categorical shader path (integer id →
+   * distinct color, id 0 transparent) instead of the intensity colormap
+   * ramp. Absent/false for ordinary intensity layers.
+   */
+  isLabel?: boolean;
+  /**
+   * Overlay opacity for a label layer (0..1). Ignored for intensity
+   * layers, whose opacity is carried by the descriptor. Defaults to ~0.5
+   * so a label is visible on open without hiding the image underneath.
+   */
+  opacity?: number;
+  /**
+   * Declared `image-label.colors` for a label layer: exact rgba per id from
+   * the OME metadata. Rendered verbatim for matching ids (via a small
+   * shader-side palette), with the glasbey hash as the fallback for the
+   * rest. Absent/empty → every id uses the hash.
+   */
+  labelColors?: { value: number; rgba: [number, number, number, number] }[];
 }
 
 /**
@@ -398,6 +443,15 @@ export interface ColdStateDisplayState {
   opacity: number;
   colormapName: string;
   channelMask: number;
+  /**
+   * Shader color model: `0` = continuous colormap ramp (intensity images,
+   * the default), `1` = categorical label overlay (integer id → distinct
+   * color, id 0 transparent). Absent on states built before labels
+   * existed; the descriptor writer defaults it to `0`.
+   */
+  colormapMode?: number;
+  /** Overlay opacity applied in categorical mode. Defaults to `1`. */
+  labelOpacity?: number;
 }
 
 export interface ColdStateMessage {
@@ -445,6 +499,7 @@ export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
   | SliceChunkDataMessage
+  | LabelSliceChunkDataMessage
   | VolumeChunkDataMessage
   | ProxyAssetDataMessage
   | VolumeRenderMultiPassMessage

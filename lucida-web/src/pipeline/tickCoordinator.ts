@@ -23,6 +23,7 @@ import {
 import { configStore } from "./planning/configStore.ts";
 import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
+import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
 import type {
   EntitySnapshot,
   MinimapChunkCoord,
@@ -433,11 +434,31 @@ export class TickCoordinator {
         epochs: result.epochs,
       });
 
+      // Categorical label overlays are invisible to the WASM planner
+      // (labels live outside `manifest.images`/`entities`), so their chunk
+      // requests are synthesized here from the label's own geometry and
+      // merged into the fetch plan. Slice view only — 3D label volumes are
+      // not rendered yet. Scoped under each label's own image id, so they
+      // never perturb intensity-chunk eviction.
+      const labelRequests =
+        ctx.mode === "slice"
+          ? computeLabelChunkRequests({
+              datasetId: dsId,
+              manifest: ctx.datasets.get(dsId)!.manifest,
+              t: selection.t,
+              z: selection.z,
+            })
+          : [];
+      const requestsWithLabels =
+        labelRequests.length > 0
+          ? [...result.requests, ...labelRequests]
+          : result.requests;
+
       // Submit chunks + proxies in a single call so they don't cancel
       // each other. Cancellation contract: a request omitted by the
       // next plan has its in-flight fetch aborted.
       ctx.cpuCache.submit({
-        requests: result.requests,
+        requests: requestsWithLabels,
         activeSet: result.activeSet,
         proxyRequests: budgetedProxyRequests,
         epochs: result.epochs,

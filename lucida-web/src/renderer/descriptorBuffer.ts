@@ -52,16 +52,16 @@ import {
   OFFSET_FIELD_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
+  OFFSET_LABEL_OPACITY,
   OFFSET_LOD_COUNT,
   OFFSET_COARSE_SOURCE,
+  OFFSET_COLORMAP_MODE,
   OFFSET_DETAIL_SOURCE,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
   OFFSET_PAD_PROXY0,
   OFFSET_PAD_PROXY1,
   OFFSET_PAD_PROXY2,
-  OFFSET_PAD_TAIL0,
-  OFFSET_PAD_TAIL1,
   OFFSET_WELL_PROXY_DIMS,
   OFFSET_WELL_PROXY_POOL_INDEX,
   OFFSET_WELL_PROXY_SLOT_INDEX,
@@ -294,14 +294,7 @@ export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
 export function displayStateForChannel(
   entry: ColdStateActiveEntry,
   channel: number,
-): {
-  contrastMin: number;
-  contrastMax: number;
-  gamma: number;
-  opacity: number;
-  colormapName: string;
-  channelMask: number;
-} {
+): ColdStateDisplayState {
   const ds = entry.displayStateByChannel[channel];
   if (ds) return ds;
   return {
@@ -311,6 +304,8 @@ export function displayStateForChannel(
     opacity: 1,
     colormapName: "gray",
     channelMask: 0,
+    colormapMode: 0,
+    labelOpacity: 1,
   };
 }
 
@@ -400,8 +395,10 @@ export function serializeEntityDescriptor(
   // range in the shared buffer, so all fields would render the same data.
   const lodCount = Math.min(lodMetas.length, DESCRIPTOR_MAX_LODS);
   u32[OFFSET_LOD_COUNT / 4] = lodCount;
-  u32[OFFSET_PAD_TAIL0 / 4] = 0;
-  u32[OFFSET_PAD_TAIL1 / 4] = 0;
+  // Categorical label overlays repurpose these two tail slots: a mode flag
+  // and the overlay opacity. Intensity images leave them at 0 / 1.
+  u32[OFFSET_COLORMAP_MODE / 4] = (displayState.colormapMode ?? 0) >>> 0;
+  f32[OFFSET_LABEL_OPACITY / 4] = displayState.labelOpacity ?? 1;
 
   const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
   const lodStrideU32 = DESCRIPTOR_LOD_INFO_SIZE / 4;

@@ -17,7 +17,7 @@
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import type { ColdStateMessage } from "../workerProtocol.ts";
 import type { AtlasState, LodIndirectionMeta } from "../volume/atlas.ts";
-import type { SliceAtlasState } from "../slice/atlas.ts";
+import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
@@ -54,6 +54,12 @@ export interface RendererState {
   volumeAtlases: Map<string, AtlasState>;
   /** poolKey → slice atlas pool state. */
   sliceAtlases: Map<string, SliceAtlasState>;
+  /**
+   * memberId → r32uint label overlay slice pool. Separate from
+   * {@link sliceAtlases} (r16uint intensity) because label ids need full
+   * 32-bit storage and render through the categorical shader path.
+   */
+  labelSlicePools: Map<string, LabelSlicePool>;
 
   // ── Per-entity eviction reference points ─────────────────────────
   /** memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
@@ -95,6 +101,7 @@ export function createInitialState(): RendererState {
     descriptorBuffersByDataset: new Map(),
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
+    labelSlicePools: new Map(),
     rayHitPerEntity: new Map(),
     cameraUVPerEntity: new Map(),
     currentEpochs: null,
