@@ -41,7 +41,7 @@ function createMockCpuCache(): CpuCache {
 }
 
 interface MockSceneConfig {
-  epochs: { content: number; layout: number; view: number; selection: number };
+  epochs: { content: number; layout: number; view: number; selection: number; labels?: number };
   viewQuery: {
     visible_entities: {
       entity_id: string;
@@ -330,6 +330,26 @@ describe("epoch caching", () => {
     planSpy.mockClear();
 
     const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 2 } });
+    orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+
+    expect(planSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-plans when labelsEpoch changes (label visibility / opacity)", () => {
+    const { datasets } = makeTickCoordinatorDeps();
+    const orch = makeOrch();
+
+    const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1, labels: 1 } });
+    orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+    planSpy.mockClear();
+
+    // Toggling a label's visibility or dragging its opacity bumps only the
+    // `labels` epoch (kept distinct from `selection` in the core). The
+    // cold-state cache must still invalidate so the rebuilt descriptor picks up
+    // the new labelOverlayOpacity (and a newly-shown label's wanted set) — the
+    // regression that made opacity changes invisible until an unrelated epoch
+    // (view/selection) advanced.
+    const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1, labels: 2 } });
     orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
 
     expect(planSpy).toHaveBeenCalledTimes(1);

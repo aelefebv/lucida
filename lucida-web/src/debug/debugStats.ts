@@ -189,6 +189,7 @@ export interface ColdStateCauseCounts {
   view: number;
   selection: number;
   asset: number;
+  labels: number;
 }
 
 export interface ColdStateDebug {
@@ -231,8 +232,8 @@ export function emptyColdStateDebug(): ColdStateDebug {
     hitRate: NaN,
     rebuildsLastSecond: 0,
     hitsLastSecond: 0,
-    causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
-    causeTotal: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
+    causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0, asset: 0, labels: 0 },
+    causeTotal: { content: 0, layout: 0, view: 0, selection: 0, asset: 0, labels: 0 },
     lastRebuildMs: null,
     rebuildP50Ms: null,
     rebuildP95Ms: null,

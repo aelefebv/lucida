@@ -173,6 +173,16 @@ export class TickCoordinator {
   private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
   private cachedResult: TickCoordinatorResult | null = null;
+  // The core `labels` epoch (label visibility / opacity) at the last cold-state
+  // rebuild. Kept out of `SceneEpochs` — which drives planning/fetch/hot-state,
+  // none of which key off labels — because it matters to exactly one decision:
+  // whether to rebuild the cold state so the descriptor's `labelOverlayOpacity`
+  // (and label visibility → wanted set) is refreshed. Mirrors the core keeping
+  // `labels` distinct from `selection` "so a renderer can invalidate just the
+  // label overlay pass" (see `epoch.rs`). Without consuming it here, a label
+  // opacity/visibility change wouldn't invalidate the epoch cache, so the mask
+  // wouldn't update until an unrelated epoch (view/selection) advanced.
+  private lastLabelsEpoch = -1;
   /**
    * Debug member stats from the most recent non-cache-hit run. Replayed
    * onto `debugStats` on epoch cache hits so the panel doesn't flash
@@ -236,6 +246,9 @@ export class TickCoordinator {
           : (rawEpochs.asset ?? 0),
       request: this.requestEpoch,
     };
+    // Label overlay epoch (visibility / opacity), tracked outside `SceneEpochs`.
+    // `?? 0` tolerates older WASM builds without the field (functional no-op).
+    const labelsEpoch: number = rawEpochs.labels ?? 0;
 
     // Diff against last epochs — drives both the cache-hit decision and
     // per-epoch cause attribution published to coldState telemetry.
@@ -249,6 +262,7 @@ export class TickCoordinator {
       if (currentEpochs.view !== last.view) causes.push("view");
       if (currentEpochs.selection !== last.selection) causes.push("selection");
       if (currentEpochs.asset !== last.asset) causes.push("asset");
+      if (labelsEpoch !== this.lastLabelsEpoch) causes.push("labels");
       isHit = causes.length === 0;
     }
 
@@ -618,6 +632,7 @@ export class TickCoordinator {
     // Step 5 — Cache and return
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
+    this.lastLabelsEpoch = labelsEpoch;
     this.cachedResult = { memberRoster, settings, multiChannel, epochs: outputEpochs, entityIndexByDataset };
     if (debugStats.enabled) {
       this.cachedDebugMemberSnapshot = {
