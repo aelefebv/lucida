@@ -56,6 +56,16 @@ export class VolumeRenderer {
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
 
+  // Label overlay dummies (3D twin of SliceRenderer's label bindings), bound at
+  // slots 9/10 on intensity draws so the bind group stays complete. On a label
+  // draw the real atlas + LUT are bound inline from `setLabelAtlas`'s arguments,
+  // so no persistent label-texture field is needed (unlike the slice renderer,
+  // which rebuilds its bind group from stored handles). `dummyLabelTexture` is a
+  // 1×1×1 `r32uint` (matches the real label atlas format); `dummyLabelLutTexture`
+  // is a 1×1 transparent rgba8unorm.
+  private dummyLabelTexture: GPUTexture;
+  private dummyLabelLutTexture: GPUTexture;
+
   constructor(device: GPUDevice) {
     this.device = device;
 
@@ -108,6 +118,22 @@ export class VolumeRenderer {
           binding: 8,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
+        },
+        // Label volume atlas (r32uint, 3D). Bound to the label member's own
+        // atlas on a label draw; a 1×1×1 dummy otherwise. Read via `textureLoad`
+        // only (nearest).
+        {
+          binding: 9,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" },
+        },
+        // Label indexed-colour LUT (rgba8unorm, 256×256 holding the flat 65536
+        // entries). Read via `textureLoad` at (id & 255, id >> 8) — no sampler,
+        // no interpolation.
+        {
+          binding: 10,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d" },
         },
       ],
     });
@@ -174,11 +200,35 @@ export class VolumeRenderer {
       magFilter: "linear",
       minFilter: "linear",
     });
+
+    // 1×1×1 dummy label volume atlas (r32uint) for intensity draws / unset
+    // bindings. Same format as the real label atlas so the bind-group layout is
+    // satisfied.
+    this.dummyLabelTexture = device.createTexture({
+      size: [1, 1, 1],
+      format: "r32uint",
+      dimension: "3d",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    // 1×1 transparent dummy label LUT (rgba8unorm). Value 0 → transparent, so a
+    // draw that somehow binds this contributes nothing.
+    this.dummyLabelLutTexture = device.createTexture({
+      size: [1, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this.dummyLabelLutTexture },
+      new Uint8Array([0, 0, 0, 0]),
+      { bytesPerRow: 4 },
+      [1, 1],
+    );
   }
 
   setColormapTexture(texture: GPUTexture) {
     this.lutTexture = texture;
-    // Bind group will be rebuilt on the next setAtlas call
+    // Bind group will be rebuilt on the next setAtlas / setLabelAtlas call
   }
 
   /** Lazily allocate the 1×1×1 dummy proxy texture used when no real
@@ -239,11 +289,16 @@ export class VolumeRenderer {
     this.volumeDims = volumeDims;
     this.detailAtlasSlotDims = detailAtlasSlotDims;
     this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0, 0];
+    // Intensity draw: bindings 9/10 fall back to the label dummies, so a prior
+    // label draw's atlas can't bleed through (the whole bind group is rebuilt).
     const dummyProxy = this.getDummyProxyTexture();
     const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
     const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
     const coarseBindingTexture = coarseTexture ?? detailTexture;
     const coarseBindingIndirection = coarseIndirectionBuf ?? detailIndirectionBuf;
+    // Label bindings fall back to dummies on an intensity draw (the shader's
+    // label branch is gated on `entity.isLabel`, so they're never sampled here —
+    // but the bind group must still be complete for validation).
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -256,6 +311,56 @@ export class VolumeRenderer {
         { binding: 6, resource: { buffer: coarseBindingIndirection } },
         { binding: 7, resource: fieldProxyView },
         { binding: 8, resource: wellProxyView },
+        { binding: 9, resource: this.dummyLabelTexture.createView() },
+        { binding: 10, resource: this.dummyLabelLutTexture.createView() },
+      ],
+    });
+  }
+
+  /**
+   * Configure the next draw as a **label overlay** draw: bind the label
+   * member's `r32uint` volume atlas (binding 9) + its indexed-colour LUT
+   * (binding 10), and wire the label atlas's indirection buffer + slot dims into
+   * the detail-tier binding/uniform slots the shader's `sampleLabelVolume`
+   * reads. The intensity atlas bindings fall back to dummies (the label branch
+   * never touches them). 3D twin of `SliceRenderer.setLabelAtlas`.
+   */
+  setLabelAtlas(
+    atlasTexture: GPUTexture,
+    indirectionBuf: GPUBuffer,
+    atlasSlotDims: [number, number, number],
+    lutTexture: GPUTexture,
+    volumeDims: [number, number, number],
+  ) {
+    this.volumeDims = volumeDims;
+    // `sampleLabelVolume` walks `detailIndirection` (binding 2) +
+    // `detailAtlasSlotDims`, so bind the label atlas's indirection + slot dims
+    // there. No coarse tier for masks.
+    this.detailAtlasSlotDims = atlasSlotDims;
+    this.coarseAtlasSlotDims = [0, 0, 0];
+    // The r16uint 1×1×1 dummy stands in for the intensity texture bindings (1/5)
+    // and the proxy bindings when no real proxy is set — none are sampled by the
+    // label branch, but the bind group must be complete.
+    const dummy3D = this.getDummyProxyTexture();
+    const fieldProxyView = (this.fieldProxyTexture ?? dummy3D).createView();
+    const wellProxyView = (this.wellProxyTexture ?? dummy3D).createView();
+    this.bindGroup = this.device.createBindGroup({
+      layout: this.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        // Intensity texture (binding 1) is a dummy — the label branch never
+        // samples it. Its indirection slot (binding 2) MUST be the label atlas's
+        // real buffer: the shader reads it for the label voxel→slot lookup.
+        { binding: 1, resource: dummy3D.createView() },
+        { binding: 2, resource: { buffer: indirectionBuf } },
+        { binding: 3, resource: this.lutTexture.createView() },
+        { binding: 4, resource: this.lutSampler },
+        { binding: 5, resource: dummy3D.createView() },
+        { binding: 6, resource: { buffer: indirectionBuf } },
+        { binding: 7, resource: fieldProxyView },
+        { binding: 8, resource: wellProxyView },
+        { binding: 9, resource: atlasTexture.createView() },
+        { binding: 10, resource: lutTexture.createView() },
       ],
     });
   }

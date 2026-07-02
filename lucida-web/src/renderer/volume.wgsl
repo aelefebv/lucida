@@ -87,6 +87,15 @@ struct EntityDescriptor {
 // proxyAtlas.ts.
 @group(0) @binding(7) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(8) var wellProxyTex: texture_3d<u32>;
+// Label overlay path (3D twin of slice.wgsl bindings 9/10): the `r32uint` label
+// volume atlas (exact integer ids, `texture_3d<u32>`) and the 256×256
+// rgba8unorm indexed-colour LUT baked by `WasmScene::label_lut` (the flat
+// 65536-entry table laid out row-major). The atlas is `textureLoad`ed for the
+// exact voxel id along the ray (NEAREST — never interpolated); the LUT is
+// `textureLoad`ed at (idx & 255, idx >> 8). No sampler is bound for either — a
+// label colour is a category, never filtered.
+@group(0) @binding(9) var labelTex: texture_3d<u32>;
+@group(0) @binding(10) var labelLutTex: texture_2d<f32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -206,6 +215,65 @@ fn sampleDetailVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
     i32(slotCoord.z * chunkDims.z + localTexel.z),
   );
   return textureLoad(detailTex, atlasCoord, 0).r;
+}
+
+// Sample the label volume atlas (`r32uint`) via the same indirection walk as
+// `sampleDetailVolume`, but reading `labelTex` (binding 9) instead of the
+// intensity atlas. The label member's own indirection buffer is bound to
+// `detailIndirection` (binding 2) and its slot dims to `detailAtlasSlotDims` for
+// the draw (mirroring the slice path's `sampleLabel2D`), so the voxel→slot
+// lookup is identical; only the sampled texture differs. `textureLoad` on the
+// `u32` atlas is exact (NEAREST) by construction — an id is never interpolated.
+// Returns the exact integer id, or the sentinel when the covering chunk isn't
+// resident (caller keeps marching to find a resident, non-zero voxel).
+fn sampleLabelVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
+  if (
+    source.valid == 0u ||
+    u.detailAtlasSlotDims.x == 0u ||
+    u.detailAtlasSlotDims.y == 0u ||
+    u.detailAtlasSlotDims.z == 0u
+  ) {
+    return 0xFFFFFFFFu;
+  }
+
+  let levelDims = vec3f(f32(source.levelDims.x), f32(source.levelDims.y), f32(source.levelDims.z));
+  let chunkDims = source.chunkDims;
+  let gridDims = source.gridDims;
+
+  let texCoord = vec3i(
+    clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
+    clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
+    clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
+  );
+  let chunkCoord = vec3u(
+    u32(texCoord.x) / chunkDims.x,
+    u32(texCoord.y) / chunkDims.y,
+    u32(texCoord.z) / chunkDims.z,
+  );
+  let gridIdx = source.indirectionOffset + chunkCoord.z * gridDims.y * gridDims.x
+              + chunkCoord.y * gridDims.x
+              + chunkCoord.x;
+  let slot = detailIndirection[gridIdx];
+  if (slot == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+
+  let slotCoord = vec3u(
+    slot % u.detailAtlasSlotDims.x,
+    (slot / u.detailAtlasSlotDims.x) % u.detailAtlasSlotDims.y,
+    slot / (u.detailAtlasSlotDims.x * u.detailAtlasSlotDims.y),
+  );
+  let localTexel = vec3u(
+    u32(texCoord.x) % chunkDims.x,
+    u32(texCoord.y) % chunkDims.y,
+    u32(texCoord.z) % chunkDims.z,
+  );
+  let atlasCoord = vec3i(
+    i32(slotCoord.x * chunkDims.x + localTexel.x),
+    i32(slotCoord.y * chunkDims.y + localTexel.y),
+    i32(slotCoord.z * chunkDims.z + localTexel.z),
+  );
+  return textureLoad(labelTex, atlasCoord, 0).r;
 }
 
 fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
@@ -430,17 +498,70 @@ fn fs(input: VSOut) -> FsOut {
     return clipMiss;
   }
 
+  let rayLenAll = tEnd - tStart;
+  let adaptiveStepAll = max(u.stepInfo.y, rayLenAll / 512.0);
+
+  // Label overlay branch: an integer-indexed mask rendered as a coloured,
+  // opaque FIRST-HIT SURFACE — NOT additive haze. March the ray at the same
+  // cadence as the intensity pass; on the first NON-ZERO, resident label voxel,
+  // tint it via the label LUT (exact integer lookup, nearest), composite it
+  // premultiplied-OVER at `labelOverlayOpacity`, record depth, and STOP. Empty
+  // (id 0) and not-yet-resident voxels are skipped so the ray keeps searching;
+  // a ray that hits none returns fully transparent (the intensity volume, drawn
+  // as its own layer, still shows around and through the mask surface).
+  if (entity.isLabel == 1u) {
+    let overlayOpacity = clamp(entity.labelOverlayOpacity, 0.0, 1.0);
+    var labelOut: FsOut;
+    labelOut.color = vec4f(0.0, 0.0, 0.0, 0.0);
+    labelOut.depth = 1.0;
+    if (overlayOpacity <= 0.0) {
+      return labelOut;
+    }
+    let labelSteps = i32(ceil(rayLenAll / adaptiveStepAll));
+    let labelMaxSteps = min(labelSteps, 512);
+    var tl = tStart;
+    for (var i = 0; i < labelMaxSteps; i++) {
+      let posl = ro + rd * tl;
+      // Labels use the detail tier only (no coarse/proxy fallback for masks).
+      let lval = sampleLabelVolume(entity.detailSource, posl);
+      // Sentinel = chunk not resident here; 0 = background. Either way, keep
+      // marching — a coloured surface must land on the first real id, not the
+      // first gap.
+      if (lval != 0xFFFFFFFFu && lval != 0u) {
+        // Exact integer LUT lookup, masked to the 65536-entry table. The LUT is
+        // a 256×256 texture holding the flat table row-major, so entry `idx`
+        // lives at (idx & 255, idx >> 8). No sampler → adjacent ids stay
+        // distinct.
+        let idx = lval & 0xFFFFu;
+        let rgb = textureLoad(labelLutTex, vec2i(i32(idx & 255u), i32(idx >> 8u)), 0).rgb;
+        // First-hit surface: record depth at the hit and composite the tint
+        // premultiplied-OVER at the overlay opacity (colour scaled by opacity,
+        // alpha = opacity). `entity.opacity` (the layer opacity) still scales
+        // the whole overlay so the layer's global opacity slider applies.
+        let worldHit = entity.modelMatrix * vec4f(posl, 1.0);
+        let clipHit = u.viewProj * worldHit;
+        labelOut.depth = clipHit.z / clipHit.w * 0.5 + 0.5;
+        let layerOp = entity.opacity;
+        labelOut.color = vec4f(rgb * overlayOpacity, overlayOpacity) * layerOp;
+        return labelOut;
+      }
+      tl += adaptiveStepAll;
+    }
+    // Ray crossed the whole volume without a resident, non-zero label voxel.
+    return labelOut;
+  }
+
   let dims = vec3i(u.volumeDims.xyz);
   let intensityMin = entity.contrastMin;
   let intensityMax = entity.contrastMax;
   let opacityScale = u.stepInfo.x;
-  let stepSize = u.stepInfo.y;
 
   let range = intensityMax - intensityMin;
   let renderMode = i32(u.stepInfo.z);
 
-  let rayLen = tEnd - tStart;
-  let adaptiveStep = max(stepSize, rayLen / 512.0);
+  // Reuse the ray length / step computed above (shared with the label branch).
+  let rayLen = rayLenAll;
+  let adaptiveStep = adaptiveStepAll;
 
   // Front-to-back compositing
   var color = vec3f(0.0);

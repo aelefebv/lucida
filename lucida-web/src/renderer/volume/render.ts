@@ -68,11 +68,24 @@ export function handleVolumeRenderMultiPass(
     const hasDetail = detailMetas != null && detailMetas.length > 0;
     const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
 
+    // Label overlay members render through the integer-LUT branch: their
+    // `r32uint` volume atlas is the detail pool, and the cached 256×256 LUT is
+    // resolved by key. A label draw needs a resident detail chunk + a built LUT;
+    // if either is missing it contributes nothing this frame (the intensity
+    // volume, drawn as its own layer, still shows).
+    const labelInfo = descIndex.labelInfoByMember.get(memberId) ?? null;
+    const isLabel = labelInfo !== null;
+    const labelLut = labelInfo ? ctx.getLabelLUT(labelInfo.labelLutKey) : null;
+
     // Colormap name lives in the descriptor's CPU mirror (set by cold
-    // state). Resolve it per draw to bind the right LUT texture.
-    const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
-    const lutTex = ctx.getOrCreateLUT(colormapName);
-    renderer.setColormapTexture(lutTex);
+    // state). Resolve it per draw to bind the right LUT texture. Labels don't
+    // use the intensity colormap (their branch reads the label LUT), so skip
+    // this for them.
+    if (!isLabel) {
+      const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
+      const lutTex = ctx.getOrCreateLUT(colormapName);
+      renderer.setColormapTexture(lutTex);
+    }
 
     for (const atlas of [detailAtlas, coarseAtlas]) {
       if (atlas && atlas.indirectionDirty) {
@@ -115,10 +128,13 @@ export function handleVolumeRenderMultiPass(
       }
     }
 
-    // Skip when the layer has nothing renderable: no detail/coarse chunks
-    // AND no resident proxy. Entities with either chunk tier or a resident
-    // proxy continue rendering; the shader fallback chain handles the rest.
-    if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) {
+    // Skip when the layer has nothing renderable. For labels: no resident detail
+    // chunk or no built LUT yet. For intensity: no detail/coarse chunks AND no
+    // resident proxy. Entities with either chunk tier or a resident proxy
+    // continue rendering; the shader fallback chain handles the rest.
+    if (isLabel) {
+      if (!hasDetail || !detailAtlas || !labelLut) continue;
+    } else if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) {
       continue;
     }
 
@@ -132,20 +148,35 @@ export function handleVolumeRenderMultiPass(
           proxySlotDimsForVolumeFallback[1],
           proxySlotDimsForVolumeFallback[0],
         ];
-    const fallbackTexture = detailAtlas?.texture ?? coarseAtlas?.texture ?? ctx.getDummy3DTexture();
-    const fallbackIndirection =
-      detailAtlas?.indirectionBuf ??
-      coarseAtlas?.indirectionBuf ??
-      getDummyIndirection(ctx.device);
-    renderer.setTierAtlases(
-      hasDetail && detailAtlas ? detailAtlas.texture : fallbackTexture,
-      hasDetail && detailAtlas ? detailAtlas.indirectionBuf : fallbackIndirection,
-      hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY, detailAtlas.slotsZ] : [0, 0, 0],
-      hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
-      hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
-      hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY, coarseAtlas.slotsZ] : [0, 0, 0],
-      volumeDims,
-    );
+
+    if (isLabel && detailAtlas && labelLut) {
+      // Bind the label `r32uint` volume atlas + its 256×256 LUT. The shader's
+      // label branch samples the atlas via the detail-tier indirection/slot-dims
+      // (NEAREST `textureLoad`, no sampler) and looks up the LUT by exact id. No
+      // intensity colormap/contrast is applied to labels.
+      renderer.setLabelAtlas(
+        detailAtlas.texture,
+        detailAtlas.indirectionBuf,
+        [detailAtlas.slotsX, detailAtlas.slotsY, detailAtlas.slotsZ],
+        labelLut,
+        volumeDims,
+      );
+    } else {
+      const fallbackTexture = detailAtlas?.texture ?? coarseAtlas?.texture ?? ctx.getDummy3DTexture();
+      const fallbackIndirection =
+        detailAtlas?.indirectionBuf ??
+        coarseAtlas?.indirectionBuf ??
+        getDummyIndirection(ctx.device);
+      renderer.setTierAtlases(
+        hasDetail && detailAtlas ? detailAtlas.texture : fallbackTexture,
+        hasDetail && detailAtlas ? detailAtlas.indirectionBuf : fallbackIndirection,
+        hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY, detailAtlas.slotsZ] : [0, 0, 0],
+        hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
+        hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
+        hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY, coarseAtlas.slotsZ] : [0, 0, 0],
+        volumeDims,
+      );
+    }
 
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
     renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);

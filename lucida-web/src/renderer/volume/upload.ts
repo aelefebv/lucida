@@ -5,11 +5,11 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { VolumeChunkDataMessage } from "../workerProtocol.ts";
-import { writeVolumeChunk } from "../gpuContext.ts";
+import { writeVolumeChunk, writeVolumeChunkU32 } from "../gpuContext.ts";
 import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint16 } from "../dataTypeUtil.ts";
+import { asUint16, asUint32 } from "../dataTypeUtil.ts";
 import {
   parseCompositeKey,
   makeCompositeKey,
@@ -104,7 +104,6 @@ export function handleVolumeChunkData(
     const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
     const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
 
-    const data = asUint16(chunk.data, chunk.dataType);
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
     const zOff = sz * chunkZ;
@@ -112,7 +111,23 @@ export function handleVolumeChunkData(
     const ch = Math.min(chunkY, levelHeight - chunk.y * chunkY);
     const cd = Math.min(chunkZ, levelDepth - chunk.z * chunkZ);
 
-    writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+    // Label pools decode the whole chunk as `u32` (untruncated ids) and write to
+    // the `r32uint` volume atlas; intensity pools stay on the `u16` path. A
+    // label id is a category tinted by its LUT, not a brightness — so a label
+    // pool never contributes to the intensity window (no `sampleIntensityRange`).
+    const isLabelPool = atlas.format === "r32uint";
+    if (isLabelPool) {
+      const data = asUint32(chunk.data, chunk.dataType);
+      writeVolumeChunkU32(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+    } else {
+      const data = asUint16(chunk.data, chunk.dataType);
+      writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+
+      const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
+      const { min, max } = sampleIntensityRange(data, perChunkSamples);
+      if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
+      if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
+    }
 
     // Write to entity's per-LOD indirection section (absolute offset)
     const [, lodGridY, lodGridX] = lodMeta.gridDims;
@@ -124,11 +139,6 @@ export function handleVolumeChunkData(
     atlas.slots.set(compositeKey, slotIndex);
     insertedKeys.push(compositeKey);
     atlas.indirectionDirty = true;
-
-    const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-    const { min, max } = sampleIntensityRange(data, perChunkSamples);
-    if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
-    if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
   }
 
   // Report chunks from the batch that the pool did not keep

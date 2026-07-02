@@ -10,7 +10,7 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
-import { getDeviceLimits } from "../gpuContext.ts";
+import { getDeviceLimits, type SliceTexelFormat } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 
 /** Per-LOD indirection section metadata. */
@@ -24,6 +24,15 @@ export interface LodIndirectionMeta {
 
 export interface AtlasState {
   texture: GPUTexture;
+  /**
+   * Texel format of {@link texture}. Intensity volume pools are `r16uint`
+   * (2 B/voxel); segmentation **label** volume pools are `r32uint`
+   * (4 B/voxel) so ids > 65535 aren't truncated. Drives the upload path's
+   * decode width (`asUint16` vs `asUint32`) and the render path's
+   * label-vs-intensity atlas binding selection. Mirrors
+   * `SliceAtlasState.format` in the 2D path.
+   */
+  format: SliceTexelFormat;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
   /** Composite keys "memberId:chunkKey" → slotIndex (insertion-order = LRU). */
@@ -87,6 +96,7 @@ function createVolumeAtlas(
   device: GPUDevice,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
+  format: SliceTexelFormat,
 ): AtlasState {
   const limits = getDeviceLimits(device);
   const geom = computeAtlasGeometry(
@@ -99,9 +109,15 @@ function createVolumeAtlas(
   const slotsZ = geom.slotsZ!;
   const atlasD = geom.atlasD!;
 
+  // `computeAtlasGeometry` caps every axis at `floor(maxTextureDimension3D /
+  // chunkN)`, so `atlasW/H/D` are already within the device's 3D-texture limit
+  // regardless of texel width — a label (`r32uint`) volume atlas is as valid as
+  // an intensity (`r16uint`) one. (The byte budget it applies is soft and
+  // assumes 2 B/voxel; a label atlas may use up to 2× that in VRAM, but masks
+  // are sparse so the resident slot count stays modest.)
   const texture = device.createTexture({
     size: [atlasW, atlasH, atlasD],
-    format: "r16uint",
+    format,
     dimension: "3d",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
@@ -122,7 +138,7 @@ function createVolumeAtlas(
   slotGridIdx.fill(-1);
 
   return {
-    texture, indirectionBuf, indirectionData,
+    texture, format, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ,
@@ -148,16 +164,23 @@ export function getOrCreateVolumePool(
   poolKey: string,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
+  format: SliceTexelFormat = "r16uint",
 ): AtlasState {
   const atlases = ctx.state.volumeAtlases;
   const existing = atlases.get(poolKey);
-  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ) {
+  if (
+    existing &&
+    existing.chunkX === chunkX &&
+    existing.chunkY === chunkY &&
+    existing.chunkZ === chunkZ &&
+    existing.format === format
+  ) {
     existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createVolumeAtlas(ctx.device, chunkX, chunkY, chunkZ, t, c);
+  const newAtlas = createVolumeAtlas(ctx.device, chunkX, chunkY, chunkZ, t, c, format);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }

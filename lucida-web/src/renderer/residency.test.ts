@@ -33,6 +33,7 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
   }
   return {
     texture: null as unknown as GPUTexture,
+    format: "r16uint",
     indirectionBuf: null as unknown as GPUBuffer,
     indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),
     slots: new Map(),

@@ -109,6 +109,38 @@ export function writeVolumeChunk(
 }
 
 /**
+ * Write one **label** chunk region into an `r32uint` volume atlas texture. The
+ * 3D twin of the slice path's `r32uint` `writeSliceRegion`: the source is a
+ * `Uint32Array` (4 B/voxel, decoded via {@link asUint32}) so ids > 65535 keep
+ * their high bits. `bytesPerRow`/`rowsPerImage` use the source chunk's full
+ * `chunkX`/`chunkY` stride (the write copies the `cw×ch×cd` sub-region from a
+ * densely-packed `chunkX×chunkY×chunkZ` source, matching {@link writeVolumeChunk}).
+ * `chunkX * 4` is always a multiple of 4; WebGPU's 256-byte `bytesPerRow`
+ * alignment does not apply to `writeTexture` from a `GPUBuffer`-backed
+ * `ArrayBuffer` here (same as the intensity path, which uses `chunkX * 2`).
+ */
+export function writeVolumeChunkU32(
+  device: GPUDevice,
+  texture: GPUTexture,
+  data: Uint32Array,
+  chunkX: number,
+  chunkY: number,
+  cw: number,
+  ch: number,
+  cd: number,
+  xOff: number,
+  yOff: number,
+  zOff: number,
+): void {
+  device.queue.writeTexture(
+    { texture, origin: [xOff, yOff, zOff] },
+    data.buffer,
+    { offset: data.byteOffset, bytesPerRow: chunkX * 4, rowsPerImage: chunkY },
+    [cw, ch, cd],
+  );
+}
+
+/**
  * A single-channel unsigned integer texture format usable for the 2D slice
  * atlas. Intensity chunks use `r16uint` (2 bytes/texel); segmentation label
  * chunks use `r32uint` (4 bytes/texel) so ids > 65535 survive intact.

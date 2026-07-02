@@ -186,8 +186,11 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     }
 
     if (mode === "volume") {
+      // Label groups use an `r32uint` volume atlas (untruncated ids); intensity
+      // uses `r16uint`. Mirrors the slice branch's format selection.
       const atlas = getOrCreateVolumePool(
         ctx, group.poolKey, pcX, pcY, pcZ, msg.currentT, group.channel,
+        group.isLabel ? "r32uint" : "r16uint",
       );
       atlas.entityMetas = newEntityMetas;
       resizeIndirection(ctx, atlas, offset);
