@@ -750,7 +750,15 @@ function LabelSection({
                   min={0}
                   max={100}
                   value={Math.round(lbl.opacity * 100)}
-                  title={`Opacity: ${Math.round(lbl.opacity * 100)}%`}
+                  // Opacity has no effect until the label is shown — disable the
+                  // slider on an OFF label so it's clear it's inert (mirrors how
+                  // an off layer's controls read as inactive).
+                  disabled={!lbl.visible}
+                  title={
+                    lbl.visible
+                      ? `Opacity: ${Math.round(lbl.opacity * 100)}%`
+                      : "Show the label to adjust its opacity"
+                  }
                   onChange={(e) =>
                     onSetLabelOpacity?.(layerId, lbl.index, Number(e.target.value) / 100)
                   }

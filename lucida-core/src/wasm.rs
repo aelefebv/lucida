@@ -1018,6 +1018,20 @@ impl WasmScene {
         self.inner.label_count(dataset_id)
     }
 
+    /// JSON `{ "rgba": number[], "width": number }` for the `label_index`-th
+    /// label of `dataset_id`: the dense `rgba8` lookup table the web uploads
+    /// **verbatim** as a `width×1` `rgba8unorm` texture (`width == 65536`). The
+    /// web indexes it by the label voxel value and never decodes the palette or
+    /// `ImageRole` itself. Value 0 is transparent; explicit
+    /// `image-label.colors` win over the deterministic glasbey fill.
+    ///
+    /// Returns the JSON string `"null"` when the dataset id / label index
+    /// doesn't resolve to a label image — the web treats that as "no LUT" and
+    /// skips binding a label texture for that member. See [`Scene::label_lut`].
+    pub fn label_lut(&self, dataset_id: &str, label_index: u32) -> String {
+        serde_json::to_string(&self.inner.label_lut(dataset_id, label_index)).unwrap()
+    }
+
     // --- Layout management ---
 
     /// Register a new layout for a dataset. The layout is parsed from JSON.

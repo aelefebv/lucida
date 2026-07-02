@@ -35,6 +35,13 @@ export interface PoolGroup {
   channel: number;
   /** `[Z, Y, X]`. For slice mode `Z = 1`. */
   chunkDims: [number, number, number];
+  /**
+   * True when this group holds segmentation **label** members. Label groups get
+   * their own `:label`-discriminated pool key and an `r32uint` atlas (so ids
+   * > 65535 aren't truncated); the cold-state applier reads this to pick the
+   * texel format when allocating the pool.
+   */
+  isLabel: boolean;
   entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ChunkTier; level: number }>;
 }
 
@@ -59,23 +66,25 @@ export function groupEntriesByPool(
   for (const channel of channels) {
     for (const entry of cold.activeSet) {
       const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
+      const isLabel = entry.isLabel === true;
       for (const source of tierSourcesForEntry(entry)) {
         const targetLevel = entry.levels.find(l => l.level === source.level);
         if (!targetLevel) continue; // well-as-proxy (no levels) skips here
         const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
         // `chunkTierPoolKey` takes `[X, Y, Z]` for volume / `[X, Y]` for
         // slice. Keep `chunkDims` on the group as `[Z, Y, X]` for
-        // downstream callers.
+        // downstream callers. Label members get a `:label` discriminator so
+        // they land in their own `r32uint` pool.
         const poolKey =
           mode === "volume"
-            ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ], isMultiCh)
-            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], isMultiCh);
+            ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ], isMultiCh, isLabel)
+            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], isMultiCh, isLabel);
         const dims: [number, number, number] =
           mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
 
         let group = groups.get(poolKey);
         if (!group) {
-          group = { poolKey, tier: source.tier, level: source.level, channel, chunkDims: dims, entries: [] };
+          group = { poolKey, tier: source.tier, level: source.level, channel, chunkDims: dims, isLabel, entries: [] };
           groups.set(poolKey, group);
         }
         group.entries.push({ entry, memberId, tier: source.tier, level: source.level });

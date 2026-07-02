@@ -13,7 +13,7 @@ import { writeSliceRegion } from "../gpuContext.ts";
 import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint16Slice } from "../dataTypeUtil.ts";
+import { asUint16Slice, asUint32Slice } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
@@ -104,16 +104,22 @@ export function handleSliceChunkData(
     }
 
     const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
-    if (!isU8 && chunk.data.byteLength % 2 !== 0) {
-      throw new Error(
-        `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
-        `(server likely returned a compressed or wrong-shape chunk)`,
-      );
+    const isLabelPool = atlas.format === "r32uint";
+    // Label pools never contribute to the intensity window — a mask is tinted
+    // by its LUT, not contrast-mapped — so skip intensity sampling for them.
+    // Intensity pools sample as before (u8 or u16 native, never u32 here).
+    if (!isLabelPool) {
+      if (!isU8 && chunk.data.byteLength % 2 !== 0) {
+        throw new Error(
+          `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
+          `(server likely returned a compressed or wrong-shape chunk)`,
+        );
+      }
+      const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
+      const r = sampleIntensityRange(rawView, perChunkSamples);
+      if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
+      if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
     }
-    const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
-    const r = sampleIntensityRange(rawView, perChunkSamples);
-    if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
-    if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
     let slotIndex: number;
     if (existingSlot !== undefined) {
@@ -142,11 +148,18 @@ export function handleSliceChunkData(
     const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
     const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
     const sliceOffset = localZ * chunkY * chunkX;
-    const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
+    // Label pools decode the Z slice as u32 (untruncated ids) and write to the
+    // r32uint atlas; intensity pools stay on the u16 path.
+    const sliceData = isLabelPool
+      ? asUint32Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX)
+      : asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
 
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
-    writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
+    writeSliceRegion(
+      ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH,
+      atlas.format,
+    );
 
     // Write to entity's per-LOD section
     const [, , lodGridX] = lodMeta.gridDims;

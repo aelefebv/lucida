@@ -30,8 +30,8 @@
  *   204: opacity             f32             (4)
  *   208: colormapLutIndex    u32             (4)
  *   212: lodCount            u32             (4)
- *   216: _pad_tail0          u32             (4)
- *   220: _pad_tail1          u32             (4)
+ *   216: isLabel             u32             (4) — 1 ⇒ label overlay branch
+ *   220: labelOverlayOpacity f32             (4) — label blend opacity [0,1]
  *   224: lods                LodInfo[8]      (512)
  *
  *   736: detailSource        ChunkTierSource (64)
@@ -89,8 +89,15 @@ export const OFFSET_GAMMA = 200;                 // f32
 export const OFFSET_OPACITY = 204;               // f32
 export const OFFSET_COLORMAP_LUT_INDEX = 208;    // u32
 export const OFFSET_LOD_COUNT = 212;             // u32
-export const OFFSET_PAD_TAIL0 = 216;             // u32 (pad)
-export const OFFSET_PAD_TAIL1 = 220;             // u32 (pad)
+/**
+ * `isLabel` — 1 for a segmentation label overlay, 0 for intensity. Selects the
+ * `slice.wgsl` label branch (integer `textureLoad` + nearest LUT, no
+ * contrast/gamma/colormap). Occupies what was `_pad_tail0`, so the struct byte
+ * size is unchanged and `lods`/tier-source offsets do not shift.
+ */
+export const OFFSET_IS_LABEL = 216;              // u32
+/** `labelOverlayOpacity` — label blend opacity in [0,1]. Was `_pad_tail1`. */
+export const OFFSET_LABEL_OVERLAY_OPACITY = 220; // f32
 /** Alias for {@link DESCRIPTOR_LODS_OFFSET}, kept for symmetry with the
  *  other `OFFSET_*` constants when reading layout side-by-side with the
  *  WGSL struct. */

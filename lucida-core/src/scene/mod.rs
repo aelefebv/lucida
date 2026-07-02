@@ -1,5 +1,7 @@
+mod label_lut;
 mod types;
 
+pub use label_lut::{LABEL_LUT_CAP, LabelLut, build_label_lut_rgba, glasbey_rgba};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
@@ -471,6 +473,57 @@ impl Scene {
     /// [`Self::label_count`].
     pub fn dataset_has_labels(&self, dataset_id: &str) -> bool {
         self.label_count(dataset_id) > 0
+    }
+
+    /// Resolve the [`ImageRole::Label`] metadata for the `label_index`-th label
+    /// image of `dataset_id` (label-relative — intensity images don't consume a
+    /// slot), matching the index space of [`Self::label_overlays`] and the
+    /// `SetLabelVisible`/`SetLabelOpacity` commands. `None` if the dataset is
+    /// unknown or has fewer than `label_index + 1` label images.
+    fn label_meta_at(&self, dataset_id: &str, label_index: u32) -> Option<&LabelMeta> {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let manifest = self.document.manifests.get(&ds_id)?;
+        manifest
+            .images()
+            .iter()
+            .filter_map(|image| match &image.role {
+                ImageRole::Label(meta) => Some(meta),
+                ImageRole::Intensity => None,
+            })
+            .nth(label_index as usize)
+    }
+
+    /// The raw, explicit `image-label.colors` palette for the `label_index`-th
+    /// label of `dataset_id`, exactly as the producer declared it (no glasbey
+    /// fill, no background override). Empty when the dataset/label doesn't
+    /// resolve to a label image or the label declared no colours.
+    ///
+    /// This is the palette *inspection* accessor; [`Self::label_lut`] is what
+    /// the renderer actually uploads (it composes this palette over the glasbey
+    /// fallback into a dense `CAP`-entry table).
+    pub fn label_colors(&self, dataset_id: &str, label_index: u32) -> Vec<LabelColor> {
+        match self.label_meta_at(dataset_id, label_index) {
+            Some(meta) => meta.colors.clone(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The dense `rgba8` lookup table for the `label_index`-th label of
+    /// `dataset_id` — [`LABEL_LUT_CAP`] entries, the producer's explicit
+    /// `image-label.colors` where present and the deterministic
+    /// [`glasbey_rgba`] hash colour everywhere else, with value `0` forced
+    /// transparent. The web uploads [`LabelLut::rgba`] verbatim as a
+    /// `width×1` `rgba8unorm` texture and never decodes [`ImageRole`] itself.
+    ///
+    /// `None` when the dataset id / label index doesn't resolve to a label
+    /// image — a caller with a stale or intensity index gets no LUT rather than
+    /// a misleading all-glasbey table.
+    pub fn label_lut(&self, dataset_id: &str, label_index: u32) -> Option<LabelLut> {
+        let meta = self.label_meta_at(dataset_id, label_index)?;
+        Some(LabelLut {
+            rgba: build_label_lut_rgba(&meta.colors),
+            width: LABEL_LUT_CAP,
+        })
     }
 
     /// Frame the named dataset's full extent in the current camera, **dispatching
@@ -3060,6 +3113,74 @@ mod tests {
         // Label 1 flipped on at the new opacity.
         assert!(overlays[1].visible);
         assert_eq!(overlays[1].opacity, 0.8);
+    }
+
+    #[test]
+    fn label_lut_resolves_and_composes_palette_over_glasbey() {
+        // The N-th label's LUT is CAP-wide, its explicit color wins at its
+        // value, and every other slot falls back to the deterministic glasbey
+        // colour. Background stays transparent.
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[("nuclei", 256, 256), ("membrane", 128, 128)],
+            ))
+            .into(),
+        );
+
+        let lut = scene.label_lut("ds1", 1).expect("label 1 resolves");
+        assert_eq!(lut.width, LABEL_LUT_CAP);
+        assert_eq!(lut.rgba.len(), (LABEL_LUT_CAP as usize) * 4);
+        // Background always transparent.
+        assert_eq!(&lut.rgba[0..4], &[0, 0, 0, 0]);
+        // The helper colours value 1 red explicitly → palette wins.
+        assert_eq!(&lut.rgba[4..8], &[255, 0, 0, 255]);
+        // A value with no explicit entry uses the glasbey fallback.
+        assert_eq!(&lut.rgba[2 * 4..2 * 4 + 4], &glasbey_rgba(2));
+    }
+
+    #[test]
+    fn label_lut_none_for_intensity_and_unknown() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[("nuclei", 256, 256)],
+            ))
+            .into(),
+        );
+        // Index past the only label → None.
+        assert!(scene.label_lut("ds1", 1).is_none());
+        // Unknown dataset → None (not a panic).
+        assert!(scene.label_lut("nope", 0).is_none());
+    }
+
+    #[test]
+    fn label_colors_returns_raw_palette_only() {
+        // label_colors is the raw explicit palette — no glasbey fill, no
+        // background override — and empty for a non-label.
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_with_labels(
+                "ds1",
+                256,
+                256,
+                &[("nuclei", 256, 256)],
+            ))
+            .into(),
+        );
+        let colors = scene.label_colors("ds1", 0);
+        assert_eq!(colors.len(), 1);
+        assert_eq!(colors[0].value, 1);
+        assert_eq!(colors[0].rgba, [255, 0, 0, 255]);
+        // No such label → empty, not a panic.
+        assert!(scene.label_colors("ds1", 9).is_empty());
+        assert!(scene.label_colors("nope", 0).is_empty());
     }
 
     #[test]

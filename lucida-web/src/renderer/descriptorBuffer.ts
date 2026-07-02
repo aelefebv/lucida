@@ -52,6 +52,8 @@ import {
   OFFSET_FIELD_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
+  OFFSET_IS_LABEL,
+  OFFSET_LABEL_OVERLAY_OPACITY,
   OFFSET_LOD_COUNT,
   OFFSET_COARSE_SOURCE,
   OFFSET_DETAIL_SOURCE,
@@ -60,8 +62,6 @@ import {
   OFFSET_PAD_PROXY0,
   OFFSET_PAD_PROXY1,
   OFFSET_PAD_PROXY2,
-  OFFSET_PAD_TAIL0,
-  OFFSET_PAD_TAIL1,
   OFFSET_WELL_PROXY_DIMS,
   OFFSET_WELL_PROXY_POOL_INDEX,
   OFFSET_WELL_PROXY_SLOT_INDEX,
@@ -107,6 +107,13 @@ export interface EntityDescriptorIndex {
   colormapNameByMember: Map<string, string>;
   /** memberId → proxy descriptor for the cold state's current `(t,c)`. */
   proxyDescriptorByMember: Map<string, EntityProxyDescriptor>;
+  /**
+   * memberId → label overlay info, present ONLY for label members. Lets the
+   * render path detect a label draw and resolve its cached LUT texture (by
+   * `labelLutKey`) without re-walking the cold state. Absent members are
+   * intensity.
+   */
+  labelInfoByMember: Map<string, { labelLutKey: string }>;
 }
 
 /**
@@ -194,6 +201,7 @@ export function buildDescriptorBuffer(
   const colormapLutIndices = new Map<string, number>();
   const colormapNameByMember = new Map<string, string>();
   const proxyDescriptorByMember = new Map<string, EntityProxyDescriptor>();
+  const labelInfoByMember = new Map<string, { labelLutKey: string }>();
   const dsPools = proxyPoolsByDataset.get(cold.datasetId) ?? null;
 
   // Pass 1: assign entity + pool + colormap indices in canonical order
@@ -224,6 +232,11 @@ export function buildDescriptorBuffer(
     const ds = displayStateForChannel(entry, channel);
     colormapNameByMember.set(memberId, ds.colormapName);
     recordColormap(ds.colormapName);
+    // Label members carry a LUT key; record it so the render path can bind the
+    // cached LUT + label atlas for this member.
+    if (entry.isLabel === true && entry.labelLutKey) {
+      labelInfoByMember.set(memberId, { labelLutKey: entry.labelLutKey });
+    }
     const desc = proxyDescriptorsByEntity.get(
       proxyDescriptorKey(entry.entityId, cold.currentT, channel),
     );
@@ -271,6 +284,7 @@ export function buildDescriptorBuffer(
     colormapLutIndices,
     colormapNameByMember,
     proxyDescriptorByMember,
+    labelInfoByMember,
   };
 }
 
@@ -282,6 +296,7 @@ export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
   idx.colormapLutIndices.clear();
   idx.colormapNameByMember.clear();
   idx.proxyDescriptorByMember.clear();
+  idx.labelInfoByMember.clear();
 }
 
 /**
@@ -400,8 +415,17 @@ export function serializeEntityDescriptor(
   // range in the shared buffer, so all fields would render the same data.
   const lodCount = Math.min(lodMetas.length, DESCRIPTOR_MAX_LODS);
   u32[OFFSET_LOD_COUNT / 4] = lodCount;
-  u32[OFFSET_PAD_TAIL0 / 4] = 0;
-  u32[OFFSET_PAD_TAIL1 / 4] = 0;
+
+  // Label overlay flag + blend opacity (repurposed tail-pad slots). A label
+  // member takes the shader's integer-LUT branch; an intensity member leaves
+  // these zeroed so the branch is skipped. `labelOverlayOpacity` defaults to a
+  // fully-opaque tint if a label entry somehow arrives without one, so a shown
+  // label is never invisible by accident.
+  const isLabel = entry.isLabel === true;
+  u32[OFFSET_IS_LABEL / 4] = isLabel ? 1 : 0;
+  f32[OFFSET_LABEL_OVERLAY_OPACITY / 4] = isLabel
+    ? clamp01(entry.labelOverlayOpacity ?? 1)
+    : 0;
 
   const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
   const lodStrideU32 = DESCRIPTOR_LOD_INFO_SIZE / 4;
@@ -449,6 +473,12 @@ export function serializeEntityDescriptor(
     : undefined;
   writeChunkTierSource(u32, OFFSET_DETAIL_SOURCE, detailMeta);
   writeChunkTierSource(u32, OFFSET_COARSE_SOURCE, coarseMeta);
+}
+
+/** Clamp a value into `[0,1]` (label opacity guard; NaN → 0). */
+function clamp01(v: number): number {
+  if (!(v > 0)) return 0;
+  return v > 1 ? 1 : v;
 }
 
 function findLodMeta(

@@ -16,6 +16,7 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { TickContext } from "../../renderLoopTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
+import type { LabelOverlayView } from "../../manifestTypes.ts";
 import type {
   ChunkFeedbackReason,
   ColdStateMessage,
@@ -52,6 +53,14 @@ export class Uploader {
 
   private readonly lastViewEpochByDataset = new Map<string, number>();
 
+  /**
+   * `${datasetId}:${labelIndex}` keys whose label LUT bytes have already been
+   * delivered to the worker. Guards against re-sending the (large) palette on
+   * every cold state; cleared for a dataset in {@link forgetDatasetLabelLuts}
+   * when its worker resources are dropped so the LUT is re-sent on re-open.
+   */
+  private readonly sentLabelLutKeys = new Set<string>();
+
   /** Snapshotted by `sendColdState` so `deliverToWorker` can stamp chunks. */
   private lastEpochs: SceneEpochs | null = null;
 
@@ -79,6 +88,19 @@ export class Uploader {
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
   }): ColdStateMessage {
+    // Effective per-label opacity, keyed by label-relative index. Read from
+    // WASM here (the pure builder can't reach the scene) so a shown label's
+    // blend opacity from the layer panel flows into the descriptor. Cheap: one
+    // call per dataset per cold state, empty for datasets without labels.
+    const labelOpacityByIndex = readLabelOpacityByIndex(args.ctx, args.datasetId);
+    // For labels present in this cold state, fetch the baked LUT bytes from WASM
+    // only for labels whose LUT the worker doesn't already have — the 256 KB
+    // palette is sent once per (dataset,label), not every tick.
+    const labelLutRgbaToSend = this.collectLabelLutsToSend(
+      args.ctx,
+      args.datasetId,
+      args.entities,
+    );
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -91,10 +113,49 @@ export class Uploader {
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
+      labelOpacityByIndex,
+      labelLutRgbaToSend,
     });
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;
     return msg;
+  }
+
+  /**
+   * For every label entity present in this cold state, decide whether its LUT
+   * bytes must ride along. Returns a map (label-relative index → `rgba8` bytes)
+   * containing only labels whose LUT the worker doesn't have cached yet; those
+   * keys are marked sent so subsequent ticks omit the payload. Empty for
+   * datasets with no (shown) labels.
+   */
+  private collectLabelLutsToSend(
+    ctx: TickContext,
+    datasetId: string,
+    entities: EntitySnapshot[],
+  ): Map<number, number[]> {
+    const out = new Map<number, number[]>();
+    for (const e of entities) {
+      if (!e.isLabel || e.labelIndex === undefined) continue;
+      const key = `${datasetId}:${e.labelIndex}`;
+      if (this.sentLabelLutKeys.has(key)) continue;
+      const lut = readLabelLutRgba(ctx, datasetId, e.labelIndex);
+      if (!lut) continue;
+      out.set(e.labelIndex, lut);
+      this.sentLabelLutKeys.add(key);
+    }
+    return out;
+  }
+
+  /**
+   * Forget the sent-LUT bookkeeping for a dataset (call when its worker
+   * resources are dropped) so its label LUTs are re-sent on re-open rather than
+   * assumed resident in a worker that no longer has them.
+   */
+  forgetDatasetLabelLuts(datasetId: string): void {
+    const prefix = `${datasetId}:`;
+    for (const key of this.sentLabelLutKeys) {
+      if (key.startsWith(prefix)) this.sentLabelLutKeys.delete(key);
+    }
   }
 
   /**
@@ -307,5 +368,52 @@ export class Uploader {
   /** Placeholder so RenderLoop teardown stays symmetric with `TickCoordinator.dispose`. */
   dispose(): void {
     // No-op: telemetry collaborators own no subscriptions today.
+  }
+}
+
+/**
+ * Read the dataset's effective per-label blend opacity, keyed by
+ * label-relative index, from `WasmScene::label_overlays`. Returns an empty map
+ * for datasets without labels (or if the query throws / returns malformed
+ * JSON — labels then fall back to fully opaque rather than breaking the tick).
+ */
+function readLabelOpacityByIndex(
+  ctx: TickContext,
+  datasetId: string,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  try {
+    const overlays = JSON.parse(
+      ctx.scene.label_overlays(datasetId),
+    ) as LabelOverlayView[];
+    for (const o of overlays) out.set(o.index, o.opacity);
+  } catch {
+    // Missing/older accessor or bad JSON — no per-label opacity this tick.
+  }
+  return out;
+}
+
+/**
+ * Fetch the baked `rgba8` LUT bytes for a label from
+ * `WasmScene::label_lut(datasetId, labelIndex)`. Returns `null` when the label
+ * doesn't resolve (older core, intensity index, or malformed JSON) so the
+ * caller simply doesn't send a LUT — the worker then falls back to no tint
+ * rather than crashing the tick.
+ */
+function readLabelLutRgba(
+  ctx: TickContext,
+  datasetId: string,
+  labelIndex: number,
+): number[] | null {
+  try {
+    const parsed = JSON.parse(ctx.scene.label_lut(datasetId, labelIndex)) as
+      | { rgba: number[]; width: number }
+      | null;
+    if (!parsed || !Array.isArray(parsed.rgba) || parsed.rgba.length === 0) {
+      return null;
+    }
+    return parsed.rgba;
+  } catch {
+    return null;
   }
 }

@@ -30,6 +30,9 @@ export function buildColdActiveEntry(
   entityById: Map<string, EntitySnapshot>,
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
   displayStateByChannel: Record<number, ColdStateDisplayState>,
+  labelOpacityByIndex: Map<number, number> = new Map(),
+  datasetId = "",
+  labelLutRgbaToSend: Map<number, number[]> = new Map(),
 ): ColdStateActiveEntry {
   const entity = entityById.get(entry.entityId);
   const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
@@ -58,6 +61,25 @@ export function buildColdActiveEntry(
   const matrices = matricesByEntity.get(entry.entityId);
   const modelMatrix = matrices?.model ?? identityMatrix();
   const invModelMatrix = matrices?.inv ?? identityMatrix();
+
+  // Label overlay fields (labels are always intensity-less image members →
+  // `field` kind here). `isLabel`/`labelIndex` come from the snapshot (joined
+  // from `view_query`); the effective blend opacity comes from
+  // `label_overlays` keyed by the label-relative index. A shown label with no
+  // opacity entry falls back to fully opaque so it can never be silently
+  // invisible. `well-as-proxy`/`invisible` are never labels.
+  const isLabel = entity?.isLabel === true;
+  const labelIndex = entity?.labelIndex;
+  const labelOverlayOpacity =
+    isLabel && labelIndex !== undefined
+      ? labelOpacityByIndex.get(labelIndex) ?? 1
+      : undefined;
+  // Stable per-label LUT cache key; the raw palette bytes ride along only when
+  // the caller decided this LUT needs (re)sending to the worker.
+  const labelLutKey =
+    isLabel && labelIndex !== undefined ? `${datasetId}:${labelIndex}` : undefined;
+  const labelLutRgba =
+    isLabel && labelIndex !== undefined ? labelLutRgbaToSend.get(labelIndex) : undefined;
 
   if (entry.kind === "well-as-proxy") {
     return {
@@ -125,6 +147,11 @@ export function buildColdActiveEntry(
     parentWellId,
     modelMatrix,
     invModelMatrix,
+    isLabel,
+    ...(labelIndex !== undefined ? { labelIndex } : {}),
+    ...(labelOverlayOpacity !== undefined ? { labelOverlayOpacity } : {}),
+    ...(labelLutKey !== undefined ? { labelLutKey } : {}),
+    ...(labelLutRgba !== undefined ? { labelLutRgba } : {}),
     displayStateByChannel,
   };
 }
@@ -146,14 +173,37 @@ export function buildColdState(args: {
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   dsSettings: DatasetSettings | undefined;
+  /**
+   * Effective label blend opacity keyed by label-relative index (from
+   * `WasmScene::label_overlays`). Empty for datasets without labels; a label
+   * entry with no entry here falls back to fully opaque.
+   */
+  labelOpacityByIndex?: Map<number, number>;
+  /**
+   * Baked `rgba8` LUT bytes keyed by label-relative index, for the labels whose
+   * LUT the worker doesn't have cached yet. The caller (uploader) dedupes so
+   * this is usually empty; when populated, the entry carries the bytes and the
+   * worker (re)builds + caches the LUT texture.
+   */
+  labelLutRgbaToSend?: Map<number, number[]>;
 }): ColdStateMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
     args.selection.visibleChannels,
     args.dsSettings,
   );
+  const labelOpacityByIndex = args.labelOpacityByIndex ?? new Map<number, number>();
+  const labelLutRgbaToSend = args.labelLutRgbaToSend ?? new Map<number, number[]>();
   const coldActiveSet = args.activeSet.map(entry =>
-    buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
+    buildColdActiveEntry(
+      entry,
+      entityById,
+      args.matricesByEntity,
+      displayStateByChannel,
+      labelOpacityByIndex,
+      args.datasetId,
+      labelLutRgbaToSend,
+    ),
   );
   return {
     type: "coldState",

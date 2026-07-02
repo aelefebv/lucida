@@ -35,6 +35,7 @@ describe("handleSliceRenderMultiPass", () => {
     const coarseIndirection = {} as GPUBuffer;
     const coarseAtlas: SliceAtlasState = {
       texture: coarseTexture,
+      format: "r16uint",
       indirectionBuf: coarseIndirection,
       indirectionData: new Uint32Array([0]),
       slots: new Map(),
@@ -74,6 +75,7 @@ describe("handleSliceRenderMultiPass", () => {
       colormapLutIndices: new Map([["gray", 0]]),
       colormapNameByMember: new Map([["img-a", "gray"]]),
       proxyDescriptorByMember: new Map(),
+      labelInfoByMember: new Map(),
     };
 
     const setTierAtlases = vi.fn();
@@ -163,6 +165,7 @@ describe("handleSliceRenderMultiPass", () => {
           wellProxyHandle: null,
         }],
       ]),
+      labelInfoByMember: new Map(),
     };
 
     const setProxyTextures = vi.fn();

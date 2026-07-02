@@ -224,6 +224,11 @@ export class RenderLoop {
     this.client.removeLayerResources(id);
     this.tickCoordinator.clearMemberResources(id);
     this.uploader.clearDataset(id);
+    // The worker destroys this dataset's label LUT textures on
+    // `removeLayerResources`, so drop the "already sent" memo too — otherwise a
+    // remove+reopen in the same session assumes the LUT is still resident and
+    // never re-sends the bytes, leaving the re-opened label blank.
+    this.uploader.forgetDatasetLabelLuts(id);
     for (const mid of memberIds) {
       this.tickCoordinator.clearMemberResources(mid);
       this.uploader.clearMember(mid);

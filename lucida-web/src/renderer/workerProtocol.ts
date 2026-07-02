@@ -320,6 +320,45 @@ interface ColdStateActiveEntryBase {
   /** Inverse of {@link modelMatrix}. */
   invModelMatrix: Float32Array;
   /**
+   * Whether this entry is a segmentation **label** overlay (vs intensity).
+   * Threaded from `view_query`'s `is_label` through the snapshot so the worker
+   * can flag the descriptor's `isLabel` field and the shader takes the label
+   * branch (integer `textureLoad` + nearest LUT, no contrast/gamma/colormap).
+   * Defaults to `false` for ordinary intensity members.
+   */
+  isLabel?: boolean;
+  /**
+   * Label-relative index (the N-th label image) for a label entry; used to
+   * fetch the per-label `WasmScene::label_lut(...)` the worker uploads as a
+   * texture. Absent for intensity members.
+   */
+  labelIndex?: number;
+  /**
+   * Effective label blend opacity in `[0,1]` (from `label_overlays`). Written
+   * into the descriptor's `labelOverlayOpacity` and used by the shader to
+   * composite the tinted mask OVER the intensity image. Per-label (not
+   * per-channel), so it lives on the entry, not in `displayStateByChannel`.
+   * Absent for intensity members.
+   */
+  labelOverlayOpacity?: number;
+  /**
+   * Stable cache key for this label's indexed-colour LUT texture, e.g.
+   * `${datasetId}:${labelIndex}`. Present for every label entry; the worker
+   * binds the cached LUT texture under this key on the draw. Absent for
+   * intensity members.
+   */
+  labelLutKey?: string;
+  /**
+   * The label's baked `rgba8` LUT bytes (`65536 * 4` numbers) from
+   * `WasmScene::label_lut(...).rgba`, uploaded verbatim (flat, row-major) into a
+   * `256×256` `rgba8unorm` texture. Carried ONLY when the LUT for {@link labelLutKey}
+   * hasn't been sent to (or was evicted from) the worker yet — the main thread
+   * dedupes re-sends of the (large) palette, and the worker keeps the built
+   * texture cached under {@link labelLutKey} across cold states. Absent when the
+   * worker already has the texture, and for intensity members.
+   */
+  labelLutRgba?: number[];
+  /**
    * Per-channel display state, keyed by channel index. Iteration yields
    * one descriptor entry per (entry, channel), so the worker indexes
    * this map by `cold.visibleChannels[ch]` for each yielded

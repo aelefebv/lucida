@@ -35,6 +35,8 @@ import {
   OFFSET_FIELD_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
+  OFFSET_IS_LABEL,
+  OFFSET_LABEL_OVERLAY_OPACITY,
   OFFSET_LOD_COUNT,
   OFFSET_LODS,
   OFFSET_MODEL_MATRIX,
@@ -181,6 +183,9 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.opacity).toBe(OFFSET_OPACITY);
     expect(offsets.colormapLutIndex).toBe(OFFSET_COLORMAP_LUT_INDEX);
     expect(offsets.lodCount).toBe(OFFSET_LOD_COUNT);
+    // Label overlay fields (repurposed tail-pad slots).
+    expect(offsets.isLabel).toBe(OFFSET_IS_LABEL);
+    expect(offsets.labelOverlayOpacity).toBe(OFFSET_LABEL_OVERLAY_OPACITY);
     expect(offsets.lods).toBe(OFFSET_LODS);
     expect(offsets.lods).toBe(DESCRIPTOR_LODS_OFFSET);
     expect(offsets.detailSource).toBe(OFFSET_DETAIL_SOURCE);

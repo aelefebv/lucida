@@ -41,6 +41,7 @@ import {
   removeMinimapResources,
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
+import { removeLabelLUTsForDataset } from "./resources.ts";
 import { postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { memberTierKey } from "../poolKeys.ts";
 
@@ -171,6 +172,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       removeSliceResources(ctx, msg.datasetId);
       removeVolumeResources(ctx, msg.datasetId);
       removeMinimapResources(msg.datasetId);
+      removeLabelLUTsForDataset(msg.datasetId);
       // Destroy proxy pools for this dataset.
       const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
       if (dsPools) {

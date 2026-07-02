@@ -59,8 +59,8 @@ struct EntityDescriptor {
   opacity: f32,
   colormapLutIndex: u32,
   lodCount: u32,
-  _pad_tail0: u32,
-  _pad_tail1: u32,
+  isLabel: u32,
+  labelOverlayOpacity: f32,
   lods: array<LodInfo, 8>,
   detailSource: ChunkTierSource,
   coarseSource: ChunkTierSource,
@@ -77,6 +77,15 @@ struct EntityDescriptor {
 // plane within the slot region.
 @group(0) @binding(7) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(8) var wellProxyTex: texture_3d<u32>;
+// Label overlay path: the r32uint label atlas (exact integer ids) and the
+// 256×256 rgba8unorm indexed-colour LUT baked by `WasmScene::label_lut` (the flat
+// 65536-entry table laid out row-major; 65536×1 would exceed
+// maxTextureDimension2D). The atlas is `textureLoad`ed for the exact id; the LUT
+// is `textureLoad`ed at (idx & 255, idx >> 8) (rgba8unorm → vec4<f32>). A label
+// colour is never filtered/interpolated, so no sampler is bound for either — the
+// linear `lutSampler` (intensity colormap) is never applied to a label.
+@group(0) @binding(9) var labelTex: texture_2d<u32>;
+@group(0) @binding(10) var labelLutTex: texture_2d<f32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -163,6 +172,49 @@ fn sampleDetail2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   return textureLoad(detailTex, atlasCoord, 0).r;
 }
 
+// Sample the label atlas (r32uint) via the same indirection walk as
+// `sampleDetail2D`, but reading the label texture bound at binding 9. The
+// label member's own indirection buffer is bound to `detailIndirection`
+// (binding 2) and its slot dims to `detailAtlasSlotDims` for the draw, so the
+// chunk→slot lookup is identical; only the sampled texture differs. Returns the
+// exact integer id, or the sentinel when the covering chunk isn't resident.
+fn sampleLabel2D(source: ChunkTierSource, uv: vec2f) -> u32 {
+  if (source.valid == 0u || u.detailAtlasSlotDims.x == 0u || u.detailAtlasSlotDims.y == 0u) {
+    return 0xFFFFFFFFu;
+  }
+  let levelDims = vec2u(source.levelDims.x, source.levelDims.y);
+  let chunkDims = vec2u(source.chunkDims.x, source.chunkDims.y);
+  let gridDims = vec2u(source.gridDims.x, source.gridDims.y);
+
+  let texCoord = vec2i(
+    clamp(i32(uv.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+    clamp(i32(uv.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+  );
+  let chunkCoord = vec2u(
+    u32(texCoord.x) / chunkDims.x,
+    u32(texCoord.y) / chunkDims.y,
+  );
+  let gridIdx = source.indirectionOffset + chunkCoord.y * gridDims.x + chunkCoord.x;
+  let slot = detailIndirection[gridIdx];
+  if (slot == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+
+  let slotCoord = vec2u(
+    slot % u.detailAtlasSlotDims.x,
+    slot / u.detailAtlasSlotDims.x,
+  );
+  let localTexel = vec2u(
+    u32(texCoord.x) % chunkDims.x,
+    u32(texCoord.y) % chunkDims.y,
+  );
+  let atlasCoord = vec2i(
+    i32(slotCoord.x * chunkDims.x + localTexel.x),
+    i32(slotCoord.y * chunkDims.y + localTexel.y),
+  );
+  return textureLoad(labelTex, atlasCoord, 0).r;
+}
+
 fn sampleCoarse2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   if (source.valid == 0u || u.coarseAtlasSlotDims.x == 0u || u.coarseAtlasSlotDims.y == 0u) {
     return 0xFFFFFFFFu;
@@ -223,6 +275,32 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   }
 
   let entity = entityDescriptors[currentEntity.index.x];
+
+  // Label overlay branch: an integer-indexed mask, tinted via the label LUT and
+  // composited OVER the intensity image. Skips contrast/gamma/colormap
+  // entirely — a label id is a category, not a brightness. Background (id 0)
+  // and not-yet-resident chunks are transparent so the intensity image (drawn
+  // in an earlier pass) shows through.
+  if (entity.isLabel == 1u) {
+    let overlayOpacity = clamp(entity.labelOverlayOpacity, 0.0, 1.0);
+    if (overlayOpacity <= 0.0) {
+      return vec4f(0.0, 0.0, 0.0, 0.0);
+    }
+    // Labels use the detail tier only (no coarse/proxy fallback for masks).
+    let labelVal = sampleLabel2D(entity.detailSource, texUV);
+    if (labelVal == 0xFFFFFFFFu || labelVal == 0u) {
+      return vec4f(0.0, 0.0, 0.0, 0.0);
+    }
+    // Exact integer LUT lookup, masked to the table size (65536). The LUT is a
+    // 256×256 texture holding the flat 65536-entry table row-major, so entry
+    // `idx` lives at (idx & 255, idx >> 8). No sampler, no interpolation —
+    // adjacent ids keep their distinct colours.
+    let idx = labelVal & 0xFFFFu;
+    let rgb = textureLoad(labelLutTex, vec2i(i32(idx & 255u), i32(idx >> 8u)), 0).rgb;
+    // Premultiplied over-compositing: colour scaled by opacity, alpha =
+    // opacity, so the compositor blends the tint onto the intensity image.
+    return vec4f(rgb * overlayOpacity, overlayOpacity);
+  }
 
   let intensityMin = entity.contrastMin;
   let intensityMax = entity.contrastMax;

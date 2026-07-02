@@ -39,6 +39,15 @@ export class SliceRenderer {
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
 
+  // Label overlay resources. `labelTexture` is the label member's r32uint
+  // atlas (null → dummy); `labelLutTexture` is its 256×256 indexed-colour LUT
+  // (null → 1×1 transparent dummy). Both are set per label draw and reset to
+  // null for intensity draws so a stale label atlas never bleeds through.
+  private labelTexture: GPUTexture | null = null;
+  private labelLutTexture: GPUTexture | null = null;
+  private dummyLabelTexture: GPUTexture;
+  private dummyLabelLutTexture: GPUTexture;
+
   constructor(device: GPUDevice) {
     this.device = device;
 
@@ -92,6 +101,21 @@ export class SliceRenderer {
           binding: 8,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
+        },
+        // Label atlas (r32uint, 2D). Bound to the label member's own atlas on a
+        // label draw; a 1×1 dummy otherwise. Read via `textureLoad` only.
+        {
+          binding: 9,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "2d" },
+        },
+        // Label indexed-colour LUT (rgba8unorm, 256×256 holding the flat 65536
+        // entries). Read via `textureLoad` at (id & 255, id >> 8) — no sampler,
+        // no interpolation.
+        {
+          binding: 10,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d" },
         },
       ],
     });
@@ -168,6 +192,27 @@ export class SliceRenderer {
       magFilter: "linear",
       minFilter: "linear",
     });
+
+    // 1×1 dummy label atlas (r32uint) for intensity draws / unset bindings.
+    this.dummyLabelTexture = device.createTexture({
+      size: [1, 1],
+      format: "r32uint",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    // 1×1 transparent dummy label LUT (rgba8unorm). Value 0 → transparent, so a
+    // draw that somehow binds this contributes nothing.
+    this.dummyLabelLutTexture = device.createTexture({
+      size: [1, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this.dummyLabelLutTexture },
+      new Uint8Array([0, 0, 0, 0]),
+      { bytesPerRow: 4 },
+      [1, 1],
+    );
   }
 
   setColormapTexture(texture: GPUTexture) {
@@ -202,6 +247,35 @@ export class SliceRenderer {
     this.coarseAtlasTexture = coarseTexture;
     this.coarseIndirectionBuffer = coarseIndirectionBuf;
     this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0];
+    // Intensity draw: ensure no label atlas persists from a prior label draw.
+    this.labelTexture = null;
+    this.rebuildBindGroup();
+  }
+
+  /**
+   * Configure the next draw as a **label overlay** draw: bind the label
+   * member's r32uint atlas (binding 9) + its indexed-colour LUT (binding 10),
+   * and wire the label atlas's indirection buffer + slot dims into the
+   * detail-tier uniform slots the shader's `sampleLabel2D` reads. The real
+   * detail/coarse intensity atlases are cleared (their bindings fall back to
+   * dummies) — the label branch never touches them.
+   */
+  setLabelAtlas(
+    atlasTexture: GPUTexture,
+    indirectionBuf: GPUBuffer,
+    atlasSlotDims: [number, number],
+    lutTexture: GPUTexture,
+  ) {
+    this.labelTexture = atlasTexture;
+    this.labelLutTexture = lutTexture;
+    // `sampleLabel2D` walks `detailIndirection` (binding 2) + `detailAtlasSlotDims`.
+    this.detailAtlasTexture = null;
+    this.detailIndirectionBuffer = indirectionBuf;
+    this.detailAtlasSlotDims = atlasSlotDims;
+    // No coarse tier for masks.
+    this.coarseAtlasTexture = null;
+    this.coarseIndirectionBuffer = null;
+    this.coarseAtlasSlotDims = [0, 0];
     this.rebuildBindGroup();
   }
 
@@ -259,6 +333,8 @@ export class SliceRenderer {
     const dummyProxy = this.getDummyProxyTexture();
     const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
     const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
+    const labelAtlas = this.labelTexture ?? this.dummyLabelTexture;
+    const labelLut = this.labelLutTexture ?? this.dummyLabelLutTexture;
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -271,6 +347,8 @@ export class SliceRenderer {
         { binding: 6, resource: { buffer: coarseIndirection } },
         { binding: 7, resource: fieldProxyView },
         { binding: 8, resource: wellProxyView },
+        { binding: 9, resource: labelAtlas.createView() },
+        { binding: 10, resource: labelLut.createView() },
       ],
     });
   }

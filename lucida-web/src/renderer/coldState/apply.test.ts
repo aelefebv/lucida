@@ -94,6 +94,8 @@ function makeCtx(device: GPUDevice): WorkerCtx {
     getDummyTexture: () => ({} as GPUTexture),
     getDummy3DTexture: () => ({} as GPUTexture),
     getOrCreateLUT: () => ({} as GPUTexture),
+    setLabelLUT: () => ({} as GPUTexture),
+    getLabelLUT: () => null,
     post: () => {},
     postWantedSet: () => {},
     lookupProxyDescriptor: () => null,

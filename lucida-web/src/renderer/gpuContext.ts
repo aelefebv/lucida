@@ -108,20 +108,34 @@ export function writeVolumeChunk(
   );
 }
 
+/**
+ * A single-channel unsigned integer texture format usable for the 2D slice
+ * atlas. Intensity chunks use `r16uint` (2 bytes/texel); segmentation label
+ * chunks use `r32uint` (4 bytes/texel) so ids > 65535 survive intact.
+ */
+export type SliceTexelFormat = "r16uint" | "r32uint";
+
+/** Bytes per texel for a {@link SliceTexelFormat}. */
+export function bytesPerTexel(format: SliceTexelFormat): 2 | 4 {
+  return format === "r32uint" ? 4 : 2;
+}
+
 export function createSliceTexture(
   device: GPUDevice,
   width: number,
   height: number,
   data?: Uint16Array | null,
+  format: SliceTexelFormat = "r16uint",
 ): GPUTexture {
+  const bpt = bytesPerTexel(format);
   const texture = device.createTexture({
     size: [width, height],
-    format: "r16uint",
+    format,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 
   if (data) {
-    const bytesPerRow = width * 2;
+    const bytesPerRow = width * bpt;
     const alignedBytesPerRow = Math.ceil(bytesPerRow / 256) * 256;
 
     if (alignedBytesPerRow === bytesPerRow) {
@@ -150,17 +164,26 @@ export function createSliceTexture(
   return texture;
 }
 
+/**
+ * Write one chunk region into a slice atlas texture. Handles both the intensity
+ * `r16uint` (2 B/texel, `Uint16Array` source) and label `r32uint` (4 B/texel,
+ * `Uint32Array` source) cases; `format` selects the texel width for the
+ * bytes-per-row math and the padding-copy element type. Row padding to WebGPU's
+ * 256-byte alignment is applied per format.
+ */
 export function writeSliceRegion(
   device: GPUDevice,
   texture: GPUTexture,
-  data: Uint16Array,
+  data: Uint16Array | Uint32Array,
   srcRowStride: number,
   dstX: number,
   dstY: number,
   chunkW: number,
   chunkH: number,
+  format: SliceTexelFormat = "r16uint",
 ): void {
-  const bytesPerRow = chunkW * 2;
+  const bpt = bytesPerTexel(format);
+  const bytesPerRow = chunkW * bpt;
   const alignedBytesPerRow = Math.ceil(bytesPerRow / 256) * 256;
 
   // Extract chunk rows from source data (which may have a different stride)
@@ -177,8 +200,11 @@ export function writeSliceRegion(
     return;
   }
 
-  const paddedWidth = alignedBytesPerRow / 2;
-  const padded = new Uint16Array(paddedWidth * chunkH);
+  const paddedWidth = alignedBytesPerRow / bpt;
+  const padded =
+    bpt === 4
+      ? new Uint32Array(paddedWidth * chunkH)
+      : new Uint16Array(paddedWidth * chunkH);
   for (let y = 0; y < chunkH; y++) {
     padded.set(data.subarray(y * srcRowStride, y * srcRowStride + chunkW), y * paddedWidth);
   }

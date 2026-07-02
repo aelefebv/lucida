@@ -10,7 +10,11 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import { SLICE_ATLAS_BUDGET } from "../workerProtocol.ts";
-import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
+import {
+  createSliceTexture,
+  getDeviceLimits,
+  type SliceTexelFormat,
+} from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 
@@ -23,6 +27,12 @@ export interface SliceEntityZInfo {
 
 export interface SliceAtlasState {
   texture: GPUTexture;
+  /**
+   * Texel format of {@link texture}. Intensity pools are `r16uint`; label
+   * pools are `r32uint` (so ids > 65535 aren't truncated). Drives the upload
+   * path's element width and the render path's atlas-binding selection.
+   */
+  format: SliceTexelFormat;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
   /** Composite keys "memberId|chunkKey" → slotIndex (insertion-order = LRU). */
@@ -66,6 +76,7 @@ function createSliceAtlas(
   device: GPUDevice,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
+  format: SliceTexelFormat,
 ): SliceAtlasState {
   const limits = getDeviceLimits(device);
   const geom = computeAtlasGeometry(
@@ -76,7 +87,7 @@ function createSliceAtlas(
   );
   const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
 
-  const texture = createSliceTexture(device, atlasW, atlasH, null);
+  const texture = createSliceTexture(device, atlasW, atlasH, null, format);
 
   // Indirection sized later by cold state handler
   const indirectionData = new Uint32Array(1);
@@ -94,7 +105,7 @@ function createSliceAtlas(
   slotGridIdx.fill(-1);
 
   return {
-    texture, indirectionBuf, indirectionData,
+    texture, format, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
     slotsX, slotsY,
@@ -122,10 +133,16 @@ export function getOrCreateSlicePool(
   poolKey: string,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
+  format: SliceTexelFormat = "r16uint",
 ): SliceAtlasState {
   const atlases = ctx.state.sliceAtlases;
   const existing = atlases.get(poolKey);
-  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY) {
+  if (
+    existing &&
+    existing.chunkX === chunkX &&
+    existing.chunkY === chunkY &&
+    existing.format === format
+  ) {
     // Mark stale on Z change before updating z
     if (z !== existing.z && existing.slots.size > 0) {
       existing.staleSliceKeys = new Set(existing.slots.keys());
@@ -136,7 +153,7 @@ export function getOrCreateSlicePool(
     return existing;
   }
   if (existing) destroySliceAtlas(existing);
-  const newAtlas = createSliceAtlas(ctx.device, chunkX, chunkY, z, t, c);
+  const newAtlas = createSliceAtlas(ctx.device, chunkX, chunkY, z, t, c, format);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }

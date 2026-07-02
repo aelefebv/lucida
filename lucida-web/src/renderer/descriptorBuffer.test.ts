@@ -45,6 +45,8 @@ import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import {
   OFFSET_COARSE_SOURCE,
   OFFSET_DETAIL_SOURCE,
+  OFFSET_IS_LABEL,
+  OFFSET_LABEL_OVERLAY_OPACITY,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -150,6 +152,12 @@ function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplayState() },
+    ...(opts.isLabel !== undefined ? { isLabel: opts.isLabel } : {}),
+    ...(opts.labelIndex !== undefined ? { labelIndex: opts.labelIndex } : {}),
+    ...(opts.labelOverlayOpacity !== undefined
+      ? { labelOverlayOpacity: opts.labelOverlayOpacity }
+      : {}),
+    ...(opts.labelLutKey !== undefined ? { labelLutKey: opts.labelLutKey } : {}),
   };
   if (opts.mode === "well-as-proxy") {
     return {
@@ -619,6 +627,79 @@ describe("EntityDescriptor byte layout", () => {
     for (let i = 0; i < (2 * DESCRIPTOR_TIER_SOURCE_SIZE) / 4; i++) {
       expect(u32[OFFSET_DETAIL_SOURCE / 4 + i]).toBe(0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Label overlay fields (isLabel + labelOverlayOpacity)
+// ---------------------------------------------------------------------------
+
+describe("EntityDescriptor label fields", () => {
+  it("writes isLabel=1 and the clamped opacity for a label entry", () => {
+    const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const entry = makeEntry({
+      entityId: "lbl-0",
+      imageId: "img-lbl",
+      mode: "fields-with-detail",
+      isLabel: true,
+      labelIndex: 0,
+      labelOverlayOpacity: 0.5,
+      labelLutKey: "ds1:0",
+    });
+    serializeEntityDescriptor(buf, 0, entry, metasFromEntry(entry), defaultDisplayState(), new Map(), new Map(), [], new Map());
+    const u32 = new Uint32Array(buf);
+    const f32 = new Float32Array(buf);
+    expect(u32[OFFSET_IS_LABEL / 4]).toBe(1);
+    expect(f32[OFFSET_LABEL_OVERLAY_OPACITY / 4]).toBeCloseTo(0.5);
+  });
+
+  it("leaves isLabel=0 and opacity=0 for an intensity entry", () => {
+    const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "fields-with-detail" });
+    serializeEntityDescriptor(buf, 0, entry, metasFromEntry(entry), defaultDisplayState(), new Map(), new Map(), [], new Map());
+    const u32 = new Uint32Array(buf);
+    const f32 = new Float32Array(buf);
+    expect(u32[OFFSET_IS_LABEL / 4]).toBe(0);
+    expect(f32[OFFSET_LABEL_OVERLAY_OPACITY / 4]).toBe(0);
+  });
+
+  it("clamps an out-of-range label opacity into [0,1] and defaults a missing one to opaque", () => {
+    const over = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    serializeEntityDescriptor(
+      over, 0,
+      makeEntry({ entityId: "l", imageId: "i", mode: "fields-with-detail", isLabel: true, labelOverlayOpacity: 4 }),
+      [], defaultDisplayState(), new Map(), new Map(), [], new Map(),
+    );
+    expect(new Float32Array(over)[OFFSET_LABEL_OVERLAY_OPACITY / 4]).toBe(1);
+
+    const missing = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    serializeEntityDescriptor(
+      missing, 0,
+      makeEntry({ entityId: "l", imageId: "i", mode: "fields-with-detail", isLabel: true }),
+      [], defaultDisplayState(), new Map(), new Map(), [], new Map(),
+    );
+    // A label with no opacity given should never be silently invisible.
+    expect(new Float32Array(missing)[OFFSET_LABEL_OVERLAY_OPACITY / 4]).toBe(1);
+  });
+
+  it("populates labelInfoByMember only for label members in buildDescriptorBuffer", () => {
+    const { device } = makeMockDevice();
+    const labelEntry = makeEntry({
+      entityId: "lbl", imageId: "img-lbl", mode: "fields-with-detail",
+      isLabel: true, labelIndex: 0, labelLutKey: "ds1:0",
+    });
+    const intensityEntry = makeEntry({ entityId: "int", imageId: "img-int", mode: "fields-with-detail" });
+    const cold = makeCold([labelEntry, intensityEntry]);
+    const idx = buildDescriptorBuffer(
+      device, cold, new Map(), new Map(),
+      new Map([
+        ["img-lbl", metasFromEntry(labelEntry)],
+        ["img-int", metasFromEntry(intensityEntry)],
+      ]),
+    );
+    expect(idx.labelInfoByMember.get("img-lbl")).toEqual({ labelLutKey: "ds1:0" });
+    expect(idx.labelInfoByMember.has("img-int")).toBe(false);
+    destroyDescriptorBuffer(idx);
   });
 });
 

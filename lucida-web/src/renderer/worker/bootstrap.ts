@@ -33,7 +33,9 @@ import {
   ensureOffscreenPool,
   getDummy3DTexture,
   getDummyTexture,
+  getLabelLUT,
   getOrCreateLUT,
+  setLabelLUT,
 } from "./resources.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
 
@@ -116,6 +118,8 @@ export async function bootstrapWorker(
     getDummyTexture: () => getDummyTexture(device),
     getDummy3DTexture: () => getDummy3DTexture(device),
     getOrCreateLUT: (name) => getOrCreateLUT(device, name),
+    setLabelLUT: (key, rgba) => setLabelLUT(device, key, rgba),
+    getLabelLUT: (key) => getLabelLUT(key),
     post,
     postWantedSet,
     lookupProxyDescriptor(entityId: string, t: number, c: number) {

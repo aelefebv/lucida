@@ -56,6 +56,21 @@ describe("chunkPoolKey", () => {
   });
 });
 
+describe("chunkPoolKey label discriminator", () => {
+  it("adds a :label segment so labels never share an intensity pool", () => {
+    // Same dataset + chunk dims, but the label variant is a distinct key.
+    expect(chunkPoolKey("ds1", 0, [128, 128], false, true)).toBe("ds1:label:128x128");
+    expect(chunkPoolKey("ds1", 0, [128, 128], false, false)).toBe("ds1:128x128");
+    expect(chunkPoolKey("ds1", 0, [128, 128], false, true)).not.toBe(
+      chunkPoolKey("ds1", 0, [128, 128], false, false),
+    );
+  });
+
+  it("places :label before the channel-less/channelled chunk-dims key", () => {
+    expect(chunkPoolKey("ds1", 2, [256, 128], true, true)).toBe("ds1:ch2:label:256x128");
+  });
+});
+
 describe("chunkTierPoolKey", () => {
   it("adds a tier suffix after the dataset/channel/chunk-shape key", () => {
     expect(chunkTierPoolKey("ds1", "detail", 0, [64, 64, 32], false)).toBe(
@@ -63,6 +78,12 @@ describe("chunkTierPoolKey", () => {
     );
     expect(chunkTierPoolKey("ds1", "coarse", 2, [128, 128], true)).toBe(
       "ds1:ch2:128x128:coarse",
+    );
+  });
+
+  it("threads the label discriminator through to the tier key", () => {
+    expect(chunkTierPoolKey("ds1", "detail", 0, [64, 64], false, true)).toBe(
+      "ds1:label:64x64:detail",
     );
   });
 });

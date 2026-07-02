@@ -34,6 +34,7 @@ export function chunkPoolKey(
   channel: number,
   chunkDims: number[],
   isMultiCh: boolean,
+  isLabel = false,
 ): string {
   let chunkDimsKey: string;
   if (chunkDims.length === 3) {
@@ -45,9 +46,13 @@ export function chunkPoolKey(
       `chunkPoolKey: unsupported chunkDims arity ${chunkDims.length}; expected 2 (slice) or 3 (volume)`,
     );
   }
+  // Label members live in their own `r32uint` atlas — a `:label` discriminator
+  // guarantees they never share a pool with an intensity member of matching
+  // chunk dims (whose atlas is `r16uint` and would truncate label ids).
+  const labelKey = isLabel ? ":label" : "";
   return isMultiCh
-    ? `${datasetId}:ch${channel}:${chunkDimsKey}`
-    : `${datasetId}:${chunkDimsKey}`;
+    ? `${datasetId}:ch${channel}${labelKey}:${chunkDimsKey}`
+    : `${datasetId}${labelKey}:${chunkDimsKey}`;
 }
 
 export function chunkTierPoolKey(
@@ -56,8 +61,9 @@ export function chunkTierPoolKey(
   channel: number,
   chunkDims: number[],
   isMultiCh: boolean,
+  isLabel = false,
 ): string {
-  const base = chunkPoolKey(datasetId, channel, chunkDims, isMultiCh);
+  const base = chunkPoolKey(datasetId, channel, chunkDims, isMultiCh, isLabel);
   return `${base}:${tier}`;
 }
 

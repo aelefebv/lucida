@@ -40,6 +40,15 @@ export interface WorkerCtx {
   getDummy3DTexture(): GPUTexture;
   getOrCreateLUT(name: string): GPUTexture;
   /**
+   * (Re)build and cache the label member's 256×256 rgba8unorm indexed-colour LUT
+   * texture under `key` from the raw `rgba8` bytes the cold state delivered (the
+   * flat 65536-entry table laid out row-major). Called when a label entry
+   * carries fresh LUT bytes.
+   */
+  setLabelLUT(key: string, rgba: Uint8Array): GPUTexture;
+  /** The cached label LUT texture for `key`, or null if none built yet. */
+  getLabelLUT(key: string): GPUTexture | null;
+  /**
    * Post a message to the main thread. `transfer` moves transferable objects
    * (e.g. an `ImageBitmap` for a thumbnail reply) instead of structured-cloning
    * them — omit it for plain messages.

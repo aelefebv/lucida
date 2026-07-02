@@ -72,6 +72,7 @@ describe("handleVolumeRenderMultiPass", () => {
       colormapLutIndices: new Map([["gray", 0]]),
       colormapNameByMember: new Map([["img-a", "gray"], ["img-b", "gray"]]),
       proxyDescriptorByMember: new Map(),
+      labelInfoByMember: new Map(),
     };
 
     const ctx = {
@@ -163,6 +164,7 @@ describe("handleVolumeRenderMultiPass", () => {
       colormapLutIndices: new Map([["gray", 0]]),
       colormapNameByMember: new Map([["img-a", "gray"]]),
       proxyDescriptorByMember: new Map(),
+      labelInfoByMember: new Map(),
     };
 
     const setTierAtlases = vi.fn();
@@ -254,6 +256,7 @@ describe("handleVolumeRenderMultiPass", () => {
           wellProxyHandle: null,
         }],
       ]),
+      labelInfoByMember: new Map(),
     };
 
     const setProxyTextures = vi.fn();

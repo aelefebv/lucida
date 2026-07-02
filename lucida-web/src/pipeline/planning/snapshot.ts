@@ -277,6 +277,11 @@ export function buildPlanningSnapshot(
       importance: e.importance,
       layoutPositionVox,
       levels,
+      // `is_label` is absent on rows from an older core → treat as intensity.
+      // A hidden label is already excluded from `view_query` by the core gate,
+      // so any label row present here is one the user turned on.
+      isLabel: e.is_label === true,
+      ...(e.label_index !== undefined ? { labelIndex: e.label_index } : {}),
     };
     if (e.kind === "Field") {
       const parentId = parentByEntityId.get(e.entity_id);

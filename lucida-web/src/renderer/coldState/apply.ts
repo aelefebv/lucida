@@ -57,6 +57,16 @@ import { memberTierKey } from "../poolKeys.ts";
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
 
+  // 0. (Re)build any label LUT textures whose bytes rode along on this cold
+  // state. The main thread only ships the (large) palette when the worker
+  // doesn't have it cached yet, so this is usually a no-op; when present, the
+  // texture is built once and reused across subsequent cold states by key.
+  for (const entry of msg.activeSet) {
+    if (entry.labelLutKey && entry.labelLutRgba) {
+      ctx.setLabelLUT(entry.labelLutKey, Uint8Array.from(entry.labelLutRgba));
+    }
+  }
+
   // 1. Refresh well→fields map so well-proxy uploads can fan out to
   // child fields' descriptors. Cold state is the source of truth for
   // active set membership; we rebuild this dataset's contribution
@@ -168,8 +178,11 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         entryByMember,
       });
     } else {
+      // Label groups use an `r32uint` atlas (untruncated ids); intensity uses
+      // `r16uint`.
       const atlas = getOrCreateSlicePool(
         ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
+        group.isLabel ? "r32uint" : "r16uint",
       );
       atlas.entityMetas = newEntityMetas;
       resizeSliceIndirection(ctx, atlas, offset);

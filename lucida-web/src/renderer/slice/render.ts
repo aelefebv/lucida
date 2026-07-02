@@ -106,27 +106,53 @@ export function handleSliceRenderMultiPass(
       }
     }
 
-    // Skip when the layer has nothing renderable: no detail/coarse chunks
-    // AND no resident proxy. Entities with either chunk tier or a resident
-    // proxy continue rendering; the shader fallback chain handles the rest.
-    if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) continue;
+    // Label overlay members render through the integer LUT branch: their
+    // r32uint atlas is the detail pool, and the cached LUT texture is resolved
+    // by key. A label draw needs a resident detail chunk + a built LUT; if
+    // either is missing it contributes nothing this frame (the intensity image
+    // still shows).
+    const labelInfo = descIndex.labelInfoByMember.get(memberId) ?? null;
+    const isLabel = labelInfo !== null;
+    const labelLut = labelInfo ? ctx.getLabelLUT(labelInfo.labelLutKey) : null;
+
+    // Skip when the layer has nothing renderable. For intensity: no
+    // detail/coarse chunks AND no resident proxy. For labels: no resident
+    // detail chunk or no LUT yet.
+    if (isLabel) {
+      if (!hasDetail || !detailAtlas || !labelLut) continue;
+    } else if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) {
+      continue;
+    }
 
     renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
 
-    renderer.setTierAtlases(
-      hasDetail && detailAtlas ? detailAtlas.texture : null,
-      hasDetail && detailAtlas ? detailAtlas.indirectionBuf : null,
-      hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY] : [0, 0],
-      hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
-      hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
-      hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY] : [0, 0],
-    );
+    if (isLabel && detailAtlas && labelLut) {
+      // Bind the label r32uint atlas + LUT; the shader's label branch reads
+      // the atlas via the detail-tier indirection/slot-dims and the LUT via an
+      // exact integer `textureLoad` (nearest, no sampler). No intensity
+      // colormap/contrast is applied to labels.
+      renderer.setLabelAtlas(
+        detailAtlas.texture,
+        detailAtlas.indirectionBuf,
+        [detailAtlas.slotsX, detailAtlas.slotsY],
+        labelLut,
+      );
+    } else {
+      renderer.setTierAtlases(
+        hasDetail && detailAtlas ? detailAtlas.texture : null,
+        hasDetail && detailAtlas ? detailAtlas.indirectionBuf : null,
+        hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY] : [0, 0],
+        hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
+        hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
+        hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY] : [0, 0],
+      );
 
-    // Colormap from descriptor's CPU mirror; contrast/gamma/opacity are
-    // read by the shader straight from the descriptor.
-    const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
-    const lutTex = ctx.getOrCreateLUT(colormapName);
-    renderer.setColormapTexture(lutTex);
+      // Colormap from descriptor's CPU mirror; contrast/gamma/opacity are
+      // read by the shader straight from the descriptor.
+      const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
+      const lutTex = ctx.getOrCreateLUT(colormapName);
+      renderer.setColormapTexture(lutTex);
+    }
     renderer.setTransform(msg.zoom, msg.cx - ox, msg.cy - oy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
     renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
     const layerEncoder = ctx.device.createCommandEncoder();

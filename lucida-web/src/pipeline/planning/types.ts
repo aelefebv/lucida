@@ -50,6 +50,18 @@ export interface BaseEntitySnapshot {
    */
   layoutPositionVox: [number, number];
   levels: LevelGeometry[];
+  /**
+   * Whether this entity's image is a segmentation **label** overlay (from
+   * `view_query`'s `is_label`). Carried through so the cold-state builder can
+   * flag the descriptor's label branch. Optional (mirrors the wire's optional
+   * `is_label`): absent ⇒ intensity, so consumers test `=== true`.
+   */
+  isLabel?: boolean;
+  /**
+   * Label-relative index (the N-th label image) for a label entity; `undefined`
+   * for intensity. Used downstream to fetch the per-label LUT for tinting.
+   */
+  labelIndex?: number;
 }
 
 /**
