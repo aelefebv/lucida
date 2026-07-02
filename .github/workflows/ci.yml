@@ -57,10 +57,17 @@ jobs:
       - name: Cache cargo build (shared with rust job)
         uses: Swatinem/rust-cache@v2
 
+      # Version is pinned deliberately: `version: latest` makes the action
+      # resolve the tag through an unauthenticated GitHub API call from the
+      # runner, and when that call is rate-limited the action silently falls
+      # back to wasm-pack v0.9.1 (2020), whose generated pkg/package.json
+      # vitest cannot resolve ("Failed to resolve entry for package
+      # lucida-core"). An explicit tag skips the API call entirely.
+      # Bump this when a new wasm-pack release ships.
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: latest
+          version: v0.15.0
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type { CpuCache } from "./fetch/index.ts";
@@ -9,6 +9,29 @@ import type { RequestPlan } from "./planning/index.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
+
+// Every test must leave shared state exactly as it found it, so the file
+// passes in any execution order (vitest `--sequence.shuffle` included).
+// Two channels need explicit cleanup:
+//
+//  - The `vi.doMock` registration for the planning module. It survives the
+//    test that made it, so without `doUnmock` the next test's import would
+//    resolve the mocked module — and `vi.fn` returns an argument that is
+//    already a mock as-is, silently reusing the previous test's spy (call
+//    history included) instead of creating a fresh one.
+//  - Module singletons mutated by tests (`configStore`, `debugStats`).
+//    `vi.resetModules()` in each beforeEach re-evaluates them, but
+//    `configStore` also persists to localStorage when one exists, so it is
+//    rewound through its dedicated testing hook rather than relying on
+//    re-evaluation alone.
+afterEach(async () => {
+  vi.doUnmock("./planning/index.ts");
+  const { configStore } = await import("./planning/configStore.ts");
+  configStore.__resetForTesting();
+  const { debugStats } = await import("../debug/debugStats.ts");
+  debugStats.enabled = false;
+  debugStats.orch = null;
+});
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(entries: Parameters<AssetCatalog["applyInitial"]>[1]["entries"] = []): AssetCatalog {
@@ -209,12 +232,18 @@ describe("epoch caching", () => {
     // Reset modules so we can spy on plan() freshly.
     vi.resetModules();
 
-    const planningModule = await import("./planning/index.ts");
+    // importActual guarantees the spy wraps the real plan() even while a
+    // mock of the module is registered (see the file-level afterEach).
+    const planningModule = await vi.importActual<
+      typeof import("./planning/index.ts")
+    >("./planning/index.ts");
     planSpy = vi.fn(planningModule.plan);
 
     // Mock the planning module's plan function.
     vi.doMock("./planning/index.ts", async () => {
-      const actual = await import("./planning/index.ts");
+      const actual = await vi.importActual<
+        typeof import("./planning/index.ts")
+      >("./planning/index.ts");
       return { ...actual, plan: planSpy };
     });
 
@@ -336,9 +365,10 @@ describe("epoch caching", () => {
   });
 
   it("submits only budget-admitted legacy proxies while preserving detail requests", async () => {
+    // Mutates the debugStats + configStore singletons; the file-level
+    // afterEach rewinds both, even if an assertion below throws.
     const { debugStats } = await import("../debug/debugStats.ts");
     const { configStore } = await import("./planning/configStore.ts");
-    const previousDebugEnabled = debugStats.enabled;
     debugStats.enabled = true;
     debugStats.orch = null;
     configStore.set("coarseDetailEnabled", false);
@@ -362,23 +392,19 @@ describe("epoch caching", () => {
       },
     ]);
 
-    try {
-      orch.planAndFetch(ctx, emptyMinimap);
+    orch.planAndFetch(ctx, emptyMinimap);
 
-      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
-      expect(submitted.requests.length).toBeGreaterThan(0);
-      expect(submitted.proxyRequests).toEqual([]);
-      const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-      expect(cold.desiredProxyKeys).toEqual([]);
-      const orchDebug = debugStats.orch as { proxyResidency?: unknown } | null;
-      expect(orchDebug?.proxyResidency).toMatchObject({
-        desiredProxyCount: 0,
-        skippedProxyCount: 2,
-        admittedBytes: 0,
-      });
-    } finally {
-      debugStats.enabled = previousDebugEnabled;
-    }
+    const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
+    expect(submitted.requests.length).toBeGreaterThan(0);
+    expect(submitted.proxyRequests).toEqual([]);
+    const cold = coldState.mock.calls[0][0] as ColdStateMessage;
+    expect(cold.desiredProxyKeys).toEqual([]);
+    const orchDebug = debugStats.orch as { proxyResidency?: unknown } | null;
+    expect(orchDebug?.proxyResidency).toMatchObject({
+      desiredProxyCount: 0,
+      skippedProxyCount: 2,
+      admittedBytes: 0,
+    });
   });
 
   // A uint32 label over `img-0` with a 4-deep, 2-chunk-Z level: slice mode
@@ -461,11 +487,17 @@ describe("multi-dataset planning", () => {
   beforeEach(async () => {
     vi.resetModules();
 
-    const planningModule = await import("./planning/index.ts");
+    // Same isolation contract as the epoch-caching describe: wrap the
+    // real plan() via importActual so each test gets a brand-new spy.
+    const planningModule = await vi.importActual<
+      typeof import("./planning/index.ts")
+    >("./planning/index.ts");
     planSpy = vi.fn(planningModule.plan);
 
     vi.doMock("./planning/index.ts", async () => {
-      const actual = await import("./planning/index.ts");
+      const actual = await vi.importActual<
+        typeof import("./planning/index.ts")
+      >("./planning/index.ts");
       return { ...actual, plan: planSpy };
     });
 
