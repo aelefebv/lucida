@@ -12,9 +12,18 @@ describe("labelColor", () => {
     expect(labelColor(0)).toEqual([0, 0, 0, 0]);
   });
 
-  it("returns an explicit color exactly when the id is declared", () => {
+  it("honors declared RGB but normalizes alpha to opaque (uniform overlay opacity)", () => {
     const explicit = new Map<number, RGBA>([[7, [10, 20, 30, 200]]]);
-    expect(labelColor(7, explicit)).toEqual([10, 20, 30, 200]);
+    expect(labelColor(7, explicit)).toEqual([10, 20, 30, 255]);
+  });
+
+  it("normalizes a declared SEMI-TRANSPARENT color (alpha<255) to opaque", () => {
+    // Regression: the ISR plate declares cells 1..10 with alpha=128, which
+    // rendered them at ~50% while glasbey-fallback cells stayed opaque — a
+    // patchwork the opacity slider couldn't correct. Alpha is now uniform;
+    // the per-label opacity is the sole transparency control.
+    const explicit = new Map<number, RGBA>([[3, [255, 225, 25, 128]]]);
+    expect(labelColor(3, explicit)).toEqual([255, 225, 25, 255]);
   });
 
   it("honors explicit colors for ids well past the 16-bit range", () => {
@@ -80,12 +89,17 @@ describe("labelColor", () => {
 });
 
 describe("packLabelPalette", () => {
-  it("packs [id, rgba] pairs in the shader's u32 layout", () => {
+  it("packs [id, rgba] pairs in the shader's u32 layout (alpha forced opaque)", () => {
     const packed = packLabelPalette([{ value: 92801, rgba: [10, 20, 30, 200] }]);
     expect(packed.length).toBe(2);
     expect(packed[0]).toBe(92801);
-    // r | g<<8 | b<<16 | a<<24
-    expect(packed[1]).toBe(((10) | (20 << 8) | (30 << 16) | (200 << 24)) >>> 0);
+    // r | g<<8 | b<<16 | a<<24 — declared RGB preserved, alpha normalized to 255
+    expect(packed[1]).toBe(((10) | (20 << 8) | (30 << 16) | (255 << 24)) >>> 0);
+  });
+
+  it("forces a declared partial alpha to opaque so overlay opacity stays uniform", () => {
+    const packed = packLabelPalette([{ value: 5, rgba: [245, 130, 48, 128] }]);
+    expect(packed[1] >>> 24).toBe(255); // alpha byte opaque, not the declared 128
   });
 
   it("caps the palette so the per-fragment shader scan stays bounded", () => {

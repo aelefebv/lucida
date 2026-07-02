@@ -16,7 +16,7 @@
 import { describe, it, expect } from "vitest";
 import sliceSrc from "./slice.wgsl?raw";
 import volumeSrc from "./volume.wgsl?raw";
-import { glasbeyRgb, labelColor } from "./labelColors.ts";
+import { glasbeyRgb, labelColor, packLabelPalette } from "./labelColors.ts";
 
 /** Extract a WGSL free function `fn name(...) { ... }` up to its first
  *  column-0 closing brace (the categorical helpers have no nested column-0
@@ -91,10 +91,6 @@ function wgslLabelColorFor(id: number, palette: number[]): [number, number, numb
   return [r, g, b, 255];
 }
 
-function pack(rgba: [number, number, number, number]): number {
-  return ((rgba[0] & 0xff) | ((rgba[1] & 0xff) << 8) | ((rgba[2] & 0xff) << 16) | ((rgba[3] & 0xff) << 24)) >>> 0;
-}
-
 // --- Tests ---------------------------------------------------------------
 
 describe("label color TS <-> WGSL parity", () => {
@@ -164,16 +160,16 @@ describe("label color TS <-> WGSL parity", () => {
       { value: 2, rgba: [230, 25, 75, 255] },
       { value: 92801, rgba: [10, 20, 30, 200] },
     ];
-    const palette: number[] = [];
+    // Build the palette the SAME way production does (packLabelPalette), so the
+    // shader-port sees exactly what the GPU sees — including the alpha-normalize.
+    const palette: number[] = Array.from(packLabelPalette(declared));
     const map = new Map<number, [number, number, number, number]>();
-    for (const d of declared) {
-      palette.push(d.value >>> 0, pack(d.rgba));
-      map.set(d.value, d.rgba);
-    }
-    // Declared ids render exactly as authored.
+    for (const d of declared) map.set(d.value, d.rgba);
+    // Declared ids render with their authored RGB; alpha is normalized to opaque
+    // (overlay transparency is the uniform layer opacity, not a per-id alpha).
     expect(wgslLabelColorFor(2, palette)).toEqual([230, 25, 75, 255]);
     expect(wgslLabelColorFor(2, palette)).toEqual(labelColor(2, map));
-    expect(wgslLabelColorFor(92801, palette)).toEqual([10, 20, 30, 200]);
+    expect(wgslLabelColorFor(92801, palette)).toEqual([10, 20, 30, 255]);
     expect(wgslLabelColorFor(92801, palette)).toEqual(labelColor(92801, map));
     // Undeclared ids fall back to the hash (matching labelColor).
     for (const id of [1, 3, 999, 70000, 4_294_967_295]) {

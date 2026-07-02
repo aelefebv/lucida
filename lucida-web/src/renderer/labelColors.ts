@@ -95,8 +95,16 @@ export function glasbeyRgb(value: number): [number, number, number] {
  *
  *   - id 0 (background) -> fully transparent.
  *   - id present in `explicit` (the OME `image-label.colors` table) ->
- *     that rgba exactly, so a dataset's declared palette is honored.
+ *     that RGB, so a dataset's declared palette is honored, but ALPHA is
+ *     normalized to opaque (255) — the overlay's transparency is controlled
+ *     uniformly by the per-label opacity, not by a per-id declared alpha.
  *   - otherwise -> the deterministic {@link glasbeyRgb} fallback, opaque.
+ *
+ * Why normalize alpha: some writers author `image-label.colors` with a
+ * partial alpha (e.g. 128). Respecting it per id would render those cells
+ * semi-transparent while glasbey-fallback ids (opaque) stayed solid — a
+ * confusing patchwork the opacity slider can't correct. So alpha is uniform
+ * and the layer's label opacity is the single transparency control.
  *
  * `explicit` keys are the raw integer ids (which may exceed 65535).
  *
@@ -113,7 +121,9 @@ export function labelColor(
   if (value === 0) return [0, 0, 0, 0];
   if (explicit) {
     const declared = explicit.get(value);
-    if (declared) return [declared[0], declared[1], declared[2], declared[3]];
+    // Declared RGB honored; alpha normalized to opaque so overlay
+    // transparency is uniform (layer opacity is the sole control).
+    if (declared) return [declared[0], declared[1], declared[2], 255];
   }
   const [r, g, b] = glasbeyRgb(value);
   return [r, g, b, 255];
@@ -132,7 +142,11 @@ export const MAX_GPU_LABEL_COLORS = 256;
  * Pack a declared palette into the flat `[id0, rgba0, id1, rgba1, ...]`
  * `u32` layout the shader's `labelColorFor` scans, capped at
  * {@link MAX_GPU_LABEL_COLORS} pairs. `rgba` is packed
- * `r | g<<8 | b<<16 | a<<24`. Pure — no GPU.
+ * `r | g<<8 | b<<16 | a<<24`. The declared RGB is preserved; the ALPHA byte
+ * is forced to opaque (255) — matching {@link labelColor} — so a declared
+ * partial alpha never makes some cells semi-transparent while glasbey ids
+ * stay opaque. Overlay transparency is the layer opacity's job, uniformly.
+ * Pure — no GPU.
  */
 export function packLabelPalette(
   colors: ReadonlyArray<{ value: number; rgba: readonly [number, number, number, number] }>,
@@ -143,11 +157,12 @@ export function packLabelPalette(
   for (let i = 0; i < count; i++) {
     const { value, rgba } = colors[i];
     out[2 * i] = value >>> 0;
+    // Alpha normalized to opaque (see doc): overlay opacity is uniform.
     out[2 * i + 1] =
       ((rgba[0] & 0xff) |
         ((rgba[1] & 0xff) << 8) |
         ((rgba[2] & 0xff) << 16) |
-        ((rgba[3] & 0xff) << 24)) >>> 0;
+        (0xff << 24)) >>> 0;
   }
   return out;
 }
