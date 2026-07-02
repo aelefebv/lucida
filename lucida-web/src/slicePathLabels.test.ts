@@ -4,10 +4,10 @@ import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberRosterEntry } from "./pipeline/tickCoordinator.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "./manifestTypes.ts";
 
-function image(id: string, yx: [number, number], scaleYX: [number, number], dtype = "Uint32"): ImageSpec {
+function image(id: string, yx: [number, number], scaleYX: [number, number], dtype = "Uint32", owner = "ent-0"): ImageSpec {
   return {
     image_id: id,
-    owner: "ent-0",
+    owner,
     multiscale: {
       axes: [
         { name: "t", kind: "time" }, { name: "c", kind: "channel" },
@@ -98,5 +98,45 @@ describe("pushLabelLayers", () => {
     const layers: SliceLayerParams[] = [];
     pushLabelLayers(layers, manifest([labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8")]), members);
     expect(layers).toHaveLength(0);
+  });
+
+  it("MAJOR (plate): places a label whose source field is OFF the active roster at its scene position, not the origin", () => {
+    // A plate with labels on two different fields. The near field (D/3/0) is in
+    // the active roster; the far field (M/13/0) is not — it renders as a well
+    // proxy or is off-view, so its field member is absent from `members`.
+    const near = image("plate:image:D/3/0", [340, 348], [1, 1], "Uint32", "plate:field:D/3/0");
+    const far = image("plate:image:M/13/0", [340, 348], [1, 1], "Uint32", "plate:field:M/13/0");
+    const dsm: DatasetManifest = {
+      dataset_id: "plate", name: "plate",
+      kind: { Plate: { rows: ["D", "M"], columns: ["3", "13"], positioning_mode: "Grid", has_stage_positions: false } },
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [near, far],
+      labels: [
+        { name: "cells", source_image_id: "plate:image:D/3/0", image: image("plate:image:D/3/0:label:cells", [85, 87], [4, 4]) },
+        { name: "cells", source_image_id: "plate:image:M/13/0", image: image("plate:image:M/13/0:label:cells", [85, 87], [4, 4]) },
+      ],
+    };
+    // Only the near field is active; the far field's placement must come from
+    // the scene position map (keyed by the source ENTITY id).
+    const roster: MemberRosterEntry[] = [{ imageId: "plate:image:D/3/0", position: [0, 0] }];
+    const memberPositions: Record<string, [number, number]> = {
+      "plate:field:D/3/0": [0, 0],
+      "plate:field:M/13/0": [5000, 6000],
+    };
+    const layers: SliceLayerParams[] = [];
+    pushLabelLayers(
+      layers,
+      dsm,
+      roster,
+      [{ visible: true, opacity: 0.5 }, { visible: true, opacity: 0.5 }],
+      memberPositions,
+    );
+    expect(layers).toHaveLength(2);
+    const d3 = layers.find((l) => l.datasetId === "plate:image:D/3/0:label:cells");
+    const m13 = layers.find((l) => l.datasetId === "plate:image:M/13/0:label:cells");
+    // In-roster label uses its roster position; off-roster label uses the scene
+    // position — NOT [0, 0], which would stack it on the first well (the bug).
+    expect([d3?.offsetX, d3?.offsetY]).toEqual([0, 0]);
+    expect([m13?.offsetX, m13?.offsetY]).toEqual([5000, 6000]);
   });
 });

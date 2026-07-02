@@ -42,6 +42,7 @@ export function pushLabelLayers(
   manifest: DatasetManifest,
   members: MemberRosterEntry[],
   labelSettings?: LabelViewSetting[],
+  memberPositions?: Record<string, [number, number]>,
 ): void {
   for (const resolved of resolveVisibleLabels(manifest, labelSettings)) {
     const { label, source, opacity } = resolved;
@@ -49,9 +50,15 @@ export function pushLabelLayers(
     const labelLevel0 = label.image.multiscale.levels[0];
     const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
     // Fields can be offset within a plate/layout; place the overlay at the
-    // source member's position so it lands on the image it annotates.
+    // source member's position so it lands on the image it annotates. The
+    // source field is frequently ABSENT from the active-set roster — in a plate
+    // a whole well renders as a single proxy, and off-view fields aren't active
+    // at all — so fall back to the scene's authoritative per-member layout
+    // position (keyed by the source ENTITY id, the same space as the roster's
+    // positions). Falling back to the origin instead would stack every
+    // off-roster label on the first well (the bug this repairs).
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
-    const position = sourceMember?.position ?? [0, 0];
+    const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
     layers.push({
       datasetId: label.image.image_id,
       dataW,
@@ -184,8 +191,18 @@ function uploadAndRenderSlice(
     }
     // Categorical label overlays, composited on top of this dataset's
     // intensity layers. Honors the per-label visible set + opacity; never
-    // affects camera/bounds.
-    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings);
+    // affects camera/bounds. A label's source field is often not in the active
+    // roster (plate wells proxy; off-view fields), so hand the scene's full
+    // per-member position map (entity id -> [x, y]) as the placement fallback.
+    let labelMemberPositions: Record<string, [number, number]> | undefined;
+    if (ds.manifest.labels && ds.manifest.labels.length > 0) {
+      try {
+        labelMemberPositions = JSON.parse(scene.member_positions(dsId)) as Record<string, [number, number]>;
+      } catch {
+        labelMemberPositions = undefined;
+      }
+    }
+    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions);
 
     const added = layers.length - layersBefore;
     if (added > 0) passesByDataset[dsId] = added;
