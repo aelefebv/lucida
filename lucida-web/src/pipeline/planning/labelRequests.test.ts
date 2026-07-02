@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { computeLabelChunkRequests, resolveDefaultLabel } from "./labelRequests.ts";
+import {
+  computeLabelChunkRequests,
+  eligibleLabelInfos,
+  resolveDefaultLabel,
+  resolveVisibleLabels,
+} from "./labelRequests.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../../manifestTypes.ts";
 
 function image(id: string, dtype: string, shapeYX: [number, number], scaleYX: [number, number]): ImageSpec {
@@ -258,5 +263,239 @@ describe("computeLabelChunkRequests", () => {
     const manifest = multiLabelManifest([singleLevelLabel("mask8", "Uint8", [512, 512])]);
     expect(resolveDefaultLabel(manifest)).toBeNull();
     expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 })).toEqual([]);
+  });
+});
+
+describe("resolveVisibleLabels", () => {
+  // A small single-level label over the shared source image.
+  function uintLabel(name: string, dtype = "Uint32"): LabelSpec {
+    return {
+      name,
+      source_image_id: "img-0",
+      image: image(`img-0:label:${name}`, dtype, [64, 64], [1, 1]),
+    };
+  }
+  function manifestWithLabels(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0",
+      name: "multi",
+      kind: "Single",
+      entities: [],
+      transforms: [],
+      source_layouts: [],
+      default_layout_id: null,
+      images: [image("img-0", "Uint16", [340, 348], [1, 1])],
+      labels,
+    };
+  }
+
+  it("no labels → empty set", () => {
+    expect(resolveVisibleLabels(manifestWithLabel(), undefined)).toEqual([]);
+  });
+
+  it("undefined settings → the first eligible label only, at the default 0.5", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const out = resolveVisibleLabels(m, undefined);
+    expect(out.map((r) => r.name)).toEqual(["a"]);
+    expect(out[0].sourceImageId).toBe("img-0");
+    expect(out[0].opacity).toBe(0.5);
+    // Carries what render/fetch need.
+    expect(out[0].label.image.image_id).toBe("img-0:label:a");
+    expect(out[0].levelIdx).toBe(0);
+  });
+
+  it("empty settings → the first eligible label only (unchanged fallback)", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    expect(resolveVisibleLabels(m, []).map((r) => r.name)).toEqual(["a"]);
+  });
+
+  it("returns exactly the visible set, each carrying its per-label opacity", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b"), uintLabel("c")]);
+    const out = resolveVisibleLabels(m, [
+      { visible: true, opacity: 0.3 },
+      { visible: false, opacity: 0.5 },
+      { visible: true, opacity: 0.8 },
+    ]);
+    expect(out.map((r) => r.name)).toEqual(["a", "c"]);
+    expect(out.map((r) => r.opacity)).toEqual([0.3, 0.8]);
+  });
+
+  it("with settings, shows ALL visible labels (generalizes past the single default)", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const out = resolveVisibleLabels(m, [
+      { visible: true, opacity: 0.5 },
+      { visible: true, opacity: 0.5 },
+    ]);
+    expect(out.map((r) => r.name)).toEqual(["a", "b"]);
+  });
+
+  it("still skips a non-uint32 label even when it is marked visible", () => {
+    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("seg32", "Uint32")]);
+    const out = resolveVisibleLabels(m, [
+      { visible: true, opacity: 0.5 },
+      { visible: true, opacity: 0.7 },
+    ]);
+    // The uint8 label is ineligible and dropped; only the uint32 sibling remains,
+    // keeping its own per-label opacity (index-aligned to the manifest).
+    expect(out.map((r) => r.name)).toEqual(["seg32"]);
+    expect(out[0].opacity).toBe(0.7);
+  });
+
+  it("hiding the only eligible label yields an empty set (nothing drawn/fetched)", () => {
+    const m = manifestWithLabels([uintLabel("a")]);
+    expect(resolveVisibleLabels(m, [{ visible: false, opacity: 0.5 }])).toEqual([]);
+  });
+
+  it("clamps opacity into [0,1] and defaults a non-finite value", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const out = resolveVisibleLabels(m, [
+      { visible: true, opacity: 5 },
+      { visible: true, opacity: Number.NaN },
+    ]);
+    expect(out[0].opacity).toBe(1);
+    expect(out[1].opacity).toBe(0.5);
+  });
+
+  it("fetch honors the visible set: a hidden label is not fetched, a visible one is", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const reqs = computeLabelChunkRequests({
+      datasetId: "ds-0",
+      manifest: m,
+      t: 0,
+      z: 0,
+      labelSettings: [
+        { visible: false, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+      ],
+    });
+    const ids = new Set(reqs.map((r) => r.imageId));
+    expect(ids.has("img-0:label:a")).toBe(false);
+    expect(ids.has("img-0:label:b")).toBe(true);
+  });
+
+  it("fetch spans EVERY visible label when several are on", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const reqs = computeLabelChunkRequests({
+      datasetId: "ds-0",
+      manifest: m,
+      t: 0,
+      z: 0,
+      labelSettings: [
+        { visible: true, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+      ],
+    });
+    const ids = new Set(reqs.map((r) => r.imageId));
+    expect(ids.has("img-0:label:a")).toBe(true);
+    expect(ids.has("img-0:label:b")).toBe(true);
+  });
+
+  it("the seeded default (first visible, rest hidden) resolves to exactly one label", () => {
+    // Mirrors the Rust `seeded_for` seed: index 0 visible, the rest hidden, all
+    // at 0.5. One clean overlay on open — no fetch/pool fan-out.
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b"), uintLabel("c")]);
+    const seed = [
+      { visible: true, opacity: 0.5 },
+      { visible: false, opacity: 0.5 },
+      { visible: false, opacity: 0.5 },
+    ];
+    const out = resolveVisibleLabels(m, seed);
+    expect(out.map((r) => r.name)).toEqual(["a"]);
+    expect(out[0].opacity).toBe(0.5);
+  });
+
+  it("falls back to the first eligible when the visible-marked label is ineligible", () => {
+    // Settings mark index 0 (uint8, undrawable) visible and index 1 (uint32,
+    // drawable) hidden — the seed picked an undrawable label. Rather than open
+    // blank, resolve the first eligible label. Guards the non-uint32-first
+    // (and, conceptually, footprint/level-ineligible) blank-open regression.
+    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("cells", "Uint32")]);
+    const out = resolveVisibleLabels(m, [
+      { visible: true, opacity: 0.5 },
+      { visible: false, opacity: 0.5 },
+    ]);
+    expect(out.map((r) => r.name)).toEqual(["cells"]);
+
+    // Fetch agrees — it requests exactly the fallback label's chunks.
+    const reqs = computeLabelChunkRequests({
+      datasetId: "ds-0",
+      manifest: m,
+      t: 0,
+      z: 0,
+      labelSettings: [
+        { visible: true, opacity: 0.5 },
+        { visible: false, opacity: 0.5 },
+      ],
+    });
+    const ids = new Set(reqs.map((r) => r.imageId));
+    expect(ids.has("img-0:label:cells")).toBe(true);
+    expect(ids.has("img-0:label:mask8")).toBe(false);
+  });
+
+  it("honors an explicit hide-all: no fallback when NOTHING is marked visible", () => {
+    // Both eligible, both hidden by the user → nothing drawn. The blank-open
+    // fallback must NOT re-show a label the user deliberately hid.
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const out = resolveVisibleLabels(m, [
+      { visible: false, opacity: 0.5 },
+      { visible: false, opacity: 0.5 },
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it("no fallback when there is no eligible label at all (all uint8)", () => {
+    const m = manifestWithLabels([uintLabel("m8a", "Uint8"), uintLabel("m8b", "Uint8")]);
+    expect(
+      resolveVisibleLabels(m, [
+        { visible: true, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("eligibleLabelInfos", () => {
+  function uintLabel(name: string, dtype = "Uint32"): LabelSpec {
+    return {
+      name,
+      source_image_id: "img-0",
+      image: image(`img-0:label:${name}`, dtype, [64, 64], [1, 1]),
+    };
+  }
+  function manifestWithLabels(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0",
+      name: "multi",
+      kind: "Single",
+      entities: [],
+      transforms: [],
+      source_layouts: [],
+      default_layout_id: null,
+      images: [image("img-0", "Uint16", [340, 348], [1, 1])],
+      labels,
+    };
+  }
+
+  it("returns every drawable label with its manifest index + name", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    expect(eligibleLabelInfos(m)).toEqual([
+      { index: 0, name: "a" },
+      { index: 1, name: "b" },
+    ]);
+  });
+
+  it("omits a non-uint32 label and PRESERVES the manifest index of the rest", () => {
+    // [uint16, uint32, uint16] → only index 1 is drawable, and it keeps index 1
+    // (so its control targets the right label_settings entry).
+    const m = manifestWithLabels([
+      uintLabel("nuclei", "Uint16"),
+      uintLabel("cells", "Uint32"),
+      uintLabel("membrane", "Uint16"),
+    ]);
+    expect(eligibleLabelInfos(m)).toEqual([{ index: 1, name: "cells" }]);
+  });
+
+  it("returns [] for a manifest with no labels", () => {
+    expect(eligibleLabelInfos(manifestWithLabel())).toEqual([]);
   });
 });

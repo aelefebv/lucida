@@ -90,15 +90,34 @@ impl WasmScene {
         self.inner.document = doc;
         // Rebuild derived state for all content graphs.
         self.inner.rebuild_derived();
-        // Ensure dataset_order and dataset_settings are consistent.
-        for id in self.inner.document.manifests.keys() {
-            if !self.inner.dataset_order.contains(id) {
+        // Ensure dataset_order and dataset_settings are consistent. Seed the
+        // COMPLETE per-channel + per-label settings from each restored manifest
+        // (via the same `seeded_for` the `DatasetOpened` apply path uses) rather
+        // than a bare `Default` — the empty default has NO channel/label entries,
+        // which would leave the layer panel's per-channel and per-label controls
+        // unable to render on a document restore. `or_insert_with` keeps any
+        // existing (locally adjusted) settings untouched across a re-load.
+        for id in self
+            .inner
+            .document
+            .manifests
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if !self.inner.dataset_order.contains(&id) {
                 self.inner.dataset_order.push(id.clone());
             }
-            self.inner
-                .dataset_settings
-                .entry(id.clone())
-                .or_insert_with(Default::default);
+            if !self.inner.dataset_settings.contains_key(&id) {
+                let seeded = self
+                    .inner
+                    .document
+                    .manifests
+                    .get(&id)
+                    .map(DatasetDisplaySettings::seeded_for)
+                    .unwrap_or_default();
+                self.inner.dataset_settings.insert(id, seeded);
+            }
         }
         // Remove stale entries for datasets no longer in the document.
         let dataset_ids: std::collections::HashSet<&DatasetId> =

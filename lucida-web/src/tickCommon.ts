@@ -18,6 +18,12 @@ export interface ChannelSettingsJS {
   gamma: number;
 }
 
+/** Per-label overlay settings (mirrors `lucida_core::scene::LabelSettings`). */
+export interface LabelSettingsJS {
+  visible: boolean;
+  opacity: number;
+}
+
 export interface DatasetSettings {
   visible: boolean;
   opacity: number;
@@ -27,6 +33,9 @@ export interface DatasetSettings {
   blend_mode: string;
   render_mode?: string;
   channel_settings: ChannelSettingsJS[];
+  /** Per-label visibility/opacity, positional by manifest label order. Absent
+   *  on settings from snapshots that predate per-label controls. */
+  label_settings?: LabelSettingsJS[];
   channel_blend_mode: string;
   detail_level_override?: number | null;
 }

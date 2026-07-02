@@ -1148,6 +1148,8 @@ function App({
         onChannelSetContrast={layers.handleChannelSetContrast}
         onChannelSetGamma={layers.handleChannelSetGamma}
         onChannelSetBlendMode={layers.handleChannelSetBlendMode}
+        onLabelSetVisible={layers.handleLabelSetVisible}
+        onLabelSetOpacity={layers.handleLabelSetOpacity}
         onAddLayer={() => setShowFileBrowser(true)}
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}

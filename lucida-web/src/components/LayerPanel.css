@@ -218,6 +218,56 @@
   max-width: none;
 }
 
+/* Labels subsection — per-label overlay controls (eye toggle + opacity),
+   mirroring the channel sublayer look. */
+.layer-labels-section {
+  margin-top: 0.25rem;
+  border-top: 1px solid #333;
+  padding-top: 0.25rem;
+}
+
+.label-sublayer {
+  border-left: 2px solid #444;
+  padding-left: 0.5rem;
+  margin-left: 0.25rem;
+}
+
+.label-sublayer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  padding: 0.2rem 0;
+}
+
+.label-name {
+  flex: 1;
+  min-width: 2rem;
+  font-size: 0.75rem;
+  color: #aaa;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.label-opacity-slider {
+  width: 60px;
+  flex-shrink: 0;
+}
+
+/* Discoverability count pill on a layer row that carries segmentation labels. */
+.layer-label-badge {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+  border-radius: 8px;
+  background: #1f6feb;
+  color: #fff;
+  white-space: nowrap;
+}
+
 /* Per-channel collapse-all / expand-all controls (sits above the channel list). */
 .channel-collapse-controls {
   gap: 6px;

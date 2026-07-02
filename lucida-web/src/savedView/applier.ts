@@ -34,6 +34,7 @@ import type {
   LayoutId,
   SavedView,
   ChannelSettings,
+  LabelSettings,
 } from "./types.ts";
 
 // Public types
@@ -635,10 +636,27 @@ export function channelDisplayCommands(
   ];
 }
 
+/** The per-label overlay display commands for one label — visibility + opacity.
+ * A label's visible/opacity is display state scoped to a single dataset's
+ * rendering (it never hides the DATASET or reframes the camera), so — like
+ * `channelDisplayCommands` — it rides both the heavy applier and the light
+ * restore, letting a restored view reproduce the author's visible-label set. */
+export function labelDisplayCommands(
+  datasetId: string,
+  label: number,
+  ls: LabelSettings,
+): Array<Record<string, unknown>> {
+  return [
+    { type: "set_label_visible", dataset_id: datasetId, label, visible: ls.visible },
+    { type: "set_label_opacity", dataset_id: datasetId, label, opacity: ls.opacity },
+  ];
+}
+
 /** The per-dataset DISPLAY commands (contrast, gamma, blend, render mode,
- * detail level, and every channel's display) for one dataset — i.e. everything
- * `applyDatasetSettings` emits EXCEPT `set_dataset_visible` /
- * `set_dataset_opacity`. Shared by the heavy applier and the light restore. */
+ * detail level, every channel's display, and every label's overlay) for one
+ * dataset — i.e. everything `applyDatasetSettings` emits EXCEPT
+ * `set_dataset_visible` / `set_dataset_opacity`. Shared by the heavy applier and
+ * the light restore. */
 export function datasetDisplayCommands(
   id: string,
   s: DatasetDisplaySettings,
@@ -662,6 +680,13 @@ export function datasetDisplayCommands(
   if (s.channel_settings) {
     s.channel_settings.forEach((c, i) => {
       for (const cmd of channelDisplayCommands(id, i, c)) cmds.push(cmd);
+    });
+  }
+  // Per-label overlay state — restored so a saved view reproduces the visible
+  // label set + opacities (a hidden label stays hidden on restore).
+  if (s.label_settings) {
+    s.label_settings.forEach((ls, i) => {
+      for (const cmd of labelDisplayCommands(id, i, ls)) cmds.push(cmd);
     });
   }
   return cmds;

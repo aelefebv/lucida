@@ -447,6 +447,9 @@ export class TickCoordinator {
               manifest: ctx.datasets.get(dsId)!.manifest,
               t: selection.t,
               z: selection.z,
+              // Fetch only the labels the render path will draw (visible +
+              // eligible), so a hidden label is neither fetched nor drawn.
+              labelSettings: dsSettings?.label_settings,
             })
           : [];
       const requestsWithLabels =

@@ -376,6 +376,21 @@ pub enum ViewportCommand {
         dataset_id: String,
         blend_mode: BlendMode,
     },
+    // Per-label overlay controls. `label` indexes the dataset's attached labels
+    // in manifest (OME `labels`) order. Both are local-only per-client display
+    // ops (exactly like the per-channel commands): applied locally, emitted as
+    // presence, persisted in saved views, and broadcast to followers via the
+    // selection epoch. Neither ever reframes the camera.
+    SetLabelVisible {
+        dataset_id: String,
+        label: u32,
+        visible: bool,
+    },
+    SetLabelOpacity {
+        dataset_id: String,
+        label: u32,
+        opacity: f32,
+    },
 }
 
 /// Wrapper enum for serde compatibility. Deserializes from the same
@@ -434,7 +449,9 @@ impl Scene {
                             self.dataset_order.push(dataset_id.clone());
                         }
 
-                        // Channel count from first image's C dimension
+                        // Channel count from first image's C dimension (kept for
+                        // the structured open log below; the settings themselves
+                        // are seeded from the manifest by `seeded_for`).
                         let channel_count = event
                             .manifest
                             .images()
@@ -443,17 +460,16 @@ impl Scene {
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
 
-                        // Display settings
+                        // Display settings — seed the COMPLETE per-channel +
+                        // per-label settings from the manifest via the SAME
+                        // constructor `load_document` uses on restore, so the
+                        // layer panel + render path always find full-length
+                        // `channel_settings` / `label_settings` regardless of how
+                        // the dataset entered the scene (fresh open vs. restore).
                         self.dataset_settings
                             .entry(dataset_id.clone())
-                            .or_insert_with(|| crate::scene::DatasetDisplaySettings {
-                                channel_settings: (0..channel_count)
-                                    .map(|i| crate::scene::ChannelSettings {
-                                        colormap: Colormap::default_for_channel(i),
-                                        ..Default::default()
-                                    })
-                                    .collect(),
-                                ..Default::default()
+                            .or_insert_with(|| {
+                                crate::scene::DatasetDisplaySettings::seeded_for(&event.manifest)
                             });
 
                         // Build derived state
@@ -803,7 +819,55 @@ impl Scene {
                 }
                 self.epochs.selection += 1;
             }
+            ViewportCommand::SetLabelVisible {
+                dataset_id,
+                label,
+                visible,
+            } => {
+                let ds = DatasetId(dataset_id);
+                // Bound the index to the dataset's actual label count so a
+                // stray/huge `label` (e.g. from a malformed non-web client) can
+                // never `ensure_label`-grow the vec unboundedly.
+                if self.label_index_in_range(&ds, label)
+                    && let Some(s) = self.dataset_settings.get_mut(&ds)
+                {
+                    s.ensure_label(label as usize).visible = visible;
+                }
+                self.epochs.selection += 1;
+            }
+            ViewportCommand::SetLabelOpacity {
+                dataset_id,
+                label,
+                opacity,
+            } => {
+                let ds = DatasetId(dataset_id);
+                // Clamp to a finite [0, 1]: a NaN/Inf opacity would serialize to
+                // `null` and break deserialize of the saved-view/presence
+                // snapshot it rides in. Matches the web `normalizeLabelOpacity`.
+                let opacity = if opacity.is_finite() {
+                    opacity.clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                if self.label_index_in_range(&ds, label)
+                    && let Some(s) = self.dataset_settings.get_mut(&ds)
+                {
+                    s.ensure_label(label as usize).opacity = opacity;
+                }
+                self.epochs.selection += 1;
+            }
         }
+    }
+
+    /// Whether `label` is a valid label index for `dataset_id` — i.e. strictly
+    /// less than the dataset's attached-label count. Guards the per-label apply
+    /// arms so an out-of-range index is ignored rather than growing the settings
+    /// vec. `false` for an unknown dataset (no manifest, no labels).
+    fn label_index_in_range(&self, dataset_id: &DatasetId, label: u32) -> bool {
+        self.document
+            .manifests
+            .get(dataset_id)
+            .is_some_and(|m| (label as usize) < m.label_specs().len())
     }
 
     fn clamp_detail_level_override(&self, dataset_id: &DatasetId, requested: u32) -> Option<u32> {
@@ -1804,6 +1868,319 @@ mod tests {
         }
     }
 
+    // --- Per-label overlay command tests (mirror the set_channel_* tests) ---
+
+    #[test]
+    fn set_label_visible_round_trips() {
+        let cmd = ViewportCommand::SetLabelVisible {
+            dataset_id: "ds1".into(),
+            label: 2,
+            visible: false,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        // The exact wire shape the web client emits (snake_case tag).
+        assert_eq!(
+            json,
+            r#"{"type":"set_label_visible","dataset_id":"ds1","label":2,"visible":false}"#
+        );
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetLabelVisible {
+                dataset_id,
+                label,
+                visible,
+            } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(label, 2);
+                assert!(!visible);
+            }
+            _ => panic!("expected SetLabelVisible"),
+        }
+    }
+
+    #[test]
+    fn set_label_opacity_round_trips() {
+        let cmd = ViewportCommand::SetLabelOpacity {
+            dataset_id: "ds1".into(),
+            label: 1,
+            opacity: 0.25,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_label_opacity\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetLabelOpacity {
+                dataset_id,
+                label,
+                opacity,
+            } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(label, 1);
+                assert_eq!(opacity, 0.25);
+            }
+            _ => panic!("expected SetLabelOpacity"),
+        }
+    }
+
+    #[test]
+    fn dataset_opened_seeds_label_settings_first_visible() {
+        let mut scene = Scene::new([800, 600]);
+        // All-uint32 labels: the first DRAWABLE label is index 0.
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        // One settings entry per attached label, seeded on open.
+        assert_eq!(ls.len(), 3);
+        // Only the first drawable label is visible by default (one clean overlay
+        // on open, no fetch/pool fan-out, no muddy stack); the rest start hidden.
+        // All at opacity 0.5.
+        assert!(ls[0].visible);
+        assert!(!ls[1].visible);
+        assert!(!ls[2].visible);
+        for l in ls {
+            assert_eq!(l.opacity, 0.5);
+        }
+    }
+
+    #[test]
+    fn seeded_for_marks_only_first_label_visible() {
+        // The shared seeding constructor (used by BOTH the DatasetOpened apply
+        // path and the document-restore path) produces complete channel + label
+        // settings, with the first drawable (uint32) label visible.
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 2, 3);
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        // Channels seeded full-length from the C dimension.
+        assert_eq!(s.channel_settings.len(), 2);
+        // Labels: one entry each, first visible, rest hidden, all at 0.5.
+        assert_eq!(s.label_settings.len(), 3);
+        assert!(s.label_settings[0].visible);
+        assert!(!s.label_settings[1].visible);
+        assert!(!s.label_settings[2].visible);
+        assert!(s.label_settings.iter().all(|l| l.opacity == 0.5));
+    }
+
+    #[test]
+    fn seeded_for_picks_first_uint32_label_over_an_earlier_non_uint32() {
+        // A uint16 mask sorts first but the render path can only draw uint32, so
+        // seeding index 0 visible would open BLANK. The first uint32 label
+        // (index 1) is the one shown instead — regression guard for a non-
+        // uint32-first dataset.
+        let reg = test_helpers::make_dataset_opened_with_label_dtypes(
+            "ds1",
+            "test",
+            1,
+            &[
+                lucida_content::DataType::Uint16,
+                lucida_content::DataType::Uint32,
+            ],
+        );
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings.len(), 2);
+        assert!(!s.label_settings[0].visible); // uint16 — undrawable, hidden
+        assert!(s.label_settings[1].visible); // uint32 — drawable, shown
+    }
+
+    #[test]
+    fn seeded_for_hides_all_labels_when_none_are_uint32() {
+        // No drawable label → none visible (nothing can render); the layer
+        // panel's count badge still surfaces that labels exist.
+        let reg = test_helpers::make_dataset_opened_with_label_dtypes(
+            "ds1",
+            "test",
+            1,
+            &[
+                lucida_content::DataType::Uint16,
+                lucida_content::DataType::Uint8,
+            ],
+        );
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings.len(), 2);
+        assert!(s.label_settings.iter().all(|l| !l.visible));
+    }
+
+    #[test]
+    fn dataset_opened_seeds_no_label_settings_for_label_less_dataset() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        assert!(scene.dataset_settings[&ds_id].label_settings.is_empty());
+    }
+
+    #[test]
+    fn apply_set_label_visible_updates_settings() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        // Label 1 starts hidden (only the first label is visible by default).
+        assert!(!scene.dataset_settings[&ds_id].label_settings[1].visible);
+        // Reveal it.
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 1,
+                visible: true,
+            }
+            .into(),
+        );
+        assert!(scene.dataset_settings[&ds_id].label_settings[1].visible);
+        // And hide it again.
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 1,
+                visible: false,
+            }
+            .into(),
+        );
+        assert!(!scene.dataset_settings[&ds_id].label_settings[1].visible);
+    }
+
+    #[test]
+    fn apply_set_label_opacity_updates_settings() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        assert_eq!(
+            scene.dataset_settings[&ds_id].label_settings[0].opacity,
+            0.5
+        );
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: 0.2,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&ds_id].label_settings[0].opacity,
+            0.2
+        );
+    }
+
+    #[test]
+    fn apply_set_label_ignores_out_of_range_index() {
+        // A label index past the dataset's real label count is ignored — it must
+        // NOT `ensure_label`-grow the vec (a huge/stray index can't balloon
+        // memory), and a label-less dataset accepts no per-label edits at all.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        assert_eq!(scene.dataset_settings[&ds_id].label_settings.len(), 2);
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 99,
+                visible: true,
+            }
+            .into(),
+        );
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 1_000_000,
+                opacity: 0.9,
+            }
+            .into(),
+        );
+        // Length unchanged — both out-of-range indices were ignored.
+        assert_eq!(scene.dataset_settings[&ds_id].label_settings.len(), 2);
+
+        // A label-less dataset likewise accepts no per-label edit (stays empty).
+        let reg2 = test_helpers::make_dataset_opened("ds2", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg2).into());
+        let ds2 = DatasetId("ds2".into());
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds2".into(),
+                label: 0,
+                visible: true,
+            }
+            .into(),
+        );
+        assert!(scene.dataset_settings[&ds2].label_settings.is_empty());
+    }
+
+    #[test]
+    fn apply_set_label_opacity_clamps_to_finite_unit_range() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        let opacity_of = |scene: &Scene| scene.dataset_settings[&ds_id].label_settings[0].opacity;
+
+        // Above 1 clamps to 1; below 0 clamps to 0.
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: 5.0,
+            }
+            .into(),
+        );
+        assert_eq!(opacity_of(&scene), 1.0);
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: -2.0,
+            }
+            .into(),
+        );
+        assert_eq!(opacity_of(&scene), 0.0);
+        // NaN / Inf fall back to the default 0.5 (never stored non-finite, so the
+        // saved-view/presence snapshot never serializes a `null` opacity).
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: f32::NAN,
+            }
+            .into(),
+        );
+        assert_eq!(opacity_of(&scene), 0.5);
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: 0,
+                opacity: f32::INFINITY,
+            }
+            .into(),
+        );
+        assert_eq!(opacity_of(&scene), 0.5);
+    }
+
+    #[test]
+    fn set_label_visible_bumps_only_selection_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let selection_before = scene.epochs.selection;
+        let view_before = scene.epochs.view;
+        let content_before = scene.epochs.content;
+        let layout_before = scene.epochs.layout;
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 0,
+                visible: false,
+            }
+            .into(),
+        );
+        // A per-label toggle is view-state only: it bumps selection (so the
+        // overlay re-resolves) and nothing else — in particular it never
+        // reframes the camera (view epoch) or touches content/layout.
+        assert_eq!(scene.epochs.selection, selection_before + 1);
+        assert_eq!(scene.epochs.view, view_before);
+        assert_eq!(scene.epochs.content, content_before);
+        assert_eq!(scene.epochs.layout, layout_before);
+    }
+
     // --- Epoch tests ---
 
     #[test]
@@ -2072,6 +2449,9 @@ mod tests {
         }"#;
         let settings: crate::scene::DatasetDisplaySettings = serde_json::from_str(json).unwrap();
         assert!(settings.channel_settings.is_empty());
+        // A snapshot persisted before per-label controls carries no
+        // `label_settings` key and must deserialize as an empty Vec (additive).
+        assert!(settings.label_settings.is_empty());
         assert_eq!(settings.detail_level_override, None);
         assert_eq!(
             settings.channel_blend_mode,
