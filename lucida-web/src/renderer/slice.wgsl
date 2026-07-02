@@ -215,6 +215,64 @@ fn sampleLabel2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   return textureLoad(labelTex, atlasCoord, 0).r;
 }
 
+// In-shader port of core `label_lut::glasbey_rgba` (see
+// `lucida-core/src/scene/label_lut.rs`) for label ids at or beyond the 65536-entry
+// LUT. Core bakes the SAME deterministic "glasbey-like" colour into LUT slots
+// `[0,65536)` in f64; here we reproduce its exact formula for ids `>= 65536`
+// (which the LUT cannot hold) so a label's colour is continuous whether it is
+// read from the LUT (`< 65536`) or computed here (`>= 65536`).
+//
+// The formula is a golden-ratio hue walk: `hue = frac(value * φ⁻¹ + 0.5)`, then
+// HSV→RGB at fixed saturation 0.65 and a parity brightness dither (0.98 for odd
+// ids, 0.88 for even). Core computes `value * φ⁻¹` in f64; WGSL has no f64, and a
+// naive f32 `f32(value) * φ⁻¹` loses ALL fractional precision for large ids (the
+// integer part swamps the f32 mantissa), giving the wrong hue. So we reduce
+// modulo 1 in a precision-safe way: split `value` into its four bytes and weight
+// each by `frac(256^k · φ⁻¹)` — pre-reduced constants below. Every partial product
+// stays below 256 in magnitude, where f32 keeps ~15 fractional bits, so
+// `frac(Σ bₖ·wₖ + 0.5)` matches core's f64 `frac(value·φ⁻¹ + 0.5)` to within one
+// 8-bit channel unit across the entire u32 range (exact for the ids that matter).
+fn glasbey_wgsl(value: u32) -> vec3<f32> {
+  // wₖ = frac(256^k · φ⁻¹), φ⁻¹ = 0.6180339887498949. Full-precision decimals so
+  // the literal round-trips to the exact f32 the port was validated against.
+  let w0 = 0.61803400516510010; // frac(1      · φ⁻¹)
+  let w1 = 0.21670112013816833; // frac(256    · φ⁻¹)
+  let w2 = 0.47548672556877136; // frac(65536  · φ⁻¹)
+  let w3 = 0.72459858655929565; // frac(2^24   · φ⁻¹)
+  let b0 = f32(value & 0xFFu);
+  let b1 = f32((value >> 8u) & 0xFFu);
+  let b2 = f32((value >> 16u) & 0xFFu);
+  let b3 = f32((value >> 24u) & 0xFFu);
+  // The +0.5 offset matches core (keeps value 1 off pure red). fract() reduces
+  // the accumulated hue into [0,1) exactly as core's `.fract()`.
+  let sum = b0 * w0 + b1 * w1 + b2 * w2 + b3 * w3 + 0.5;
+  let hue = fract(sum);
+
+  // Fixed saturation; brightness dithers by id parity (matches core).
+  let s = 0.65;
+  let v = select(0.88, 0.98, (value & 1u) == 1u);
+
+  // Standard six-sector HSV→RGB (core `hsv_to_rgb`).
+  let h6 = fract(hue) * 6.0;
+  let sector = i32(floor(h6));
+  let f = h6 - floor(h6);
+  let p = v * (1.0 - s);
+  let q = v * (1.0 - s * f);
+  let t = v * (1.0 - s * (1.0 - f));
+  var rgb = vec3<f32>(v, p, q);
+  switch (sector) {
+    case 0: { rgb = vec3<f32>(v, t, p); }
+    case 1: { rgb = vec3<f32>(q, v, p); }
+    case 2: { rgb = vec3<f32>(p, v, t); }
+    case 3: { rgb = vec3<f32>(p, q, v); }
+    case 4: { rgb = vec3<f32>(t, p, v); }
+    default: { rgb = vec3<f32>(v, p, q); }
+  }
+  // Core rounds each channel to u8 then the web divides by 255; matching that
+  // (round, /255) keeps the shader-computed colour identical to the LUT-baked one.
+  return round(rgb * 255.0) / 255.0;
+}
+
 fn sampleCoarse2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   if (source.valid == 0u || u.coarseAtlasSlotDims.x == 0u || u.coarseAtlasSlotDims.y == 0u) {
     return 0xFFFFFFFFu;
@@ -291,12 +349,20 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     if (labelVal == 0xFFFFFFFFu || labelVal == 0u) {
       return vec4f(0.0, 0.0, 0.0, 0.0);
     }
-    // Exact integer LUT lookup, masked to the table size (65536). The LUT is a
-    // 256×256 texture holding the flat 65536-entry table row-major, so entry
-    // `idx` lives at (idx & 255, idx >> 8). No sampler, no interpolation —
-    // adjacent ids keep their distinct colours.
-    let idx = labelVal & 0xFFFFu;
-    let rgb = textureLoad(labelLutTex, vec2i(i32(idx & 255u), i32(idx >> 8u)), 0).rgb;
+    // Full u32 id → colour, in two ranges so large ids are honoured (no
+    // truncation): the 256×256 LUT holds the flat 65536-entry table row-major
+    // (entry `idx` at (idx & 255, idx >> 8), no sampler/interpolation, explicit
+    // `image-label.colors` over a glasbey fill) for `idx < 65536`; ids the LUT
+    // cannot hold (`>= 65536`) get the SAME glasbey colour computed in-shader.
+    // Previously this masked the id to its low 16 bits before the lookup,
+    // collapsing e.g. 70000→4464 and any multiple of 65536→0 (transparent) —
+    // the defect this fixes.
+    var rgb: vec3<f32>;
+    if (labelVal < 65536u) {
+      rgb = textureLoad(labelLutTex, vec2i(i32(labelVal & 255u), i32(labelVal >> 8u)), 0).rgb;
+    } else {
+      rgb = glasbey_wgsl(labelVal);
+    }
     // Premultiplied over-compositing: colour scaled by opacity, alpha =
     // opacity, so the compositor blends the tint onto the intensity image.
     return vec4f(rgb * overlayOpacity, overlayOpacity);

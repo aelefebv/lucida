@@ -2,10 +2,14 @@
 //!
 //! A label image stores an integer id per voxel; the renderer never decodes
 //! colours itself. Instead the core bakes a flat `rgba8` lookup table here and
-//! the web uploads it verbatim as a `65536×1` texture, indexing it by the
-//! (masked) voxel value. Keeping colour choice in one deterministic Rust
-//! function means every surface (2D slice, future 3D, minimap, tests) tints a
-//! given label id identically, and the web stays a dumb texture uploader.
+//! the web uploads it verbatim as a `256×256` texture (the flat 65536-entry
+//! table laid out row-major), reading entry `v` at `(v & 255, v >> 8)` for
+//! `v < 65536`; ids `>= 65536` — which the table can't hold — get the same
+//! deterministic glasbey colour recomputed in-shader, so no id is ever
+//! truncated. Keeping colour choice in one deterministic Rust function means
+//! every surface (2D slice, 3D volume, minimap, tests) tints a given label id
+//! identically, and the web stays a thin texture uploader (plus the in-shader
+//! glasbey mirror for the ids past the table).
 //!
 //! Two colour sources compose, in priority order:
 //!
@@ -23,17 +27,18 @@
 use lucida_content::LabelColor;
 use serde::{Deserialize, Serialize};
 
-/// Number of entries the label LUT covers, i.e. `[0, CAP)`. A label voxel value
-/// `v` indexes the LUT at `v & (CAP - 1)` (the web masks with `0xFFFF`), so the
-/// table must be exactly this wide for the mask to be a no-op on in-range ids
-/// and a safe wrap on the rare out-of-range one. 65536 = every distinct value a
-/// 16-bit mask can produce.
+/// Number of entries the label LUT covers, i.e. `[0, CAP)`. The web looks a
+/// label voxel value `v < CAP` up directly (no masking); ids `>= CAP`, which
+/// the table can't hold, are coloured by the same deterministic [`glasbey_rgba`]
+/// walk recomputed in-shader, so no id is truncated to fit. 65536 = a full
+/// 256×256 texture and every distinct value a 16-bit id can take.
 pub const LABEL_LUT_CAP: u32 = 65536;
 
 /// A flat `rgba8` lookup table for a label overlay: `CAP` entries of 4 bytes
-/// each, laid out `[r, g, b, a, r, g, b, a, …]` so it uploads directly as an
-/// `rgba8unorm` texture of width [`width`](Self::width) (== [`LABEL_LUT_CAP`])
-/// and height 1.
+/// each, laid out `[r, g, b, a, r, g, b, a, …]`. The web reshapes these
+/// [`width`](Self::width) (== [`LABEL_LUT_CAP`]) entries row-major into a
+/// `256×256` `rgba8unorm` texture on upload (a flat `65536×1` texture would
+/// exceed the GPU's max 2D texture dimension).
 ///
 /// Built by [`crate::scene::Scene::label_lut`]; `rgba.len() == width * 4`.
 ///
