@@ -115,6 +115,25 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.memberToDataset.set(memberId, msg.datasetId);
   }
 
+  // 2b. Record which member(s) each label overlay index maps to, so the hover
+  // sampler (`labelSamples`) can resolve a `(datasetId, labelIndex)` back to the
+  // memberId its chunks upload under. A label may surface under more than one
+  // channel-suffixed memberId in multi-channel display, so collect a set per
+  // index. Rebuilt fully each cold state for this dataset (a re-layout / channel
+  // toggle can change the mapping).
+  const labelMembersForDataset = new Map<number, Set<string>>();
+  for (const { entry, memberId } of iterateColdMembers(msg)) {
+    if (entry.isLabel === true && entry.labelIndex !== undefined) {
+      let set = labelMembersForDataset.get(entry.labelIndex);
+      if (!set) {
+        set = new Set<string>();
+        labelMembersForDataset.set(entry.labelIndex, set);
+      }
+      set.add(memberId);
+    }
+  }
+  state.labelSamples.setLabelMembers(msg.datasetId, labelMembersForDataset);
+
   // 3. Build pool groups (volume or slice) — partitions activeSet by
   // (channel, chunkDims). Entries without a targetLevel (e.g.
   // well-as-proxy with empty `levels[]`) are skipped here; they're

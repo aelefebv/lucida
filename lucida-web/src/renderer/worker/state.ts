@@ -21,6 +21,7 @@ import type { SliceAtlasState } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
+import { LabelSampleStore } from "./labelSample.ts";
 
 export interface RendererState {
   // ── Cold-state routing ────────────────────────────────────────────
@@ -54,6 +55,14 @@ export interface RendererState {
   volumeAtlases: Map<string, AtlasState>;
   /** poolKey → slice atlas pool state. */
   sliceAtlases: Map<string, SliceAtlasState>;
+
+  // ── Label hover sampling ─────────────────────────────────────────
+  /**
+   * CPU cache of decoded label Z-slices (bounded by atlas residency) + label
+   * member geometry, feeding the hover tooltip's `sampleLabelValue`. Populated in
+   * the slice upload path, cleared on eviction / Z-change / dataset removal.
+   */
+  labelSamples: LabelSampleStore;
 
   // ── Per-entity eviction reference points ─────────────────────────
   /** memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
@@ -95,6 +104,7 @@ export function createInitialState(): RendererState {
     descriptorBuffersByDataset: new Map(),
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
+    labelSamples: new LabelSampleStore(),
     rayHitPerEntity: new Map(),
     cameraUVPerEntity: new Map(),
     currentEpochs: null,

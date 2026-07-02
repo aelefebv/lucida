@@ -7,6 +7,9 @@ import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
+import { LabelTooltip } from "./LabelTooltip.tsx";
+import type { LabelTooltipRow } from "./labelTooltip.ts";
+import { resolveLabelHover, asHoverScene } from "./resolveLabelHover.ts";
 
 interface Props {
   z: number;
@@ -48,10 +51,38 @@ interface Props {
 /** Max pointer travel (CSS px) for a press+release to count as a click, not a drag. */
 const PIN_CLICK_SLOP = 4;
 
+/** How long the pointer must sit still before a label hover resolves (ms). Long
+ * enough that a moving cursor never fires a pick per frame, short enough to feel
+ * responsive once the pointer settles. */
+const HOVER_SETTLE_MS = 150;
+
+/** Resolved label tooltip content + its cursor position (CSS px, relative to the
+ * canvas). `null` when nothing is hovered / the pick is background or hidden. */
+interface HoverTooltip {
+  x: number;
+  y: number;
+  name: string;
+  value: number;
+  rows: LabelTooltipRow[];
+}
+
 export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
+
+  // ── Label hover tooltip ──────────────────────────────────────────
+  // Resolved content shown by <LabelTooltip>; null hides it.
+  const [tooltip, setTooltip] = useState<HoverTooltip | null>(null);
+  // Debounce timer for the hover settle (cleared on every move / gesture start).
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic token so a slow async pick reply that lands after the pointer has
+  // moved on (or left) is discarded instead of flashing a stale tooltip.
+  const hoverToken = useRef(0);
+  // Latest scene/dataset for the settle handler without re-binding pointer
+  // listeners on every doc change (same ref-mirror pattern as the pin refs).
+  const sceneRef = useRef(scene);
+  const clientRef = useRef(client);
   // Press context for distinguishing a pin-drop click from a pan drag, and for
   // anchoring a line/box draw at the press point. `world` is the start vertex.
   const pressStart = useRef<{ x: number; y: number; pin: boolean; world: [number, number] } | null>(null);
@@ -84,6 +115,8 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     myIdRef.current = myId;
     sendCommandRef.current = sendCommand;
     onDocumentChangedRef.current = onDocumentChanged;
+    sceneRef.current = scene;
+    clientRef.current = client;
   });
 
   // Create/start render loop. Deliberately omits `datasets` (live mutable
@@ -127,6 +160,52 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [canvas, scene],
   );
 
+  // Cancel any pending hover settle and hide the tooltip. Bumps the token so a
+  // late async reply for the cancelled hover is ignored.
+  const cancelHover = useCallback(() => {
+    if (hoverTimer.current !== null) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+    hoverToken.current++;
+    setTooltip(null);
+  }, []);
+
+  // Resolve the label under the cursor (physical-pixel screen coords) and show a
+  // tooltip iff a shown, effectively-visible label reports a non-zero id there.
+  // The gating/pick logic lives in the pure `resolveLabelHover` (unit-tested);
+  // this wrapper feeds it the current scene + worker sampler and guards the
+  // async reply with a token so a settle for a since-moved / since-left cursor
+  // never flashes a stale tooltip.
+  const resolveHover = useCallback(
+    async (screenX: number, screenY: number, cssX: number, cssY: number) => {
+      const token = ++hoverToken.current;
+      const sc = sceneRef.current;
+      const cl = clientRef.current;
+      const datasetId = annotationDatasetIdRef.current;
+      if (!datasetId) {
+        setTooltip(null);
+        return;
+      }
+      const resolved = await resolveLabelHover(
+        asHoverScene(sc),
+        (ds, labelIndex, voxel, primaryShape) =>
+          cl.sampleLabelValue(ds, labelIndex, voxel, primaryShape),
+        datasetId,
+        screenX,
+        screenY,
+      );
+      // The pointer moved / left (or another settle started) while we awaited.
+      if (token !== hoverToken.current) return;
+      setTooltip(
+        resolved
+          ? { x: cssX, y: cssY, name: resolved.name, value: resolved.value, rows: resolved.rows }
+          : null,
+      );
+    },
+    [],
+  );
+
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
       // Shift-press begins an annotation draw (a point on a click, or a
@@ -140,8 +219,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       setDragging(!pin);
       lastPos.current = { x: e.clientX, y: e.clientY };
       canvas.setPointerCapture(e.pointerId);
+      // Any press begins a gesture (pan or draw) — dismiss the hover tooltip.
+      cancelHover();
     },
-    [canvas, eventToWorld],
+    [canvas, eventToWorld, cancelHover],
   );
 
   const onPointerMove = useCallback(
@@ -174,6 +255,27 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
             : null;
       }
 
+      // Label hover: while idle (no pan drag, no shift-draw), (re)arm a debounced
+      // settle. Every move restarts the timer and invalidates any pending pick,
+      // so a moving cursor never fires a pick per frame — only a settled one
+      // does. The pick needs physical-pixel screen coords (WASM viewport space);
+      // the tooltip is positioned in CSS px relative to the canvas.
+      if (!dragging && !press?.pin) {
+        if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+        hoverToken.current++;
+        // Hide the previous tooltip immediately on move so it never lingers on
+        // the wrong pixel; the settle re-shows it if the new spot has a label.
+        setTooltip((prev) => (prev ? null : prev));
+        const settleScreenX = cursorX;
+        const settleScreenY = cursorY;
+        const settleCssX = e.clientX - rect.left;
+        const settleCssY = e.clientY - rect.top;
+        hoverTimer.current = setTimeout(() => {
+          hoverTimer.current = null;
+          void resolveHover(settleScreenX, settleScreenY, settleCssX, settleCssY);
+        }, HOVER_SETTLE_MS);
+      }
+
       if (!dragging) return;
       const dx = (e.clientX - lastPos.current.x) * dpr;
       const dy = (e.clientY - lastPos.current.y) * dpr;
@@ -185,7 +287,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       emitPresence();
       loopRef.current?.markInteractiveDirty();
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
+    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, resolveHover],
   );
 
   const onPointerUp = useCallback(
@@ -276,20 +378,29 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     pressStart.current = null;
     setDragging(false);
     annotationDraftRef.current = null;
-  }, [annotationDraftRef]);
+    cancelHover();
+  }, [annotationDraftRef, cancelHover]);
 
   const onPointerLeave = useCallback(() => {
     sendCursor(null);
-  }, [sendCursor]);
+    // Dismiss the label tooltip when the pointer leaves the canvas.
+    cancelHover();
+  }, [sendCursor, cancelHover]);
 
-  // Clear cursor on unmount (e.g. mode switch to 3D)
+  // Clear cursor + hover on unmount (e.g. mode switch to 3D)
   useEffect(() => {
-    return () => { sendCursor(null); };
-  }, [sendCursor]);
+    return () => {
+      sendCursor(null);
+      cancelHover();
+    };
+  }, [sendCursor, cancelHover]);
 
   const onWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
+      // Zoom remaps screen→voxel; drop any pending/visible hover so it can't
+      // report an id for the pre-zoom cursor position.
+      cancelHover();
 
       const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
@@ -314,7 +425,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       emitPresence();
       loopRef.current?.markInteractiveDirty();
     },
-    [scene, canvas, emitPresence, breakFollow],
+    [scene, canvas, emitPresence, breakFollow, cancelHover],
   );
 
   useEffect(() => {
@@ -340,5 +451,16 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     };
   }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging]);
 
-  return null;
+  // The tooltip is the only DOM this viewer renders (the canvas + gestures are
+  // imperative). It sits in the same absolute-in-`position:relative` wrapper as
+  // the other 2D overlays, positioned in CSS px near the cursor.
+  return tooltip ? (
+    <LabelTooltip
+      x={tooltip.x}
+      y={tooltip.y}
+      name={tooltip.name}
+      value={tooltip.value}
+      rows={tooltip.rows}
+    />
+  ) : null;
 }

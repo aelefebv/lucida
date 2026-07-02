@@ -137,6 +137,9 @@ export function handleSliceChunkData(
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);
+      // Keep the label sample cache in lockstep with atlas residency: a chunk
+      // evicted from a label pool loses its CPU slice too (bounded cache).
+      if (isLabelPool) ctx.state.labelSamples.evict(evictKey);
       const oldGridIdx = atlas.slotGridIdx[slotIndex];
       if (oldGridIdx >= 0) {
         atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
@@ -160,6 +163,30 @@ export function handleSliceChunkData(
       ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH,
       atlas.format,
     );
+
+    // Retain the decoded current-Z slice on the CPU for hover sampling. Only
+    // label pools (r32uint) — an intensity slice is never picked for an id. The
+    // slice is the same chunkY×chunkX plane just written to the atlas; the store
+    // copies it and keeps exactly one plane per resident chunk (bounded by the
+    // atlas slot set). Its geometry comes from the level's lodMeta.
+    if (isLabelPool) {
+      ctx.state.labelSamples.recordGeom(memberId, {
+        level: lodMeta.level,
+        levelDims: lodMeta.levelDims,
+        gridDims: lodMeta.gridDims,
+        chunkDims: lodMeta.chunkDims,
+      });
+      ctx.state.labelSamples.putSlice(
+        memberId,
+        chunk.key,
+        level,
+        chunk.x,
+        chunk.y,
+        chunkW,
+        chunkH,
+        sliceData as Uint32Array,
+      );
+    }
 
     // Write to entity's per-LOD section
     const [, , lodGridX] = lodMeta.gridDims;

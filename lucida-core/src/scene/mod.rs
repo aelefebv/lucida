@@ -526,6 +526,40 @@ impl Scene {
         })
     }
 
+    /// The producer's `image-label.properties` `fields` for a **single picked
+    /// label value** — the object a hover tooltip renders as key/value rows.
+    ///
+    /// Resolves the `label_index`-th label image of `dataset_id` (label-relative,
+    /// same index space as [`Self::label_overlays`] / `label_lut`), then finds the
+    /// [`LabelProperty`] whose `value == value` in that label's untrusted
+    /// [`LabelMeta::properties`] and returns a **clone** of its `fields` map. This
+    /// is a pure metadata read: it does not touch pixel data — the caller has
+    /// already sampled the integer id at the hovered voxel (on the web side, from
+    /// the finest resident label level) and passes it in as `value`.
+    ///
+    /// Returns `None` when any link in the chain is absent: an unknown dataset id,
+    /// a `label_index` past the dataset's label images, or a `value` with no
+    /// matching `properties` entry (the common case — most label ids carry no
+    /// declared properties, and value `0` is background). `None` and an *empty*
+    /// `fields` map are deliberately distinct: `None` means "no such property row",
+    /// while `Some({})` means "the producer declared this value with no fields",
+    /// so the tooltip can still show the id even when the row is empty.
+    ///
+    /// The first matching entry wins if a (malformed) producer repeats a `value`;
+    /// lucida does not dedupe `properties` at parse time.
+    pub fn label_property(
+        &self,
+        dataset_id: &str,
+        label_index: u32,
+        value: u32,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let meta = self.label_meta_at(dataset_id, label_index)?;
+        meta.properties
+            .iter()
+            .find(|p| p.value == value)
+            .map(|p| p.fields.clone())
+    }
+
     /// Frame the named dataset's full extent in the current camera, **dispatching
     /// on the camera mode** so each mode is fed bounds in the coordinate space it
     /// actually uses:
@@ -3181,6 +3215,127 @@ mod tests {
         // No such label → empty, not a panic.
         assert!(scene.label_colors("ds1", 9).is_empty());
         assert!(scene.label_colors("nope", 0).is_empty());
+    }
+
+    /// Open a two-label dataset and inject `properties` onto each label image so
+    /// `label_property` has something to resolve. Label 0 (`nuclei`) declares
+    /// value 1 → `{area: 42.0, name: "cell-a"}` and value 7 → `{}` (an empty but
+    /// present row); label 1 (`membrane`) declares value 1 → `{area: 99.0}` so we
+    /// can prove `label_index` selects the right label. A big uint32 value
+    /// (`4_000_000_003`, above u16 range) is added to label 0 to prove the value
+    /// is matched as a full u32.
+    fn scene_with_label_properties() -> Scene {
+        let reg = test_helpers::make_dataset_with_labels(
+            "ds1",
+            256,
+            256,
+            &[("nuclei", 256, 256), ("membrane", 256, 256)],
+        );
+        let mut manifest = reg.manifest;
+        for image in manifest.images_mut() {
+            if let ImageRole::Label(meta) = &mut image.role {
+                if meta.name == "nuclei" {
+                    let mut f1 = serde_json::Map::new();
+                    f1.insert("area".into(), serde_json::json!(42.0));
+                    f1.insert("name".into(), serde_json::json!("cell-a"));
+                    let mut big = serde_json::Map::new();
+                    big.insert("area".into(), serde_json::json!(1.0));
+                    meta.properties = vec![
+                        LabelProperty {
+                            value: 1,
+                            fields: f1,
+                        },
+                        LabelProperty {
+                            value: 7,
+                            fields: serde_json::Map::new(),
+                        },
+                        LabelProperty {
+                            value: 4_000_000_003,
+                            fields: big,
+                        },
+                    ];
+                } else if meta.name == "membrane" {
+                    let mut f = serde_json::Map::new();
+                    f.insert("area".into(), serde_json::json!(99.0));
+                    meta.properties = vec![LabelProperty {
+                        value: 1,
+                        fields: f,
+                    }];
+                }
+            }
+        }
+        let reg = lucida_protocol::DatasetOpened { manifest, ..reg };
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene
+    }
+
+    #[test]
+    fn label_property_returns_fields_for_matching_value() {
+        let scene = scene_with_label_properties();
+        let fields = scene
+            .label_property("ds1", 0, 1)
+            .expect("nuclei value 1 has properties");
+        assert_eq!(fields.get("area"), Some(&serde_json::json!(42.0)));
+        assert_eq!(fields.get("name"), Some(&serde_json::json!("cell-a")));
+    }
+
+    #[test]
+    fn label_property_is_label_index_relative() {
+        // Same value (1), different label index → different fields, proving the
+        // index selects the correct label image rather than any label.
+        let scene = scene_with_label_properties();
+        let nuclei = scene.label_property("ds1", 0, 1).unwrap();
+        let membrane = scene.label_property("ds1", 1, 1).unwrap();
+        assert_eq!(nuclei.get("area"), Some(&serde_json::json!(42.0)));
+        assert_eq!(membrane.get("area"), Some(&serde_json::json!(99.0)));
+    }
+
+    #[test]
+    fn label_property_matches_full_u32_value() {
+        // A value above the u16 range must resolve intact (no truncation).
+        let scene = scene_with_label_properties();
+        let fields = scene
+            .label_property("ds1", 0, 4_000_000_003)
+            .expect("large uint32 value resolves");
+        assert_eq!(fields.get("area"), Some(&serde_json::json!(1.0)));
+        // The truncated-to-u16 version of that value must NOT match.
+        let truncated = 4_000_000_003u32 & 0xFFFF;
+        assert!(scene.label_property("ds1", 0, truncated).is_none());
+    }
+
+    #[test]
+    fn label_property_some_empty_map_for_declared_value_with_no_fields() {
+        // A declared value with an empty `fields` object is Some({}), distinct
+        // from None: the tooltip still shows the id, just with no rows.
+        let scene = scene_with_label_properties();
+        let fields = scene
+            .label_property("ds1", 0, 7)
+            .expect("value 7 is declared, even if empty");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn label_property_none_for_unmatched_value_index_and_dataset() {
+        let scene = scene_with_label_properties();
+        // A value with no properties entry → None.
+        assert!(scene.label_property("ds1", 0, 999).is_none());
+        // Value 0 (background) is never a declared property here → None.
+        assert!(scene.label_property("ds1", 0, 0).is_none());
+        // A label_index past the dataset's labels → None (not a panic).
+        assert!(scene.label_property("ds1", 5, 1).is_none());
+        // An unknown dataset id → None.
+        assert!(scene.label_property("nope", 0, 1).is_none());
+    }
+
+    #[test]
+    fn label_property_none_for_intensity_index() {
+        // A dataset with labels: index 0 is a label. But asking a label-relative
+        // index that lands past the labels (here the sole label is index 0, so 1
+        // is past it) returns None rather than reading an intensity image.
+        let scene = scene_with_label_properties();
+        // There are exactly two labels (0, 1); index 2 is the first non-existent.
+        assert!(scene.label_property("ds1", 2, 1).is_none());
     }
 
     #[test]

@@ -146,6 +146,12 @@ export function getOrCreateSlicePool(
     // Mark stale on Z change before updating z
     if (z !== existing.z && existing.slots.size > 0) {
       existing.staleSliceKeys = new Set(existing.slots.keys());
+      // A label pool's CPU sample cache holds the OLD Z-slice for these chunks;
+      // drop them so a hover between the Z change and the fresh chunk's arrival
+      // never reports a stale id. Fresh slices re-cache on their next upload.
+      if (existing.format === "r32uint") {
+        ctx.state.labelSamples.invalidateStale(existing.staleSliceKeys);
+      }
     }
     existing.z = z;
     existing.t = t;

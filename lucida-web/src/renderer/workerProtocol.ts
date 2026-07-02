@@ -261,6 +261,25 @@ export interface RemoveLayerResourcesMessage {
   datasetId: string;
 }
 
+/**
+ * Read the label integer id under a hover pick from the worker's CPU label-slice
+ * cache — feeds the label tooltip. `frac` is the picked voxel normalized to
+ * `[0,1]^3` by the dataset's primary shape (so the worker is independent of any
+ * intensity-vs-label resolution difference). The worker replies with one
+ * {@link SampleLabelValueResultMessage}, correlated by `id`; the sample reads the
+ * finest resident level so a fused coarse id is never reported.
+ */
+export interface SampleLabelValueMessage {
+  type: "sampleLabelValue";
+  /** Correlates the {@link SampleLabelValueResultMessage} reply. */
+  id: number;
+  datasetId: string;
+  /** Label-relative index (the N-th label image), matching `label_overlays`. */
+  labelIndex: number;
+  /** Picked voxel normalized to `[0,1]^3` by the primary member's level-0 shape. */
+  frac: [number, number, number];
+}
+
 export interface UpdateCursorDataMessage {
   type: "updateCursorData";
   data: ArrayBuffer;
@@ -493,6 +512,7 @@ export type MainToWorkerMessage =
   | MinimapDestroyMessage
   | MinimapUploadOverviewChunksForLayerMessage
   | ThumbnailRenderMessage
+  | SampleLabelValueMessage
   | RemoveLayerResourcesMessage
   | UpdateCursorDataMessage
   | DestroyMessage
@@ -527,6 +547,18 @@ export interface ThumbnailResultMessage {
   type: "thumbnailResult";
   id: number;
   bitmap: ImageBitmap | null;
+}
+
+/**
+ * Reply to a {@link SampleLabelValueMessage}, correlated by `id`. `value` is the
+ * label integer id under the pick (untruncated uint32), or `0` when nothing
+ * resident covers the point / no such label — the label convention for
+ * background. The main thread resolves the matching pending promise.
+ */
+export interface SampleLabelValueResultMessage {
+  type: "sampleLabelValueResult";
+  id: number;
+  value: number;
 }
 
 export type ChunkFeedbackReason =
@@ -610,5 +642,6 @@ export type WorkerToMainMessage =
   | ErrorMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage
+  | SampleLabelValueResultMessage
   | ChunksEvictedMessage
   | WantedSetDeltaMessage;

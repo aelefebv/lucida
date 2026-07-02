@@ -1032,6 +1032,23 @@ impl WasmScene {
         serde_json::to_string(&self.inner.label_lut(dataset_id, label_index)).unwrap()
     }
 
+    /// JSON object of the producer's `image-label.properties` `fields` for a
+    /// single picked label `value` on the `label_index`-th label of `dataset_id`
+    /// — the key/value rows a hover tooltip renders. The caller has already
+    /// sampled the label integer at the hovered voxel (from the finest resident
+    /// label level) and passes it in as `value`.
+    ///
+    /// Returns the JSON string `"null"` when nothing resolves — an unknown
+    /// dataset id, a `label_index` past the dataset's labels, or a `value` with
+    /// no matching `properties` entry (the common case; value `0` is background).
+    /// A declared value that carries no fields serializes as `"{}"` — distinct
+    /// from `"null"` — so the tooltip can still show the id with no rows. The web
+    /// parses this with `JSON.parse` and treats `null` as "no properties". See
+    /// [`Scene::label_property`].
+    pub fn label_property(&self, ds: &str, label_index: u32, value: u32) -> String {
+        serde_json::to_string(&self.inner.label_property(ds, label_index, value)).unwrap()
+    }
+
     // --- Layout management ---
 
     /// Register a new layout for a dataset. The layout is parsed from JSON.

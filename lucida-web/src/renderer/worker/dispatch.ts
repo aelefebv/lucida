@@ -147,6 +147,15 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "thumbnailRender":
       handleThumbnailRender(ctx, msg);
       return;
+    case "sampleLabelValue": {
+      const value = ctx.state.labelSamples.sample(
+        msg.datasetId,
+        msg.labelIndex,
+        msg.frac,
+      );
+      ctx.post({ type: "sampleLabelValueResult", id: msg.id, value });
+      return;
+    }
     case "minimapDestroy":
       handleMinimapDestroy();
       return;
@@ -173,6 +182,8 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       removeVolumeResources(ctx, msg.datasetId);
       removeMinimapResources(msg.datasetId);
       removeLabelLUTsForDataset(msg.datasetId);
+      // Drop the dataset's cached label slices + label→member map (hover sampler).
+      ctx.state.labelSamples.removeDataset(msg.datasetId);
       // Destroy proxy pools for this dataset.
       const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
       if (dsPools) {

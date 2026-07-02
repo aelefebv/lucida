@@ -24,6 +24,11 @@ export class RenderClient implements UploadClient {
   private thumbnailPending = new Map<number, (bitmap: ImageBitmap | null) => void>();
   private thumbnailSeq = 0;
 
+  /** Pending `sampleLabelValue` requests, keyed by id; resolved on the matching
+   *  `sampleLabelValueResult`. */
+  private labelSamplePending = new Map<number, (value: number) => void>();
+  private labelSampleSeq = 0;
+
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ChunksEvictedHandler | null = null;
   /**
@@ -77,6 +82,12 @@ export class RenderClient implements UploadClient {
         // No waiter (e.g. the request was already settled/abandoned) — release
         // the GPU-backed bitmap rather than leak it.
         msg.bitmap.close();
+      }
+    } else if (msg.type === "sampleLabelValueResult") {
+      const resolve = this.labelSamplePending.get(msg.id);
+      if (resolve) {
+        this.labelSamplePending.delete(msg.id);
+        resolve(msg.value);
       }
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
@@ -292,6 +303,41 @@ export class RenderClient implements UploadClient {
     });
   }
 
+  /**
+   * Read the label integer id under a hover pick from the worker's CPU
+   * label-slice cache. `voxel` is the pick (`WasmScene::pick_annotation_voxel`)
+   * in the dataset's **primary** member level-0 frame `[x, y, z]`;
+   * `primaryShape` is that member's level-0 `[X, Y, Z]` (from
+   * `dataset_volume_shape`, reordered) used to normalize the voxel to `[0,1]^3`
+   * before crossing the worker boundary. Resolves with the untruncated uint32 id,
+   * or `0` when nothing resident covers the point / no such label. Resolves `0`
+   * (never rejects) if the worker is gone, so a hover never throws.
+   */
+  sampleLabelValue(
+    datasetId: string,
+    labelIndex: number,
+    voxel: [number, number, number],
+    primaryShape: [number, number, number],
+  ): Promise<number> {
+    const [sx, sy, sz] = primaryShape;
+    const frac: [number, number, number] = [
+      sx > 0 ? voxel[0] / sx : -1,
+      sy > 0 ? voxel[1] / sy : -1,
+      sz > 0 ? voxel[2] / sz : 0,
+    ];
+    const id = this.labelSampleSeq++;
+    return new Promise<number>((resolve) => {
+      this.labelSamplePending.set(id, resolve);
+      this.worker.postMessage({
+        type: "sampleLabelValue",
+        id,
+        datasetId,
+        labelIndex,
+        frac,
+      });
+    });
+  }
+
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
     chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
@@ -347,6 +393,10 @@ export class RenderClient implements UploadClient {
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
+    // Same for pending label samples — resolve to 0 (background) so a hover in
+    // flight during teardown never hangs.
+    for (const resolve of this.labelSamplePending.values()) resolve(0);
+    this.labelSamplePending.clear();
     this.worker.postMessage({ type: "destroy" });
     this.worker.terminate();
   }
