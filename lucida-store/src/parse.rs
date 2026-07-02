@@ -9,10 +9,18 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Deserialize;
 
-use lucida_content::ChannelInfo;
 use lucida_content::normalize::{normalize_f64_to_5d, normalize_to_5d};
+use lucida_content::{ChannelInfo, LabelColor};
 
 use crate::backend::StoreError;
+
+/// Upper bound on label groups parsed from one `labels` list. Guards against
+/// oversized/untrusted metadata; far above any realistic label count.
+const MAX_LABEL_GROUPS: usize = 4096;
+
+/// Upper bound on color-table entries kept per label. A display palette, not a
+/// per-object table, so this is generous while still bounding memory.
+const MAX_LABEL_COLORS: usize = 1 << 16;
 
 /// Intermediate per-level metadata parsed from OME multiscales.
 #[derive(Debug, Clone)]
@@ -215,6 +223,154 @@ pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<Channel
             })
         })
         .collect()
+}
+
+/// Read and parse a zarr.json that may not exist, without treating absence as
+/// an error.
+///
+/// Detects optional child groups (e.g. a `labels/` group). A missing
+/// object is the common case and yields `None` silently; a present-but-corrupt
+/// object (bad JSON) also yields `None` but with a warning, and any other
+/// storage error yields `None` with a warning. Optional metadata must never
+/// fail the whole import — the caller simply proceeds as if the group is
+/// absent.
+pub(crate) async fn read_optional_zarr_json(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+) -> Option<serde_json::Value> {
+    match store.get(&Path::from(path)).await {
+        Ok(response) => match response.bytes().await {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    eprintln!("[lucida-store] ignoring malformed optional metadata {path}: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("[lucida-store] ignoring unreadable optional metadata {path}: {e}");
+                None
+            }
+        },
+        Err(object_store::Error::NotFound { .. }) => None,
+        Err(e) => {
+            eprintln!("[lucida-store] ignoring optional metadata {path}: {e}");
+            None
+        }
+    }
+}
+
+/// A single label-group's name must be a safe single path segment: it is
+/// concatenated into a store path (`{prefix}/labels/{name}`), so a name with a
+/// separator or `..` could escape the dataset. Reject those (and empty /
+/// over-long names) rather than trust untrusted metadata.
+fn is_safe_label_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
+/// Parse the label-group names from a `labels/zarr.json` value's
+/// `attributes.ome.labels` list.
+///
+/// GENERIC and untrusted-input safe: a missing/non-array `labels` yields an
+/// empty `Vec`; non-string or unsafe entries are dropped; duplicate names are
+/// deduped (first occurrence wins, order preserved); and the count is capped at
+/// [`MAX_LABEL_GROUPS`]. The returned names are safe to use as store-path
+/// segments.
+pub(crate) fn parse_labels_names(labels_group_json: &serde_json::Value) -> Vec<String> {
+    let Some(entries) = labels_group_json
+        .pointer("/attributes/ome/labels")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for entry in entries {
+        let Some(name) = entry.as_str() else { continue };
+        if !is_safe_label_name(name) {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            names.push(name.to_string());
+            if names.len() >= MAX_LABEL_GROUPS {
+                break;
+            }
+        }
+    }
+    names
+}
+
+/// The parsed `ome.image-label` block of a single label group.
+#[derive(Debug, Default)]
+pub(crate) struct ImageLabelMeta {
+    /// Validated color table, in declared order; empty when absent/malformed.
+    pub colors: Vec<LabelColor>,
+    /// Whether `image-label.source.image` was present (a declared back-pointer
+    /// to the source intensity image).
+    pub source_declared: bool,
+}
+
+/// Parse the `attributes.ome.image-label` block of a label group's zarr.json.
+///
+/// GENERIC and untrusted-input safe: a missing `image-label` yields the default
+/// (no colors, no declared source). Each color entry must carry an integer
+/// `label-value` (kept as `i64` — never truncated, since ids exceed 16 bits)
+/// and an `rgba` array of exactly four `0..=255` integers; malformed entries
+/// are skipped individually and the kept count is capped at
+/// [`MAX_LABEL_COLORS`]. `properties`, when present, is intentionally not
+/// consumed here.
+pub(crate) fn parse_image_label(label_group_json: &serde_json::Value) -> ImageLabelMeta {
+    let Some(image_label) = label_group_json.pointer("/attributes/ome/image-label") else {
+        return ImageLabelMeta::default();
+    };
+
+    let source_declared = image_label
+        .pointer("/source/image")
+        .and_then(|v| v.as_str())
+        .is_some();
+
+    let colors = image_label
+        .get("colors")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(parse_label_color)
+                .take(MAX_LABEL_COLORS)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    ImageLabelMeta {
+        colors,
+        source_declared,
+    }
+}
+
+/// Validate one `image-label.colors` entry. Returns `None` (dropping the entry)
+/// when `label-value` is missing/non-integer/out of `i64` range, or when `rgba`
+/// is absent, not a 4-element array, or has any component outside `0..=255`.
+fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
+    let value = entry.get("label-value")?.as_i64()?;
+    let rgba_arr = entry.get("rgba")?.as_array()?;
+    if rgba_arr.len() != 4 {
+        return None;
+    }
+    let mut rgba = [0u8; 4];
+    for (slot, component) in rgba.iter_mut().zip(rgba_arr) {
+        let n = component.as_u64()?;
+        if n > u8::MAX as u64 {
+            return None;
+        }
+        *slot = n as u8;
+    }
+    Some(LabelColor { value, rgba })
 }
 
 /// Read ArrayMeta for each level in the multiscale pyramid.
@@ -527,5 +683,181 @@ mod tests {
         assert_eq!(shape_5d, [1, 1, 20, 100, 200]);
         // T=1, C=1, Z=10, Y=64, X=64
         assert_eq!(chunk_5d, [1, 1, 10, 64, 64]);
+    }
+
+    // --- parse_labels_names tests ---
+
+    /// Wrap a `labels` value in the `attributes.ome.labels` envelope the parser
+    /// reads from. Spliced verbatim so tests can pass malformed shapes.
+    fn labels_group(labels: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "labels": labels } }
+        })
+    }
+
+    #[test]
+    fn labels_names_parses_in_order() {
+        let json = labels_group(serde_json::json!([
+            "mitochondria",
+            "foreground",
+            "mito_eroded"
+        ]));
+        assert_eq!(
+            parse_labels_names(&json),
+            vec!["mitochondria", "foreground", "mito_eroded"],
+        );
+    }
+
+    #[test]
+    fn labels_names_missing_or_non_array_is_empty() {
+        // No labels key at all.
+        let none = serde_json::json!({"attributes": {"ome": {"version": "0.5"}}});
+        assert!(parse_labels_names(&none).is_empty());
+        // labels present but not an array.
+        for bad in [
+            serde_json::json!("cells"),
+            serde_json::json!({"0": "cells"}),
+            serde_json::json!(7),
+            serde_json::json!(null),
+        ] {
+            assert!(parse_labels_names(&labels_group(bad)).is_empty());
+        }
+    }
+
+    #[test]
+    fn labels_names_dedupes_preserving_first_occurrence() {
+        let json = labels_group(serde_json::json!(["cells", "nuclei", "cells", "cells"]));
+        assert_eq!(parse_labels_names(&json), vec!["cells", "nuclei"]);
+    }
+
+    #[test]
+    fn labels_names_drops_unsafe_and_non_string_entries() {
+        // Path-traversal, separators, empty, and non-strings must all be
+        // dropped so a name can be safely used as a store-path segment.
+        let json = labels_group(serde_json::json!([
+            "..",
+            "a/b",
+            "a\\b",
+            "",
+            42,
+            {"name": "x"},
+            "good"
+        ]));
+        assert_eq!(parse_labels_names(&json), vec!["good"]);
+    }
+
+    #[test]
+    fn labels_names_caps_oversized_lists() {
+        let many: Vec<String> = (0..(MAX_LABEL_GROUPS + 100))
+            .map(|i| format!("l{i}"))
+            .collect();
+        let json = labels_group(serde_json::json!(many));
+        assert_eq!(parse_labels_names(&json).len(), MAX_LABEL_GROUPS);
+    }
+
+    // --- parse_image_label tests ---
+
+    /// Wrap an `image-label` value in the group envelope the parser reads from.
+    fn image_label_group(image_label: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": { "ome": { "version": "0.5", "image-label": image_label } }
+        })
+    }
+
+    #[test]
+    fn image_label_parses_colors_and_source() {
+        let json = image_label_group(serde_json::json!({
+            "version": "0.5",
+            "colors": [
+                {"label-value": 2, "rgba": [230, 25, 75, 255]},
+                {"label-value": 92801, "rgba": [0, 0, 128, 255]}
+            ],
+            "source": {"image": "../../"}
+        }));
+        let meta = parse_image_label(&json);
+        assert!(meta.source_declared);
+        assert_eq!(meta.colors.len(), 2);
+        assert_eq!(
+            meta.colors[0],
+            LabelColor {
+                value: 2,
+                rgba: [230, 25, 75, 255]
+            }
+        );
+        // A label value far past u16::MAX is preserved, not truncated.
+        assert_eq!(meta.colors[1].value, 92801);
+    }
+
+    #[test]
+    fn image_label_missing_block_is_default() {
+        let json = serde_json::json!({"attributes": {"ome": {"version": "0.5"}}});
+        let meta = parse_image_label(&json);
+        assert!(meta.colors.is_empty());
+        assert!(!meta.source_declared);
+    }
+
+    #[test]
+    fn image_label_tolerates_missing_colors_and_source() {
+        // image-label present but with neither colors nor source.
+        let json = image_label_group(serde_json::json!({"version": "0.5"}));
+        let meta = parse_image_label(&json);
+        assert!(meta.colors.is_empty());
+        assert!(!meta.source_declared);
+    }
+
+    #[test]
+    fn image_label_skips_malformed_color_entries() {
+        let json = image_label_group(serde_json::json!({
+            "colors": [
+                {"label-value": 1, "rgba": [1, 2, 3]},          // wrong rgba len
+                {"label-value": 2, "rgba": [1, 2, 3, 300]},     // component > 255
+                {"label-value": 3, "rgba": [1, 2, 3, -1]},      // negative component
+                {"rgba": [1, 2, 3, 4]},                          // missing label-value
+                {"label-value": 4},                              // missing rgba
+                {"label-value": 5, "rgba": [10, 20, 30, 40]}    // valid
+            ]
+        }));
+        let meta = parse_image_label(&json);
+        assert_eq!(meta.colors.len(), 1);
+        assert_eq!(
+            meta.colors[0],
+            LabelColor {
+                value: 5,
+                rgba: [10, 20, 30, 40]
+            }
+        );
+    }
+
+    #[test]
+    fn image_label_non_array_colors_degrade_to_empty() {
+        for bad in [
+            serde_json::json!("red"),
+            serde_json::json!(5),
+            serde_json::json!({"label-value": 1}),
+            serde_json::json!(null),
+        ] {
+            let json = image_label_group(serde_json::json!({"colors": bad}));
+            assert!(parse_image_label(&json).colors.is_empty());
+        }
+    }
+
+    #[test]
+    fn image_label_source_without_image_string_is_not_declared() {
+        // A `source` object lacking a string `image` does not count.
+        let json = image_label_group(serde_json::json!({"source": {"note": "x"}}));
+        assert!(!parse_image_label(&json).source_declared);
+    }
+
+    #[test]
+    fn image_label_caps_oversized_color_tables() {
+        let many: Vec<serde_json::Value> = (0..(MAX_LABEL_COLORS + 50))
+            .map(|i| serde_json::json!({"label-value": i, "rgba": [1, 2, 3, 4]}))
+            .collect();
+        let json = image_label_group(serde_json::json!({"colors": many}));
+        assert_eq!(parse_image_label(&json).colors.len(), MAX_LABEL_COLORS);
     }
 }

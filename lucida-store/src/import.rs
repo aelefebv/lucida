@@ -56,7 +56,7 @@ async fn import_single_image(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
     let coarse_level_index =
         select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
     let level_bindings = build_level_binding_infos(
@@ -93,6 +93,13 @@ async fn import_single_image(
         },
     };
 
+    // Look for a `labels/` child group and attach any label overlays to this
+    // image. Absent labels (the common case) yield nothing; malformed ones
+    // degrade gracefully without failing the import.
+    let mut label_budget = LabelBudget::new();
+    let labels =
+        import_labels_for_image(&mut label_budget, store, id, "", &image_id, &entity_id).await;
+
     let default_layout_id = LayoutId("source".to_string());
     let source_layout = LayoutSpec {
         id: default_layout_id.clone(),
@@ -112,22 +119,27 @@ async fn import_single_image(
         vec![image],
         vec![source_layout],
         Some(default_layout_id),
-    );
+    )
+    .with_labels(labels.specs);
 
+    let mut fetch_images = vec![ProxiedImageSpec {
+        image_id: image_id.clone(),
+        wire_format: WireFormat::Raw { data_type },
+    }];
+    fetch_images.extend(labels.fetch);
     let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
-        images: vec![ProxiedImageSpec {
-            image_id: image_id.clone(),
-            wire_format: WireFormat::Raw { data_type },
-        }],
+        images: fetch_images,
     });
 
+    let mut binding_images = vec![ImageBindingSeed {
+        image_id,
+        axes_names,
+        store_prefix: None,
+        levels: level_bindings,
+    }];
+    binding_images.extend(labels.bindings);
     let binding_seed = ServerBindingSeed {
-        images: vec![ImageBindingSeed {
-            image_id,
-            axes_names,
-            store_prefix: None,
-            levels: level_bindings,
-        }],
+        images: binding_images,
     };
 
     Ok(ImportResult {
@@ -282,7 +294,7 @@ async fn import_plate(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
     let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
@@ -336,6 +348,11 @@ async fn import_plate(
     let mut transforms: Vec<TransformEdge> = Vec::new();
     let mut fetch_images: Vec<ProxiedImageSpec> = Vec::new();
     let mut binding_images: Vec<ImageBindingSeed> = Vec::new();
+    // Label overlays discovered per-field, flattened across the whole plate.
+    // The budget is shared across fields so aggregate label/color memory is
+    // bounded no matter how many fields carry labels.
+    let mut label_specs: Vec<LabelSpec> = Vec::new();
+    let mut label_budget = LabelBudget::new();
 
     for well in &parsed_wells {
         let well_entity_id = EntityId(format!("{id}:well:{}", well.path));
@@ -433,6 +450,19 @@ async fn import_plate(
             }
             // Grid transforms are built after all entities are created.
 
+            // Read this field's `labels/` group before its ids are moved into
+            // the image/binding vecs. Nested per-field, mirroring how the FOV
+            // metadata itself is read.
+            let fov_labels = import_labels_for_image(
+                &mut label_budget,
+                store,
+                id,
+                &fov.store_prefix,
+                &image_id,
+                &field_entity_id,
+            )
+            .await;
+
             images.push(ImageSpec {
                 image_id: image_id.clone(),
                 owner: field_entity_id,
@@ -462,6 +492,11 @@ async fn import_plate(
                 store_prefix: Some(fov.store_prefix.clone()),
                 levels: level_bindings.clone(),
             });
+
+            // Append the field's labels after its own image entries.
+            label_specs.extend(fov_labels.specs);
+            fetch_images.extend(fov_labels.fetch);
+            binding_images.extend(fov_labels.bindings);
         }
     }
 
@@ -510,7 +545,8 @@ async fn import_plate(
         images,
         vec![source_layout],
         Some(default_layout_id),
-    );
+    )
+    .with_labels(label_specs);
 
     let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
         images: fetch_images,
@@ -619,11 +655,18 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
         .collect()
 }
 
+/// Build per-level [`LevelGeometry`], normalizing shapes to canonical 5D.
+///
+/// A zero chunk dimension is rejected with a [`StoreError`] rather than allowed
+/// to reach the `shape / chunk` grid computation (which would divide by zero and
+/// panic). This keeps untrusted array metadata — a label's or an image's
+/// `chunk_shape` — from aborting the process: a bad label surfaces as an `Err`
+/// the caller skips, and a bad source array fails the import loudly.
 fn build_level_geometries(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
     axes_names: &[String],
-) -> Vec<LevelGeometry> {
+) -> Result<Vec<LevelGeometry>, StoreError> {
     level_entries
         .iter()
         .zip(level_metas.iter())
@@ -632,16 +675,217 @@ fn build_level_geometries(
             let shape = normalize_to_5d(&meta.shape, axes_names, 1);
             let chunk_shape =
                 normalize_to_5d(&meta.chunk_grid.configuration.chunk_shape, axes_names, 1);
+            if chunk_shape.contains(&0) {
+                return Err(StoreError::Metadata(format!(
+                    "level {i}: chunk_shape {chunk_shape:?} has a zero dimension"
+                )));
+            }
             let grid_shape = std::array::from_fn(|d| shape[d].div_ceil(chunk_shape[d]));
-            LevelGeometry {
+            Ok(LevelGeometry {
                 level_index: i as u32,
                 shape,
                 chunk_shape,
                 grid_shape,
                 scale: entry.scale,
-            }
+            })
         })
         .collect()
+}
+
+/// Dataset-wide ceiling on retained labels. The per-group name cap bounds one
+/// `labels` list; this bounds the total kept across every field of a plate so
+/// an adversarial dataset can't accumulate unbounded label specs in memory.
+const MAX_LABELS_PER_DATASET: usize = 1 << 16;
+
+/// Dataset-wide ceiling on retained color-table entries, summed across all
+/// labels. Complements the per-label color cap in `parse` so the total color
+/// memory across a whole plate stays bounded.
+const MAX_LABEL_COLORS_PER_DATASET: usize = 1 << 20;
+
+/// Remaining dataset-wide budget for retained labels and color entries, carried
+/// across every source image / plate field so aggregate memory is bounded even
+/// when per-label caps are individually satisfied.
+struct LabelBudget {
+    labels_remaining: usize,
+    colors_remaining: usize,
+}
+
+impl LabelBudget {
+    fn new() -> Self {
+        Self {
+            labels_remaining: MAX_LABELS_PER_DATASET,
+            colors_remaining: MAX_LABEL_COLORS_PER_DATASET,
+        }
+    }
+}
+
+/// Label overlays imported for one source image: the manifest specs plus the
+/// fetch/binding entries the server needs to stream each label's chunks.
+#[derive(Default)]
+struct ImportedLabels {
+    specs: Vec<LabelSpec>,
+    fetch: Vec<ProxiedImageSpec>,
+    bindings: Vec<ImageBindingSeed>,
+}
+
+/// Detect an OME-NGFF `labels/` child group on a source image group and import
+/// every well-formed label it lists.
+///
+/// `base_prefix` is the source image group's store prefix (`""` for a
+/// standalone image, `"{well}/{fov}"` for a plate field); labels live under
+/// `{base_prefix}/labels`. A missing `labels/` group — the common case —
+/// returns empty. Each label is built through the same multiscale pipeline as
+/// an ordinary image and attached to `source_image_id`; a label that fails to
+/// parse is skipped with a warning so one bad label never fails the import.
+/// `budget` is shared across all calls for a dataset and bounds the aggregate
+/// number of retained labels and colors.
+async fn import_labels_for_image(
+    budget: &mut LabelBudget,
+    store: &Arc<dyn ObjectStore>,
+    dataset_id: &str,
+    base_prefix: &str,
+    source_image_id: &ImageId,
+    source_owner: &EntityId,
+) -> ImportedLabels {
+    let labels_prefix = if base_prefix.is_empty() {
+        "labels".to_string()
+    } else {
+        format!("{base_prefix}/labels")
+    };
+
+    let Some(labels_json) =
+        parse::read_optional_zarr_json(store, &format!("{labels_prefix}/zarr.json")).await
+    else {
+        return ImportedLabels::default();
+    };
+
+    let names = parse::parse_labels_names(&labels_json);
+    let mut imported = ImportedLabels::default();
+    for name in names {
+        if budget.labels_remaining == 0 {
+            eprintln!(
+                "[lucida-store] dataset {dataset_id:?}: dataset label budget reached; \
+                 skipping remaining labels under {labels_prefix:?}",
+            );
+            break;
+        }
+        match build_label(store, &labels_prefix, &name, source_image_id, source_owner).await {
+            Ok(mut built) => {
+                // Clamp this label's colors to the remaining dataset-wide budget
+                // before retaining them, then charge both budgets.
+                if built.spec.colors.len() > budget.colors_remaining {
+                    built.spec.colors.truncate(budget.colors_remaining);
+                }
+                budget.colors_remaining -= built.spec.colors.len();
+                budget.labels_remaining -= 1;
+                imported.specs.push(built.spec);
+                imported.fetch.push(built.fetch);
+                imported.bindings.push(built.binding);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[lucida-store] dataset {dataset_id:?}: skipping malformed label \
+                     {name:?} under {labels_prefix:?}: {e}",
+                );
+            }
+        }
+    }
+    imported
+}
+
+/// A single fully-built label: its manifest spec plus the fetch/binding entries
+/// keyed by the label's own image id.
+struct BuiltLabel {
+    spec: LabelSpec,
+    fetch: ProxiedImageSpec,
+    binding: ImageBindingSeed,
+}
+
+/// Build one label from its group prefix, reusing the ordinary multiscale
+/// pipeline so the label becomes a first-class multiscale image with its own
+/// axes, per-level geometry, integer dtype, and coarse-level selection — kept
+/// distinct from the source image's geometry, which is the spatial-alignment
+/// foundation for later rendering.
+async fn build_label(
+    store: &Arc<dyn ObjectStore>,
+    labels_prefix: &str,
+    name: &str,
+    source_image_id: &ImageId,
+    source_owner: &EntityId,
+) -> Result<BuiltLabel, StoreError> {
+    let group_prefix = format!("{labels_prefix}/{name}");
+    let group_json = parse::read_zarr_json(store, &format!("{group_prefix}/zarr.json")).await?;
+
+    let error_prefix = format!("label {name:?}: ");
+    let parsed = parse::parse_multiscales(&group_json, &error_prefix)?;
+    let axes_names = parsed.axes_names;
+    let level_entries = parsed.level_entries;
+
+    let level_metas = parse::read_level_metas(store, &group_prefix, &level_entries).await?;
+
+    // Preserve the label's integer dtype exactly (uint8/16/32) — a uint32 mask
+    // whose ids exceed 65535 must never be narrowed.
+    let data_type = parse_data_type(&level_metas[0].data_type)?;
+    let layout = classify_axes(&axes_names, &level_metas[0].shape);
+    warn_pinned_axes(&group_prefix, &layout.pinned);
+    let axes = build_axes(&layout.canonical_names);
+    // A zero chunk dimension here returns Err, so the label is skipped by the
+    // caller rather than panicking the whole import.
+    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
+    let coarse_level_index =
+        select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
+    let level_bindings = build_level_binding_infos(
+        &axes_names,
+        &level_metas,
+        data_type_size(data_type),
+        &layout.pinned,
+    )?;
+
+    let image_label = parse::parse_image_label(&group_json);
+
+    let label_image_id = ImageId(format!("{source_image_id}:label:{name}"));
+
+    let image = ImageSpec {
+        image_id: label_image_id.clone(),
+        // The label shares the source image's owning entity so a render pass can
+        // resolve its placement from the same entity that positions the source.
+        owner: source_owner.clone(),
+        multiscale: MultiscaleInfo {
+            axes,
+            levels,
+            coarse_level_index,
+            generated_levels: Vec::new(),
+            data_type,
+            pinned_axes: layout.pinned,
+            channel_infos: Vec::new(),
+        },
+    };
+
+    let spec = LabelSpec {
+        name: name.to_string(),
+        source_image_id: source_image_id.clone(),
+        image,
+        colors: image_label.colors,
+        source_declared: image_label.source_declared,
+    };
+
+    let fetch = ProxiedImageSpec {
+        image_id: label_image_id.clone(),
+        wire_format: WireFormat::Raw { data_type },
+    };
+
+    let binding = ImageBindingSeed {
+        image_id: label_image_id,
+        axes_names,
+        store_prefix: Some(group_prefix),
+        levels: level_bindings,
+    };
+
+    Ok(BuiltLabel {
+        spec,
+        fetch,
+        binding,
+    })
 }
 
 #[cfg(test)]
@@ -2189,6 +2433,511 @@ mod tests {
                 .multiscale
                 .channel_infos
                 .is_empty(),
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Label import fixtures ---
+
+    /// Write a `labels/` group listing `names` into an existing image or FOV
+    /// directory (`group_dir/labels/zarr.json`).
+    fn write_labels_index(group_dir: &std::path::Path, names: &[&str]) {
+        let labels_dir = group_dir.join("labels");
+        fs::create_dir_all(&labels_dir).unwrap();
+        let json = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"ome": {"version": "0.5", "labels": names}}
+        });
+        fs::write(
+            labels_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Write a single-level label multiscale group at
+    /// `group_dir/labels/{name}`. `image_label` is spliced verbatim as
+    /// `ome.image-label`; pass `Value::Null` to omit the block entirely.
+    #[allow(clippy::too_many_arguments)]
+    fn write_label_multiscale(
+        group_dir: &std::path::Path,
+        name: &str,
+        axes: &[&str],
+        shape: &[u64],
+        chunk: &[u64],
+        scale: &[f64],
+        dtype: &str,
+        image_label: serde_json::Value,
+    ) {
+        let label_dir = group_dir.join("labels").join(name);
+        fs::create_dir_all(&label_dir).unwrap();
+
+        let axes_json: Vec<serde_json::Value> = axes
+            .iter()
+            .map(|n| {
+                let kind = match n.to_lowercase().as_str() {
+                    "t" => "time",
+                    "c" => "channel",
+                    _ => "space",
+                };
+                serde_json::json!({"name": n, "type": kind})
+            })
+            .collect();
+
+        let mut ome = serde_json::json!({
+            "version": "0.5",
+            "multiscales": [{
+                "version": "0.5",
+                "name": name,
+                "axes": axes_json,
+                "datasets": [{
+                    "path": "0",
+                    "coordinateTransformations": [{"type": "scale", "scale": scale}]
+                }]
+            }]
+        });
+        if !image_label.is_null() {
+            ome["image-label"] = image_label;
+        }
+
+        let group = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"ome": ome}
+        });
+        fs::write(
+            label_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&group).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = label_dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": shape,
+            "data_type": dtype,
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": chunk}},
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Write a label group whose zarr.json is present but has no multiscales,
+    /// so building it fails and the label must be skipped.
+    fn write_broken_label_group(group_dir: &std::path::Path, name: &str) {
+        let label_dir = group_dir.join("labels").join(name);
+        fs::create_dir_all(&label_dir).unwrap();
+        let group = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"ome": {"version": "0.5"}}
+        });
+        fs::write(
+            label_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&group).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A standalone image with a `labels/` group attaches the label with its
+    /// OWN axes, dtype, and scale preserved distinct from the source image, and
+    /// exposes it as a streamable image (fetch + binding) that is not part of
+    /// `manifest.images()`.
+    #[tokio::test]
+    async fn import_single_image_with_label_overlay() {
+        let dir = temp_dir("import_single_label");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["mitochondria"]);
+        write_label_multiscale(
+            &dir,
+            "mitochondria",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 4.0, 4.0], // 4x coarser in y/x than the source
+            "uint32",
+            serde_json::json!({
+                "version": "0.5",
+                "colors": [
+                    {"label-value": 2, "rgba": [230, 25, 75, 255]},
+                    {"label-value": 92801, "rgba": [0, 0, 128, 255]}
+                ],
+                "source": {"image": "../../"}
+            }),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "lbl-id", "Labeled").await.unwrap();
+
+        // The base image import is unchanged.
+        assert!(matches!(result.manifest.kind, DatasetKind::Single));
+        assert_eq!(result.manifest.images().len(), 1);
+        let source_image_id = result.manifest.images()[0].image_id.clone();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1);
+        let label = &labels[0];
+        assert_eq!(label.name, "mitochondria");
+        assert_eq!(label.source_image_id, source_image_id);
+        // dtype preserved end to end (uint32), never narrowed.
+        assert_eq!(label.data_type, DataType::Uint32);
+        // The label's own axes (no channel), distinct from the source's TCZYX.
+        assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
+        // The label's own level-0 scale, normalized to 5D with c filled to 1.
+        assert_eq!(label.level0_scale, [1.0, 1.0, 1.0, 4.0, 4.0]);
+        // Colors, including a value well beyond u16::MAX.
+        assert_eq!(label.colors.len(), 2);
+        assert_eq!(label.colors[0].rgba, [230, 25, 75, 255]);
+        assert_eq!(label.colors[1].value, 92801);
+        assert!(label.source_declared);
+
+        // The label image is streamable and distinct from the source image, and
+        // is deliberately absent from manifest.images().
+        let label_image_id = label.label_image_id.clone();
+        assert_ne!(label_image_id, source_image_id);
+        assert!(
+            !result
+                .manifest
+                .images()
+                .iter()
+                .any(|i| i.image_id == label_image_id),
+            "label must not appear among ordinary images",
+        );
+
+        if let FetchSource::Proxied(ref p) = result.fetch {
+            assert_eq!(p.images.len(), 2, "source image + label image");
+            assert!(p.images.iter().any(|i| i.image_id == label_image_id));
+        } else {
+            panic!("expected Proxied fetch");
+        }
+
+        let binding = result
+            .binding_seed
+            .images
+            .iter()
+            .find(|b| b.image_id == label_image_id)
+            .expect("label has a binding seed");
+        assert_eq!(binding.store_prefix.as_deref(), Some("labels/mitochondria"));
+        assert_eq!(binding.axes_names, vec!["t", "z", "y", "x"]);
+        assert!(!binding.levels.is_empty());
+
+        // The stored spec exposes the label's full multiscale for streaming.
+        let spec = result
+            .manifest
+            .label_specs()
+            .iter()
+            .find(|s| s.name == "mitochondria")
+            .unwrap();
+        assert_eq!(spec.image.multiscale.data_type, DataType::Uint32);
+        assert_eq!(spec.image.multiscale.levels[0].shape, [1, 1, 1, 16, 16]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A standalone image with no `labels/` group imports exactly as before:
+    /// no labels, and the fetch/binding carry only the source image.
+    #[tokio::test]
+    async fn import_single_image_without_labels_has_no_labels() {
+        let dir = temp_dir("import_no_labels");
+        create_single_image_fixture(&dir, None);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "no-lbl", "No Labels").await.unwrap();
+
+        assert!(result.manifest.labels().is_empty());
+        if let FetchSource::Proxied(ref p) = result.fetch {
+            assert_eq!(p.images.len(), 1);
+        }
+        assert_eq!(result.binding_seed.images.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A malformed label is skipped without failing the import; well-formed
+    /// labels alongside it still attach, and a label whose `image-label` is
+    /// malformed degrades to empty colors.
+    #[tokio::test]
+    async fn malformed_label_is_skipped_without_failing_import() {
+        let dir = temp_dir("import_label_degrade");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["good", "broken", "nocolors"]);
+        write_label_multiscale(
+            &dir,
+            "good",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint16",
+            serde_json::json!({
+                "colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}],
+                "source": {"image": "../../"}
+            }),
+        );
+        write_broken_label_group(&dir, "broken");
+        write_label_multiscale(
+            &dir,
+            "nocolors",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint8",
+            serde_json::json!({"colors": "not-an-array"}),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "degrade", "Degrade")
+            .await
+            .expect("a malformed label must not fail the whole import");
+
+        // The source image still imported.
+        assert_eq!(result.manifest.images().len(), 1);
+
+        let labels = result.manifest.labels();
+        let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(labels.len(), 2, "broken label skipped, other two kept");
+        assert!(names.contains(&"good"));
+        assert!(names.contains(&"nocolors"));
+        assert!(!names.contains(&"broken"));
+
+        // The malformed image-label degraded gracefully.
+        let nc = labels.iter().find(|l| l.name == "nocolors").unwrap();
+        assert!(nc.colors.is_empty());
+        assert!(!nc.source_declared);
+        assert_eq!(nc.data_type, DataType::Uint8);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Labels nested under a single plate field attach to that field's image,
+    /// with a field-nested store prefix, and leave DatasetKind and the field
+    /// image set unchanged.
+    #[tokio::test]
+    async fn import_plate_with_labels_on_field() {
+        let dir = temp_dir("import_plate_labels");
+        create_plate_fixture(
+            &dir,
+            "p",
+            &["A", "B"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 2),
+                ("A", "2", 0, 1, 1),
+                ("B", "1", 1, 0, 1),
+            ],
+            [1, 1, 10, 256, 256],
+            [1, 1, 1, 128, 128],
+            2,
+        );
+
+        // Attach a "cells" label to field A/1/0 only.
+        let fov_dir = dir.join("A").join("1").join("0");
+        write_labels_index(&fov_dir, &["cells"]);
+        write_label_multiscale(
+            &fov_dir,
+            "cells",
+            &["t", "z", "y", "x"],
+            &[1, 10, 256, 256],
+            &[1, 1, 128, 128],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({
+                "colors": [{"label-value": 1, "rgba": [230, 25, 75, 128]}],
+                "source": {"image": "../../"}
+            }),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "plate-lbl", "Plate Labeled")
+            .await
+            .unwrap();
+
+        // DatasetKind and field image set are unchanged (4 fields: 2+1+1).
+        assert!(matches!(result.manifest.kind, DatasetKind::Plate { .. }));
+        assert_eq!(result.manifest.images().len(), 4);
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1);
+        let label = &labels[0];
+        assert_eq!(label.name, "cells");
+        assert_eq!(label.data_type, DataType::Uint32);
+        assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
+        // Attached to the A/1/0 field image specifically.
+        let expected_source = ImageId("plate-lbl:image:A/1/0".to_string());
+        assert_eq!(label.source_image_id, expected_source);
+        // That source image really exists in the manifest.
+        assert!(
+            result
+                .manifest
+                .images()
+                .iter()
+                .any(|i| i.image_id == expected_source),
+        );
+
+        // Streamable with a field-nested store prefix.
+        let binding = result
+            .binding_seed
+            .images
+            .iter()
+            .find(|b| b.image_id == label.label_image_id)
+            .expect("label binding present");
+        assert_eq!(binding.store_prefix.as_deref(), Some("A/1/0/labels/cells"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Write a minimal single-image OME-Zarr fixture with a caller-chosen level-0
+    /// shape and chunk shape (5D TCZYX). Metadata only.
+    fn create_single_image_with_chunk(dir: &std::path::Path, shape: [u64; 5], chunk: [u64; 5]) {
+        fs::create_dir_all(dir).unwrap();
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"ome": {
+                "version": "0.5",
+                "multiscales": [{
+                    "version": "0.5",
+                    "name": "image",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"}
+                    ],
+                    "datasets": [{
+                        "path": "0",
+                        "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0, 1.0]}]
+                    }]
+                }]
+            }}
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": shape,
+            "data_type": "uint16",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": chunk}},
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A label whose level-0 array has a zero chunk dimension (which would
+    /// divide by zero when computing its grid) is skipped without panicking or
+    /// failing the import; the source image and well-formed sibling labels still
+    /// import.
+    #[tokio::test]
+    async fn label_with_zero_chunk_dimension_is_skipped() {
+        let dir = temp_dir("import_label_zero_chunk");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["good", "zerochunk"]);
+        write_label_multiscale(
+            &dir,
+            "good",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint16",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+        // Zero in the Y chunk dimension.
+        write_label_multiscale(
+            &dir,
+            "zerochunk",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 0, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({"colors": []}),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "zc", "Zero Chunk")
+            .await
+            .expect("a zero-chunk label must not panic or fail the whole import");
+
+        // Source image still imported.
+        assert_eq!(result.manifest.images().len(), 1);
+        // Only the well-formed label survives; the zero-chunk one is skipped.
+        let labels = result.manifest.labels();
+        let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(labels.len(), 1);
+        assert!(names.contains(&"good"));
+        assert!(!names.contains(&"zerochunk"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A SOURCE image whose level-0 array has a zero chunk dimension must fail
+    /// the import loudly with a clear `StoreError`, never a divide-by-zero panic.
+    #[tokio::test]
+    async fn source_image_with_zero_chunk_fails_without_panic() {
+        let dir = temp_dir("import_source_zero_chunk");
+        create_single_image_with_chunk(&dir, [1, 1, 1, 64, 64], [1, 1, 1, 0, 64]);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "szc", "Src Zero Chunk")
+            .await
+            .expect_err("a zero-chunk source array must fail the import");
+        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(
+            err.to_string().contains("zero"),
+            "error should name the zero dimension: {err}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same guard applies on the plate path: a zero chunk dimension in the
+    /// representative field's array fails loudly rather than panicking.
+    #[tokio::test]
+    async fn plate_source_with_zero_chunk_fails_without_panic() {
+        let dir = temp_dir("import_plate_zero_chunk");
+        create_plate_fixture(
+            &dir,
+            "p",
+            &["A"],
+            &["1"],
+            &[("A", "1", 0, 0, 1)],
+            [1, 1, 10, 256, 256],
+            [1, 1, 1, 0, 128], // zero Y chunk
+            1,
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "pzc", "Plate Zero Chunk")
+            .await
+            .expect_err("a zero-chunk plate field array must fail the import");
+        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(
+            err.to_string().contains("zero"),
+            "error should name the zero dimension: {err}",
         );
 
         let _ = fs::remove_dir_all(&dir);
