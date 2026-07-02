@@ -230,3 +230,9 @@ id_ecdsa
 id_ecdsa.*
 id_ed25519
 id_ed25519.*
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
