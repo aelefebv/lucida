@@ -9,13 +9,18 @@
 
 export {
   type AtlasState,
+  type LabelVolumePool,
   type LodIndirectionMeta,
+  destroyAllLabelVolumePools,
   destroyAllVolumeAtlasResources,
   destroyAtlas,
   ensureDepthTexture,
   getDepthTexture,
   getDummyIndirection,
+  getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
+  removeLabelVolumePool,
+  removeLabelVolumePoolsForDataset,
   removeVolumeAtlas,
   resizeIndirection,
 } from "./atlas.ts";
@@ -32,12 +37,14 @@ export {
 
 export { remapIndirection } from "./remap.ts";
 
-export { handleVolumeChunkData } from "./upload.ts";
+export { handleVolumeChunkData, handleLabelVolumeChunkData } from "./upload.ts";
 
 export { handleVolumeRenderMultiPass } from "./render.ts";
 
 import {
+  destroyAllLabelVolumePools,
   destroyAllVolumeAtlasResources,
+  removeLabelVolumePoolsForDataset,
   removeVolumeAtlas,
 } from "./atlas.ts";
 import { clearAllRayHits, clearRayHitForMember } from "./eviction.ts";
@@ -47,17 +54,21 @@ import type { WorkerCtx } from "../workerContext.ts";
  * Remove resources for a removed entity or dataset.
  * Pass either a poolKey (removes the whole pool) or a memberId (removes per-entity state).
  *
- * Composed from `removeVolumeAtlas` (atlas pool teardown) and
- * `clearRayHitForMember` (per-entity ray-pick cleanup) so the atlas
+ * Composed from `removeVolumeAtlas` (atlas pool teardown),
+ * `removeLabelVolumePoolsForDataset` (label pool teardown — matched by owning
+ * dataset since label pools are keyed by the label image id, not the dataset
+ * id), and `clearRayHitForMember` (per-entity ray-pick cleanup) so the atlas
  * module stays independent of the eviction module.
  */
 export function removeVolumeResources(ctx: WorkerCtx, idOrMember: string): void {
   removeVolumeAtlas(ctx, idOrMember);
+  removeLabelVolumePoolsForDataset(ctx, idOrMember);
   clearRayHitForMember(ctx.state, idOrMember);
 }
 
-/** Tear down every volume pool, the depth texture, the dummy indirection buffer, and all ray-pick state. */
+/** Tear down every volume pool, the label volume pools, the depth texture, the dummy indirection buffer, and all ray-pick state. */
 export function destroyAllVolumeResources(ctx: WorkerCtx): void {
   destroyAllVolumeAtlasResources(ctx);
+  destroyAllLabelVolumePools(ctx);
   clearAllRayHits(ctx.state);
 }

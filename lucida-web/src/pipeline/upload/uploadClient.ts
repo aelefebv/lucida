@@ -115,6 +115,37 @@ export interface UploadClient {
     tier?: ResidencyTier,
   ): void;
 
+  /**
+   * Deliver WHOLE uint32 label chunks to the r32uint label VOLUME pool
+   * (categorical first-hit overlay path). Distinct from {@link volumeChunkData}:
+   * routed by the label image id and drawn as a colored surface, not
+   * accumulated as intensity. Unlike {@link labelSliceChunkData}, the full 3D
+   * chunk crosses (no plane extraction) — the 3D surface needs the whole
+   * volume.
+   */
+  labelVolumeChunkData(
+    memberId: string,
+    datasetId: string,
+    chunks: {
+      data: ArrayBuffer;
+      dataType: string;
+      x: number;
+      y: number;
+      z: number;
+      key: string;
+    }[],
+    level: number,
+    t: number,
+    c: number,
+    levelWidth: number,
+    levelHeight: number,
+    levelDepth: number,
+    chunkX: number,
+    chunkY: number,
+    chunkZ: number,
+    epochs: SceneEpochs,
+  ): void;
+
   proxyAssetData(
     datasetId: string,
     entityId: string,

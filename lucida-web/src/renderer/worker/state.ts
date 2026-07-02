@@ -16,7 +16,7 @@
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import type { ColdStateMessage } from "../workerProtocol.ts";
-import type { AtlasState, LodIndirectionMeta } from "../volume/atlas.ts";
+import type { AtlasState, LabelVolumePool, LodIndirectionMeta } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
@@ -60,6 +60,14 @@ export interface RendererState {
    * 32-bit storage and render through the categorical shader path.
    */
   labelSlicePools: Map<string, LabelSlicePool>;
+  /**
+   * memberId → r32uint label overlay volume pool. The 3D counterpart to
+   * {@link labelSlicePools}: holds the full label mask volume for the
+   * first-hit categorical surface drawn over the translucent intensity
+   * volume. Separate from {@link volumeAtlases} (r16uint intensity) for the
+   * same reason — full 32-bit ids + the categorical shader path.
+   */
+  labelVolumePools: Map<string, LabelVolumePool>;
 
   // ── Per-entity eviction reference points ─────────────────────────
   /** memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
@@ -102,6 +110,7 @@ export function createInitialState(): RendererState {
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
     labelSlicePools: new Map(),
+    labelVolumePools: new Map(),
     rayHitPerEntity: new Map(),
     cameraUVPerEntity: new Map(),
     currentEpochs: null,

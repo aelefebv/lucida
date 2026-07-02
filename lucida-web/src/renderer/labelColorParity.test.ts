@@ -15,7 +15,17 @@
 
 import { describe, it, expect } from "vitest";
 import sliceSrc from "./slice.wgsl?raw";
+import volumeSrc from "./volume.wgsl?raw";
 import { glasbeyRgb, labelColor } from "./labelColors.ts";
+
+/** Extract a WGSL free function `fn name(...) { ... }` up to its first
+ *  column-0 closing brace (the categorical helpers have no nested column-0
+ *  `}`), so the two shader copies can be compared byte-for-byte. */
+function extractFn(src: string, name: string): string {
+  const m = src.match(new RegExp(`fn ${name}[\\s\\S]*?\\n\\}`));
+  if (!m) throw new Error(`fn ${name} not found`);
+  return m[0];
+}
 
 // --- Hand port of slice.wgsl `labelGlasbey` (u32 arithmetic) -------------
 
@@ -93,6 +103,24 @@ describe("label color TS <-> WGSL parity", () => {
     expect(sliceSrc).toContain("0x85ebca6b");
     expect(sliceSrc).toContain("0xc2b2ae35");
     expect(sliceSrc).toContain("1530u");
+  });
+
+  it("volume.wgsl carries the same categorical hash + palette scan", () => {
+    // The 3D first-hit label surface reuses the identical color derivation,
+    // so the on-screen 3D colors match 2D and `labelColor` bit-for-bit.
+    expect(volumeSrc).toContain("fn labelGlasbey");
+    expect(volumeSrc).toContain("fn labelColorFor");
+    expect(volumeSrc).toContain("0x85ebca6b");
+    expect(volumeSrc).toContain("0xc2b2ae35");
+    expect(volumeSrc).toContain("1530u");
+    expect(volumeSrc).toContain("labelColors[2u * i]");
+  });
+
+  it("slice.wgsl and volume.wgsl share byte-identical categorical helpers", () => {
+    // Same source in both shaders — no forked color logic that could drift.
+    for (const fn of ["labelFmix32", "labelGlasbey", "labelColorFor"]) {
+      expect(extractFn(volumeSrc, fn)).toBe(extractFn(sliceSrc, fn));
+    }
   });
 
   it("WGSL port matches glasbeyRgb across representative ids", () => {

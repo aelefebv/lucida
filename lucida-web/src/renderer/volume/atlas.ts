@@ -10,7 +10,7 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
-import { getDeviceLimits } from "../gpuContext.ts";
+import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 
 /** Per-LOD indirection section metadata. */
@@ -41,6 +41,151 @@ export interface AtlasState {
   t: number; c: number;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
+}
+
+/**
+ * A label overlay's volume pool: one `r32uint` 3D texture holding the label
+ * mask at its chosen level's full extent, plus a single-slot indirection
+ * buffer so the categorical shader path reads it as one tile. The 3D analog
+ * of {@link import("../slice/atlas.ts").LabelSlicePool}: kept minimal and
+ * self-contained (no shared LRU slots) because a label overlay is a single
+ * member covering a bounded footprint, unlike the shared intensity atlas
+ * that packs many members.
+ *
+ * The texture is written IN PLACE as chunks arrive (never destroyed on a
+ * T scrub), mirroring the intensity atlas' overwrite so a label never blanks
+ * mid-scrub — the previous volume stays visible until the new one lands.
+ */
+export interface LabelVolumePool {
+  texture: GPUTexture; // r32uint 3D, size [width, height, depth]
+  /** Single-entry indirection ([0]) so the one tile is always slot 0. */
+  indirectionBuf: GPUBuffer;
+  /**
+   * Owning dataset id (the `removeLayerResources` id). The pool is keyed by
+   * the label image id — which dataset removal never sees — so this is how
+   * {@link removeLabelVolumePoolsForDataset} finds + frees it on removal.
+   */
+  datasetId: string;
+  width: number;
+  height: number;
+  depth: number;
+  /**
+   * Reused single-entity descriptor buffer (allocated once, rewritten in
+   * place each frame). Unlike the 2D label descriptor — cacheable by opacity
+   * because it uses an identity transform — the volume label descriptor
+   * carries the source member's model matrix (for the ray transform + frag
+   * depth), which can change on a layout epoch, so its contents are refreshed
+   * per frame rather than cached. Populated by the render path.
+   */
+  descBuffer?: GPUBuffer;
+  /**
+   * Cached declared-palette storage buffer ([id, packedRgba] pairs) + its
+   * pair count, built once from the label's `image-label.colors`.
+   */
+  labelColorBuffer?: GPUBuffer;
+  labelColorCount?: number;
+}
+
+/** Warn once per member when its label volume texture can't be allocated,
+ *  so a failing device doesn't spam the console each delivery. */
+const warnedLabelVolumeAlloc = new Set<string>();
+
+/**
+ * Get or create a label volume pool for `memberId` sized to the label
+ * level's 3D dimensions (clamped to the device's max 3D texture dimension
+ * so an oversized level can never exceed the limit). Reused IN PLACE when the
+ * dims are unchanged — a T scrub overwrites the existing texture rather than
+ * destroying + recreating it, so the overlay never blanks. Recreated only when
+ * the dims actually change (a new level). `datasetId` is stamped on the pool so
+ * dataset removal can free it (the pool is keyed by the label image id).
+ *
+ * Returns `null` when the texture allocation fails (e.g. an out-of-budget
+ * device) — the caller skips the label rather than throwing through the upload
+ * path. Level selection already bounds the size, so this is defense in depth.
+ */
+export function getOrCreateLabelVolumePool(
+  ctx: WorkerCtx,
+  memberId: string,
+  datasetId: string,
+  width: number,
+  height: number,
+  depth: number,
+): LabelVolumePool | null {
+  const limit = getDeviceLimits(ctx.device).maxTextureDimension3D;
+  const w = Math.max(1, Math.min(width, limit));
+  const h = Math.max(1, Math.min(height, limit));
+  const d = Math.max(1, Math.min(depth, limit));
+
+  const pools = ctx.state.labelVolumePools;
+  const existing = pools.get(memberId);
+  if (existing && existing.width === w && existing.height === h && existing.depth === d) {
+    existing.datasetId = datasetId;
+    return existing;
+  }
+  if (existing) destroyLabelVolumePool(existing);
+
+  let texture: GPUTexture;
+  try {
+    texture = createEmptyVolumeTexture(ctx.device, w, h, d, "r32uint");
+  } catch (err) {
+    if (!warnedLabelVolumeAlloc.has(memberId)) {
+      warnedLabelVolumeAlloc.add(memberId);
+      console.warn(
+        `[labels] skipping "${memberId}": could not allocate a ${w}×${h}×${d} ` +
+        `r32uint volume texture (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+    return null;
+  }
+  const indirectionBuf = ctx.device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  // Single tile lives at slot 0.
+  ctx.device.queue.writeBuffer(indirectionBuf, 0, new Uint32Array([0]));
+
+  const pool: LabelVolumePool = { texture, indirectionBuf, datasetId, width: w, height: h, depth: d };
+  pools.set(memberId, pool);
+  return pool;
+}
+
+export function destroyLabelVolumePool(pool: LabelVolumePool): void {
+  pool.texture.destroy();
+  pool.indirectionBuf.destroy();
+  pool.descBuffer?.destroy();
+  pool.labelColorBuffer?.destroy();
+}
+
+/** Remove a member's label volume pool (no-op if absent). */
+export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string): void {
+  const pool = ctx.state.labelVolumePools.get(memberId);
+  if (pool) {
+    destroyLabelVolumePool(pool);
+    ctx.state.labelVolumePools.delete(memberId);
+  }
+}
+
+/**
+ * Free every label volume pool matching `idOrDataset`, matched EITHER by the
+ * pool's member key (the label image id) OR by its owning `datasetId`. Dataset
+ * removal calls `removeLayerResources` with the dataset id, which never equals
+ * a label pool's key — so matching on the stamped `datasetId` is what actually
+ * frees the (large) 3D label texture. Also accepts a member id so a per-member
+ * removal still works.
+ */
+export function removeLabelVolumePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
+  for (const [memberId, pool] of ctx.state.labelVolumePools) {
+    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      destroyLabelVolumePool(pool);
+      ctx.state.labelVolumePools.delete(memberId);
+    }
+  }
+}
+
+/** Destroy every label volume pool. */
+export function destroyAllLabelVolumePools(ctx: WorkerCtx): void {
+  for (const pool of ctx.state.labelVolumePools.values()) destroyLabelVolumePool(pool);
+  ctx.state.labelVolumePools.clear();
 }
 
 // Shared depth texture for volume rendering (used by cursor renderer for occlusion).

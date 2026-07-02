@@ -12,6 +12,13 @@ import type { Level0 } from "../../../renderer/labelLayout.ts";
 import type { DatasetEntry } from "../../../renderLoopTypes.ts";
 
 export interface ManifestEntry {
+  /**
+   * The dataset's key in `ctx.datasets` — the SAME id `removeLayerResources`
+   * is called with on dataset removal. Carried so a label delivery can stamp
+   * its GPU pool with the owning dataset (a label pool is keyed by the label
+   * image id, not the dataset id, so removal needs this to find + free it).
+   */
+  datasetId: string;
   manifest: DatasetManifest;
   image: ImageSpec;
   levels: LevelGeometry[];
@@ -39,9 +46,10 @@ export function buildManifestByImage(
   datasets: Map<string, DatasetEntry>,
 ): Map<string, ManifestEntry> {
   const out = new Map<string, ManifestEntry>();
-  for (const [, ds] of datasets) {
+  for (const [datasetId, ds] of datasets) {
     for (const image of ds.manifest.images) {
       out.set(image.image_id, {
+        datasetId,
         manifest: ds.manifest,
         image,
         levels: image.multiscale.levels,
@@ -55,6 +63,7 @@ export function buildManifestByImage(
       const source0 = source?.multiscale.levels[0] ?? label0;
       if (!label0) continue;
       out.set(label.image.image_id, {
+        datasetId,
         manifest: ds.manifest,
         image: label.image,
         levels: label.image.multiscale.levels,

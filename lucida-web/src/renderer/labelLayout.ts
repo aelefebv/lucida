@@ -109,3 +109,57 @@ export function labelDepthZ(sourceZ: number, source: Level0, label: Level0): num
 export function labelTimeIndex(sourceT: number, source: Level0, label: Level0): number {
   return labelAxisIndex(sourceT, source, label, AXIS_T);
 }
+
+/** Ratio of the label's physical extent to the source's on `axis`, or `1`
+ *  when either is missing/zero (never a zero/NaN scale factor). */
+function extentRatio(label: Level0, source: Level0, axis: number): number {
+  const labelExtent = safeCount(label.shape, axis) * safeScale(label.scale, axis);
+  const sourceExtent = safeCount(source.shape, axis) * safeScale(source.scale, axis);
+  if (!(sourceExtent > 0) || !(labelExtent > 0)) return 1;
+  const r = labelExtent / sourceExtent;
+  return Number.isFinite(r) && r > 0 ? r : 1;
+}
+
+/**
+ * The model matrix (and inverse) that maps a LABEL's `[0,1]^3` cube to world
+ * space, given the SOURCE member's model matrix + inverse. The 3D analog of
+ * {@link labelFootprint}: a label overlays its source's physical extent, so
+ * it inherits the source's world origin/orientation, scaled per axis so the
+ * cube spans the LABEL's own physical extent (`shape * scale`). For a
+ * spec-compliant label — same physical extent as its source, only downsampled
+ * — every ratio is `1` and the matrices pass through unchanged.
+ *
+ * Both matrices are column-major 4×4. `M_label = M_source · diag(rx, ry, rz, 1)`
+ * scales the source's basis columns; the inverse is
+ * `diag(1/rx, 1/ry, 1/rz, 1) · M_source⁻¹`, which scales the inverse's rows —
+ * so no general matrix inversion is needed (the source inverse is reused).
+ */
+export function labelModelMatrices(
+  sourceModel: Float32Array,
+  sourceInv: Float32Array,
+  source: Level0,
+  label: Level0,
+): { model: Float32Array; inv: Float32Array } {
+  const rx = extentRatio(label, source, AXIS_X);
+  const ry = extentRatio(label, source, AXIS_Y);
+  const rz = extentRatio(label, source, AXIS_Z);
+
+  // M · diag(rx, ry, rz, 1): scale columns 0, 1, 2 (local x/y/z basis).
+  const model = new Float32Array(sourceModel);
+  for (let i = 0; i < 4; i++) {
+    model[i] *= rx;      // column 0
+    model[4 + i] *= ry;  // column 1
+    model[8 + i] *= rz;  // column 2
+  }
+
+  // diag(1/rx, 1/ry, 1/rz, 1) · M⁻¹: scale rows 0, 1, 2 (column-major → stride 4).
+  const inv = new Float32Array(sourceInv);
+  const irx = 1 / rx, iry = 1 / ry, irz = 1 / rz;
+  for (let c = 0; c < 4; c++) {
+    inv[0 + 4 * c] *= irx; // row 0
+    inv[1 + 4 * c] *= iry; // row 1
+    inv[2 + 4 * c] *= irz; // row 2
+  }
+
+  return { model, inv };
+}

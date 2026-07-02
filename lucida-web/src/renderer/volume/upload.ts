@@ -4,12 +4,15 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { VolumeChunkDataMessage } from "../workerProtocol.ts";
+import type {
+  LabelVolumeChunkDataMessage,
+  VolumeChunkDataMessage,
+} from "../workerProtocol.ts";
 import { writeVolumeChunk } from "../gpuContext.ts";
 import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint16 } from "../dataTypeUtil.ts";
+import { asUint16, asUint32 } from "../dataTypeUtil.ts";
 import {
   parseCompositeKey,
   makeCompositeKey,
@@ -17,6 +20,65 @@ import {
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
+import { getOrCreateLabelVolumePool } from "./atlas.ts";
+
+/**
+ * Write WHOLE uint32 label chunks into the member's r32uint label VOLUME
+ * pool. The delivery path (`dispatchLabelVolumeChunkDelivery`) forwards the
+ * entire 3D chunk (no plane extraction), so each `chunk.data` is a full
+ * `chunkZ*chunkY*chunkX` block of ids placed at the chunk's `(x, y, z)`
+ * grid offset. The pool is a single tile reused in place, so a T scrub
+ * overwrites resident voxels without blanking. Ids stay at full 32-bit
+ * width — no intensity-range sampling (categorical, not scalar). Writes are
+ * clamped to the (possibly device-limited) texture. Mirrors
+ * `handleLabelSliceChunkData` in 3D and the intensity `handleVolumeChunkData`
+ * edge clamping.
+ */
+export function handleLabelVolumeChunkData(
+  ctx: WorkerCtx,
+  msg: LabelVolumeChunkDataMessage,
+): void {
+  // Drop an out-of-date delivery (e.g. a previous timepoint's chunk racing
+  // in after the view moved on) so it can't overwrite the pool with the
+  // wrong T — same stale guard the intensity path uses.
+  if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
+
+  const { memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+
+  // Returns null if the texture can't be allocated — skip the label rather
+  // than throw through the upload path (defense in depth; level selection
+  // already bounds the size).
+  const pool = getOrCreateLabelVolumePool(ctx, memberId, datasetId, levelWidth, levelHeight, levelDepth);
+  if (!pool) return;
+
+  for (const chunk of msg.chunks) {
+    const xOff = chunk.x * chunkX;
+    const yOff = chunk.y * chunkY;
+    const zOff = chunk.z * chunkZ;
+    // Clamp to the resident texture (dims may be device-limited below the
+    // requested level); skip tiles that fall entirely outside it.
+    if (xOff >= pool.width || yOff >= pool.height || zOff >= pool.depth) continue;
+    const cw = Math.min(chunkX, pool.width - xOff);
+    const ch = Math.min(chunkY, pool.height - yOff);
+    const cd = Math.min(chunkZ, pool.depth - zOff);
+    if (cw <= 0 || ch <= 0 || cd <= 0) continue;
+    const data = asUint32(chunk.data);
+    writeVolumeChunk(
+      ctx.device,
+      pool.texture,
+      data,
+      chunkX,
+      chunkY,
+      cw,
+      ch,
+      cd,
+      xOff,
+      yOff,
+      zOff,
+      "r32uint",
+    );
+  }
+}
 
 export function handleVolumeChunkData(
   ctx: WorkerCtx,

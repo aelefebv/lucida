@@ -56,6 +56,7 @@ function makeImage(): ImageSpec {
 function makeMeta(): ManifestEntry {
   const image = makeImage();
   return {
+    datasetId: "ds1",
     manifest: {
       dataset_id: "ds1",
       name: "ds1",

@@ -29,6 +29,7 @@ import {
 } from "../slice/index.ts";
 import {
   applyViewHotState,
+  handleLabelVolumeChunkData,
   handleVolumeChunkData,
   handleVolumeRenderMultiPass,
   removeVolumeResources,
@@ -112,6 +113,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
       return;
     }
+    case "labelVolumeChunkData":
+      handleLabelVolumeChunkData(ctx, msg);
+      return;
     case "volumeRenderMultiPass":
       handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
         const detailPoolKey =

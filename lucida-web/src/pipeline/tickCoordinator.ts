@@ -437,21 +437,20 @@ export class TickCoordinator {
       // Categorical label overlays are invisible to the WASM planner
       // (labels live outside `manifest.images`/`entities`), so their chunk
       // requests are synthesized here from the label's own geometry and
-      // merged into the fetch plan. Slice view only — 3D label volumes are
-      // not rendered yet. Scoped under each label's own image id, so they
-      // never perturb intensity-chunk eviction.
-      const labelRequests =
-        ctx.mode === "slice"
-          ? computeLabelChunkRequests({
-              datasetId: dsId,
-              manifest: ctx.datasets.get(dsId)!.manifest,
-              t: selection.t,
-              z: selection.z,
-              // Fetch only the labels the render path will draw (visible +
-              // eligible), so a hidden label is neither fetched nor drawn.
-              labelSettings: dsSettings?.label_settings,
-            })
-          : [];
+      // merged into the fetch plan. In `slice` mode the label's mapped
+      // Z-plane is fetched; in `volume` mode the whole label volume (every
+      // z-chunk) is fetched for the 3D first-hit surface. Scoped under each
+      // label's own image id, so they never perturb intensity-chunk eviction.
+      const labelRequests = computeLabelChunkRequests({
+        datasetId: dsId,
+        manifest: ctx.datasets.get(dsId)!.manifest,
+        t: selection.t,
+        z: selection.z,
+        // Fetch only the labels the render path will draw (visible +
+        // eligible), so a hidden label is neither fetched nor drawn.
+        labelSettings: dsSettings?.label_settings,
+        mode: ctx.mode as "slice" | "volume",
+      });
       const requestsWithLabels =
         labelRequests.length > 0
           ? [...result.requests, ...labelRequests]

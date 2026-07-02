@@ -499,3 +499,184 @@ describe("eligibleLabelInfos", () => {
     expect(eligibleLabelInfos(manifestWithLabel())).toEqual([]);
   });
 });
+
+describe("computeLabelChunkRequests — volume mode", () => {
+  function image5(id: string, shape5: number[], chunk5: number[], scale5: number[], dtype = "Uint32"): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: [
+          { name: "t", kind: "time" },
+          { name: "c", kind: "channel" },
+          { name: "z", kind: "space" },
+          { name: "y", kind: "space" },
+          { name: "x", kind: "space" },
+        ],
+        levels: [{ level_index: 0, shape: shape5, chunk_shape: chunk5, grid_shape: [1, 1, 1, 1, 1], scale: scale5 }],
+        data_type: dtype,
+      },
+    };
+  }
+
+  // A 4-deep label at chunk-Z 2 → 2 z-chunks; 128² at chunk 64 → 2×2 (y, x).
+  function volManifest(): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "vol", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [image5("img-0", [1, 1, 4, 128, 128], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1], "Uint16")],
+      labels: [{
+        name: "mito",
+        source_image_id: "img-0",
+        image: image5("img-0:label:mito", [1, 1, 4, 128, 128], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1]),
+      }],
+    };
+  }
+
+  it("emits EVERY (z, y, x) chunk of the chosen level (the full volume)", () => {
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "volume" });
+    // gz=2, gy=2, gx=2 → 8 chunks; slice mode would emit only 4 (single z).
+    expect(reqs).toHaveLength(8);
+    // Both z-chunks are present (not just the mapped-Z plane).
+    expect(new Set(reqs.map((r) => r.z))).toEqual(new Set([0, 1]));
+    const keys = new Set(reqs.map((r) => r.chunkKey));
+    expect(keys.size).toBe(8);
+    expect(keys.has("0/0/0/0/0/0")).toBe(true); // z=0 corner
+    expect(keys.has("0/0/0/1/1/1")).toBe(true); // z=1 far corner
+    // Every request is scoped under the label's own image id.
+    expect(reqs.every((r) => r.imageId === "img-0:label:mito")).toBe(true);
+    expect(reqs.every((r) => r.level === 0)).toBe(true);
+  });
+
+  it("slice mode (and the default) fetches only the mapped z-plane", () => {
+    const sliceReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "slice" });
+    expect(sliceReqs).toHaveLength(4); // gy*gx, single z-chunk
+    expect(new Set(sliceReqs.map((r) => r.z))).toEqual(new Set([0]));
+    // Omitting `mode` behaves identically to slice (back-compat).
+    const defaultReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0 });
+    expect(defaultReqs).toHaveLength(4);
+    expect(new Set(defaultReqs.map((r) => r.z))).toEqual(new Set([0]));
+  });
+
+  it("maps a time-invariant label (T=1) to t=0 for every z-chunk", () => {
+    const manifest: DatasetManifest = {
+      dataset_id: "ds-0", name: "ts", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [image5("img-0", [8, 1, 4, 64, 64], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1], "Uint16")],
+      labels: [{
+        name: "seg",
+        source_image_id: "img-0",
+        image: image5("img-0:label:seg", [1, 1, 4, 64, 64], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1]),
+      }],
+    };
+    // Source at t=5, but the label has only t=0 — every z-chunk stays at t=0.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 5, z: 0, mode: "volume" });
+    expect(reqs).toHaveLength(2); // gz=2, gy=gx=1
+    expect(reqs.every((r) => r.t === 0)).toBe(true);
+    expect(new Set(reqs.map((r) => r.z))).toEqual(new Set([0, 1]));
+  });
+
+  it("fetches nothing in volume mode for a hidden label", () => {
+    const reqs = computeLabelChunkRequests({
+      datasetId: "ds-0",
+      manifest: volManifest(),
+      t: 0,
+      z: 0,
+      mode: "volume",
+      labelSettings: [{ visible: false, opacity: 0.5 }],
+    });
+    expect(reqs).toEqual([]);
+  });
+});
+
+describe("computeLabelChunkRequests — volume level selection (3D caps)", () => {
+  interface Lvl { shape: number[]; chunk: number[]; scale: number[] }
+  const AXES = [
+    { name: "t", kind: "time" }, { name: "c", kind: "channel" },
+    { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
+  ];
+  function img(id: string, levels: Lvl[], dtype: string): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: AXES,
+        levels: levels.map((l, i) => ({
+          level_index: i, shape: l.shape, chunk_shape: l.chunk, grid_shape: [1, 1, 1, 1, 1], scale: l.scale,
+        })),
+        data_type: dtype,
+      },
+    };
+  }
+  const SCALE1 = [1, 1, 1, 1, 1];
+  function manifestFor(labelLevels: Lvl[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "vol", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [img("img-0", [{ shape: labelLevels[0].shape, chunk: [1, 1, 64, 256, 256], scale: SCALE1 }], "Uint16")],
+      labels: [{ name: "seg", source_image_id: "img-0", image: img("img-0:label:seg", labelLevels, "Uint32") }],
+    };
+  }
+  const vol = { datasetId: "ds-0", t: 0, z: 0, mode: "volume" as const };
+  const slice = { datasetId: "ds-0", t: 0, z: 0, mode: "slice" as const };
+
+  it("skips a label whose Z exceeds the 3D limit — slice mode stays eligible", () => {
+    // 512×512×3000: fine in 2D (Z ignored), but Z>2048 in 3D with no coarser level.
+    const m = manifestFor([{ shape: [1, 1, 3000, 512, 512], chunk: [1, 1, 64, 256, 256], scale: SCALE1 }]);
+    expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
+    expect(resolveVisibleLabels(m, undefined, { mode: "volume" })).toEqual([]);
+    // Slice is unaffected by the 3D caps.
+    expect(computeLabelChunkRequests({ ...slice, manifest: m }).length).toBeGreaterThan(0);
+    expect(resolveVisibleLabels(m, undefined, { mode: "slice" })).toHaveLength(1);
+  });
+
+  it("coarsens past a level whose X/Y exceeds the 3D limit", () => {
+    const m = manifestFor([
+      { shape: [1, 1, 64, 4096, 4096], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }, // X/Y 4096 > 2048
+      { shape: [1, 1, 16, 1024, 1024], chunk: [1, 1, 16, 512, 512], scale: [1, 1, 4, 4, 4] }, // fits
+    ]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.length).toBeGreaterThan(0);
+    expect(reqs.every((r) => r.level === 1)).toBe(true);
+    expect(resolveVisibleLabels(m, undefined, { mode: "volume" })[0].levelIdx).toBe(1);
+  });
+
+  it("coarsens past a level with too many chunks AND bounds the request count", () => {
+    const m = manifestFor([
+      // 64·16·16 = 16384 chunks (bytes fine at 67 MB) → chunk-count rejects it.
+      { shape: [1, 1, 64, 512, 512], chunk: [1, 1, 1, 32, 32], scale: SCALE1 },
+      { shape: [1, 1, 16, 256, 256], chunk: [1, 1, 16, 256, 256], scale: [1, 1, 4, 2, 2] }, // 1 chunk
+    ]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.every((r) => r.level === 1)).toBe(true);
+    expect(reqs.length).toBeLessThanOrEqual(512); // bounded per-tick fan-out
+    expect(reqs).toHaveLength(1);
+  });
+
+  it("skips a level whose texture bytes exceed the volume budget — slice stays eligible", () => {
+    // 2048·2048·33·4 B = 553 MB > 512 MB; per-axis dims + chunk count are both fine.
+    const m = manifestFor([{ shape: [1, 1, 33, 2048, 2048], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }]);
+    expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
+    expect(resolveVisibleLabels(m, undefined, { mode: "slice" })).toHaveLength(1);
+  });
+
+  it("coarsens past a level that busts the byte budget to one that fits", () => {
+    const m = manifestFor([
+      { shape: [1, 1, 33, 2048, 2048], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }, // 553 MB
+      { shape: [1, 1, 16, 1024, 1024], chunk: [1, 1, 16, 512, 512], scale: [1, 1, 2, 2, 2] }, // 67 MB
+    ]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.length).toBeGreaterThan(0);
+    expect(reqs.every((r) => r.level === 1)).toBe(true);
+  });
+
+  it("respects caller-supplied caps (a tighter volume cap coarsens further)", () => {
+    const m = manifestFor([
+      { shape: [1, 1, 8, 256, 256], chunk: [1, 1, 8, 128, 128], scale: SCALE1 }, // 2·2·1 = 4 chunks
+      { shape: [1, 1, 4, 128, 128], chunk: [1, 1, 4, 128, 128], scale: [1, 1, 2, 2, 2] }, // 1 chunk
+    ]);
+    // Default caps accept level 0; a maxChunksPerVolume of 1 forces level 1.
+    expect(resolveVisibleLabels(m, undefined, { mode: "volume" })[0].levelIdx).toBe(0);
+    expect(resolveVisibleLabels(m, undefined, { mode: "volume", maxChunksPerVolume: 1 })[0].levelIdx).toBe(1);
+  });
+});

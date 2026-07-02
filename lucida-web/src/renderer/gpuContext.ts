@@ -78,10 +78,11 @@ export function createEmptyVolumeTexture(
   width: number,
   height: number,
   depth: number,
+  format: SliceTextureFormat = "r16uint",
 ): GPUTexture {
   return device.createTexture({
     size: [width, height, depth],
-    format: "r16uint",
+    format,
     dimension: "3d",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
@@ -90,7 +91,7 @@ export function createEmptyVolumeTexture(
 export function writeVolumeChunk(
   device: GPUDevice,
   texture: GPUTexture,
-  data: Uint16Array,
+  data: SliceVoxels,
   chunkX: number,
   chunkY: number,
   cw: number,
@@ -99,24 +100,27 @@ export function writeVolumeChunk(
   xOff: number,
   yOff: number,
   zOff: number,
+  format: SliceTextureFormat = "r16uint",
 ): void {
+  const bpv = bytesPerVoxelFor(format);
   device.queue.writeTexture(
     { texture, origin: [xOff, yOff, zOff] },
     data.buffer,
-    { offset: data.byteOffset, bytesPerRow: chunkX * 2, rowsPerImage: chunkY },
+    { offset: data.byteOffset, bytesPerRow: chunkX * bpv, rowsPerImage: chunkY },
     [cw, ch, cd],
   );
 }
 
 /**
- * Single-channel unsigned-integer texture formats the slice atlas can
- * hold: `r16uint` for intensity images (2 bytes/voxel, `Uint16Array`) and
- * `r32uint` for label masks whose ids exceed 16 bits (4 bytes/voxel,
- * `Uint32Array`). Both bind to the shader's `texture_2d<u32>` sampler.
+ * Single-channel unsigned-integer texture formats the 2D slice atlas and
+ * 3D volume textures hold: `r16uint` for intensity images (2 bytes/voxel,
+ * `Uint16Array`) and `r32uint` for label masks whose ids exceed 16 bits (4
+ * bytes/voxel, `Uint32Array`). Both bind to the shader's `texture_*d<u32>`
+ * samplers.
  */
 export type SliceTextureFormat = "r16uint" | "r32uint";
 
-/** A slice payload matching its texture format's element size. */
+/** A voxel payload matching its texture format's element size. */
 export type SliceVoxels = Uint16Array | Uint32Array;
 
 function bytesPerVoxelFor(format: SliceTextureFormat): number {

@@ -26,9 +26,11 @@ import type { WorkerCtx } from "../../renderer/workerContext.ts";
 import type { LabelSliceChunkDataMessage } from "../../renderer/workerProtocol.ts";
 import { createInitialState } from "../../renderer/worker/state.ts";
 import { handleLabelSliceChunkData } from "../../renderer/slice/upload.ts";
+import { handleLabelVolumeChunkData } from "../../renderer/volume/upload.ts";
+import type { LabelVolumeChunkDataMessage } from "../../renderer/workerProtocol.ts";
 import { computeLabelChunkRequests } from "../planning/labelRequests.ts";
 import { buildManifestByImage } from "./delivery/manifestIndex.ts";
-import { dispatchLabelChunkDelivery } from "./delivery/dispatch.ts";
+import { dispatchLabelChunkDelivery, dispatchLabelVolumeChunkDelivery } from "./delivery/dispatch.ts";
 
 const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
 
@@ -188,5 +190,84 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
     expect(result).toBeNull();
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
+  });
+});
+
+describe("label chunk flow (3D): volume request → whole-chunk delivery → volume pool", () => {
+  it("forwards the WHOLE 3D chunk (no plane extraction) and lands it with ids intact", () => {
+    // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume" });
+    expect(reqs).toHaveLength(1);
+    const req = reqs[0];
+    expect(req.imageId).toBe("img-0:label:mito");
+
+    // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids), incl. ids past 16 bits.
+    const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
+    const delivery: ReadyChunkDelivery = {
+      kind: "chunk",
+      entityId: req.entityId,
+      imageId: req.imageId,
+      level: req.level,
+      t: req.t, c: req.c, z: req.z, y: req.y, x: req.x,
+      chunkKey: req.chunkKey,
+      data: ids.buffer as ArrayBuffer,
+      dataType: "Uint32",
+      epochs: EPOCHS,
+      lane: "detail",
+      residencyTier: "detail",
+    };
+
+    // 3. Delivery routing: the mock client forwards the message into the worker handler.
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds-0", { manifest } as unknown as DatasetEntry],
+    ]);
+    const meta = buildManifestByImage(datasets).get("img-0:label:mito");
+    expect(meta?.isLabel).toBe(true);
+
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeWorkerCtx(writes);
+    const client = {
+      labelVolumeChunkData: vi.fn((
+        memberId: string,
+        datasetId: string,
+        chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
+        level: number, t: number, c: number,
+        levelWidth: number, levelHeight: number, levelDepth: number,
+        chunkX: number, chunkY: number, chunkZ: number,
+        epochs: SceneEpochs,
+      ) => {
+        const msg: LabelVolumeChunkDataMessage = {
+          type: "labelVolumeChunkData",
+          epochs, memberId, datasetId, chunks,
+          level, t, c,
+          levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ,
+        };
+        handleLabelVolumeChunkData(ctx, msg);
+      }),
+    } as unknown as UploadClient;
+
+    const result = dispatchLabelVolumeChunkDelivery(client, delivery, meta!, EPOCHS);
+    expect(result).not.toBeNull();
+    expect(result!.memberId).toBe("img-0:label:mito");
+    // The WHOLE chunk crosses (8 ids * 4 = 32 bytes) — never a single ~plane.
+    expect(result!.bytes).toBe(32);
+    // The delivery stamped the owning dataset id (from the ManifestEntry key).
+    expect(vi.mocked(client.labelVolumeChunkData).mock.calls[0][1]).toBe("ds-0");
+
+    // 4. The chunk landed in the volume pool sized to the label's own dims,
+    //    stamped with the owning dataset for removal.
+    const pool = ctx.state.labelVolumePools.get("img-0:label:mito");
+    expect(pool).toBeDefined();
+    expect(pool!.width).toBe(2);
+    expect(pool!.height).toBe(2);
+    expect(pool!.depth).toBe(2);
+    expect(pool!.datasetId).toBe("ds-0");
+
+    // 5. All 8 ids reached the texture at full 32-bit width.
+    expect(writes.length).toBeGreaterThan(0);
+    const written = new Uint32Array(writes[0].buffer);
+    expect(written[4]).toBe(92801);
+    expect(written[5]).toBe(92801 + 65536);
+    expect(written[7]).toBe(4_294_967_295);
   });
 });

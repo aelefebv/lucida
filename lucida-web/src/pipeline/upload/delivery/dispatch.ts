@@ -122,10 +122,11 @@ export function dispatchChunkDelivery(
  * extracted here from the label's own full-res Z (mapped from the current
  * source Z) and only that crosses to the worker.
  *
- * Slice mode only — 3D label volumes aren't rendered yet. Returns the
- * worker member id + the bytes actually sent (for budget accounting), or
- * `null` when geometry is unavailable or the chunk is for a different
- * Z-plane-chunk than the current view (a stale scrub).
+ * This is the 2D slice variant (the 3D volume view uses
+ * {@link dispatchLabelVolumeChunkDelivery}, which forwards the whole chunk).
+ * Returns the worker member id + the bytes actually sent (for budget
+ * accounting), or `null` when geometry is unavailable or the chunk is for a
+ * different Z-plane-chunk than the current view (a stale scrub).
  */
 export function dispatchLabelChunkDelivery(
   client: UploadClient,
@@ -183,6 +184,56 @@ export function dispatchLabelChunkDelivery(
     epochs,
   );
   return { memberId, bytes: plane.byteLength };
+}
+
+/**
+ * Deliver one uint32 label chunk to the r32uint label VOLUME pool — the
+ * WHOLE 3D chunk, no plane extraction. The 3D first-hit surface needs the
+ * full label volume (each ray stops at the first non-zero voxel anywhere
+ * along its depth), so unlike {@link dispatchLabelChunkDelivery} (which
+ * pre-slices to one ~64 KB Z-plane for the 2D view) the entire ~8 MB chunk
+ * crosses to the worker. The uploader accounts the real byte size so the
+ * per-frame budget throttles the volume across frames rather than fanning
+ * every chunk out at once.
+ *
+ * Returns the worker member id + the bytes sent (for budget accounting), or
+ * `null` when the level geometry is unavailable.
+ */
+export function dispatchLabelVolumeChunkDelivery(
+  client: UploadClient,
+  delivery: ReadyChunkDelivery,
+  meta: ManifestEntry,
+  epochs: SceneEpochs,
+): { memberId: string; bytes: number } | null {
+  const levelMeta = meta.levels[delivery.level];
+  if (!levelMeta) return null;
+  const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
+  const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+  const memberId = delivery.imageId;
+
+  client.labelVolumeChunkData(
+    memberId,
+    meta.datasetId,
+    [{
+      data: delivery.data,
+      dataType: delivery.dataType,
+      x: delivery.x,
+      y: delivery.y,
+      z: delivery.z,
+      key: delivery.chunkKey,
+    }],
+    delivery.level,
+    delivery.t,
+    delivery.c,
+    levelWidth,
+    levelHeight,
+    levelDepth,
+    chunkX,
+    chunkY,
+    chunkZ,
+    epochs,
+  );
+  return { memberId, bytes: delivery.data.byteLength };
 }
 
 export function dispatchProxy(

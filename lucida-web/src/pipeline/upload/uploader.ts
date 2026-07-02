@@ -36,6 +36,7 @@ import {
 import {
   dispatchChunkDelivery,
   dispatchLabelChunkDelivery,
+  dispatchLabelVolumeChunkDelivery,
   dispatchProxy,
 } from "./delivery/dispatch.ts";
 import { WorkerResourceTracker } from "./delivery/resources.ts";
@@ -230,13 +231,16 @@ export class Uploader {
     }
 
     // Categorical label overlays route to the r32uint label pool via a
-    // distinct message; they render only in the 2D slice view for now. The
-    // dispatch pre-slices to one Z-plane and reports the bytes actually
-    // sent (~64 KB), so a label never charges the full ~8 MB 3D chunk
-    // against the budget and starve/blank the overlay.
+    // distinct message. In the 2D slice view the dispatch pre-slices to one
+    // Z-plane and reports the bytes actually sent (~64 KB); in the 3D volume
+    // view it forwards the whole ~8 MB chunk for the first-hit surface. Both
+    // report the REAL bytes sent so the per-frame budget throttles the
+    // upload (one item per frame) instead of fanning every chunk out at once
+    // — and labels never blank/starve because at least one always goes.
     if (meta.isLabel) {
-      if (ctx.mode !== "slice") return 0;
-      const label = dispatchLabelChunkDelivery(ctx.client, delivery, meta, sliceZ, epochs);
+      const label = ctx.mode === "slice"
+        ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, sliceZ, epochs)
+        : dispatchLabelVolumeChunkDelivery(ctx.client, delivery, meta, epochs);
       if (!label) {
         this.currentUploadStats.skippedNoMeta++;
         return 0;

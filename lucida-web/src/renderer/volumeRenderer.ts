@@ -32,6 +32,9 @@ export class VolumeRenderer {
   private bindGroup: GPUBindGroup | null = null;
   private descriptorBindGroup: GPUBindGroup | null = null;
   private currentDescriptorBuffer: GPUBuffer | null = null;
+  private currentLabelColorBuffer: GPUBuffer | null = null;
+  private labelColorBuffer: GPUBuffer | null = null;
+  private dummyLabelColorBuffer: GPUBuffer;
   /** Single-entity descriptor used by minimap + other call sites that
    *  aren't backed by cold-state. Lazily allocated. */
   private transientDescriptorBuffer: GPUBuffer | null = null;
@@ -125,6 +128,14 @@ export class VolumeRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "uniform" },
         },
+        // Declared label palette: [id, packedRgba] pairs scanned in-shader
+        // for the categorical first-hit label surface. A 1-entry dummy is
+        // bound for intensity draws (count 0 → the scan is a no-op).
+        {
+          binding: 2,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
+        },
       ],
     });
 
@@ -156,6 +167,14 @@ export class VolumeRenderer {
       size: ENTITY_REF_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // Dummy declared-palette buffer (one u32) for non-categorical draws;
+    // the shader scans 0 pairs (count comes from the entity ref).
+    this.dummyLabelColorBuffer = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.dummyLabelColorBuffer, 0, new Uint32Array([0]));
 
     // Default 1x1 white LUT (renders grayscale when no colormap is set)
     this.lutTexture = device.createTexture({
@@ -261,22 +280,40 @@ export class VolumeRenderer {
   }
 
   /**
-   * Bind the per-dataset entity descriptor buffer and write the entity
-   * index for the next draw. Rebuilds the descriptor bind group if the
-   * buffer pointer changed (cold-state churn → buffer recreated).
+   * Set the declared-label-palette storage buffer for the next categorical
+   * draw ([id, packedRgba] pairs). Pass `null` (or omit) for intensity
+   * draws — a dummy is bound so the layout stays satisfied.
    */
-  setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number) {
-    if (this.currentDescriptorBuffer !== descriptorBuffer || !this.descriptorBindGroup) {
+  setLabelColorBuffer(buffer: GPUBuffer | null) {
+    this.labelColorBuffer = buffer;
+  }
+
+  /**
+   * Bind the per-dataset entity descriptor buffer and write the entity
+   * index (and, for categorical label draws, the declared-palette count)
+   * for the next draw. Rebuilds the descriptor bind group if the descriptor
+   * or label-palette buffer pointer changed (cold-state churn → buffer
+   * recreated; label vs. intensity draw → palette swapped).
+   */
+  setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number, labelColorCount = 0) {
+    const labelColors = this.labelColorBuffer ?? this.dummyLabelColorBuffer;
+    if (
+      this.currentDescriptorBuffer !== descriptorBuffer ||
+      this.currentLabelColorBuffer !== labelColors ||
+      !this.descriptorBindGroup
+    ) {
       this.currentDescriptorBuffer = descriptorBuffer;
+      this.currentLabelColorBuffer = labelColors;
       this.descriptorBindGroup = this.device.createBindGroup({
         layout: this.descriptorBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: descriptorBuffer } },
           { binding: 1, resource: { buffer: this.entityRefBuffer } },
+          { binding: 2, resource: { buffer: labelColors } },
         ],
       });
     }
-    const refData = new Uint32Array([entityIndex >>> 0, 0, 0, 0]);
+    const refData = new Uint32Array([entityIndex >>> 0, labelColorCount >>> 0, 0, 0]);
     this.device.queue.writeBuffer(this.entityRefBuffer, 0, refData);
   }
 
@@ -316,6 +353,9 @@ export class VolumeRenderer {
       opacity,
     });
     this.device.queue.writeBuffer(this.transientDescriptorBuffer, 0, cpu);
+    // The minimap/thumbnail path is intensity-only; bind the dummy palette
+    // so a prior label draw's (possibly freed) palette buffer can't leak in.
+    this.setLabelColorBuffer(null);
     this.setDescriptorBinding(this.transientDescriptorBuffer, 0);
   }
 

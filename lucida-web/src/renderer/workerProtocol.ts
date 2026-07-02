@@ -106,6 +106,38 @@ export interface VolumeChunkDataMessage {
 }
 
 /**
+ * A batch of WHOLE 3D uint32 label chunks for one label overlay member,
+ * routed to the r32uint label VOLUME pool and drawn categorically. Unlike
+ * {@link LabelSliceChunkDataMessage} (which pre-slices to a single ~64 KB
+ * Z-plane), the 3D first-hit surface needs the full volume, so each
+ * `chunk.data` is the entire 3D chunk (~8 MB for a 128³ tile). `chunk.dataType`
+ * is `"Uint32"`; ids are never narrowed to 16 bits. `chunk.x/y/z` are the
+ * chunk's grid coords, used to place it within the single-tile texture.
+ */
+export interface LabelVolumeChunkDataMessage {
+  type: "labelVolumeChunkData";
+  epochs: SceneEpochs;
+  /** Label overlay member id (the label image id). */
+  memberId: string;
+  /**
+   * Owning dataset id (the `ctx.datasets` key / `removeLayerResources` id).
+   * Stamped on the label volume pool so dataset removal can free it — the pool
+   * is keyed by {@link memberId} (the label image id), which removal never sees.
+   */
+  datasetId: string;
+  chunks: Chunk[];
+  level: number;
+  t: number;
+  c: number;
+  levelWidth: number;
+  levelHeight: number;
+  levelDepth: number;
+  chunkX: number;
+  chunkY: number;
+  chunkZ: number;
+}
+
+/**
  * A generated proxy asset delivered to the worker. Carries the compact
  * `[Z, Y, X]` u16 voxel buffer plus identifying metadata.
  */
@@ -144,6 +176,36 @@ export interface VolumeLayerParams {
    * the worker to resolve descriptor + display state.
    */
   entityIndex: number;
+  /**
+   * Categorical label overlay marker. When true the layer is drawn from
+   * the r32uint label VOLUME pool via the categorical first-hit shader path
+   * (a colored surface over the translucent intensity volume) using a
+   * transient descriptor, not the cold-state entity buffer. Absent/false for
+   * ordinary intensity layers.
+   */
+  isLabel?: boolean;
+  /**
+   * Overlay opacity for a label layer (0..1). Ignored for intensity layers,
+   * whose opacity is carried by the descriptor. Defaults to ~0.5 so a label
+   * is visible on open without hiding the volume underneath.
+   */
+  opacity?: number;
+  /**
+   * Declared `image-label.colors` for a label layer: exact rgba per id from
+   * the OME metadata. Rendered verbatim for matching ids (via a small
+   * shader-side palette), with the glasbey hash as the fallback for the
+   * rest. Absent/empty → every id uses the hash.
+   */
+  labelColors?: { value: number; rgba: [number, number, number, number] }[];
+  /**
+   * Column-major model matrix (source member's `[0,1]^3` cube → world) and
+   * its inverse, for a label layer only. A label overlays its source image's
+   * physical extent, so it renders in the source's world placement; the
+   * transient descriptor takes these directly (labels are outside cold
+   * state, so the worker can't read them from the descriptor buffer).
+   */
+  modelMatrix?: Float32Array;
+  invModelMatrix?: Float32Array;
 }
 
 /**
@@ -501,6 +563,7 @@ export type MainToWorkerMessage =
   | SliceChunkDataMessage
   | LabelSliceChunkDataMessage
   | VolumeChunkDataMessage
+  | LabelVolumeChunkDataMessage
   | ProxyAssetDataMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
