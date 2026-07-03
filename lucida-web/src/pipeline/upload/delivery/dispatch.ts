@@ -166,6 +166,7 @@ export function dispatchLabelChunkDelivery(
 
   client.labelSliceChunkData(
     memberId,
+    meta.datasetId,
     [{
       data: plane.buffer,
       dataType: delivery.dataType,

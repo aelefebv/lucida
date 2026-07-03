@@ -74,6 +74,7 @@ export interface UploadClient {
    */
   labelSliceChunkData(
     memberId: string,
+    datasetId: string,
     chunks: {
       data: ArrayBuffer;
       dataType: string;

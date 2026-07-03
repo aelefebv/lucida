@@ -7,6 +7,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { LabelSliceChunkDataMessage } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
 import { handleLabelSliceChunkData } from "./upload.ts";
+import { destroyAllSliceResources, removeSliceResources } from "./index.ts";
 
 interface WriteTextureCall {
   origin: [number, number, number] | undefined;
@@ -39,6 +40,7 @@ function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
     type: "labelSliceChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     memberId: "img-0:label:mito",
+    datasetId: "ds-0",
     chunks: [{ data: plane.buffer as ArrayBuffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
     level: 0,
     t: 0,
@@ -107,6 +109,20 @@ describe("handleLabelSliceChunkData", () => {
     expect(writes).toHaveLength(1);
   });
 
+  it("stamps the owning dataset id on the pool (so removal can free it)", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    const pool = ctx.state.labelSlicePools.get("img-0:label:mito")!;
+    expect(pool.datasetId).toBe("ds-0");
+
+    // The stamp is refreshed on the reuse-in-place branch too, so it always
+    // reflects the latest delivery's owner.
+    handleLabelSliceChunkData(ctx, { ...labelPlaneMsg(new Uint32Array([5, 6, 7, 8])), datasetId: "ds-1" });
+    expect(ctx.state.labelSlicePools.get("img-0:label:mito")).toBe(pool);
+    expect(pool.datasetId).toBe("ds-1");
+  });
+
   it("drops a stale-epoch delivery so it can't overwrite the pool with an old T/Z", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
@@ -115,5 +131,46 @@ describe("handleLabelSliceChunkData", () => {
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect(writes).toHaveLength(0);
     expect(ctx.state.labelSlicePools.has("img-0:label:mito")).toBe(false);
+  });
+});
+
+describe("label slice pool cleanup on dataset removal", () => {
+  it("frees the label pool keyed by image id when its DATASET is removed", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    const pool = ctx.state.labelSlicePools.get("img-0:label:mito")!;
+    const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
+
+    // removeLayerResources passes the DATASET id ("ds-0"), which is NOT the
+    // pool's key ("img-0:label:mito") — the leak was the lookup missing here.
+    removeSliceResources(ctx, "ds-0");
+
+    expect(ctx.state.labelSlicePools.has("img-0:label:mito")).toBe(false);
+    expect(destroyed).toHaveBeenCalled(); // the label texture is freed
+  });
+
+  it("does NOT free a label pool belonging to a different dataset", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    removeSliceResources(ctx, "some-other-dataset");
+    expect(ctx.state.labelSlicePools.has("img-0:label:mito")).toBe(true);
+  });
+
+  it("still frees the pool on a member-keyed removal (removal id == pool key)", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    removeSliceResources(ctx, "img-0:label:mito");
+    expect(ctx.state.labelSlicePools.has("img-0:label:mito")).toBe(false);
+  });
+
+  it("destroyAllSliceResources frees every label slice pool", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    destroyAllSliceResources(ctx);
+    expect(ctx.state.labelSlicePools.size).toBe(0);
   });
 });

@@ -31,6 +31,12 @@ export interface LabelSlicePool {
   texture: GPUTexture; // r32uint, size [width, height]
   /** Single-entry indirection ([0]) so the one tile is always slot 0. */
   indirectionBuf: GPUBuffer;
+  /**
+   * Owning dataset id (the `removeLayerResources` id). The pool is keyed by
+   * the label image id — which dataset removal never sees — so this is how
+   * {@link removeLabelSlicePoolsForDataset} finds + frees it on removal.
+   */
+  datasetId: string;
   width: number;
   height: number;
   /**
@@ -55,10 +61,13 @@ export interface LabelSlicePool {
  * Reused IN PLACE when the dims are unchanged — a Z/T scrub overwrites the
  * existing texture rather than destroying + recreating it, so the overlay
  * never blanks. Recreated only when the dims actually change (a new level).
+ * `datasetId` is stamped on the pool so dataset removal can free it (the
+ * pool is keyed by the label image id).
  */
 export function getOrCreateLabelSlicePool(
   ctx: WorkerCtx,
   memberId: string,
+  datasetId: string,
   width: number,
   height: number,
 ): LabelSlicePool {
@@ -69,6 +78,7 @@ export function getOrCreateLabelSlicePool(
   const pools = ctx.state.labelSlicePools;
   const existing = pools.get(memberId);
   if (existing && existing.width === w && existing.height === h) {
+    existing.datasetId = datasetId;
     return existing;
   }
   if (existing) destroyLabelSlicePool(existing);
@@ -81,7 +91,7 @@ export function getOrCreateLabelSlicePool(
   // Single tile lives at slot 0.
   ctx.device.queue.writeBuffer(indirectionBuf, 0, new Uint32Array([0]));
 
-  const pool: LabelSlicePool = { texture, indirectionBuf, width: w, height: h };
+  const pool: LabelSlicePool = { texture, indirectionBuf, datasetId, width: w, height: h };
   pools.set(memberId, pool);
   return pool;
 }
@@ -93,12 +103,20 @@ export function destroyLabelSlicePool(pool: LabelSlicePool): void {
   pool.labelColorBuffer?.destroy();
 }
 
-/** Remove a member's label pool (no-op if absent). */
-export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
-  const pool = ctx.state.labelSlicePools.get(memberId);
-  if (pool) {
-    destroyLabelSlicePool(pool);
-    ctx.state.labelSlicePools.delete(memberId);
+/**
+ * Free every label slice pool matching `idOrDataset`, matched EITHER by the
+ * pool's member key (the label image id) OR by its owning `datasetId`. Dataset
+ * removal calls `removeLayerResources` with the dataset id, which never equals
+ * a label pool's key — so matching on the stamped `datasetId` is what actually
+ * frees the label texture. Also accepts a member id so a per-member removal
+ * still works.
+ */
+export function removeLabelSlicePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
+  for (const [memberId, pool] of ctx.state.labelSlicePools) {
+    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      destroyLabelSlicePool(pool);
+      ctx.state.labelSlicePools.delete(memberId);
+    }
   }
 }
 
