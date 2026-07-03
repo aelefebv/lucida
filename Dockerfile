@@ -55,12 +55,12 @@ WORKDIR /workspace
 # Copy the workspace. .dockerignore keeps target/, node_modules/,
 # lucida-core/pkg/, lucida-web/dist/, .git/, wiki/, extras/, lucida-py/,
 # lucida.db*, secrets, etc. out of the build context.
-COPY Cargo.toml ./
-# Cargo.lock is gitignored in this repo (workspace of library crates
-# that don't pin transitive deps; see /.gitignore comment "Workspace
-# lock file (library crates)"). Cargo regenerates it on first build
-# when missing; this matches what the CI rust job already does on
-# every fresh checkout.
+# Cargo.lock is committed: this workspace ships release binaries
+# (lucida-server, the lucida CLI) and this image, so the lock pins the
+# full transitive dep graph. Copying it in and building `--locked`
+# below makes an image rebuild of the same commit reproduce the same
+# dependency set instead of silently re-resolving to newer versions.
+COPY Cargo.toml Cargo.lock ./
 COPY lucida-cli/      ./lucida-cli/
 COPY lucida-content/  ./lucida-content/
 COPY lucida-core/     ./lucida-core/
@@ -72,13 +72,19 @@ COPY lucida-store/    ./lucida-store/
 # Build the server binary (release). `-p lucida-server` keeps cargo from
 # walking other workspace members' bin targets unnecessarily; the dep
 # graph still pulls in lucida-core/-content/-protocol/-proxy/-store as
-# library deps.
-RUN cargo build --release -p lucida-server
+# library deps. `--locked` fails the build if Cargo.lock is out of sync
+# with the manifests rather than re-resolving deps at image build time.
+RUN cargo build --locked --release -p lucida-server
 
 # Build the WASM artifact lucida-web depends on. The output directory
 # (lucida-core/pkg) is exactly what lucida-web's
 # `"lucida-core": "file:../lucida-core/pkg"` dependency resolves to.
-RUN cd lucida-core && wasm-pack build --target web --out-dir pkg
+# Everything after `--` is forwarded to the underlying `cargo build`.
+# Best-effort only: wasm-pack's own pre-build `cargo metadata` runs
+# unlocked and would silently repair a desynced Cargo.lock before the
+# forwarded --locked could reject it. The hard lock gate is the
+# `cargo build --locked` above, which fails this stage first.
+RUN cd lucida-core && wasm-pack build --target web --out-dir pkg -- --locked
 
 # Stage 2: node + pnpm SPA build.
 # node:22-slim matches CI's `lts/*` (node 22 is the active LTS) and
