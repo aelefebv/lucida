@@ -40,7 +40,7 @@ interface RawDatasetSettings {
   blend_mode: string;
   render_mode?: string;
   channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
-  label_settings?: { visible: boolean; opacity: number }[];
+  label_settings?: { visible: boolean; opacity: number; name?: string }[];
   channel_blend_mode?: string;
   detail_level_override?: number | null;
 }

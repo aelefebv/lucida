@@ -22,6 +22,11 @@ export interface ChannelSettingsJS {
 export interface LabelSettingsJS {
   visible: boolean;
   opacity: number;
+  /** The manifest label name this entry controls. In-session, entries are
+   *  positional against the live label list; the name is the stable key a
+   *  saved view uses to survive a label-list change. Absent on settings that
+   *  predate names. */
+  name?: string;
 }
 
 export interface DatasetSettings {

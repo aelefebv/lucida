@@ -191,10 +191,16 @@ export interface ResolvedVisibleLabel extends ResolvedLabel {
 }
 
 /** Per-label visibility + opacity, mirroring `lucida_core::scene::LabelSettings`
- *  (the `dataset_settings.label_settings` entries surfaced from the scene). */
+ *  (the `dataset_settings.label_settings` entries surfaced from the scene).
+ *  Entries are POSITIONAL against the live manifest's label order — in-session
+ *  the scene seeds one entry per label — so fetch/render resolve by index; the
+ *  optional `name` (the label's manifest name, seeded scene-side) is the stable
+ *  key saved views use to survive a label-list change and is not consulted
+ *  here. */
 export interface LabelViewSetting {
   visible: boolean;
   opacity: number;
+  name?: string;
 }
 
 /**

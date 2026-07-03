@@ -15,7 +15,7 @@ import type { WasmScene } from "lucida-core";
 import { dataset_id_for_url } from "lucida-core";
 import { SavedViewApplier, type DimensionExtentsResolver } from "../savedView/applier.ts";
 import { UrlSync } from "../savedView/urlSync.ts";
-import { buildCapture } from "../savedView/captureBuilder.ts";
+import { buildCapture, type LabelNamesByDatasetId } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
 import type { DatasetReferenceMode, SavedView, ViewState } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -59,6 +59,14 @@ interface Params {
    *  applier via the scene's volume shape. Optional — omit to leave t/c
    *  unclamped. */
   dimensionExtentsFor?: DimensionExtentsResolver;
+  /** Reads per-dataset label names (manifest order) from the caller's loaded
+   *  manifests, so every capture stamps `label_settings` entries with the
+   *  NAME of the label they control — the stable key a restore uses when the
+   *  dataset's label list has since changed. Read at call time (a getter, not
+   *  a snapshot) so captures always see the current manifests. Optional —
+   *  when omitted, captures keep the names the scene's settings export
+   *  carries. */
+  getLabelNamesByDatasetId?: () => LabelNamesByDatasetId | null;
   /** React-side dim mirrors. The applier writes set_c/set_t/set_z_range
    *  to WASM; without these the C/T/Z sliders stay stale (e.g. bookmark
    *  saved on ch2 opens with the C slider showing 0; Bug #3 root cause). */
@@ -111,6 +119,7 @@ export function useSavedViewSync({
   loopRef,
   getLiveView,
   dimensionExtentsFor,
+  getLabelNamesByDatasetId,
   setC,
   setT,
   setZ,
@@ -146,15 +155,18 @@ export function useSavedViewSync({
   const fetchLastViewRef = useRef(fetchLastView);
   const persistLastViewRef = useRef(persistLastView);
   const restoreEnabledRef = useRef(restoreLastViewEnabled);
-  // Live-view + extents resolvers are read at call time (capture fires
-  // from event handlers; extents from inside apply), so keep them in refs
-  // that track the latest props without relifting the bundle initializer.
+  // Live-view + extents + label-name resolvers are read at call time (capture
+  // fires from event handlers; extents from inside apply), so keep them in
+  // refs that track the latest props without relifting the bundle initializer.
   const getLiveViewRef = useRef(getLiveView);
   const dimensionExtentsForRef = useRef(dimensionExtentsFor);
+  const getLabelNamesRef = useRef(getLabelNamesByDatasetId);
   // eslint-disable-next-line react-hooks/refs
   getLiveViewRef.current = getLiveView;
   // eslint-disable-next-line react-hooks/refs
   dimensionExtentsForRef.current = dimensionExtentsFor;
+  // eslint-disable-next-line react-hooks/refs
+  getLabelNamesRef.current = getLabelNamesByDatasetId;
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
   // eslint-disable-next-line react-hooks/refs
@@ -185,6 +197,9 @@ export function useSavedViewSync({
           urlByDatasetId,
           datasetReferenceMode,
           autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
+          // Manifest-order label names so each captured label setting is
+          // stamped with the NAME of the label it controls.
+          labelNamesByDatasetId: getLabelNamesRef.current?.() ?? undefined,
           // Authoritative live Z/T/C from React; falls back to the scene's
           // presence view inside buildCapture when null.
           liveView: getLiveViewRef.current?.() ?? undefined,
@@ -239,6 +254,9 @@ export function useSavedViewSync({
         urlByDatasetId: bundle.urlByDatasetId,
         datasetReferenceMode,
         autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
+        // Manifest-order label names so each captured label setting is
+        // stamped with the NAME of the label it controls.
+        labelNamesByDatasetId: getLabelNamesRef.current?.() ?? undefined,
         // Authoritative live Z/T/C from React (read via ref so the share
         // button captures the user's actual slab/timepoint/channel even if
         // it hasn't been flushed to the scene yet).

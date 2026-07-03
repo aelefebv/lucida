@@ -90,6 +90,16 @@ export interface ChannelSettings {
 export interface LabelSettings {
   visible: boolean;
   opacity: number;
+  /** The manifest (OME `labels`) name of the label this entry was captured
+   *  for — the stable key that lets a restore land the entry on the SAME
+   *  label even after the dataset's label list changed (a re-import can
+   *  reorder/add/remove labels, which would scramble a purely positional
+   *  restore). Mirrors `lucida_core::scene::LabelSettings::name`
+   *  (serde-skipped when None): absent on views saved before names existed,
+   *  and such entries restore positionally, exactly as before. An explicit
+   *  `null` (hand-authored/normalized JSON; serde deserializes it to None)
+   *  means the same as absent — no name, restore positionally. */
+  name?: string | null;
 }
 
 export interface DatasetDisplaySettings {
@@ -101,8 +111,10 @@ export interface DatasetDisplaySettings {
   blend_mode: BlendMode;
   render_mode?: RenderMode;
   channel_settings?: ChannelSettings[];
-  /** Per-label overlay settings, positional by manifest label order. Optional
-   *  in the wire format — absent on views persisted before per-label controls. */
+  /** Per-label overlay settings, positional by manifest label order (each
+   *  entry additionally carrying its label's `name` when captured with one).
+   *  Optional in the wire format — absent on views persisted before per-label
+   *  controls. */
   label_settings?: LabelSettings[];
   channel_blend_mode?: BlendMode;
   detail_level_override?: number | null;

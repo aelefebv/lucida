@@ -640,15 +640,28 @@ export function channelDisplayCommands(
  * A label's visible/opacity is display state scoped to a single dataset's
  * rendering (it never hides the DATASET or reframes the camera), so — like
  * `channelDisplayCommands` — it rides both the heavy applier and the light
- * restore, letting a restored view reproduce the author's visible-label set. */
+ * restore, letting a restored view reproduce the author's visible-label set.
+ *
+ * Addressing: a setting captured WITH its label's name is emitted as
+ * `label_name`, which the scene resolves against the dataset's CURRENT label
+ * list — so the setting lands on the label it was saved for even after a
+ * re-import reordered/added/removed labels, and a name the dataset no longer
+ * has is dropped scene-side (never misapplied to a positional neighbor). A
+ * name-less setting — the key ABSENT (saved before names existed) or an
+ * explicit `null` (hand-authored/normalized JSON) — is emitted as the
+ * positional `label` index, preserving the legacy behavior exactly. Emitting
+ * `label_name: null` instead would resolve to no label scene-side and
+ * silently drop the entry's visible/opacity. */
 export function labelDisplayCommands(
   datasetId: string,
   label: number,
   ls: LabelSettings,
 ): Array<Record<string, unknown>> {
+  const target: Record<string, unknown> =
+    ls.name != null ? { label_name: ls.name } : { label };
   return [
-    { type: "set_label_visible", dataset_id: datasetId, label, visible: ls.visible },
-    { type: "set_label_opacity", dataset_id: datasetId, label, opacity: ls.opacity },
+    { type: "set_label_visible", dataset_id: datasetId, ...target, visible: ls.visible },
+    { type: "set_label_opacity", dataset_id: datasetId, ...target, opacity: ls.opacity },
   ];
 }
 
@@ -683,10 +696,27 @@ export function datasetDisplayCommands(
     });
   }
   // Per-label overlay state — restored so a saved view reproduces the visible
-  // label set + opacities (a hidden label stays hidden on restore).
+  // label set + opacities (a hidden label stays hidden on restore). Entries
+  // captured with a UNIQUE name restore by `label_name` (the scene resolves it
+  // against the dataset's CURRENT label list, so a re-imported/reordered label
+  // list can't misroute them). A name REPEATED within the captured vec (plate
+  // fields commonly each carry a same-named label group) is ambiguous as a
+  // per-command key — the scene would resolve every one to the first match —
+  // so repeated-name entries restore positionally by index, exactly like a
+  // name-less legacy capture. An explicit `name: null` (hand-authored/
+  // normalized JSON) is NOT a name: it neither counts toward uniqueness nor
+  // addresses by name — the entry restores positionally, same as absent.
   if (s.label_settings) {
+    const nameCounts = new Map<string, number>();
+    for (const ls of s.label_settings) {
+      if (ls.name != null) {
+        nameCounts.set(ls.name, (nameCounts.get(ls.name) ?? 0) + 1);
+      }
+    }
     s.label_settings.forEach((ls, i) => {
-      for (const cmd of labelDisplayCommands(id, i, ls)) cmds.push(cmd);
+      const uniqueName = ls.name != null && nameCounts.get(ls.name) === 1;
+      const entry = uniqueName ? ls : { visible: ls.visible, opacity: ls.opacity };
+      for (const cmd of labelDisplayCommands(id, i, entry)) cmds.push(cmd);
     });
   }
   return cmds;

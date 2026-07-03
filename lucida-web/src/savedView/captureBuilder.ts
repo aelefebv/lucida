@@ -35,6 +35,7 @@ import { SAVED_VIEW_VERSION } from "./types.ts";
  */
 export type UrlByDatasetId = ReadonlyMap<DatasetId, string>;
 export type AutoContrastByDatasetId = ReadonlyMap<DatasetId, boolean>;
+export type LabelNamesByDatasetId = ReadonlyMap<DatasetId, readonly string[]>;
 
 export interface CaptureInputs {
   scene: WasmScene;
@@ -49,6 +50,16 @@ export interface CaptureInputs {
    *  `useDatasetSettings.autoContrastMap`. Optional — omitted when no
    *  per-dataset preference has been set. */
   autoContrastByDatasetId?: AutoContrastByDatasetId;
+  /** Per-dataset label names in manifest (OME `labels`) order, sourced from
+   *  the caller's loaded manifests. `label_settings` is positional against
+   *  the label list at capture time, so each captured entry is stamped with
+   *  its label's NAME — the stable key a later restore uses when the
+   *  dataset's label list has since changed (re-imports reorder/add/remove
+   *  labels). When provided, this map is AUTHORITATIVE for the datasets it
+   *  covers; datasets it omits (and captures without it) keep whatever names
+   *  the scene's own settings export carries (the scene seeds them from the
+   *  manifest on open). */
+  labelNamesByDatasetId?: LabelNamesByDatasetId;
   /**
    * The authoritative live Z/T/C selection, sourced from the React
    * dimension state rather than the scene's presence export.
@@ -82,6 +93,7 @@ export function buildCapture({
   urlByDatasetId,
   datasetReferenceMode = "source-url",
   autoContrastByDatasetId,
+  labelNamesByDatasetId,
   liveView,
 }: CaptureInputs): SavedView {
   const presence = JSON.parse(scene.export_presence()) as {
@@ -101,6 +113,10 @@ export function buildCapture({
     dataset_order: DatasetId[];
     dataset_settings: Record<DatasetId, DatasetDisplaySettings>;
   };
+  const datasetSettings = withLabelNames(
+    datasetPresence.dataset_settings,
+    labelNamesByDatasetId,
+  );
 
   // Active layouts — read from WASM. `dataset_ids()` returns ALL loaded
   // datasets; `available_layouts(id)` is keyed by dataset and includes
@@ -159,9 +175,37 @@ export function buildCapture({
     view,
     display: presence.display,
     dataset_order: datasetPresence.dataset_order,
-    dataset_settings: datasetPresence.dataset_settings,
+    dataset_settings: datasetSettings,
     auto_contrast: Object.keys(autoContrast).length > 0 ? autoContrast : undefined,
   };
+}
+
+/** Stamp each captured `label_settings` entry with its label's manifest NAME
+ * (positional at capture time: entry `i` controls label `i` of the CURRENT
+ * list, so `names[i]` is its name). The caller-supplied manifest names are
+ * authoritative for the datasets they cover; entries beyond the supplied list
+ * — or datasets the map omits — keep whatever the scene export carried.
+ * Non-mutating: returns fresh objects for the settings it re-stamps. */
+function withLabelNames(
+  settings: Record<DatasetId, DatasetDisplaySettings>,
+  labelNamesByDatasetId?: LabelNamesByDatasetId,
+): Record<DatasetId, DatasetDisplaySettings> {
+  if (!labelNamesByDatasetId || labelNamesByDatasetId.size === 0) return settings;
+  const out: Record<DatasetId, DatasetDisplaySettings> = {};
+  for (const [dsId, s] of Object.entries(settings)) {
+    const names = labelNamesByDatasetId.get(dsId);
+    if (!names || !s.label_settings || s.label_settings.length === 0) {
+      out[dsId] = s;
+      continue;
+    }
+    out[dsId] = {
+      ...s,
+      label_settings: s.label_settings.map((ls, i) =>
+        names[i] !== undefined ? { ...ls, name: names[i] } : ls,
+      ),
+    };
+  }
+  return out;
 }
 
 /** True if any URL is a local-file path. Used by the share toolbar to

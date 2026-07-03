@@ -376,19 +376,39 @@ pub enum ViewportCommand {
         dataset_id: String,
         blend_mode: BlendMode,
     },
-    // Per-label overlay controls. `label` indexes the dataset's attached labels
-    // in manifest (OME `labels`) order. Both are local-only per-client display
-    // ops (exactly like the per-channel commands): applied locally, emitted as
+    // Per-label overlay controls. Both are local-only per-client display ops
+    // (exactly like the per-channel commands): applied locally, emitted as
     // presence, persisted in saved views, and broadcast to followers via the
     // selection epoch. Neither ever reframes the camera.
+    //
+    // The target label is addressed one of two ways (see
+    // `Scene::resolve_label_index`):
+    // - `label: <index>` — an index into the dataset's CURRENT label list, in
+    //   manifest (OME `labels`) order. This is what live UI controls emit
+    //   (in-session, indices ARE the current list) and what a restore of
+    //   name-less legacy settings emits.
+    // - `label_name: <name>` — resolved scene-side against the CURRENT
+    //   manifest's label names. A saved view captured against an older label
+    //   list restores through this form, so its settings land on the labels
+    //   they were saved for even after a re-import reordered/added/removed
+    //   labels; a name the dataset no longer has makes the command a no-op.
+    // `label_name` wins when both are present. Both fields are
+    // `#[serde(default, skip_serializing_if …)]`, so the index-only wire shape
+    // is byte-identical to what it always was — additive, no wire break.
     SetLabelVisible {
         dataset_id: String,
-        label: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label_name: Option<String>,
         visible: bool,
     },
     SetLabelOpacity {
         dataset_id: String,
-        label: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label_name: Option<String>,
         opacity: f32,
     },
 }
@@ -466,8 +486,19 @@ impl Scene {
                         // layer panel + render path always find full-length
                         // `channel_settings` / `label_settings` regardless of how
                         // the dataset entered the scene (fresh open vs. restore).
+                        //
+                        // An entry that ALREADY exists (restored before this
+                        // manifest arrived — e.g. a document reload racing the
+                        // open) is kept, but its per-label settings are re-keyed
+                        // by label NAME against the arriving manifest: the label
+                        // list may have changed since the settings were captured
+                        // (a re-import reorders/adds/removes labels), and
+                        // applying the restored vec positionally would put
+                        // settings on the wrong labels. Name-less legacy
+                        // settings are left untouched (positional, as always).
                         self.dataset_settings
                             .entry(dataset_id.clone())
+                            .and_modify(|s| s.reconcile_label_settings(&event.manifest))
                             .or_insert_with(|| {
                                 crate::scene::DatasetDisplaySettings::seeded_for(&event.manifest)
                             });
@@ -822,22 +853,21 @@ impl Scene {
             ViewportCommand::SetLabelVisible {
                 dataset_id,
                 label,
+                label_name,
                 visible,
             } => {
                 let ds = DatasetId(dataset_id);
-                // Bound the index to the dataset's actual label count so a
-                // stray/huge `label` (e.g. from a malformed non-web client) can
-                // never `ensure_label`-grow the vec unboundedly.
-                if self.label_index_in_range(&ds, label)
+                if let Some(idx) = self.resolve_label_index(&ds, label, label_name.as_deref())
                     && let Some(s) = self.dataset_settings.get_mut(&ds)
                 {
-                    s.ensure_label(label as usize).visible = visible;
+                    s.ensure_label(idx).visible = visible;
                 }
                 self.epochs.selection += 1;
             }
             ViewportCommand::SetLabelOpacity {
                 dataset_id,
                 label,
+                label_name,
                 opacity,
             } => {
                 let ds = DatasetId(dataset_id);
@@ -849,25 +879,45 @@ impl Scene {
                 } else {
                     0.5
                 };
-                if self.label_index_in_range(&ds, label)
+                if let Some(idx) = self.resolve_label_index(&ds, label, label_name.as_deref())
                     && let Some(s) = self.dataset_settings.get_mut(&ds)
                 {
-                    s.ensure_label(label as usize).opacity = opacity;
+                    s.ensure_label(idx).opacity = opacity;
                 }
                 self.epochs.selection += 1;
             }
         }
     }
 
-    /// Whether `label` is a valid label index for `dataset_id` — i.e. strictly
-    /// less than the dataset's attached-label count. Guards the per-label apply
-    /// arms so an out-of-range index is ignored rather than growing the settings
-    /// vec. `false` for an unknown dataset (no manifest, no labels).
-    fn label_index_in_range(&self, dataset_id: &DatasetId, label: u32) -> bool {
-        self.document
-            .manifests
-            .get(dataset_id)
-            .is_some_and(|m| (label as usize) < m.label_specs().len())
+    /// Resolve the label a per-label command targets to an index into
+    /// `dataset_id`'s CURRENT label list (manifest order).
+    ///
+    /// `label_name` takes precedence and resolves by NAME, so a command from a
+    /// restore of settings captured against an older label list lands on the
+    /// label it was saved for; a name the dataset no longer has resolves to
+    /// `None` (the command is dropped, never misapplied to a positional
+    /// neighbor). A name the dataset carries MORE THAN ONCE (plate fields can
+    /// each repeat a label-group name) resolves to its FIRST occurrence — a
+    /// single command carries no occurrence info, so restores emit repeated
+    /// names positionally instead (see the web `datasetDisplayCommands`) and
+    /// the settings-vec reconciliation matches them by occurrence. A bare
+    /// `label` index is used as-is when strictly less than the dataset's
+    /// attached-label count — the bound that keeps a stray/huge index (e.g.
+    /// from a malformed non-web client) from `ensure_label`-growing the
+    /// settings vec unboundedly. `None` for an unknown dataset (no manifest,
+    /// no labels) or a command carrying neither field.
+    fn resolve_label_index(
+        &self,
+        dataset_id: &DatasetId,
+        label: Option<u32>,
+        label_name: Option<&str>,
+    ) -> Option<usize> {
+        let labels = self.document.manifests.get(dataset_id)?.label_specs();
+        if let Some(name) = label_name {
+            return labels.iter().position(|l| l.name == name);
+        }
+        let idx = label? as usize;
+        (idx < labels.len()).then_some(idx)
     }
 
     fn clamp_detail_level_override(&self, dataset_id: &DatasetId, requested: u32) -> Option<u32> {
@@ -1874,11 +1924,14 @@ mod tests {
     fn set_label_visible_round_trips() {
         let cmd = ViewportCommand::SetLabelVisible {
             dataset_id: "ds1".into(),
-            label: 2,
+            label: Some(2),
+            label_name: None,
             visible: false,
         };
         let json = serde_json::to_string(&cmd).unwrap();
-        // The exact wire shape the web client emits (snake_case tag).
+        // The exact wire shape the web client emits for an index-addressed
+        // toggle (snake_case tag) — byte-identical to the pre-`label_name`
+        // form, since an absent name serializes no key.
         assert_eq!(
             json,
             r#"{"type":"set_label_visible","dataset_id":"ds1","label":2,"visible":false}"#
@@ -1888,11 +1941,40 @@ mod tests {
             ViewportCommand::SetLabelVisible {
                 dataset_id,
                 label,
+                label_name,
                 visible,
             } => {
                 assert_eq!(dataset_id, "ds1");
-                assert_eq!(label, 2);
+                assert_eq!(label, Some(2));
+                assert_eq!(label_name, None);
                 assert!(!visible);
+            }
+            _ => panic!("expected SetLabelVisible"),
+        }
+    }
+
+    #[test]
+    fn set_label_visible_by_name_round_trips() {
+        // The name-addressed form a saved-view restore emits: `label_name`
+        // instead of an index. No `label` key on the wire (skipped when None).
+        let cmd = ViewportCommand::SetLabelVisible {
+            dataset_id: "ds1".into(),
+            label: None,
+            label_name: Some("mitochondria".into()),
+            visible: true,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"set_label_visible","dataset_id":"ds1","label_name":"mitochondria","visible":true}"#
+        );
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetLabelVisible {
+                label, label_name, ..
+            } => {
+                assert_eq!(label, None);
+                assert_eq!(label_name.as_deref(), Some("mitochondria"));
             }
             _ => panic!("expected SetLabelVisible"),
         }
@@ -1902,20 +1984,27 @@ mod tests {
     fn set_label_opacity_round_trips() {
         let cmd = ViewportCommand::SetLabelOpacity {
             dataset_id: "ds1".into(),
-            label: 1,
+            label: Some(1),
+            label_name: None,
             opacity: 0.25,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"set_label_opacity\""));
+        assert!(
+            !json.contains("label_name"),
+            "an index-addressed command must not emit a `label_name` key: {json}"
+        );
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
             ViewportCommand::SetLabelOpacity {
                 dataset_id,
                 label,
+                label_name,
                 opacity,
             } => {
                 assert_eq!(dataset_id, "ds1");
-                assert_eq!(label, 1);
+                assert_eq!(label, Some(1));
+                assert_eq!(label_name, None);
                 assert_eq!(opacity, 0.25);
             }
             _ => panic!("expected SetLabelOpacity"),
@@ -2020,7 +2109,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
-                label: 1,
+                label: Some(1),
+                label_name: None,
                 visible: true,
             }
             .into(),
@@ -2030,7 +2120,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
-                label: 1,
+                label: Some(1),
+                label_name: None,
                 visible: false,
             }
             .into(),
@@ -2051,7 +2142,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelOpacity {
                 dataset_id: "ds1".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 opacity: 0.2,
             }
             .into(),
@@ -2075,7 +2167,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
-                label: 99,
+                label: Some(99),
+                label_name: None,
                 visible: true,
             }
             .into(),
@@ -2083,7 +2176,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelOpacity {
                 dataset_id: "ds1".into(),
-                label: 1_000_000,
+                label: Some(1_000_000),
+                label_name: None,
                 opacity: 0.9,
             }
             .into(),
@@ -2098,7 +2192,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds2".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 visible: true,
             }
             .into(),
@@ -2118,7 +2213,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelOpacity {
                 dataset_id: "ds1".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 opacity: 5.0,
             }
             .into(),
@@ -2127,7 +2223,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelOpacity {
                 dataset_id: "ds1".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 opacity: -2.0,
             }
             .into(),
@@ -2138,7 +2235,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelOpacity {
                 dataset_id: "ds1".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 opacity: f32::NAN,
             }
             .into(),
@@ -2147,7 +2245,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelOpacity {
                 dataset_id: "ds1".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 opacity: f32::INFINITY,
             }
             .into(),
@@ -2167,7 +2266,8 @@ mod tests {
         scene.apply(
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
-                label: 0,
+                label: Some(0),
+                label_name: None,
                 visible: false,
             }
             .into(),
@@ -2179,6 +2279,470 @@ mod tests {
         assert_eq!(scene.epochs.view, view_before);
         assert_eq!(scene.epochs.content, content_before);
         assert_eq!(scene.epochs.layout, layout_before);
+    }
+
+    // --- Label-name keying tests ------------------------------------------
+    //
+    // Per-label settings are positional against the live label list, but they
+    // also carry the label NAME so a restore captured against an OLDER list
+    // (a re-import reordered/added/removed labels) can land each setting on
+    // the label it was saved for. These cover the three surfaces: seeding
+    // (names populated from the manifest), the name-addressed commands
+    // (`label_name` resolved scene-side), and the settings-vec reconciliation
+    // when a restored entry meets an arriving manifest.
+
+    /// Replace the label NAMES on a labeled `DatasetOpened`, in order — so a
+    /// test can model a re-import whose label list is ordered differently
+    /// than the list some settings were saved against.
+    fn with_label_names(
+        mut reg: lucida_protocol::DatasetOpened,
+        names: &[&str],
+    ) -> lucida_protocol::DatasetOpened {
+        let mut labels = reg.manifest.label_specs().to_vec();
+        assert_eq!(labels.len(), names.len());
+        for (label, name) in labels.iter_mut().zip(names) {
+            label.name = (*name).to_string();
+        }
+        reg.manifest = reg.manifest.clone().with_labels(labels);
+        reg
+    }
+
+    #[test]
+    fn seeded_label_settings_carry_manifest_names() {
+        // Seeding attaches each label's manifest name to its settings entry,
+        // so presence exports and saved views carry the stable key for free.
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["nuclei", "mitochondria"],
+        );
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings[0].name.as_deref(), Some("nuclei"));
+        assert_eq!(s.label_settings[1].name.as_deref(), Some("mitochondria"));
+    }
+
+    #[test]
+    fn label_settings_without_name_round_trips_and_omits_key() {
+        // Back-compat: an entry with no name must serialize WITHOUT a `name`
+        // key (byte-identical to a pre-name entry, so presence snapshots and
+        // saved views don't change shape), and a legacy blob with no `name`
+        // field must deserialize as None.
+        use crate::scene::LabelSettings;
+        let ls = LabelSettings::default();
+        let json = serde_json::to_string(&ls).unwrap();
+        assert_eq!(json, r#"{"visible":true,"opacity":0.5}"#);
+        let old = r#"{"visible":false,"opacity":0.25}"#;
+        let parsed: LabelSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.name, None);
+        // And a named entry round-trips its name.
+        let named = LabelSettings {
+            visible: false,
+            opacity: 0.25,
+            name: Some("nuclei".into()),
+        };
+        let back: LabelSettings =
+            serde_json::from_str(&serde_json::to_string(&named).unwrap()).unwrap();
+        assert_eq!(back, named);
+    }
+
+    #[test]
+    fn apply_set_label_by_name_targets_matching_label() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["nuclei", "mitochondria"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        assert!(!scene.dataset_settings[&ds_id].label_settings[1].visible);
+
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: None,
+                label_name: Some("mitochondria".into()),
+                visible: true,
+            }
+            .into(),
+        );
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: None,
+                label_name: Some("mitochondria".into()),
+                opacity: 0.2,
+            }
+            .into(),
+        );
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        // Landed on "mitochondria" (index 1), not on index 0.
+        assert!(ls[1].visible);
+        assert_eq!(ls[1].opacity, 0.2);
+        assert!(ls[0].visible); // seeded default, untouched
+        assert_eq!(ls[0].opacity, 0.5);
+    }
+
+    #[test]
+    fn apply_set_label_by_unknown_name_is_noop() {
+        // A name the dataset doesn't have (a saved label dropped by a
+        // re-import) must be DROPPED — never misapplied to some index.
+        let mut scene = Scene::new([800, 600]);
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 1),
+            &["nuclei"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        let before = scene.dataset_settings[&ds_id].label_settings.clone();
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: None,
+                label_name: Some("gone".into()),
+                visible: false,
+            }
+            .into(),
+        );
+        assert_eq!(scene.dataset_settings[&ds_id].label_settings, before);
+    }
+
+    #[test]
+    fn apply_set_label_name_wins_over_index() {
+        // When a command carries BOTH, the name is the stable key and the
+        // index is ignored — even an out-of-range one doesn't spoil the apply.
+        let mut scene = Scene::new([800, 600]);
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["nuclei", "mitochondria"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        scene.apply(
+            ViewportCommand::SetLabelOpacity {
+                dataset_id: "ds1".into(),
+                label: Some(99),
+                label_name: Some("nuclei".into()),
+                opacity: 0.75,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&ds_id].label_settings[0].opacity,
+            0.75
+        );
+    }
+
+    #[test]
+    fn dataset_opened_rekeys_restored_named_label_settings_by_name() {
+        // The document-restore ordering: per-dataset settings can be restored
+        // BEFORE the dataset's manifest arrives, and the arriving label list
+        // may be ordered differently than the one the settings were saved
+        // against. Restored [nuclei hidden, mitochondria visible] meets a
+        // manifest ordered [mitochondria, nuclei]: each entry must land on
+        // its NAMED label, not its old index.
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                label_settings: vec![
+                    LabelSettings {
+                        visible: false,
+                        opacity: 0.9,
+                        name: Some("nuclei".into()),
+                    },
+                    LabelSettings {
+                        visible: true,
+                        opacity: 0.25,
+                        name: Some("mitochondria".into()),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["mitochondria", "nuclei"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        assert_eq!(ls.len(), 2);
+        // Index 0 is now "mitochondria" — it gets the saved mitochondria
+        // state (visible, 0.25), NOT the saved index-0 (nuclei) state.
+        assert_eq!(ls[0].name.as_deref(), Some("mitochondria"));
+        assert!(ls[0].visible);
+        assert_eq!(ls[0].opacity, 0.25);
+        // Index 1 is "nuclei" — hidden at 0.9, as saved.
+        assert_eq!(ls[1].name.as_deref(), Some("nuclei"));
+        assert!(!ls[1].visible);
+        assert_eq!(ls[1].opacity, 0.9);
+    }
+
+    #[test]
+    fn dataset_opened_keeps_nameless_restored_label_settings_positional() {
+        // Name-less settings (persisted before names existed) have no stable
+        // key: they keep their exact positional meaning, untouched.
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        let restored = vec![
+            LabelSettings {
+                visible: false,
+                opacity: 0.9,
+                name: None,
+            },
+            LabelSettings {
+                visible: true,
+                opacity: 0.25,
+                name: None,
+            },
+        ];
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                label_settings: restored.clone(),
+                ..Default::default()
+            },
+        );
+
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["mitochondria", "nuclei"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.dataset_settings[&ds_id].label_settings, restored);
+    }
+
+    #[test]
+    fn dataset_opened_reseeds_empty_label_settings_when_labels_return() {
+        // The "leave a nameless vec untouched" rule is for NON-EMPTY legacy
+        // data only. An EMPTY vec — e.g. named settings met a label-less
+        // manifest revision (a re-import that lost its labels, or a transient
+        // label-less broadcast) and were reconciled down to nothing — must
+        // reseed when a later revision brings labels back. Treating the empty
+        // vec as legacy would strand the dataset with no per-label entries
+        // forever: the DatasetOpened path only seeds a MISSING settings entry,
+        // never an existing-but-empty one, and panel edits would then regrow
+        // nameless positional entries.
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                label_settings: vec![
+                    LabelSettings {
+                        visible: false,
+                        opacity: 0.9,
+                        name: Some("nuclei".into()),
+                    },
+                    LabelSettings {
+                        visible: true,
+                        opacity: 0.25,
+                        name: Some("mitochondria".into()),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        // A label-less manifest arrives: no current label matches any saved
+        // name, so reconciliation empties the vec (nothing to key to).
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 0);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert!(scene.dataset_settings[&ds_id].label_settings.is_empty());
+
+        // The labels return: the empty vec must reseed to the full named
+        // default vec — NOT stay empty.
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["nuclei", "mitochondria"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        assert_eq!(ls.len(), 2);
+        // Seeded defaults: first uint32 label visible, the rest hidden, all
+        // at 0.5, each carrying the manifest's name.
+        assert_eq!(ls[0].name.as_deref(), Some("nuclei"));
+        assert!(ls[0].visible);
+        assert_eq!(ls[0].opacity, 0.5);
+        assert_eq!(ls[1].name.as_deref(), Some("mitochondria"));
+        assert!(!ls[1].visible);
+        assert_eq!(ls[1].opacity, 0.5);
+    }
+
+    #[test]
+    fn dataset_opened_drops_unmatched_names_and_seeds_uncovered_labels() {
+        // A saved name the dataset no longer has is dropped; a current label
+        // with no saved entry gets its seeded default. Restored: only "gone"
+        // (removed by the re-import) + "mitochondria". Manifest: [nuclei,
+        // mitochondria].
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                label_settings: vec![
+                    LabelSettings {
+                        visible: true,
+                        opacity: 0.9,
+                        name: Some("gone".into()),
+                    },
+                    LabelSettings {
+                        visible: true,
+                        opacity: 0.25,
+                        name: Some("mitochondria".into()),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["nuclei", "mitochondria"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        assert_eq!(ls.len(), 2);
+        // "nuclei" had no saved entry: seeded default (first uint32 → visible,
+        // 0.5) — and nothing from the dropped "gone" entry leaked onto it.
+        assert_eq!(ls[0].name.as_deref(), Some("nuclei"));
+        assert!(ls[0].visible);
+        assert_eq!(ls[0].opacity, 0.5);
+        // "mitochondria" keeps its saved state.
+        assert_eq!(ls[1].name.as_deref(), Some("mitochondria"));
+        assert!(ls[1].visible);
+        assert_eq!(ls[1].opacity, 0.25);
+    }
+
+    #[test]
+    fn dataset_opened_reconciles_repeated_names_by_occurrence() {
+        // A label name is only unique per source image — a plate whose fields
+        // each carry a "cells" group repeats the name once per field, in field
+        // order. The k-th restored "cells" must land on the k-th current
+        // "cells" (first-match would pile both onto one label), and an
+        // unchanged repeated list must restore exactly as saved.
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                label_settings: vec![
+                    LabelSettings {
+                        visible: false,
+                        opacity: 0.9,
+                        name: Some("cells".into()),
+                    },
+                    LabelSettings {
+                        visible: true,
+                        opacity: 0.25,
+                        name: Some("cells".into()),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        // The re-imported plate gained a "nuclei" label ahead of the two
+        // per-field "cells" groups.
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3),
+            &["nuclei", "cells", "cells"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let ls = &scene.dataset_settings[&ds_id].label_settings;
+        assert_eq!(ls.len(), 3);
+        // "nuclei" had no saved entry: seeded default.
+        assert_eq!(ls[0].name.as_deref(), Some("nuclei"));
+        assert!(ls[0].visible);
+        assert_eq!(ls[0].opacity, 0.5);
+        // First saved "cells" → first current "cells" (index 1).
+        assert!(!ls[1].visible);
+        assert_eq!(ls[1].opacity, 0.9);
+        // Second saved "cells" → second current "cells" (index 2).
+        assert!(ls[2].visible);
+        assert_eq!(ls[2].opacity, 0.25);
+    }
+
+    #[test]
+    fn dataset_opened_reconcile_is_identity_for_unchanged_repeated_names() {
+        // Same plate, unchanged label list [cells, cells]: occurrence matching
+        // must reproduce the saved state exactly (per-slot), never collapse
+        // both entries onto the first "cells".
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        let saved = vec![
+            LabelSettings {
+                visible: false,
+                opacity: 0.9,
+                name: Some("cells".into()),
+            },
+            LabelSettings {
+                visible: true,
+                opacity: 0.25,
+                name: Some("cells".into()),
+            },
+        ];
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                label_settings: saved.clone(),
+                ..Default::default()
+            },
+        );
+        let reg = with_label_names(
+            test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2),
+            &["cells", "cells"],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.dataset_settings[&ds_id].label_settings, saved);
+    }
+
+    #[test]
+    fn dataset_opened_reconcile_leaves_other_settings_untouched() {
+        // Reconciliation is label-scoped: the rest of a restored settings
+        // entry (opacity/contrast/channel settings) must ride through the
+        // arriving manifest unchanged.
+        use crate::scene::{DatasetDisplaySettings, LabelSettings};
+
+        let mut scene = Scene::new([800, 600]);
+        let ds_id = DatasetId("ds1".into());
+        scene.dataset_settings.insert(
+            ds_id.clone(),
+            DatasetDisplaySettings {
+                opacity: 0.4,
+                contrast_max: 1234.0,
+                label_settings: vec![LabelSettings {
+                    visible: false,
+                    opacity: 0.1,
+                    name: Some("label-0".into()),
+                }],
+                ..Default::default()
+            },
+        );
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let s = &scene.dataset_settings[&ds_id];
+        assert_eq!(s.opacity, 0.4);
+        assert_eq!(s.contrast_max, 1234.0);
+        assert!(!s.label_settings[0].visible);
+        assert_eq!(s.label_settings[0].opacity, 0.1);
     }
 
     // --- Epoch tests ---

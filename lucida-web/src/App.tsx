@@ -98,6 +98,22 @@ function hasSavedViewDeepLink(): boolean {
   );
 }
 
+/** Per-dataset label names in manifest (OME `labels`) order, from the loaded
+ *  datasets. "Save view" captures stamp each per-label setting with the NAME
+ *  of the label it controls — the stable key a restore uses when a dataset's
+ *  label list has since changed (re-imports can reorder/add/remove labels).
+ *  Datasets without labels are omitted. */
+function labelNamesByDatasetId(
+  datasets: Map<string, DatasetState>,
+): ReadonlyMap<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>();
+  for (const ds of datasets.values()) {
+    const names = ds.manifest.labels?.map((l) => l.name);
+    if (names && names.length > 0) out.set(ds.id, names);
+  }
+  return out;
+}
+
 function App({
   workspaceId,
   workspaceName,
@@ -362,6 +378,12 @@ function App({
     loopRef: render.loopRef,
     getLiveView,
     dimensionExtentsFor: dims.dimensionExtentsFor,
+    // Per-dataset label names (manifest order) for captures, read from the
+    // loaded manifests at call time (the hook reads this getter via a ref)
+    // so each captured label setting is stamped with the NAME of the label
+    // it controls — the stable key a restore uses when a dataset's label
+    // list has since changed (re-imports can reorder/add/remove labels).
+    getLabelNamesByDatasetId: () => labelNamesByDatasetId(datasetsRef.current),
     setC: dims.setC,
     setT: dims.setT,
     setZ: dims.setZ,

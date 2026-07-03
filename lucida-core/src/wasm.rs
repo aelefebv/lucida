@@ -95,8 +95,13 @@ impl WasmScene {
         // (via the same `seeded_for` the `DatasetOpened` apply path uses) rather
         // than a bare `Default` — the empty default has NO channel/label entries,
         // which would leave the layer panel's per-channel and per-label controls
-        // unable to render on a document restore. `or_insert_with` keeps any
-        // existing (locally adjusted) settings untouched across a re-load.
+        // unable to render on a document restore. Existing (locally adjusted)
+        // settings are kept across a re-load, but their per-label entries are
+        // re-keyed by label NAME against the loaded manifest's label list
+        // (`reconcile_label_settings`): the list may differ from the one the
+        // settings were captured against (a re-import reorders/adds/removes
+        // labels), and applying them positionally would land settings on the
+        // wrong labels. Name-less legacy settings stay positional, untouched.
         for id in self
             .inner
             .document
@@ -108,15 +113,22 @@ impl WasmScene {
             if !self.inner.dataset_order.contains(&id) {
                 self.inner.dataset_order.push(id.clone());
             }
-            if !self.inner.dataset_settings.contains_key(&id) {
-                let seeded = self
-                    .inner
-                    .document
-                    .manifests
-                    .get(&id)
-                    .map(DatasetDisplaySettings::seeded_for)
-                    .unwrap_or_default();
-                self.inner.dataset_settings.insert(id, seeded);
+            match self.inner.dataset_settings.get_mut(&id) {
+                Some(existing) => {
+                    if let Some(manifest) = self.inner.document.manifests.get(&id) {
+                        existing.reconcile_label_settings(manifest);
+                    }
+                }
+                None => {
+                    let seeded = self
+                        .inner
+                        .document
+                        .manifests
+                        .get(&id)
+                        .map(DatasetDisplaySettings::seeded_for)
+                        .unwrap_or_default();
+                    self.inner.dataset_settings.insert(id, seeded);
+                }
             }
         }
         // Remove stale entries for datasets no longer in the document.

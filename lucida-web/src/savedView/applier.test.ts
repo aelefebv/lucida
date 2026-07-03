@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SavedViewApplier, type ApplierBridge, clampViewIndices } from "./applier.ts";
+import {
+  SavedViewApplier,
+  type ApplierBridge,
+  clampViewIndices,
+  labelDisplayCommands,
+} from "./applier.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
 
 // Mock WasmScene: records every apply_command call and lets the test
@@ -438,6 +443,174 @@ describe("SavedViewApplier", () => {
     });
   });
 
+  // --- Per-label restore addressing ---------------------------------------
+  //
+  // A label setting captured WITH its label's name restores via `label_name`
+  // (resolved scene-side against the CURRENT label list, so it survives a
+  // re-import that reordered/added/removed labels); a name-less legacy setting
+  // restores positionally via `label: <index>`, exactly as before.
+
+  it("restores NAMED label settings via label_name (never a positional index)", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        label_settings: [
+          { visible: false, opacity: 0.9, name: "nuclei" },
+          { visible: true, opacity: 0.25, name: "mitochondria" },
+        ],
+      },
+    };
+    await applier.apply(v);
+
+    const labelCmds = scene.calls
+      .filter((c) => c.includes('"set_label_'))
+      .map((c) => JSON.parse(c) as Record<string, unknown>);
+    expect(labelCmds).toHaveLength(4); // visible + opacity per entry
+    // Every command addresses its label by NAME — no positional index that a
+    // reordered label list would misroute.
+    for (const cmd of labelCmds) {
+      expect(cmd.label).toBeUndefined();
+    }
+    expect(labelCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label_name: "nuclei", visible: false,
+    });
+    expect(labelCmds).toContainEqual({
+      type: "set_label_opacity", dataset_id: "ds-a", label_name: "nuclei", opacity: 0.9,
+    });
+    expect(labelCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label_name: "mitochondria", visible: true,
+    });
+    expect(labelCmds).toContainEqual({
+      type: "set_label_opacity", dataset_id: "ds-a", label_name: "mitochondria", opacity: 0.25,
+    });
+  });
+
+  it("restores REPEATED saved names positionally (ambiguous as a per-command key)", async () => {
+    // A plate's fields commonly each carry a same-named label group, so the
+    // captured vec can repeat a name. The scene resolves `label_name` to the
+    // FIRST occurrence, which would pile every repeated entry onto one label —
+    // so repeated-name entries fall back to positional addressing, while a
+    // uniquely-named sibling in the same vec still restores by name.
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        label_settings: [
+          { visible: false, opacity: 0.9, name: "cells" },
+          { visible: true, opacity: 0.25, name: "cells" },
+          { visible: true, opacity: 0.5, name: "nuclei" },
+        ],
+      },
+    };
+    await applier.apply(v);
+
+    const visibleCmds = scene.calls
+      .filter((c) => c.includes('"set_label_visible"'))
+      .map((c) => JSON.parse(c) as Record<string, unknown>);
+    expect(visibleCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label: 0, visible: false,
+    });
+    expect(visibleCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label: 1, visible: true,
+    });
+    expect(visibleCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label_name: "nuclei", visible: true,
+    });
+  });
+
+  it("restores an explicit null-named entry positionally (null is not a name)", async () => {
+    // A hand-authored or normalized stored view can spell "no name" as an
+    // explicit `name: null` (serde deserializes it to None). It must restore
+    // exactly like an absent name — positionally — never as
+    // `label_name: null`, which the scene resolves to no label, silently
+    // losing the entry's visible/opacity.
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        label_settings: [
+          { visible: false, opacity: 0.9, name: null },
+        ],
+      },
+    };
+    await applier.apply(v);
+
+    const labelCmds = scene.calls
+      .filter((c) => c.includes('"set_label_'))
+      .map((c) => JSON.parse(c) as Record<string, unknown>);
+    expect(labelCmds).toHaveLength(2);
+    for (const cmd of labelCmds) {
+      expect("label_name" in cmd).toBe(false);
+    }
+    expect(labelCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label: 0, visible: false,
+    });
+    expect(labelCmds).toContainEqual({
+      type: "set_label_opacity", dataset_id: "ds-a", label: 0, opacity: 0.9,
+    });
+  });
+
+  it("restores name-less legacy label settings positionally (exact old behavior)", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+        label_settings: [
+          { visible: false, opacity: 0.9 },
+          { visible: true, opacity: 0.25 },
+        ],
+      },
+    };
+    await applier.apply(v);
+
+    const labelCmds = scene.calls
+      .filter((c) => c.includes('"set_label_'))
+      .map((c) => JSON.parse(c) as Record<string, unknown>);
+    expect(labelCmds).toHaveLength(4);
+    for (const cmd of labelCmds) {
+      expect(cmd.label_name).toBeUndefined();
+    }
+    expect(labelCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label: 0, visible: false,
+    });
+    expect(labelCmds).toContainEqual({
+      type: "set_label_visible", dataset_id: "ds-a", label: 1, visible: true,
+    });
+  });
+
   it("applyInProgress flag is true between start and resolution", async () => {
     const scene = createMockScene();
     const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl, 1000);
@@ -640,6 +813,36 @@ describe("SavedViewApplier", () => {
     const setCCall = scene.calls.find((c) => c.includes('"type":"set_c"'));
     expect(setCCall).toBeDefined();
     expect(JSON.parse(setCCall!)).toMatchObject({ type: "set_c", c: 2 });
+  });
+});
+
+describe("labelDisplayCommands", () => {
+  it("addresses a NAMED setting by label_name (no index key)", () => {
+    const cmds = labelDisplayCommands("ds-a", 3, {
+      visible: true,
+      opacity: 0.4,
+      name: "mitochondria",
+    });
+    expect(cmds).toEqual([
+      { type: "set_label_visible", dataset_id: "ds-a", label_name: "mitochondria", visible: true },
+      { type: "set_label_opacity", dataset_id: "ds-a", label_name: "mitochondria", opacity: 0.4 },
+    ]);
+  });
+
+  it("addresses a name-less setting by positional index (no label_name key)", () => {
+    const cmds = labelDisplayCommands("ds-a", 3, { visible: false, opacity: 0.9 });
+    expect(cmds).toEqual([
+      { type: "set_label_visible", dataset_id: "ds-a", label: 3, visible: false },
+      { type: "set_label_opacity", dataset_id: "ds-a", label: 3, opacity: 0.9 },
+    ]);
+  });
+
+  it("addresses an explicit-null name by positional index (never label_name: null)", () => {
+    const cmds = labelDisplayCommands("ds-a", 2, { visible: true, opacity: 0.7, name: null });
+    expect(cmds).toEqual([
+      { type: "set_label_visible", dataset_id: "ds-a", label: 2, visible: true },
+      { type: "set_label_opacity", dataset_id: "ds-a", label: 2, opacity: 0.7 },
+    ]);
   });
 });
 

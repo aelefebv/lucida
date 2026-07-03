@@ -254,7 +254,7 @@ pub fn is_local_dataset_url(canonical: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{BlendMode, ChannelSettings, Colormap, RenderMode};
+    use crate::scene::{BlendMode, ChannelSettings, Colormap, LabelSettings, RenderMode};
 
     fn sample_view() -> SavedView {
         let mut v = SavedView::empty([1024, 768]);
@@ -285,6 +285,13 @@ mod tests {
                 // A user channel-name override rides the saved view too.
                 name: Some("Nucleus".into()),
             }],
+            // A per-label entry keyed by its label NAME rides along, so a
+            // restore can land it on the right label after a re-import.
+            label_settings: vec![LabelSettings {
+                visible: false,
+                opacity: 0.35,
+                name: Some("mitochondria".into()),
+            }],
             ..Default::default()
         };
         v.dataset_settings.insert(DatasetId("ds-aaaa".into()), s);
@@ -305,6 +312,53 @@ mod tests {
     fn round_trips() {
         let v = sample_view();
         assert_round_trips(&v);
+    }
+
+    /// Label NAMES survive the stored-view serde path — the exact
+    /// `serde_json` round-trip a server-stored bookmark / last-view /
+    /// viewer-profile takes (lucida-server round-trips this struct), so
+    /// persisting a view must never strip the key that lets its per-label
+    /// settings land on the right labels at restore time.
+    #[test]
+    fn label_settings_names_survive_saved_view_round_trip() {
+        let v = sample_view();
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(
+            json.contains(r#""name":"mitochondria""#),
+            "a named per-label entry must serialize its name: {json}"
+        );
+        let back: SavedView = serde_json::from_str(&json).unwrap();
+        let ls = &back.dataset_settings[&DatasetId("ds-aaaa".into())].label_settings;
+        assert_eq!(ls.len(), 1);
+        assert_eq!(ls[0].name.as_deref(), Some("mitochondria"));
+        assert!(!ls[0].visible);
+        assert_eq!(ls[0].opacity, 0.35);
+    }
+
+    /// A saved view persisted before label names existed (positional,
+    /// name-less `label_settings`) still parses — its entries carry
+    /// `name: None` and are applied by index at restore time.
+    #[test]
+    fn nameless_label_settings_parse_as_positional_legacy() {
+        let json = r#"{
+            "v": 1,
+            "camera": {"mode": "slice", "center": [0.0, 0.0], "zoom": 1.0, "viewport": [800, 600]},
+            "view": {"z_range": {"start": 0, "end": 1}, "t": 0, "c": 0},
+            "display": {"contrast_min": 0.0, "contrast_max": 65535.0, "gamma": 1.0},
+            "dataset_settings": {"ds-aaaa": {
+                "visible": true, "opacity": 1.0,
+                "contrast_min": 0.0, "contrast_max": 65535.0, "gamma": 1.0,
+                "blend_mode": "alpha",
+                "label_settings": [
+                    {"visible": false, "opacity": 0.9},
+                    {"visible": true, "opacity": 0.25}
+                ]
+            }}
+        }"#;
+        let back: SavedView = serde_json::from_str(json).unwrap();
+        let ls = &back.dataset_settings[&DatasetId("ds-aaaa".into())].label_settings;
+        assert_eq!(ls.len(), 2);
+        assert!(ls.iter().all(|l| l.name.is_none()));
     }
 
     /// `remap_dataset_ids` moves every workspace-local id key (active_layouts,

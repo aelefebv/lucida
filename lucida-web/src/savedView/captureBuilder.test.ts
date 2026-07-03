@@ -121,6 +121,107 @@ describe("captureBuilder.isLocalFilePath (via hasLocalFilePaths)", () => {
   });
 });
 
+// A scene stub whose dataset presence carries per-label settings, for the
+// label-name capture tests. `labelSettings` seeds `wds-a`'s label_settings
+// exactly as `export_dataset_presence` would serialize them.
+function sceneWithLabelSettings(
+  labelSettings: Array<{ visible: boolean; opacity: number; name?: string }>,
+) {
+  return {
+    export_presence: () => JSON.stringify({
+      camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
+      view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+      display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
+    }),
+    export_dataset_presence: () => JSON.stringify({
+      dataset_order: ["wds-a"],
+      dataset_settings: {
+        "wds-a": {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 65535,
+          gamma: 1,
+          blend_mode: "alpha",
+          label_settings: labelSettings,
+        },
+      },
+    }),
+    dataset_ids: () => JSON.stringify(["wds-a"]),
+    available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+  };
+}
+
+describe("buildCapture label names", () => {
+  it("stamps each captured label setting with its manifest name (map input is authoritative)", () => {
+    // The scene export carries no names (e.g. settings that predate names);
+    // the caller supplies the manifest order, which stamps them positionally.
+    const scene = sceneWithLabelSettings([
+      { visible: false, opacity: 0.9 },
+      { visible: true, opacity: 0.25 },
+    ]);
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+      labelNamesByDatasetId: new Map([["wds-a", ["nuclei", "mitochondria"]]]),
+    });
+    expect(view.dataset_settings["wds-a"].label_settings).toEqual([
+      { visible: false, opacity: 0.9, name: "nuclei" },
+      { visible: true, opacity: 0.25, name: "mitochondria" },
+    ]);
+  });
+
+  it("overrides scene-carried names with the caller's manifest names", () => {
+    // When both exist, the loaded manifest is the source of truth.
+    const scene = sceneWithLabelSettings([
+      { visible: true, opacity: 0.5, name: "stale-a" },
+      { visible: false, opacity: 0.5, name: "stale-b" },
+    ]);
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+      labelNamesByDatasetId: new Map([["wds-a", ["nuclei", "mitochondria"]]]),
+    });
+    expect(view.dataset_settings["wds-a"].label_settings?.map((l) => l.name))
+      .toEqual(["nuclei", "mitochondria"]);
+  });
+
+  it("passes scene-carried names through when no map is provided", () => {
+    const scene = sceneWithLabelSettings([
+      { visible: true, opacity: 0.5, name: "nuclei" },
+    ]);
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+    });
+    expect(view.dataset_settings["wds-a"].label_settings).toEqual([
+      { visible: true, opacity: 0.5, name: "nuclei" },
+    ]);
+  });
+
+  it("leaves datasets the map omits (and entries beyond the name list) untouched", () => {
+    const scene = sceneWithLabelSettings([
+      { visible: true, opacity: 0.5, name: "scene-kept" },
+      { visible: false, opacity: 0.3 },
+    ]);
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+      // Covers another dataset only; a one-name list would similarly leave
+      // entry 1 as the scene exported it.
+      labelNamesByDatasetId: new Map([["wds-other", ["irrelevant"]]]),
+    });
+    expect(view.dataset_settings["wds-a"].label_settings).toEqual([
+      { visible: true, opacity: 0.5, name: "scene-kept" },
+      { visible: false, opacity: 0.3 },
+    ]);
+  });
+});
+
 describe("buildCapture workspace dataset references", () => {
   it("does not put source URLs into workspace-mode saved views", () => {
     const scene = {

@@ -113,6 +113,23 @@ fn default_channel_blend_mode() -> BlendMode {
 pub struct LabelSettings {
     pub visible: bool,
     pub opacity: f32,
+    /// The manifest (OME `labels`) name of the label this entry controls.
+    /// `label_settings` is positional against the live scene's CURRENT label
+    /// list, but a saved view can outlive a re-import that reorders/adds/
+    /// removes labels — the name is the stable key that lets a restore land
+    /// each entry on the label it was saved for (see
+    /// [`DatasetDisplaySettings::reconcile_label_settings`]) instead of on
+    /// whatever now sits at the same index. Populated from the manifest by
+    /// [`DatasetDisplaySettings::seeded_for`], so presence exports and saved
+    /// views carry it automatically.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps this
+    /// strictly additive: a presence snapshot / saved view persisted before
+    /// names existed carries no `name` key and deserializes as `None` (and is
+    /// then applied positionally, exactly as before), while an entry WITHOUT a
+    /// name serializes byte-identically to a pre-name one. No wire break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Default for LabelSettings {
@@ -120,6 +137,7 @@ impl Default for LabelSettings {
         Self {
             visible: true,
             opacity: 0.5,
+            name: None,
         }
     }
 }
@@ -210,12 +228,6 @@ impl DatasetDisplaySettings {
             .and_then(|img| img.multiscale.levels.first())
             .map(|l| l.shape[1] as usize)
             .unwrap_or(1);
-        let labels = manifest.label_specs();
-        // Index of the first uint32 (drawable-dtype) label, or `None` if the
-        // dataset has no uint32 label. Only that one is seeded visible.
-        let default_visible = labels
-            .iter()
-            .position(|l| l.image.multiscale.data_type == DataType::Uint32);
         Self {
             channel_settings: (0..channel_count)
                 .map(|i| ChannelSettings {
@@ -223,14 +235,113 @@ impl DatasetDisplaySettings {
                     ..Default::default()
                 })
                 .collect(),
-            label_settings: (0..labels.len())
-                .map(|i| LabelSettings {
-                    visible: Some(i) == default_visible,
-                    opacity: 0.5,
-                })
-                .collect(),
+            label_settings: Self::seeded_label_settings(manifest),
             ..Default::default()
         }
+    }
+
+    /// The default per-label settings for `manifest`'s attached labels: one
+    /// entry per label in manifest (OME `labels`) order, carrying that label's
+    /// NAME, with only the first drawable-dtype (uint32) label visible and all
+    /// at opacity 0.5 (the seeding policy documented on [`Self::seeded_for`]).
+    /// Shared by [`Self::seeded_for`] and
+    /// [`Self::reconcile_label_settings`] so a reconciled entry vec and a
+    /// freshly seeded one agree on defaults and names.
+    fn seeded_label_settings(manifest: &DatasetManifest) -> Vec<LabelSettings> {
+        let labels = manifest.label_specs();
+        // Index of the first uint32 (drawable-dtype) label, or `None` if the
+        // dataset has no uint32 label. Only that one is seeded visible.
+        let default_visible = labels
+            .iter()
+            .position(|l| l.image.multiscale.data_type == DataType::Uint32);
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, l)| LabelSettings {
+                visible: Some(i) == default_visible,
+                opacity: 0.5,
+                name: Some(l.name.clone()),
+            })
+            .collect()
+    }
+
+    /// Re-key restored per-label settings against `manifest`'s CURRENT label
+    /// list, by label NAME.
+    ///
+    /// A restored `label_settings` vec was captured against the label list the
+    /// dataset had WHEN IT WAS SAVED; the manifest arriving now (a re-import,
+    /// a per-field label set) may order, add, or remove labels differently, so
+    /// applying the vec positionally would put settings on the wrong labels.
+    /// Called wherever an already-present settings entry meets an arriving
+    /// manifest (the `DatasetOpened` apply path and the document restore),
+    /// with these rules:
+    ///
+    /// - **Non-empty nameless vec (legacy)**: if the vec has entries but NO
+    ///   entry carries a name — settings persisted before names existed — it
+    ///   is left untouched, keeping the exact positional behavior such data
+    ///   always had. An **empty vec is not legacy data**: it carries no
+    ///   positional meaning to preserve, so it falls through and reseeds
+    ///   full-length from the manifest. This matters after a label-less
+    ///   manifest revision (a re-import that lost its labels, or a transient
+    ///   label-less broadcast) emptied the vec: when a later revision brings
+    ///   labels back, the entries must reseed — treating the empty vec as
+    ///   legacy would strand the dataset with no per-label entries forever
+    ///   (the `DatasetOpened` path only seeds a MISSING entry, never an
+    ///   existing-but-empty one), and panel edits would then regrow nameless
+    ///   positional entries.
+    /// - **Named entries** land on the current label with the SAME name
+    ///   (visible/opacity copied onto that label's slot); a name the dataset
+    ///   no longer has is dropped.
+    /// - **Repeated names** match by OCCURRENCE: the k-th restored `"cells"`
+    ///   lands on the k-th current `"cells"`. A label name is only unique per
+    ///   source image — a plate whose fields each carry a `"cells"` group
+    ///   repeats the name once per field, in field order — so first-match
+    ///   would pile every field's setting onto one label, while occurrence
+    ///   order keeps an unchanged list restoring exactly as saved.
+    /// - **Nameless entries in a mixed vec** keep their positional meaning:
+    ///   index `i` targets the current list's label `i` when in range.
+    /// - **Labels with no restored entry** get their seeded default (the
+    ///   [`Self::seeded_label_settings`] policy), so the result is always
+    ///   full-length with every entry carrying the current manifest's name.
+    pub fn reconcile_label_settings(&mut self, manifest: &DatasetManifest) {
+        // Only a NON-EMPTY all-nameless vec is legacy positional data to be
+        // preserved verbatim. An empty vec falls through so it reseeds from
+        // the manifest (see the rules above).
+        if !self.label_settings.is_empty() && !self.label_settings.iter().any(|l| l.name.is_some())
+        {
+            return;
+        }
+        let mut next = Self::seeded_label_settings(manifest);
+        let labels = manifest.label_specs();
+        // Occurrence counter per restored name, so the k-th restored entry
+        // named X targets the k-th current label named X.
+        let mut occurrence: HashMap<String, usize> = HashMap::new();
+        for (i, entry) in std::mem::take(&mut self.label_settings)
+            .into_iter()
+            .enumerate()
+        {
+            let target = match &entry.name {
+                Some(name) => {
+                    let k = occurrence.entry(name.clone()).or_insert(0);
+                    let pos = labels
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| &l.name == name)
+                        .map(|(j, _)| j)
+                        .nth(*k);
+                    *k += 1;
+                    pos
+                }
+                None => (i < next.len()).then_some(i),
+            };
+            if let Some(j) = target {
+                // Only the user-adjustable fields move; the slot keeps the
+                // current manifest's canonical name.
+                next[j].visible = entry.visible;
+                next[j].opacity = entry.opacity;
+            }
+        }
+        self.label_settings = next;
     }
 }
 

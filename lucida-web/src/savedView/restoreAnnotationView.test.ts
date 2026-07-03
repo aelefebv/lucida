@@ -213,6 +213,49 @@ describe("restoreAnnotationView (light tier)", () => {
     expect(emitted).not.toContain("set_dataset_contrast");
   });
 
+  it("restores captured per-label display by label NAME for the pin's dataset", () => {
+    // The author's captured label settings carry names; the light restore
+    // addresses each by `label_name` (resolved scene-side against the CURRENT
+    // label list), so the author's visible-label set lands on the same labels
+    // even if the dataset's label order changed since capture. A name-less
+    // legacy entry stays positional.
+    const { scene, calls } = makeScene({
+      volumeShapes: { [DS]: new Uint32Array([100, 512, 512]) },
+    });
+    const view = viewWith({
+      dataset_order: [DS],
+      dataset_settings: {
+        [DS]: {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 65535,
+          gamma: 1,
+          blend_mode: "alpha",
+          label_settings: [
+            { visible: true, opacity: 0.35, name: "mitochondria" },
+            { visible: false, opacity: 0.5 },
+          ],
+        },
+      },
+    });
+
+    restoreAnnotationView({ scene, view, datasetId: DS });
+
+    expect(calls).toContainEqual({
+      type: "set_label_visible", dataset_id: DS, label_name: "mitochondria", visible: true,
+    });
+    expect(calls).toContainEqual({
+      type: "set_label_opacity", dataset_id: DS, label_name: "mitochondria", opacity: 0.35,
+    });
+    // The name-less second entry restores positionally (index 1).
+    expect(calls).toContainEqual({
+      type: "set_label_visible", dataset_id: DS, label: 1, visible: false,
+    });
+    // Still strictly display-scoped: no layer-placement command was emitted.
+    expect(typesOf(calls)).not.toContain("set_dataset_visible");
+  });
+
   it("clamps the captured z/t/c to the pin's dataset extents + reports a notice", () => {
     // The pin's dataset is shallow (Z=4) but the captured slab is deep (z 50..52)
     // and t/c are out of range — all must clamp to fit, with a notice naming them.

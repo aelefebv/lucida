@@ -113,9 +113,11 @@ interface HarnessProps {
   outRef: Captured;
   loopRef: React.RefObject<RenderLoop | null>;
   initial?: { z?: number; c?: number; t?: number; viewMode?: "2d" | "3d" };
+  /** Optional per-dataset label-name getter, threaded to capture. */
+  getLabelNames?: () => ReadonlyMap<string, readonly string[]>;
 }
 
-function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
+function HookHarness({ scene, outRef, loopRef, initial, getLabelNames }: HarnessProps) {
   const [z, setZ] = useState(initial?.z ?? 0);
   const [c, setC] = useState(initial?.c ?? 0);
   const [t, setT] = useState(initial?.t ?? 0);
@@ -136,6 +138,7 @@ function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
     changeTick: 0,
     debounceMs: 1,
     loopRef,
+    getLabelNamesByDatasetId: getLabelNames,
     setC,
     setT,
     setZ,
@@ -285,6 +288,48 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     });
     await act(async () => { /* flush pending effects */ });
     expect(outRef.current?.viewMode).toBe("3d");
+  });
+
+  it("threads getLabelNamesByDatasetId into captures (label settings stamped with names)", async () => {
+    // The scene's settings export carries name-less label settings; the
+    // hook's label-name getter (fed from loaded manifests) must reach
+    // buildCapture so the captured entries are stamped with their labels'
+    // manifest names — the key a later restore uses if the label list changes.
+    const loop = makeMockLoop();
+    scene.export_dataset_presence = () => JSON.stringify({
+      dataset_order: ["wds-a"],
+      dataset_settings: {
+        "wds-a": {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 65535,
+          gamma: 1,
+          blend_mode: "alpha",
+          label_settings: [
+            { visible: true, opacity: 0.5 },
+            { visible: false, opacity: 0.3 },
+          ],
+        },
+      },
+    });
+    scene.dataset_ids = () => JSON.stringify(["wds-a"]);
+    await act(async () => {
+      render(
+        <HookHarness
+          scene={scene}
+          outRef={outRef}
+          loopRef={loop.ref}
+          getLabelNames={() => new Map([["wds-a", ["nuclei", "mitochondria"]]])}
+        />,
+      );
+    });
+
+    const captured = outRef.current!.handle.captureBuilder();
+    expect(captured?.dataset_settings["wds-a"].label_settings).toEqual([
+      { visible: true, opacity: 0.5, name: "nuclei" },
+      { visible: false, opacity: 0.3, name: "mitochondria" },
+    ]);
   });
 
   it("syncs multiChannel from post-apply scene state", async () => {
