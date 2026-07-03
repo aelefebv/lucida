@@ -98,9 +98,12 @@ impl ChunkByteLayout {
     }
 }
 
-/// Compute [`ChunkByteLayout`] for one level. Errors when the axes order
-/// is not contiguous-prefix-sliceable; the message names the offending
-/// axis so users know what to look for in their OME-Zarr metadata.
+/// Compute [`ChunkByteLayout`] for one level. Errors when any chunk
+/// dimension is zero (Zarr v3 forbids it, and every byte quantity here
+/// would collapse to an empty on-disk chunk) or when the axes order is
+/// not contiguous-prefix-sliceable; either way the message names the
+/// offending axis so users know what to look for in their OME-Zarr
+/// metadata.
 ///
 /// `axes` is the raw OME axes list (e.g. `["t","c","z","m","y","x"]`).
 /// `chunk_shape` parallels `axes` (one entry per axis).
@@ -124,6 +127,19 @@ pub fn compute_chunk_byte_layout(
             "axes/chunk_shape length mismatch: axes has {} entries, chunk_shape has {}",
             axes.len(),
             chunk_shape.len(),
+        )));
+    }
+
+    // Zarr v3 requires every chunk dimension to be at least 1 on every axis,
+    // including non-canonical (pinned) ones. A zero would make every byte
+    // quantity below meaningless — in particular an on_disk_byte_size of 0,
+    // which no slice-site bound check could ever satisfy.
+    if let Some(i) = chunk_shape.iter().position(|&d| d == 0) {
+        return Err(StoreError::Metadata(format!(
+            "axis '{}' has a zero chunk dimension; Zarr v3 requires every \
+             chunk dimension to be at least 1 (chunk_shape: {chunk_shape:?}, \
+             axes order: {axes:?})",
+            axes[i],
         )));
     }
 
@@ -151,6 +167,16 @@ pub fn compute_chunk_byte_layout(
         .map_err(|_| StoreError::Metadata("chunk byte size exceeds usize".to_string()))?;
     let canonical_byte_size = usize::try_from(canonical)
         .map_err(|_| StoreError::Metadata("canonical chunk byte size exceeds usize".to_string()))?;
+
+    // Complements the zero-dimension check above: refuse any layout whose
+    // on-disk chunks hold zero bytes (e.g. a zero dtype size), since such a
+    // level could never stream a valid chunk.
+    if on_disk_byte_size == 0 {
+        return Err(StoreError::Metadata(format!(
+            "on-disk chunk byte size is 0 (chunk_shape: {chunk_shape:?}, \
+             dtype size {dtype_size}); chunks must hold at least one byte"
+        )));
+    }
 
     // Compute byte strides for the canonical-indexed axes (t, c) by
     // walking right-to-left and accumulating dtype_size × ∏ inner dims.
@@ -395,6 +421,62 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("length mismatch"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_zero_chunk_dim_on_pinned_axis() {
+        // [t, c, z, m, y, x] with chunk_m = 0: the zero sits on the pinned
+        // axis, which a normalized-5D view of the chunk_shape would drop —
+        // the raw check here must reject it and name the axis.
+        let err = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "m", "y", "x"]),
+            &[1, 1, 1, 0, 64, 64],
+            2,
+            &[pinned("m", 6)],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'m'"), "error should name 'm': {msg}");
+        assert!(
+            msg.contains("zero chunk dimension"),
+            "error should call out the zero chunk dimension: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_chunk_dim_on_canonical_axis() {
+        let err = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "y", "x"]),
+            &[1, 1, 1, 0, 256],
+            2,
+            &[],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'y'"), "error should name 'y': {msg}");
+        assert!(
+            msg.contains("zero chunk dimension"),
+            "error should call out the zero chunk dimension: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_layout_with_zero_byte_chunks() {
+        // Every dimension is >= 1 but a dtype size of 0 still collapses the
+        // byte sizes to nothing; the layout must be refused rather than admit
+        // on_disk_byte_size == 0.
+        let err = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "y", "x"]),
+            &[1, 1, 1, 64, 64],
+            0,
+            &[],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("byte size is 0"),
+            "error should call out the empty byte size: {msg}"
+        );
     }
 
     // Canonical-indexed (t, c) chunk_size > 1 cases.

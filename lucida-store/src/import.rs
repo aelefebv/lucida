@@ -657,11 +657,18 @@ fn build_axes(axes_names: &[String]) -> Vec<Axis> {
 
 /// Build per-level [`LevelGeometry`], normalizing shapes to canonical 5D.
 ///
-/// A zero chunk dimension is rejected with a [`StoreError`] rather than allowed
-/// to reach the `shape / chunk` grid computation (which would divide by zero and
-/// panic). This keeps untrusted array metadata — a label's or an image's
-/// `chunk_shape` — from aborting the process: a bad label surfaces as an `Err`
-/// the caller skips, and a bad source array fails the import loudly.
+/// A zero chunk dimension on ANY axis is rejected with a [`StoreError`] naming
+/// the level and the offending axis — by name when the axes metadata
+/// identifies it unambiguously, by position otherwise (Zarr v3 forbids a zero
+/// either way). The raw `chunk_shape` is checked before normalization because
+/// [`normalize_to_5d`] drops non-canonical
+/// (pinned) axes — a zero on e.g. a CZI `m` axis would otherwise slip through
+/// and admit a level whose on-disk chunks hold zero bytes, corrupting every
+/// later fetch of them. The normalized shape is checked as well, guarding the
+/// `shape / chunk` grid computation (div_ceil) directly. Together these keep
+/// untrusted array metadata — a label's or an image's `chunk_shape` — from
+/// aborting the process: a bad label surfaces as an `Err` the caller skips,
+/// and a bad source array fails the import loudly.
 fn build_level_geometries(
     level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
@@ -672,9 +679,28 @@ fn build_level_geometries(
         .zip(level_metas.iter())
         .enumerate()
         .map(|(i, (entry, meta))| {
+            let raw_chunk = &meta.chunk_grid.configuration.chunk_shape;
+            if let Some(d) = raw_chunk.iter().position(|&v| v == 0) {
+                // Name the offending axis only when `axes_names` aligns
+                // positionally with the raw chunk_shape (equal lengths).
+                // `parse_multiscales` drops axes entries that lack a "name",
+                // so a shorter names list is shifted relative to the chunk
+                // dimensions and looking up index `d` in it would blame an
+                // innocent neighboring axis. Otherwise identify the dimension
+                // by position, which is always correct.
+                let axis = if axes_names.len() == raw_chunk.len() {
+                    format!("axis '{}'", axes_names[d])
+                } else {
+                    format!("dimension {d}")
+                };
+                return Err(StoreError::Metadata(format!(
+                    "level {i}: {axis} has a zero chunk dimension \
+                     (chunk_shape {raw_chunk:?}); Zarr v3 requires every chunk \
+                     dimension to be at least 1"
+                )));
+            }
             let shape = normalize_to_5d(&meta.shape, axes_names, 1);
-            let chunk_shape =
-                normalize_to_5d(&meta.chunk_grid.configuration.chunk_shape, axes_names, 1);
+            let chunk_shape = normalize_to_5d(raw_chunk, axes_names, 1);
             if chunk_shape.contains(&0) {
                 return Err(StoreError::Metadata(format!(
                     "level {i}: chunk_shape {chunk_shape:?} has a zero dimension"
@@ -829,8 +855,9 @@ async fn build_label(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(&group_prefix, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    // A zero chunk dimension here returns Err, so the label is skipped by the
-    // caller rather than panicking the whole import.
+    // A zero chunk dimension on any axis (canonical or pinned) here returns
+    // Err, so the label is skipped by the caller rather than panicking the
+    // whole import or attaching with an empty chunk byte layout.
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names)?;
     let coarse_level_index =
         select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
@@ -1942,8 +1969,6 @@ mod tests {
         chunk: &[u64],
         codec_after_bytes: Option<serde_json::Value>,
     ) {
-        fs::create_dir_all(dir).unwrap();
-
         let axes_json: Vec<serde_json::Value> = axes
             .iter()
             .map(|name| {
@@ -1955,8 +1980,22 @@ mod tests {
                 serde_json::json!({"name": name, "type": kind})
             })
             .collect();
+        create_fixture_with_axes_json(dir, &axes_json, shape, chunk, codec_after_bytes);
+    }
 
-        let scale: Vec<f64> = vec![1.0; axes.len()];
+    /// Like [`create_6d_fixture_with_axes`] but takes the raw axes JSON
+    /// entries, so tests can exercise metadata edge cases such as an axes
+    /// entry without a `"name"` key.
+    fn create_fixture_with_axes_json(
+        dir: &std::path::Path,
+        axes_json: &[serde_json::Value],
+        shape: &[u64],
+        chunk: &[u64],
+        codec_after_bytes: Option<serde_json::Value>,
+    ) {
+        fs::create_dir_all(dir).unwrap();
+
+        let scale: Vec<f64> = vec![1.0; axes_json.len()];
         let root = serde_json::json!({
             "zarr_format": 3,
             "node_type": "group",
@@ -2938,6 +2977,182 @@ mod tests {
         assert!(
             err.to_string().contains("zero"),
             "error should name the zero dimension: {err}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A SOURCE image with a zero chunk dimension on a non-canonical (pinned)
+    /// axis must fail the import loudly. Normalizing to 5D drops the `m` axis,
+    /// so only a check on the raw chunk_shape can catch this — admitting the
+    /// level would leave it with an empty on-disk chunk byte layout that turns
+    /// into corruption once a fetch path streams its chunks.
+    #[tokio::test]
+    async fn source_image_with_zero_chunk_on_pinned_axis_fails() {
+        let dir = temp_dir("import_source_zero_chunk_pinned");
+        create_6d_fixture_with_axes(
+            &dir,
+            &["t", "c", "z", "m", "y", "x"],
+            &[1, 1, 1, 6, 64, 64],
+            &[1, 1, 1, 0, 64, 64],
+            None,
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "szc-m", "Src Zero Chunk M")
+            .await
+            .expect_err("a zero chunk dim on a pinned axis must fail the import");
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("level 0"),
+            "error should name the level: {msg}"
+        );
+        assert!(msg.contains("'m'"), "error should name the m axis: {msg}");
+        assert!(
+            msg.contains("zero"),
+            "error should call out the zero: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A zero chunk dimension sitting beyond the axes list's coverage (the
+    /// axes and chunk_shape lengths disagree — doubly malformed metadata)
+    /// still fails loudly, identifying the dimension by position instead of
+    /// panicking on an out-of-bounds axis lookup.
+    #[tokio::test]
+    async fn source_image_with_zero_chunk_beyond_axes_fails() {
+        let dir = temp_dir("import_source_zero_chunk_beyond_axes");
+        create_6d_fixture_with_axes(&dir, &["y", "x"], &[16, 16, 4], &[16, 16, 0], None);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "szc-b", "Src Zero Chunk Beyond")
+            .await
+            .expect_err("a zero chunk dim must fail even with mismatched axes");
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dimension 2"),
+            "error should locate the zero by position: {msg}"
+        );
+        assert!(
+            msg.contains("zero"),
+            "error should call out the zero: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A zero chunk dimension on an axis whose metadata entry has no `"name"`
+    /// must never be blamed on a named axis: `parse_multiscales` drops
+    /// unnamed axes entries, so the names list (here t, z, y, x) is shifted
+    /// relative to the raw chunk_shape, and a positional name lookup would
+    /// pin the zero at index 1 on 'z' when it belongs to the anonymous second
+    /// axis. The import still fails loudly, identifying the dimension by its
+    /// position in chunk_shape instead.
+    #[tokio::test]
+    async fn source_image_with_zero_chunk_on_unnamed_axis_fails() {
+        let dir = temp_dir("import_source_zero_chunk_unnamed_axis");
+        create_fixture_with_axes_json(
+            &dir,
+            &[
+                serde_json::json!({"name": "t", "type": "time"}),
+                serde_json::json!({"type": "space"}), // no "name" key
+                serde_json::json!({"name": "z", "type": "space"}),
+                serde_json::json!({"name": "y", "type": "space"}),
+                serde_json::json!({"name": "x", "type": "space"}),
+            ],
+            &[1, 4, 1, 64, 64],
+            &[1, 0, 1, 64, 64],
+            None,
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "szc-u", "Src Zero Chunk Unnamed")
+            .await
+            .expect_err("a zero chunk dim on an unnamed axis must fail the import");
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dimension 1"),
+            "error should locate the zero by position: {msg}"
+        );
+        assert!(
+            !msg.contains("axis '"),
+            "error must not blame a named axis when the names list is \
+             misaligned with chunk_shape: {msg}"
+        );
+        assert!(
+            msg.contains("zero"),
+            "error should call out the zero: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A LABEL with a zero chunk dimension on a non-canonical (pinned) axis is
+    /// skipped — never attached with an empty on-disk chunk byte layout — while
+    /// the source image and well-formed sibling labels still import.
+    #[tokio::test]
+    async fn label_with_zero_chunk_on_pinned_axis_is_skipped() {
+        let dir = temp_dir("import_label_zero_chunk_pinned");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["good", "zeropinned"]);
+        write_label_multiscale(
+            &dir,
+            "good",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint16",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+        // Zero chunk on the pinned `m` axis; every canonical dim is valid, so
+        // a normalized-5D view of this chunk_shape would look fine.
+        write_label_multiscale(
+            &dir,
+            "zeropinned",
+            &["t", "z", "m", "y", "x"],
+            &[1, 1, 6, 16, 16],
+            &[1, 1, 0, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({"colors": []}),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "zcp", "Zero Chunk Pinned")
+            .await
+            .expect("a zero-chunk label must not fail the whole import");
+
+        // Source image still imported.
+        assert_eq!(result.manifest.images().len(), 1);
+        // Only the well-formed label survives.
+        let labels = result.manifest.labels();
+        let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["good"]);
+
+        // No fetch or binding entries exist for the skipped label, so nothing
+        // downstream can ever stream its (empty) chunks.
+        if let FetchSource::Proxied(ref p) = result.fetch {
+            assert_eq!(p.images.len(), 2, "source image + good label only");
+            assert!(
+                !p.images.iter().any(|i| i.image_id.0.contains("zeropinned")),
+                "skipped label must not be streamable",
+            );
+        } else {
+            panic!("expected Proxied fetch");
+        }
+        assert_eq!(result.binding_seed.images.len(), 2);
+        assert!(
+            !result
+                .binding_seed
+                .images
+                .iter()
+                .any(|b| b.image_id.0.contains("zeropinned")),
+            "skipped label must not have a binding seed",
         );
 
         let _ = fs::remove_dir_all(&dir);
