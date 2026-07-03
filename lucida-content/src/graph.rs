@@ -4,7 +4,7 @@ use crate::entity::Entity;
 use crate::id::{DatasetId, LayoutId};
 use crate::image::ImageSpec;
 use crate::kind::DatasetKind;
-use crate::label::{LabelAttachment, LabelSpec};
+use crate::label::LabelSpec;
 use crate::layout::LayoutSpec;
 use crate::transform::TransformEdge;
 
@@ -87,12 +87,6 @@ impl DatasetManifest {
     /// reach a label's full per-level geometry.
     pub fn label_specs(&self) -> &[LabelSpec] {
         &self.labels
-    }
-
-    /// Every label attached to any image in this dataset (standalone or plate),
-    /// projected into the lean [`LabelAttachment`] read-view.
-    pub fn labels(&self) -> Vec<LabelAttachment> {
-        self.labels.iter().map(LabelAttachment::from_spec).collect()
     }
 }
 
@@ -257,6 +251,8 @@ mod tests {
         let spec = &back.label_specs()[0];
         assert_eq!(spec.name, "mitochondria");
         assert_eq!(spec.source_image_id, ImageId("multiscale-0".to_string()));
+        // The source image's owning entity — the placement anchor — survives.
+        assert_eq!(spec.image.owner, EntityId("img-0".to_string()));
         assert_eq!(spec.image.multiscale.data_type, DataType::Uint32);
         assert_eq!(
             spec.image.multiscale.levels[0].scale,
@@ -266,14 +262,6 @@ mod tests {
         // A label value beyond u16 survives the JSON round trip untouched.
         assert_eq!(spec.colors[0].value, 92801);
         assert!(spec.source_declared);
-
-        // The projected read-view is intact, including the source entity used
-        // for placement.
-        let labels = back.labels();
-        assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].source_entity_id, EntityId("img-0".to_string()));
-        assert_eq!(labels[0].data_type, DataType::Uint32);
-        assert_eq!(labels[0].level0_scale, [1.0, 1.0, 1.0, 4.0, 4.0]);
     }
 
     #[test]
@@ -290,6 +278,5 @@ mod tests {
         // deserializes, defaulting to no labels.
         let back: DatasetManifest = serde_json::from_value(value).unwrap();
         assert!(back.label_specs().is_empty());
-        assert!(back.labels().is_empty());
     }
 }

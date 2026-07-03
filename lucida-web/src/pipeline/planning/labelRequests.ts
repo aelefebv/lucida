@@ -14,7 +14,7 @@
  */
 
 import { Axis } from "../../axes.ts";
-import { labelDepthZ, labelFootprint, labelTimeIndex } from "../../renderer/labelLayout.ts";
+import { labelFootprint, labelLevelZTarget, labelTimeIndex } from "../../renderer/labelLayout.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
 import type {
   DatasetManifest,
@@ -354,46 +354,6 @@ export function resolveVisibleLabels(
   return resolveLabelDisplayStates(manifest, labelSettings, caps).filter((s) => s.visible);
 }
 
-/** A DRAWABLE (eligible) label: its manifest index + name. */
-export interface EligibleLabelInfo {
-  /** Index into `manifest.labels` — the key the per-label commands + settings
-   *  are positional on, so a control targets the right label even when earlier
-   *  (ineligible) labels are omitted from the panel. */
-  index: number;
-  name: string;
-}
-
-/**
- * Every DRAWABLE (eligible) label — its manifest index + name — regardless of
- * visibility. A name-only projection of {@link resolveLabelDisplayStates}
- * (pass `caps.mode` for the mode whose drawable set you want — eligibility is
- * recomputed per mode, and neither mode's set contains the other's), for
- * callers that need the drawable set without the per-label visible/opacity
- * state.
- */
-export function eligibleLabelInfos(
-  manifest: DatasetManifest,
-  caps?: LabelSelectionCaps,
-): EligibleLabelInfo[] {
-  return resolveLabelDisplayStates(manifest, undefined, caps).map(({ index, name }) => ({
-    index,
-    name,
-  }));
-}
-
-/**
- * The ONE label a dataset shows by default (the first eligible, at the default
- * opacity). A thin wrapper over {@link resolveVisibleLabels} with no settings —
- * kept for callers/paths that only need the single default label. Returns
- * `null` when none qualifies.
- */
-export function resolveDefaultLabel(
-  manifest: DatasetManifest,
-  caps?: LabelSelectionCaps,
-): ResolvedLabel | null {
-  return resolveVisibleLabels(manifest, undefined, caps)[0] ?? null;
-}
-
 export interface LabelRequestArgs {
   datasetId: string;
   manifest: DatasetManifest;
@@ -514,18 +474,10 @@ function appendLabelChunkRequests(
   }
 
   // Slice: the single Z-plane the current view needs. Map the source Z to
-  // the label's own full-res Z, then to this level's chunk grid.
-  const labelFullResZ = labelDepthZ(args.z, src0, lbl0);
-  const label0Depth = label0.shape[Axis.Z];
-  const levelDepth = lvl.shape[Axis.Z];
-  const levelZ = Math.min(
-    Math.floor(
-      (labelFullResZ / Math.max(label0Depth - 1, 1)) * Math.max(levelDepth - 1, 1),
-    ),
-    Math.max(levelDepth - 1, 0),
-  );
-  const chunkZ = lvl.chunk_shape[Axis.Z] || 1;
-  const targetChunkZ = Math.floor(levelZ / chunkZ);
+  // the label's own full-res Z, then to this level's chunk grid — via the
+  // SAME helper the delivery gate uses, so fetch and delivery always agree
+  // on which z-chunk holds the view's plane.
+  const { chunkZ: targetChunkZ } = labelLevelZTarget(args.z, src0, lbl0, lvl);
 
   for (let y = 0; y < gy; y++) {
     for (let x = 0; x < gx; x++) {

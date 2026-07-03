@@ -8,7 +8,7 @@ use lucida_content::{
 use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
 
 use crate::camera::Camera;
-use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
+use crate::scene::{BlendMode, Colormap, LabelSettings, RenderMode, Scene};
 
 /// Commands that mutate shared document state (datasets).
 /// These are sequenced, persisted, and broadcast to all clients.
@@ -873,11 +873,12 @@ impl Scene {
                 let ds = DatasetId(dataset_id);
                 // Clamp to a finite [0, 1]: a NaN/Inf opacity would serialize to
                 // `null` and break deserialize of the saved-view/presence
-                // snapshot it rides in. Matches the web `normalizeLabelOpacity`.
+                // snapshot it rides in. Matches the web `normalizeLabelOpacity`;
+                // the non-finite fallback is the one default definition.
                 let opacity = if opacity.is_finite() {
                     opacity.clamp(0.0, 1.0)
                 } else {
-                    0.5
+                    LabelSettings::default().opacity
                 };
                 if let Some(idx) = self.resolve_label_index(&ds, label, label_name.as_deref())
                     && let Some(s) = self.dataset_settings.get_mut(&ds)
@@ -2440,7 +2441,6 @@ mod tests {
         // key (byte-identical to a pre-name entry, so presence snapshots and
         // saved views don't change shape), and a legacy blob with no `name`
         // field must deserialize as None.
-        use crate::scene::LabelSettings;
         let ls = LabelSettings::default();
         let json = serde_json::to_string(&ls).unwrap();
         assert_eq!(json, r#"{"visible":true,"opacity":0.5}"#);

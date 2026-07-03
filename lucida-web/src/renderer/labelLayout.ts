@@ -110,6 +110,44 @@ export function labelTimeIndex(sourceT: number, source: Level0, label: Level0): 
   return labelAxisIndex(sourceT, source, label, AXIS_T);
 }
 
+/**
+ * Where a label LEVEL holds the plane for a source full-res Z: the level's
+ * own Z index (`levelZ`), the z-chunk containing that plane (`chunkZ`, an
+ * index into the level's chunk grid), and the plane's offset within that
+ * chunk (`localZ`).
+ *
+ * The source Z is first mapped to the label's own full-res Z (see
+ * {@link labelDepthZ}), then onto the level's depth PROPORTIONALLY — position
+ * `labelFullResZ / (label0Depth - 1)` scaled across `0..levelDepth - 1` —
+ * because a level's Z downsample factor is not carried per axis here; a
+ * depth-1 level maps every plane to 0. A missing/zero chunk depth counts
+ * as 1 (a plane per chunk), never a divide-by-zero.
+ *
+ * Used by BOTH the request emitter (which fetches exactly the `chunkZ`
+ * z-chunk) and the delivery gate (which drops an arriving chunk whose z
+ * differs — a stale scrub), so the two can never disagree on which chunk
+ * holds the view's plane. A disagreement would fetch one chunk and gate on
+ * another, silently blanking the overlay.
+ */
+export function labelLevelZTarget(
+  sourceZ: number,
+  source0: Level0,
+  label0: Level0,
+  level: { shape: number[]; chunk_shape: number[] },
+): { levelZ: number; chunkZ: number; localZ: number } {
+  const labelFullResZ = labelDepthZ(sourceZ, source0, label0);
+  const label0Depth = label0.shape[AXIS_Z];
+  const levelDepth = level.shape[AXIS_Z];
+  const levelZ = Math.min(
+    Math.floor((labelFullResZ / Math.max(label0Depth - 1, 1)) * Math.max(levelDepth - 1, 1)),
+    Math.max(levelDepth - 1, 0),
+  );
+  const rawChunkDepth = level.chunk_shape[AXIS_Z];
+  const chunkDepth = rawChunkDepth > 0 ? rawChunkDepth : 1;
+  const chunkZ = Math.floor(levelZ / chunkDepth);
+  return { levelZ, chunkZ, localZ: levelZ - chunkZ * chunkDepth };
+}
+
 /** Ratio of the label's physical extent to the source's on `axis`, or `1`
  *  when either is missing/zero (never a zero/NaN scale factor). */
 function extentRatio(label: Level0, source: Level0, axis: number): number {

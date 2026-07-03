@@ -156,15 +156,6 @@ export function destroyLabelVolumePool(pool: LabelVolumePool): void {
   pool.labelColorBuffer?.destroy();
 }
 
-/** Remove a member's label volume pool (no-op if absent). */
-export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string): void {
-  const pool = ctx.state.labelVolumePools.get(memberId);
-  if (pool) {
-    destroyLabelVolumePool(pool);
-    ctx.state.labelVolumePools.delete(memberId);
-  }
-}
-
 /**
  * Free every label volume pool matching `idOrDataset`, matched EITHER by the
  * pool's member key (the label image id) OR by its owning `datasetId`. Dataset

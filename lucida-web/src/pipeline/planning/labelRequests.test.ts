@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   computeLabelChunkRequests,
-  eligibleLabelInfos,
-  resolveDefaultLabel,
   resolveLabelDisplayStates,
   resolveVisibleLabels,
 } from "./labelRequests.ts";
@@ -227,8 +225,9 @@ describe("computeLabelChunkRequests", () => {
     const second = singleLevelLabel("ok", "Uint32", [512, 512]);
     const manifest = multiLabelManifest([first, second]);
 
-    const resolved = resolveDefaultLabel(manifest);
-    expect(resolved?.label.image.image_id).toBe("img-0:label:ok");
+    // No settings → the single default is the first ELIGIBLE label.
+    const resolved = resolveVisibleLabels(manifest, undefined);
+    expect(resolved.map((r) => r.label.image.image_id)).toEqual(["img-0:label:ok"]);
 
     // Fetch agrees: requests target the resolvable second label, not the first.
     const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
@@ -253,8 +252,8 @@ describe("computeLabelChunkRequests", () => {
       singleLevelLabel("mask8", "Uint8", [512, 512]),
       singleLevelLabel("seg32", "Uint32", [512, 512]),
     ]);
-    const resolved = resolveDefaultLabel(manifest);
-    expect(resolved?.label.image.image_id).toBe("img-0:label:seg32");
+    const resolved = resolveVisibleLabels(manifest, undefined);
+    expect(resolved.map((r) => r.label.image.image_id)).toEqual(["img-0:label:seg32"]);
 
     const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
     expect(reqs.every((r) => r.imageId === "img-0:label:seg32")).toBe(true);
@@ -262,7 +261,7 @@ describe("computeLabelChunkRequests", () => {
 
   it("MAJOR: a uint8-only label set yields no requests (skipped, no pool)", () => {
     const manifest = multiLabelManifest([singleLevelLabel("mask8", "Uint8", [512, 512])]);
-    expect(resolveDefaultLabel(manifest)).toBeNull();
+    expect(resolveVisibleLabels(manifest, undefined)).toEqual([]);
     expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 })).toEqual([]);
   });
 });
@@ -608,52 +607,6 @@ describe("resolveLabelDisplayStates (the shared panel/fetch/render resolution)",
       { index: 1, name: "flat", visible: false, opacity: 0.5 },
     ]);
     expect(resolveVisibleLabels(m, settings, { mode: "volume" })).toEqual([]);
-  });
-});
-
-describe("eligibleLabelInfos", () => {
-  function uintLabel(name: string, dtype = "Uint32"): LabelSpec {
-    return {
-      name,
-      source_image_id: "img-0",
-      image: image(`img-0:label:${name}`, dtype, [64, 64], [1, 1]),
-    };
-  }
-  function manifestWithLabels(labels: LabelSpec[]): DatasetManifest {
-    return {
-      dataset_id: "ds-0",
-      name: "multi",
-      kind: "Single",
-      entities: [],
-      transforms: [],
-      source_layouts: [],
-      default_layout_id: null,
-      images: [image("img-0", "Uint16", [340, 348], [1, 1])],
-      labels,
-    };
-  }
-
-  it("returns every drawable label with its manifest index + name", () => {
-    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
-    expect(eligibleLabelInfos(m)).toEqual([
-      { index: 0, name: "a" },
-      { index: 1, name: "b" },
-    ]);
-  });
-
-  it("omits a non-uint32 label and PRESERVES the manifest index of the rest", () => {
-    // [uint16, uint32, uint16] → only index 1 is drawable, and it keeps index 1
-    // (so its control targets the right label_settings entry).
-    const m = manifestWithLabels([
-      uintLabel("nuclei", "Uint16"),
-      uintLabel("cells", "Uint32"),
-      uintLabel("membrane", "Uint16"),
-    ]);
-    expect(eligibleLabelInfos(m)).toEqual([{ index: 1, name: "cells" }]);
-  });
-
-  it("returns [] for a manifest with no labels", () => {
-    expect(eligibleLabelInfos(manifestWithLabel())).toEqual([]);
   });
 });
 

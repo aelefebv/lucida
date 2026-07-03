@@ -268,8 +268,9 @@ impl DatasetDisplaySettings {
             .enumerate()
             .map(|(i, l)| LabelSettings {
                 visible: Some(i) == default_visible,
-                opacity: 0.5,
                 name: Some(l.name.clone()),
+                // Opacity (0.5) comes from the one default definition.
+                ..LabelSettings::default()
             })
             .collect()
     }

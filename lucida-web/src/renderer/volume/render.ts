@@ -19,6 +19,9 @@ import {
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+// The one shared default (fetch/render/panel agree); used when a label layer
+// omits an opacity.
+import { DEFAULT_LABEL_OPACITY } from "../../pipeline/planning/labelRequests.ts";
 
 /** Identity 4×4 (column-major) — the fallback model transform for a label
  *  layer that somehow arrives without matrices (defensive; a real label
@@ -26,9 +29,6 @@ import { packLabelPalette } from "../labelColors.ts";
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
 ]);
-
-/** Default overlay opacity for a label layer that omits one. */
-const DEFAULT_LABEL_OPACITY = 0.5;
 
 /**
  * The transient categorical descriptor for a label volume pool. The buffer

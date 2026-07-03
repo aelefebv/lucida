@@ -9,7 +9,7 @@ import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
-import { labelDepthZ } from "../../../renderer/labelLayout.ts";
+import { labelLevelZTarget } from "../../../renderer/labelLayout.ts";
 
 export function workerMemberIdForChunk(
   delivery: ReadyChunkDelivery,
@@ -139,22 +139,21 @@ export function dispatchLabelChunkDelivery(
   if (!levelMeta || sliceZ === null || !meta.labelLevel0 || !meta.labelSourceLevel0) {
     return null;
   }
-  const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
-  const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-  const label0Depth = meta.labelLevel0.shape[Axis.Z];
+  const [, , , levelHeight, levelWidth] = levelMeta.shape;
+  const [, , , chunkY, chunkX] = levelMeta.chunk_shape;
 
-  // Which Z-plane the current view wants, in this level's coords.
-  const labelFullResZ = labelDepthZ(sliceZ, meta.labelSourceLevel0, meta.labelLevel0);
-  const levelZ = Math.min(
-    Math.floor((labelFullResZ / Math.max(label0Depth - 1, 1)) * Math.max(levelDepth - 1, 1)),
-    Math.max(levelDepth - 1, 0),
+  // Which Z-plane the current view wants, in this level's coords — via the
+  // SAME helper the request emitter uses, so fetch and delivery always agree
+  // on which z-chunk holds the view's plane.
+  const { chunkZ: targetChunkZ, localZ } = labelLevelZTarget(
+    sliceZ,
+    meta.labelSourceLevel0,
+    meta.labelLevel0,
+    levelMeta,
   );
-  const cz = Math.max(chunkZ, 1);
-  const targetChunkZ = Math.floor(levelZ / cz);
   // This chunk covers a different Z-chunk than the current view — the right
   // one is requested separately; drop this stale plane.
   if (delivery.z !== targetChunkZ) return null;
-  const localZ = levelZ - targetChunkZ * cz;
 
   const planeLen = chunkY * chunkX;
   const full = new Uint32Array(delivery.data);

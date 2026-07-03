@@ -2622,17 +2622,30 @@ mod tests {
         assert_eq!(result.manifest.images().len(), 1);
         let source_image_id = result.manifest.images()[0].image_id.clone();
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1);
         let label = &labels[0];
         assert_eq!(label.name, "mitochondria");
         assert_eq!(label.source_image_id, source_image_id);
         // dtype preserved end to end (uint32), never narrowed.
-        assert_eq!(label.data_type, DataType::Uint32);
+        assert_eq!(label.image.multiscale.data_type, DataType::Uint32);
         // The label's own axes (no channel), distinct from the source's TCZYX.
-        assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
-        // The label's own level-0 scale, normalized to 5D with c filled to 1.
-        assert_eq!(label.level0_scale, [1.0, 1.0, 1.0, 4.0, 4.0]);
+        let axis_names: Vec<&str> = label
+            .image
+            .multiscale
+            .axes
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(axis_names, vec!["t", "z", "y", "x"]);
+        // The label's own level-0 geometry, normalized to canonical 5D with the
+        // absent channel axis filled to 1 — the spec exposes the full multiscale
+        // for streaming.
+        assert_eq!(
+            label.image.multiscale.levels[0].scale,
+            [1.0, 1.0, 1.0, 4.0, 4.0]
+        );
+        assert_eq!(label.image.multiscale.levels[0].shape, [1, 1, 1, 16, 16]);
         // Colors, including a value well beyond u16::MAX.
         assert_eq!(label.colors.len(), 2);
         assert_eq!(label.colors[0].rgba, [230, 25, 75, 255]);
@@ -2641,7 +2654,7 @@ mod tests {
 
         // The label image is streamable and distinct from the source image, and
         // is deliberately absent from manifest.images().
-        let label_image_id = label.label_image_id.clone();
+        let label_image_id = label.image.image_id.clone();
         assert_ne!(label_image_id, source_image_id);
         assert!(
             !result
@@ -2669,16 +2682,6 @@ mod tests {
         assert_eq!(binding.axes_names, vec!["t", "z", "y", "x"]);
         assert!(!binding.levels.is_empty());
 
-        // The stored spec exposes the label's full multiscale for streaming.
-        let spec = result
-            .manifest
-            .label_specs()
-            .iter()
-            .find(|s| s.name == "mitochondria")
-            .unwrap();
-        assert_eq!(spec.image.multiscale.data_type, DataType::Uint32);
-        assert_eq!(spec.image.multiscale.levels[0].shape, [1, 1, 1, 16, 16]);
-
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2692,7 +2695,7 @@ mod tests {
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "no-lbl", "No Labels").await.unwrap();
 
-        assert!(result.manifest.labels().is_empty());
+        assert!(result.manifest.label_specs().is_empty());
         if let FetchSource::Proxied(ref p) = result.fetch {
             assert_eq!(p.images.len(), 1);
         }
@@ -2742,7 +2745,7 @@ mod tests {
         // The source image still imported.
         assert_eq!(result.manifest.images().len(), 1);
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(labels.len(), 2, "broken label skipped, other two kept");
         assert!(names.contains(&"good"));
@@ -2753,7 +2756,7 @@ mod tests {
         let nc = labels.iter().find(|l| l.name == "nocolors").unwrap();
         assert!(nc.colors.is_empty());
         assert!(!nc.source_declared);
-        assert_eq!(nc.data_type, DataType::Uint8);
+        assert_eq!(nc.image.multiscale.data_type, DataType::Uint8);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2805,12 +2808,19 @@ mod tests {
         assert!(matches!(result.manifest.kind, DatasetKind::Plate { .. }));
         assert_eq!(result.manifest.images().len(), 4);
 
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         assert_eq!(labels.len(), 1);
         let label = &labels[0];
         assert_eq!(label.name, "cells");
-        assert_eq!(label.data_type, DataType::Uint32);
-        assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
+        assert_eq!(label.image.multiscale.data_type, DataType::Uint32);
+        let axis_names: Vec<&str> = label
+            .image
+            .multiscale
+            .axes
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(axis_names, vec!["t", "z", "y", "x"]);
         // Attached to the A/1/0 field image specifically.
         let expected_source = ImageId("plate-lbl:image:A/1/0".to_string());
         assert_eq!(label.source_image_id, expected_source);
@@ -2828,7 +2838,7 @@ mod tests {
             .binding_seed
             .images
             .iter()
-            .find(|b| b.image_id == label.label_image_id)
+            .find(|b| b.image_id == label.image.image_id)
             .expect("label binding present");
         assert_eq!(binding.store_prefix.as_deref(), Some("A/1/0/labels/cells"));
 
@@ -2924,7 +2934,7 @@ mod tests {
         // Source image still imported.
         assert_eq!(result.manifest.images().len(), 1);
         // Only the well-formed label survives; the zero-chunk one is skipped.
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(labels.len(), 1);
         assert!(names.contains(&"good"));
@@ -3130,7 +3140,7 @@ mod tests {
         // Source image still imported.
         assert_eq!(result.manifest.images().len(), 1);
         // Only the well-formed label survives.
-        let labels = result.manifest.labels();
+        let labels = result.manifest.label_specs();
         let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, vec!["good"]);
 

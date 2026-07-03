@@ -19,7 +19,6 @@ export {
   getDummyIndirection,
   getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
-  removeLabelVolumePool,
   removeLabelVolumePoolsForDataset,
   removeVolumeAtlas,
   resizeIndirection,
