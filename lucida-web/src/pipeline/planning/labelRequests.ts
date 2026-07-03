@@ -92,8 +92,9 @@ function normalizeLabelOpacity(opacity: number | undefined): number {
  * the total texture bytes (`maxVolumeBytes`) — the monolithic 3D texture is
  * cubic in memory. Returns `-1` when NO level fits (e.g. a whole-slide label,
  * or a 3D label whose Z is never downsampled below the limit) — the caller
- * skips it: a clean "nothing" (the panel still lists the label) beats a
- * silently truncated/stretched overlay. No unconditional coarsest fallback.
+ * skips it, and the layer panel omits its controls in that mode: a clean
+ * "nothing" beats a silently truncated/stretched overlay or a live-looking
+ * toggle that draws nothing. No unconditional coarsest fallback.
  */
 function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): number {
   for (let i = 0; i < levels.length; i++) {
@@ -210,9 +211,12 @@ export interface LabelViewSetting {
  * pool handles today — uint8/uint16 are skipped with a one-time warning until a
  * widening path exists), has a resolvable source image, has a positive
  * footprint, AND has at least one multiscale level within the mode's
- * device/budget caps (see {@link chooseLabelLevel} — the volume caps are
- * stricter than slice, so a label can be slice-eligible but volume-ineligible).
- * Returns `null` when the label does not qualify.
+ * device/budget caps (see {@link chooseLabelLevel}). The caps are recomputed
+ * per mode against that mode's OWN limits — neither cap set subsumes the
+ * other: a deep label can be slice-eligible but volume-ineligible (the 3D
+ * per-axis/byte caps), while a label whose per-plane chunk grid busts the
+ * slice cap can still fit the volume totals. Returns `null` when the label
+ * does not qualify.
  */
 function eligibleLabel(
   manifest: DatasetManifest,
@@ -244,56 +248,65 @@ function eligibleLabel(
   return { source, levelIdx };
 }
 
+/** A drawable label with its full display resolution: the manifest index the
+ *  positional per-label settings/commands key on, whether it currently draws,
+ *  and everything a drawn label carries ({@link ResolvedVisibleLabel}). */
+export interface LabelDisplayState extends ResolvedVisibleLabel {
+  /** Index into `manifest.labels` — the key the per-label commands + settings
+   *  are positional on, so a control targets the right label even when earlier
+   *  (ineligible) labels are omitted. */
+  index: number;
+  /** Whether this label is drawn under the given settings — the SAME predicate
+   *  fetch and render apply, so a panel row built from this never lies. */
+  visible: boolean;
+}
+
 /**
- * The labels a dataset draws, resolved by a single criterion shared by the
- * fetch path ({@link computeLabelChunkRequests}) and the render path
- * (`pushLabelLayers`), so they never disagree (which would fetch one label but
- * draw a different — blank — one). Returns one entry per label that is VISIBLE
- * (per `labelSettings`) AND eligible (see {@link eligibleLabel}), in manifest
- * (OME `labels`) order, each carrying its per-label overlay opacity.
+ * Resolve every DRAWABLE (eligible) label of a dataset to its display state —
+ * the single place the "which labels can draw, which ARE drawn, at what
+ * opacity" rules live. The fetch path ({@link computeLabelChunkRequests}), both
+ * render paths (`pushLabelLayers` / `pushLabelVolumeLayers`, via
+ * {@link resolveVisibleLabels}) and the layer panel (`buildLayerInfos`) all
+ * derive from this one resolution, so the panel's toggle state and the drawn
+ * set can never disagree for the same manifest/settings/mode.
  *
- * When `labelSettings` is undefined/empty — a snapshot that predates the
- * per-label controls — this falls back to the pre-controls default: the FIRST
- * eligible label only, at {@link DEFAULT_LABEL_OPACITY}, so behavior is
- * unchanged until the user interacts. With settings present, a label is shown
- * iff its entry is `visible` AND it is eligible; a missing entry (settings
- * shorter than the label list — a stale/short snapshot) counts as HIDDEN. This
- * is the SAME rule the layer panel uses (see `buildLayerInfos`), so the panel's
- * toggle state and the drawn set never diverge.
+ * Eligibility is MODE-dependent (see {@link eligibleLabel} — it is recomputed
+ * per mode against that mode's own caps, and neither mode's eligible set
+ * contains the other's); an ineligible label gets NO entry and, deliberately,
+ * no say in visibility:
  *
- * Blank-open guard: if settings mark SOME label visible but none of the
- * visible-marked labels are drawable (e.g. the seed picked a uint32 label that
- * fails a render-only footprint/level check, or — defensively — a non-uint32
- * one), yet a drawable label exists, this falls back to the first eligible label
- * (like the empty-settings default) so the dataset never opens blank while it
- * has something to draw. It does NOT fire when the user has hidden EVERY label
- * (nothing marked visible), so an explicit "hide all" is honored.
+ * - With `labelSettings` present, an eligible label is visible iff its
+ *   positional entry is `visible`; a missing entry (settings shorter than the
+ *   label list — a stale/short snapshot) counts as HIDDEN.
+ * - A `visible` flag on an INELIGIBLE label is inert: it neither draws (it
+ *   can't) nor forces some other label on in its place. Only drawable labels
+ *   get panel controls, so an overlay driven by an undrawable label's flag
+ *   would be one the user has no toggle to clear; and eligibility varies by
+ *   mode, so such a flag would also switch other labels on across a 2D↔3D
+ *   change the user never asked for. (The scene-side seed skips labels it can
+ *   tell are undrawable, but device/caps eligibility is not knowable there,
+ *   and restored/older settings can carry any flags — so a visible flag CAN
+ *   sit on a render-ineligible label; it must stay inert here.)
+ * - With NO settings at all (a snapshot that predates the per-label controls),
+ *   the default is the FIRST eligible label only, at
+ *   {@link DEFAULT_LABEL_OPACITY}, so a labeled dataset doesn't open blank and
+ *   behavior is unchanged until the user interacts.
  */
-export function resolveVisibleLabels(
+export function resolveLabelDisplayStates(
   manifest: DatasetManifest,
   labelSettings: LabelViewSetting[] | undefined,
   caps?: LabelSelectionCaps,
-): ResolvedVisibleLabel[] {
+): LabelDisplayState[] {
   const labels = manifest.labels;
   if (!labels || labels.length === 0) return [];
   const resolvedCaps = resolveLabelCaps(caps);
-
   const hasSettings = labelSettings !== undefined && labelSettings.length > 0;
 
-  const out: ResolvedVisibleLabel[] = [];
-  let firstEligible: ResolvedVisibleLabel | null = null;
-  // Whether the settings mark ANY label visible — including an INELIGIBLE one
-  // (a visible-but-undrawable label is exactly the blank-open case the fallback
-  // below repairs). Distinguishes "the seed/settings wanted something shown" from
-  // "the user hid everything".
-  let anyMarkedVisible = false;
+  const out: LabelDisplayState[] = [];
   for (let i = 0; i < labels.length; i++) {
     const label = labels[i];
-    if (hasSettings && labelSettings[i]?.visible === true) anyMarkedVisible = true;
-
     const elig = eligibleLabel(manifest, label, resolvedCaps);
     if (!elig) continue;
-    const isFirstEligible = firstEligible === null;
 
     let visible: boolean;
     let opacity: number;
@@ -303,28 +316,42 @@ export function resolveVisibleLabels(
       opacity = normalizeLabelOpacity(setting?.opacity);
     } else {
       // No settings at all: pre-controls default — only the first eligible.
-      visible = isFirstEligible;
+      visible = out.length === 0;
       opacity = DEFAULT_LABEL_OPACITY;
     }
-    const resolved: ResolvedVisibleLabel = {
+    out.push({
+      index: i,
       label,
       source: elig.source,
       levelIdx: elig.levelIdx,
       name: label.name,
       sourceImageId: label.source_image_id,
+      visible,
       opacity,
-    };
-    if (isFirstEligible) firstEligible = resolved;
-    if (visible) out.push(resolved);
-  }
-
-  // Blank-open guard (see the doc): settings wanted something shown, but nothing
-  // visible-marked is drawable, while a drawable label exists → show the first
-  // eligible one. Never overrides an explicit "hide all".
-  if (out.length === 0 && hasSettings && anyMarkedVisible && firstEligible !== null) {
-    return [firstEligible];
+    });
   }
   return out;
+}
+
+/**
+ * The labels a dataset draws: every label that is visible AND eligible per
+ * {@link resolveLabelDisplayStates} (which holds the full rules — per-label
+ * settings, the no-settings first-eligible default, and why an undrawable
+ * label's visible flag is inert), in manifest (OME `labels`) order, each
+ * carrying its per-label overlay opacity. Shared by the fetch path
+ * ({@link computeLabelChunkRequests}) and the render paths (`pushLabelLayers`,
+ * `pushLabelVolumeLayers`), so they never disagree (which would fetch one
+ * label but draw a different — blank — one). Callers must pass the same
+ * `caps.mode` as the active view: eligibility is mode-dependent, and the layer
+ * panel resolves its rows for the active mode too, so hiding every panel row
+ * always empties this set.
+ */
+export function resolveVisibleLabels(
+  manifest: DatasetManifest,
+  labelSettings: LabelViewSetting[] | undefined,
+  caps?: LabelSelectionCaps,
+): ResolvedVisibleLabel[] {
+  return resolveLabelDisplayStates(manifest, labelSettings, caps).filter((s) => s.visible);
 }
 
 /** A DRAWABLE (eligible) label: its manifest index + name. */
@@ -338,26 +365,20 @@ export interface EligibleLabelInfo {
 
 /**
  * Every DRAWABLE (eligible) label — its manifest index + name — regardless of
- * visibility. This is the set the Labels panel should offer controls for, so a
- * control never lies about a label that can't render (a uint8/uint16 mask, an
- * orphan with no source, or one with no level within the caps is omitted).
- * Uses the SAME {@link eligibleLabel} criterion as the fetch + render paths, so
- * the panel only exposes labels those paths can actually draw.
+ * visibility. A name-only projection of {@link resolveLabelDisplayStates}
+ * (pass `caps.mode` for the mode whose drawable set you want — eligibility is
+ * recomputed per mode, and neither mode's set contains the other's), for
+ * callers that need the drawable set without the per-label visible/opacity
+ * state.
  */
 export function eligibleLabelInfos(
   manifest: DatasetManifest,
   caps?: LabelSelectionCaps,
 ): EligibleLabelInfo[] {
-  const labels = manifest.labels;
-  if (!labels || labels.length === 0) return [];
-  const resolvedCaps = resolveLabelCaps(caps);
-  const out: EligibleLabelInfo[] = [];
-  for (let i = 0; i < labels.length; i++) {
-    if (eligibleLabel(manifest, labels[i], resolvedCaps)) {
-      out.push({ index: i, name: labels[i].name });
-    }
-  }
-  return out;
+  return resolveLabelDisplayStates(manifest, undefined, caps).map(({ index, name }) => ({
+    index,
+    name,
+  }));
 }
 
 /**

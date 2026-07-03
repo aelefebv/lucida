@@ -3,6 +3,7 @@ import {
   computeLabelChunkRequests,
   eligibleLabelInfos,
   resolveDefaultLabel,
+  resolveLabelDisplayStates,
   resolveVisibleLabels,
 } from "./labelRequests.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../../manifestTypes.ts";
@@ -404,37 +405,49 @@ describe("resolveVisibleLabels", () => {
     expect(out[0].opacity).toBe(0.5);
   });
 
-  it("falls back to the first eligible when the visible-marked label is ineligible", () => {
+  it("a visible flag on an undrawable label is inert: draws nothing, substitutes nothing", () => {
     // Settings mark index 0 (uint8, undrawable) visible and index 1 (uint32,
-    // drawable) hidden — the seed picked an undrawable label. Rather than open
-    // blank, resolve the first eligible label. Guards the non-uint32-first
-    // (and, conceptually, footprint/level-ineligible) blank-open regression.
+    // drawable) hidden — a stale or restored settings vec can carry exactly
+    // this (the scene seed never picks a non-uint32, but a saved view can
+    // outlive a re-import that changed the label list). The undrawable label
+    // has no panel control, so its flag must not conjure a DIFFERENT label
+    // into the drawn set (the user would have no toggle that clears it): the
+    // drawn set stays exactly "visible AND eligible" — empty.
     const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("cells", "Uint32")]);
-    const out = resolveVisibleLabels(m, [
+    const settings = [
       { visible: true, opacity: 0.5 },
       { visible: false, opacity: 0.5 },
-    ]);
-    expect(out.map((r) => r.name)).toEqual(["cells"]);
+    ];
+    expect(resolveVisibleLabels(m, settings)).toEqual([]);
 
-    // Fetch agrees — it requests exactly the fallback label's chunks.
-    const reqs = computeLabelChunkRequests({
-      datasetId: "ds-0",
-      manifest: m,
-      t: 0,
-      z: 0,
-      labelSettings: [
-        { visible: true, opacity: 0.5 },
-        { visible: false, opacity: 0.5 },
-      ],
-    });
-    const ids = new Set(reqs.map((r) => r.imageId));
-    expect(ids.has("img-0:label:cells")).toBe(true);
-    expect(ids.has("img-0:label:mask8")).toBe(false);
+    // Fetch agrees — nothing is requested for either label.
+    expect(
+      computeLabelChunkRequests({ datasetId: "ds-0", manifest: m, t: 0, z: 0, labelSettings: settings }),
+    ).toEqual([]);
+  });
+
+  it("show→hide on the drawable label round-trips to empty despite a stale undrawable flag", () => {
+    // The undrawable label's stale `visible: true` never goes away (no panel
+    // control targets it), so hiding the drawable label must still empty the
+    // drawn set — an overlay that cannot be turned off is worse than none.
+    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("cells", "Uint32")]);
+    const shown = resolveVisibleLabels(m, [
+      { visible: true, opacity: 0.5 },
+      { visible: true, opacity: 0.7 },
+    ]);
+    expect(shown.map((r) => r.name)).toEqual(["cells"]);
+    expect(shown[0].opacity).toBe(0.7);
+
+    const hidden = resolveVisibleLabels(m, [
+      { visible: true, opacity: 0.5 },
+      { visible: false, opacity: 0.7 },
+    ]);
+    expect(hidden).toEqual([]);
   });
 
   it("honors an explicit hide-all: no fallback when NOTHING is marked visible", () => {
-    // Both eligible, both hidden by the user → nothing drawn. The blank-open
-    // fallback must NOT re-show a label the user deliberately hid.
+    // Both eligible, both hidden by the user → nothing drawn. Nothing may
+    // re-show a label the user deliberately hid.
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
     const out = resolveVisibleLabels(m, [
       { visible: false, opacity: 0.5 },
@@ -451,6 +464,150 @@ describe("resolveVisibleLabels", () => {
         { visible: true, opacity: 0.5 },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("resolveLabelDisplayStates (the shared panel/fetch/render resolution)", () => {
+  function uintLabel(name: string, dtype = "Uint32"): LabelSpec {
+    return {
+      name,
+      source_image_id: "img-0",
+      image: image(`img-0:label:${name}`, dtype, [64, 64], [1, 1]),
+    };
+  }
+  function manifestWithLabels(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0",
+      name: "multi",
+      kind: "Single",
+      entities: [],
+      transforms: [],
+      source_layouts: [],
+      default_layout_id: null,
+      images: [image("img-0", "Uint16", [340, 348], [1, 1])],
+      labels,
+    };
+  }
+  /** Project a state to the fields the layer panel renders. */
+  function row(s: { index: number; name: string; visible: boolean; opacity: number }) {
+    return { index: s.index, name: s.name, visible: s.visible, opacity: s.opacity };
+  }
+
+  it("emits one entry per DRAWABLE label, keyed by manifest index; undrawables get none", () => {
+    // [uint8, uint32, uint32]: index 0 is undrawable — no entry, and its
+    // visible flag has no effect. Indices 1/2 keep their manifest positions so
+    // controls target the right positional settings entry.
+    const m = manifestWithLabels([
+      uintLabel("mask8", "Uint8"),
+      uintLabel("cells"),
+      uintLabel("nuclei"),
+    ]);
+    const states = resolveLabelDisplayStates(m, [
+      { visible: true, opacity: 0.5 },
+      { visible: false, opacity: 0.25 },
+      { visible: true, opacity: 0.75 },
+    ]);
+    expect(states.map(row)).toEqual([
+      { index: 1, name: "cells", visible: false, opacity: 0.25 },
+      { index: 2, name: "nuclei", visible: true, opacity: 0.75 },
+    ]);
+    // Each entry carries the fetch/render resolution too.
+    expect(states[0].label.image.image_id).toBe("img-0:label:cells");
+    expect(states[0].sourceImageId).toBe("img-0");
+    expect(states[0].levelIdx).toBe(0);
+  });
+
+  it("no settings → every drawable label listed, only the FIRST visible, all at 0.5", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    expect(resolveLabelDisplayStates(m, undefined).map(row)).toEqual([
+      { index: 0, name: "a", visible: true, opacity: 0.5 },
+      { index: 1, name: "b", visible: false, opacity: 0.5 },
+    ]);
+  });
+
+  it("a missing settings entry (short/stale snapshot) counts as hidden; opacity is clamped", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const states = resolveLabelDisplayStates(m, [{ visible: true, opacity: 7 }]);
+    expect(states.map(row)).toEqual([
+      { index: 0, name: "a", visible: true, opacity: 1 }, // clamped into [0, 1]
+      { index: 1, name: "b", visible: false, opacity: 0.5 }, // no entry → hidden, default opacity
+    ]);
+  });
+
+  it("the visible-marked states ARE the drawn set (resolveVisibleLabels), settings or not", () => {
+    // The invariant the panel relies on: rows marked visible == labels drawn,
+    // for the same manifest/settings/mode — including when a stale flag sits
+    // on an undrawable label, and when everything drawable is hidden.
+    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("cells"), uintLabel("nuclei")]);
+    const cases = [
+      undefined, // pre-controls default
+      [
+        { visible: true, opacity: 0.5 }, // stale flag on the undrawable label
+        { visible: false, opacity: 0.5 },
+        { visible: false, opacity: 0.5 },
+      ],
+      [
+        { visible: false, opacity: 0.5 },
+        { visible: true, opacity: 0.3 },
+        { visible: true, opacity: 0.8 },
+      ],
+    ];
+    for (const settings of cases) {
+      const drawn = resolveVisibleLabels(m, settings);
+      const visibleStates = resolveLabelDisplayStates(m, settings).filter((s) => s.visible);
+      expect(drawn.map((r) => ({ name: r.name, opacity: r.opacity }))).toEqual(
+        visibleStates.map((s) => ({ name: s.name, opacity: s.opacity })),
+      );
+    }
+    // The stale-flag case draws nothing at all — no stuck overlay.
+    expect(resolveVisibleLabels(m, cases[1])).toEqual([]);
+  });
+
+  it("volume mode drops a slice-only label from the states (no row, no draw)", () => {
+    // Single-level label with Z over the 3D texture limit: drawable in 2D
+    // (slice caps ignore Z), undrawable in 3D — so in volume mode it must not
+    // appear as a controllable row at all.
+    const deep: LabelSpec = {
+      name: "deep",
+      source_image_id: "img-0",
+      image: {
+        image_id: "img-0:label:deep",
+        owner: "ent-0",
+        multiscale: {
+          axes: [
+            { name: "t", kind: "time" },
+            { name: "c", kind: "channel" },
+            { name: "z", kind: "space" },
+            { name: "y", kind: "space" },
+            { name: "x", kind: "space" },
+          ],
+          levels: [
+            {
+              level_index: 0,
+              shape: [1, 1, 3000, 512, 512],
+              chunk_shape: [1, 1, 64, 256, 256],
+              grid_shape: [1, 1, 1, 1, 1],
+              scale: [1, 1, 1, 1, 1],
+            },
+          ],
+          data_type: "Uint32",
+        },
+      },
+    };
+    const m = manifestWithLabels([deep, uintLabel("flat")]);
+    const settings = [
+      { visible: true, opacity: 0.5 },
+      { visible: false, opacity: 0.5 },
+    ];
+    expect(resolveLabelDisplayStates(m, settings, { mode: "slice" }).map(row)).toEqual([
+      { index: 0, name: "deep", visible: true, opacity: 0.5 },
+      { index: 1, name: "flat", visible: false, opacity: 0.5 },
+    ]);
+    // Volume: "deep" is gone, and its 2D visible flag does NOT flip "flat" on.
+    expect(resolveLabelDisplayStates(m, settings, { mode: "volume" }).map(row)).toEqual([
+      { index: 1, name: "flat", visible: false, opacity: 0.5 },
+    ]);
+    expect(resolveVisibleLabels(m, settings, { mode: "volume" })).toEqual([]);
   });
 });
 

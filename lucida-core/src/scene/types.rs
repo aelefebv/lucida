@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use lucida_content::{
-    DataType, DatasetId, DatasetKind, DatasetManifest, EntityId, LayoutId, LayoutSpec,
+    DataType, DatasetId, DatasetKind, DatasetManifest, EntityId, LabelSpec, LayoutId, LayoutSpec,
 };
 use lucida_protocol::AssetCatalog;
 
@@ -206,21 +206,29 @@ impl DatasetDisplaySettings {
     /// depend on `label_settings` / `channel_settings` being present and
     /// full-length however the dataset entered the scene.
     ///
-    /// Label policy: only the first DRAWABLE-dtype (uint32) label is visible by
-    /// default (the rest start hidden), all at opacity 0.5 — one clean overlay on
-    /// open, the user reveals the others via the per-label toggles. This keeps a
-    /// labeled plate from fetching + pooling every mask on open and avoids
-    /// stacking masks into a muddy first impression, while still exposing the
-    /// full set for control.
+    /// Label policy: only the first label that could plausibly draw (see
+    /// [`Self::label_could_draw`]) is visible by default (the rest start
+    /// hidden), all at opacity 0.5 — one clean overlay on open, the user
+    /// reveals the others via the per-label toggles. This keeps a labeled
+    /// plate from fetching + pooling every mask on open and avoids stacking
+    /// masks into a muddy first impression, while still exposing the full set
+    /// for control.
     ///
-    /// The render/fetch path only draws uint32 masks, so seeding a NON-uint32
-    /// label (uint8/uint16 are common) visible would open BLANK. Picking the
-    /// first uint32 label instead keeps the "one clean overlay on open" intent
-    /// even when a non-uint32 label sorts first. If no label is uint32, none is
-    /// visible (nothing can draw); the layer panel's count badge still surfaces
-    /// that labels exist. Footprint/level ineligibility isn't visible here (it is
-    /// a render-side, device-dependent check) — the web `resolveVisibleLabels`
-    /// falls back to the first eligible label to cover that.
+    /// The pick applies every render-eligibility check knowable from the
+    /// manifest alone: the label must be uint32 (the only dtype the render/
+    /// fetch path draws — uint8/uint16 are common), its source image must
+    /// resolve in `manifest.images()` with a level 0 to place the overlay
+    /// against, and its own level-0 spatial footprint must be non-empty.
+    /// Spending the single visible pick on a label that
+    /// fails any of these would open with NO overlay even when a drawable
+    /// sibling exists — the web draws exactly the visible-AND-eligible set and
+    /// does NOT substitute a fallback for an undrawable visible label. If no
+    /// label qualifies, none is visible (nothing can draw); the layer panel's
+    /// count badge still surfaces that labels exist. Device/budget eligibility
+    /// (whether some multiscale level fits the client's texture/chunk caps in
+    /// the active 2D/3D mode) is NOT knowable here, so a label ineligible only
+    /// by those caps can still take the pick and open with no overlay until
+    /// the user toggles a drawable label on.
     pub fn seeded_for(manifest: &DatasetManifest) -> Self {
         let channel_count = manifest
             .images()
@@ -242,18 +250,19 @@ impl DatasetDisplaySettings {
 
     /// The default per-label settings for `manifest`'s attached labels: one
     /// entry per label in manifest (OME `labels`) order, carrying that label's
-    /// NAME, with only the first drawable-dtype (uint32) label visible and all
-    /// at opacity 0.5 (the seeding policy documented on [`Self::seeded_for`]).
+    /// NAME, with only the first label that could plausibly draw (see
+    /// [`Self::label_could_draw`]) visible and all at opacity 0.5 (the seeding
+    /// policy documented on [`Self::seeded_for`]).
     /// Shared by [`Self::seeded_for`] and
     /// [`Self::reconcile_label_settings`] so a reconciled entry vec and a
     /// freshly seeded one agree on defaults and names.
     fn seeded_label_settings(manifest: &DatasetManifest) -> Vec<LabelSettings> {
         let labels = manifest.label_specs();
-        // Index of the first uint32 (drawable-dtype) label, or `None` if the
-        // dataset has no uint32 label. Only that one is seeded visible.
+        // Index of the first label that could plausibly draw, or `None` when
+        // no label qualifies. Only that one is seeded visible.
         let default_visible = labels
             .iter()
-            .position(|l| l.image.multiscale.data_type == DataType::Uint32);
+            .position(|l| Self::label_could_draw(manifest, l));
         labels
             .iter()
             .enumerate()
@@ -263,6 +272,45 @@ impl DatasetDisplaySettings {
                 name: Some(l.name.clone()),
             })
             .collect()
+    }
+
+    /// Whether `label` passes every render-eligibility check knowable from the
+    /// manifest alone — i.e. whether it could plausibly draw on some client:
+    ///
+    /// - **Drawable dtype**: the render/fetch path only draws uint32 masks.
+    /// - **Drawable source**: `source_image_id` names an image present in
+    ///   `manifest.images()` that carries a level 0. The render path places
+    ///   the overlay against its source's level-0 geometry, so a label whose
+    ///   source lacks a level 0 (an image with an empty `levels` list — never
+    ///   importer-produced, but expressible in a persisted/foreign manifest)
+    ///   is exactly as unplaceable as an orphan label with no source at all.
+    /// - **Positive footprint**: the label's own level-0 spatial extent is
+    ///   non-empty. A zero Y or X dimension — or no level 0 at all — covers no
+    ///   pixels.
+    ///
+    /// Device/budget eligibility (whether some multiscale level fits the
+    /// client's texture/chunk caps for the active 2D/3D view mode) is
+    /// deliberately NOT checked: it depends on per-client GPU limits and view
+    /// mode, which the scene cannot know.
+    fn label_could_draw(manifest: &DatasetManifest, label: &LabelSpec) -> bool {
+        if label.image.multiscale.data_type != DataType::Uint32 {
+            return false;
+        }
+        let source_has_level0 = manifest
+            .images()
+            .iter()
+            .find(|img| img.image_id == label.source_image_id)
+            .is_some_and(|source| !source.multiscale.levels.is_empty());
+        if !source_has_level0 {
+            return false;
+        }
+        // Canonical 5D shape order is [t, c, z, y, x].
+        label
+            .image
+            .multiscale
+            .levels
+            .first()
+            .is_some_and(|l0| l0.shape[3] > 0 && l0.shape[4] > 0)
     }
 
     /// Re-key restored per-label settings against `manifest`'s CURRENT label

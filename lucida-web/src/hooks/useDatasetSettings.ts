@@ -7,7 +7,7 @@ import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { Axis } from "../axes.ts";
-import { eligibleLabelInfos } from "../pipeline/planning/labelRequests.ts";
+import { resolveLabelDisplayStates } from "../pipeline/planning/labelRequests.ts";
 
 /** Apply a settings command and invalidate the settings cache. */
 function applySettingsCommand(scene: WasmScene, cmd: Record<string, unknown>): void {
@@ -52,11 +52,14 @@ interface RawDatasetSettings {
  * `scene.all_dataset_settings()` reach the panel — is unit-testable with a stub
  * scene, which a component-with-injected-props test cannot cover.
  *
- * Label rows expose ONLY the DRAWABLE (eligible) labels via
- * {@link eligibleLabelInfos}, each carrying its MANIFEST index so the toggle /
- * opacity handlers target the right `label_settings` entry even when earlier
- * (ineligible) labels are omitted — a control never lies about a label that
- * can't render.
+ * Label rows expose ONLY the labels DRAWABLE in the ACTIVE view mode, resolved
+ * through {@link resolveLabelDisplayStates} — the same resolution the fetch and
+ * render paths use — so a control never lies about a label that can't render.
+ * Eligibility is mode-dependent — each mode applies its own caps, and neither
+ * mode's drawable set contains the other's — so the rows are derived against
+ * `scene.camera_mode()`: a label a mode cannot draw gets no eye/opacity
+ * control while that mode is active, rather than a live-looking control that
+ * does nothing.
  */
 export function buildLayerInfos(
   scene: WasmScene,
@@ -77,6 +80,12 @@ export function buildLayerInfos(
   }
 
   const currentC = scene.c();
+  // Label eligibility depends on the active view mode (each mode applies its
+  // own caps; neither set subsumes the other), so resolve label rows against
+  // the mode actually rendering. Matches the `camera_mode()` mapping in
+  // `sceneViewState.ts` and the `mode` the fetch/render paths pass to
+  // `resolveVisibleLabels`.
+  const labelMode: "slice" | "volume" = scene.camera_mode() !== "slice" ? "volume" : "slice";
 
   return layerOrder.slice().reverse().map((id) => {
     const settings = allSettings[id];
@@ -86,23 +95,14 @@ export function buildLayerInfos(
 
     const chSettings = settings?.channel_settings?.[currentC];
 
-    // One row per DRAWABLE label, keyed by manifest index. Visibility mirrors
-    // `resolveVisibleLabels` (the render path) EXACTLY so the toggle state and
-    // the drawn set never disagree: with settings present, the stored flag (a
-    // missing/short entry → hidden); with NO settings (a snapshot predating
-    // per-label seeding), only the FIRST drawable label shows.
-    const rawLabelSettings = settings?.label_settings;
-    const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
+    // One row per label DRAWABLE in the active view mode, keyed by manifest
+    // index. Rows come from the SAME resolution the fetch + render paths use
+    // (`resolveLabelDisplayStates`), so the eye state IS the drawn set — a row
+    // marked visible is rendered, and hiding every row draws nothing.
     const labelRows = ds
-      ? eligibleLabelInfos(ds.manifest).map((e, orderIdx) => {
-          const ls = rawLabelSettings?.[e.index];
-          return {
-            index: e.index,
-            name: e.name,
-            visible: hasLabelSettings ? (ls?.visible ?? false) : orderIdx === 0,
-            opacity: ls?.opacity ?? 0.5,
-          };
-        })
+      ? resolveLabelDisplayStates(ds.manifest, settings?.label_settings, {
+          mode: labelMode,
+        }).map((s) => ({ index: s.index, name: s.name, visible: s.visible, opacity: s.opacity }))
       : [];
 
     return {

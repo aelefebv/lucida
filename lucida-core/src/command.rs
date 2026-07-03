@@ -2088,6 +2088,120 @@ mod tests {
         assert!(s.label_settings.iter().all(|l| !l.visible));
     }
 
+    /// Rebuild `reg`'s manifest with `mutate` applied to its label list — for
+    /// seeding tests that need a label the stock helpers don't produce (an
+    /// orphan source, an empty footprint).
+    fn mutate_labels(
+        reg: &mut lucida_protocol::DatasetOpened,
+        mutate: impl FnOnce(&mut Vec<lucida_content::LabelSpec>),
+    ) {
+        let mut labels = reg.manifest.label_specs().to_vec();
+        mutate(&mut labels);
+        reg.manifest = reg.manifest.clone().with_labels(labels);
+    }
+
+    #[test]
+    fn seeded_for_skips_an_orphan_source_uint32_for_a_drawable_sibling() {
+        // Label 0 is uint32 but its source image is absent from the manifest,
+        // so the render path cannot place it — spending the single visible
+        // pick on it would open with NO overlay while label 1 (uint32,
+        // resolvable) is drawable. The seed must pick label 1.
+        let mut reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
+        mutate_labels(&mut reg, |labels| {
+            labels[0].source_image_id = lucida_content::ImageId("no-such-image".into());
+        });
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings.len(), 2);
+        assert!(!s.label_settings[0].visible); // orphan — unplaceable, hidden
+        assert!(s.label_settings[1].visible); // resolvable — shown
+    }
+
+    /// Rebuild `reg`'s manifest with an extra image appended to its image
+    /// list — a clone of the primary image renamed to `image_id`, with
+    /// `mutate` applied — for seeding tests that need a second source image
+    /// the stock helpers don't produce (e.g. one with no multiscale levels).
+    /// Appended (not prepended) so `images()[0]`, which drives the seeded
+    /// channel count, stays the stock image.
+    fn add_source_image(
+        reg: &mut lucida_protocol::DatasetOpened,
+        image_id: &str,
+        mutate: impl FnOnce(&mut lucida_content::ImageSpec),
+    ) {
+        let mut images = reg.manifest.images().to_vec();
+        let mut extra = images[0].clone();
+        extra.image_id = lucida_content::ImageId(image_id.into());
+        mutate(&mut extra);
+        images.push(extra);
+        let rebuilt = lucida_content::DatasetManifest::new(
+            reg.manifest.dataset_id.clone(),
+            reg.manifest.name.clone(),
+            reg.manifest.kind.clone(),
+            reg.manifest.entities().to_vec(),
+            reg.manifest.transforms().to_vec(),
+            images,
+            reg.manifest.source_layouts().to_vec(),
+            reg.manifest.default_layout_id.clone(),
+        )
+        .with_labels(reg.manifest.label_specs().to_vec());
+        reg.manifest = rebuilt;
+    }
+
+    #[test]
+    fn seeded_for_skips_a_uint32_whose_source_has_no_levels_for_a_drawable_sibling() {
+        // Label 0's source image IS present in `manifest.images()` but
+        // carries NO multiscale levels: the render path places an overlay
+        // against its source's level-0 geometry, so it refuses to draw
+        // against a level-less source exactly as it does for an absent one.
+        // The single visible pick must go to label 1, whose source is intact.
+        let mut reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
+        add_source_image(&mut reg, "level-less-image", |img| {
+            img.multiscale.levels.clear();
+        });
+        mutate_labels(&mut reg, |labels| {
+            labels[0].source_image_id = lucida_content::ImageId("level-less-image".into());
+        });
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings.len(), 2);
+        assert!(!s.label_settings[0].visible); // source has no level 0 — hidden
+        assert!(s.label_settings[1].visible); // intact source — shown
+    }
+
+    #[test]
+    fn seeded_for_skips_a_zero_footprint_uint32_for_a_drawable_sibling() {
+        // Label 0 is uint32 with an empty level-0 spatial extent (X = 0): it
+        // cannot cover a single pixel, so the visible pick goes to label 1.
+        let mut reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
+        mutate_labels(&mut reg, |labels| {
+            labels[0].image.multiscale.levels[0].shape = [1, 1, 1, 64, 0];
+        });
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings.len(), 2);
+        assert!(!s.label_settings[0].visible); // empty footprint — hidden
+        assert!(s.label_settings[1].visible); // drawable — shown
+    }
+
+    #[test]
+    fn seeded_for_hides_all_labels_when_the_only_uint32_is_an_orphan() {
+        // [uint16, orphan uint32]: nothing can draw — dtype disqualifies the
+        // first, the missing source the second — so none is seeded visible,
+        // exactly like the none-uint32 case.
+        let mut reg = test_helpers::make_dataset_opened_with_label_dtypes(
+            "ds1",
+            "test",
+            1,
+            &[
+                lucida_content::DataType::Uint16,
+                lucida_content::DataType::Uint32,
+            ],
+        );
+        mutate_labels(&mut reg, |labels| {
+            labels[1].source_image_id = lucida_content::ImageId("no-such-image".into());
+        });
+        let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
+        assert_eq!(s.label_settings.len(), 2);
+        assert!(s.label_settings.iter().all(|l| !l.visible));
+    }
+
     #[test]
     fn dataset_opened_seeds_no_label_settings_for_label_less_dataset() {
         let mut scene = Scene::new([800, 600]);
