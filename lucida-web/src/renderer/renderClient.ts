@@ -15,9 +15,19 @@ import type {
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
 
+/** How long `destroy()` waits for the worker to process its `destroy`
+ *  message (which ends in `self.close()`) before hard-terminating it.
+ *  Calling `terminate()` immediately would discard the queued message and
+ *  skip the worker-side GPU cleanup entirely; the fallback only matters for
+ *  a wedged worker or one that never finished init (pre-init workers ignore
+ *  `destroy`). `terminate()` on an already-closed worker is a no-op. */
+const DESTROY_TERMINATE_FALLBACK_MS = 1000;
+
 export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
+  private readyReject: (err: Error) => void = () => {};
+  private destroyed = false;
 
   /** Pending `thumbnailRender` requests, keyed by the id sent to the worker.
    *  Resolved when the matching `thumbnailResult` arrives. */
@@ -40,6 +50,9 @@ export class RenderClient implements UploadClient {
     );
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
+      // Kept so destroy() can settle a still-pending init (settling an
+      // already-resolved promise is a no-op).
+      this.readyReject = reject;
       const handler = (e: MessageEvent<WorkerToMainMessage>) => {
         if (e.data.type === "ready") {
           resolve();
@@ -53,15 +66,31 @@ export class RenderClient implements UploadClient {
       this.worker.addEventListener("message", handler);
     });
 
+    // Pre-attach a no-op rejection handler: the promise can reject with no
+    // consumer listening (destroy() before init, or a worker init error, on
+    // a client whose ready() was never awaited), and that must not surface
+    // as an unhandled rejection. ready() hands out the original promise, so
+    // awaiting callers still observe the rejection themselves.
+    this.readyPromise.catch(() => {});
+
     this.worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
   }
 
+  /** Resolves when the worker finishes init; rejects if `destroy()` runs
+   *  first, so awaiting callers always settle. Safe to ignore: rejection
+   *  never escapes as an unhandled rejection (see constructor). */
   ready(): Promise<void> {
     return this.readyPromise;
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
     const msg = e.data;
+    if (this.destroyed) {
+      // The worker may still flush messages between destroy() and its own
+      // exit; the only obligation left is releasing any GPU-backed bitmap.
+      if (msg.type === "thumbnailResult" && msg.bitmap) msg.bitmap.close();
+      return;
+    }
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
@@ -358,6 +387,12 @@ export class RenderClient implements UploadClient {
     eye: Float32Array,
     size: number,
   ): Promise<ImageBitmap | null> {
+    if (this.destroyed) {
+      // The worker can no longer answer; settle immediately (same `null`
+      // that destroy() hands to in-flight requests) so callers awaiting a
+      // sequence of thumbnails never hang on a dead client.
+      return Promise.resolve(null);
+    }
     const id = this.thumbnailSeq++;
     return new Promise<ImageBitmap | null>((resolve) => {
       this.thumbnailPending.set(id, resolve);
@@ -415,12 +450,22 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage({ type: "removeLayerResources", datasetId });
   }
 
+  /** Idempotent — a second call is a no-op. */
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     // Settle any in-flight thumbnail requests so their promises don't hang
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
+    // Settle a still-pending init so `ready()` awaiters don't hang (no-op
+    // once the worker has reported ready).
+    this.readyReject(new Error("RenderClient destroyed"));
+    // The worker's destroy handler releases its GPU resources and ends with
+    // `self.close()`, so the thread exits on its own once the message is
+    // processed; terminate() is only the fallback for a worker that can't
+    // get there (see DESTROY_TERMINATE_FALLBACK_MS).
     this.worker.postMessage({ type: "destroy" });
-    this.worker.terminate();
+    setTimeout(() => this.worker.terminate(), DESTROY_TERMINATE_FALLBACK_MS);
   }
 }
