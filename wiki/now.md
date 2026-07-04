@@ -5,7 +5,7 @@ description: "Snapshot of what's active."
 tags: [lucida, status]
 source_path: wiki/now.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # Now — Lucida Current State
@@ -45,7 +45,7 @@ No major refactor in flight. The four-PRD chunk-pipeline structural-cleanup arc 
 
 ## Open questions
 
-See [Queue — Open Questions](queue.md). Key ones: PRDs to fold into `wiki/inputs/`, planning threshold rationale, proxy-generation priority, [GPU-Side Temporal Lookahead — Won't Implement](decisions/0010-temporal-runway-not-implemented.md) still holding, Windows CI, and whether delivery-state ownership should become a broader pipeline principle.
+See [Queue — Open Questions](queue.md). Key ones: PRDs to fold into `wiki/inputs/`, planning threshold rationale, [GPU-Side Temporal Lookahead — Won't Implement](decisions/0010-temporal-runway-not-implemented.md) still holding, Windows CI, and whether delivery-state ownership should become a broader pipeline principle. The proxy-generation-priority and disabled-mode-bookmark questions closed against [Sunset dispositions for the three superseded server surfaces](decisions/0043-superseded-server-surfaces-sunset.md), which fixes end-states for the global `/ws` session, the bookmarks store, and the proxy fallback protocol.
 
 ## Source material
 
