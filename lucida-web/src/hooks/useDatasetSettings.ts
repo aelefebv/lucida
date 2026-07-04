@@ -5,12 +5,14 @@ import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetState } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import type { ViewportCommand } from "../commands.ts";
+import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos } from "../pipeline/planning/labelRequests.ts";
 
 /** Apply a settings command and invalidate the settings cache. */
-function applySettingsCommand(scene: WasmScene, cmd: Record<string, unknown>): void {
+function applySettingsCommand(scene: WasmScene, cmd: ViewportCommand): void {
   scene.apply_command(JSON.stringify(cmd));
   bumpSettingsGeneration();
 }
@@ -257,7 +259,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetColormap = useCallback((id: string, colormap: string) => {
+  const handleLayerSetColormap = useCallback((id: string, colormap: Colormap) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -281,7 +283,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: string) => {
+  const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: Colormap) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -331,7 +333,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleChannelSetBlendMode = useCallback((id: string, blendMode: string) => {
+  const handleChannelSetBlendMode = useCallback((id: string, blendMode: BlendMode) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -369,7 +371,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetBlendMode = useCallback((id: string, mode: string) => {
+  const handleLayerSetBlendMode = useCallback((id: string, mode: BlendMode) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -380,7 +382,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetRenderMode = useCallback((id: string, mode: string) => {
+  const handleLayerSetRenderMode = useCallback((id: string, mode: RenderMode) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();

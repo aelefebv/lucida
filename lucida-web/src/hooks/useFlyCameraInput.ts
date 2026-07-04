@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback } from "react";
 import type { WasmScene } from "lucida-core";
 import { isActionPressed } from "../config/keyBindings";
+import type { ViewportCommand } from "../commands.ts";
 
 /**
  * Hook that drives the fly camera via a RAF loop + mouselook.
@@ -12,10 +13,7 @@ import { isActionPressed } from "../config/keyBindings";
  */
 export function useFlyCameraInput(
   sceneRef: React.RefObject<WasmScene | null>,
-  applyViewportCommand: (
-    scene: WasmScene,
-    cmd: Record<string, unknown>,
-  ) => void,
+  applyViewportCommand: (scene: WasmScene, cmd: ViewportCommand) => void,
   pressedKeysRef: React.RefObject<Set<string>>,
   isActive: boolean,
   emitPresence: () => void,

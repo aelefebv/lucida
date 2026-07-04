@@ -5,7 +5,7 @@ description: "React 19 + Vite 7 + WebGPU frontend that consumes the lucida-core 
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-web.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # lucida-web
@@ -52,7 +52,8 @@ WASM owns:
 - `main.tsx` — Vite entry; `createRoot` mount
 - `bridge.ts` — WebSocket client; throttles presence/cursor/dataset-presence updates
 - `manifestTypes.ts` — TS mirror of [lucida-content](lucida-content.md)'s `DatasetManifest` and [lucida-protocol](lucida-protocol.md)'s `FetchSource`
-- `applyAndSend.ts` — `applyDocumentCommand` (sends to server) vs `applyViewportCommand` (local + presence emit)
+- `applyAndSend.ts` — `applyDocumentCommand` (sends to server) vs `applyViewportCommand` (local + presence emit); both take the typed vocabulary from `commands.ts`
+- `commands.ts` — TS mirror of `lucida-core/src/command.rs`'s `DocumentCommand`/`ViewportCommand` serde wire shapes (manifestTypes.ts-style), covering every command the web produces as a JSON literal
 - `renderLoop.ts` / `renderLoopTypes.ts` — pull-based RAF loop with typed dirty flags
 - `slicePath.ts` / `volumePath.ts` / `minimapPath.ts` — entry points for the three render paths
 - `tickCommon.ts` — shared tick helpers
@@ -84,7 +85,8 @@ The WASM bundle is **not** a `src/` subdir: `npm run build:wasm` builds it into 
 
 - **All GPU work is on the worker.** The main thread never touches WebGPU directly; the canvas is transferred via `OffscreenCanvas`. See [All GPU Work on a Dedicated Web Worker](../../decisions/0003-gpu-on-dedicated-worker.md).
 - **`interactiveDirty` and `residencyDirty` are throttled differently.** `interactiveDirty` renders immediately; `residencyDirty` waits ~33ms. The reason and consequence are in [Flow: Chunk Lifecycle](../../flows/chunk-lifecycle.md).
-- **The classification gate is call-site discipline, not a runtime predicate.** `applyDocumentCommand` (sends to server, awaits Ack/CommandBroadcast) vs `applyViewportCommand` (applies locally + emits presence) is the choice point; the Rust side enforces it at compile time via the disjoint `DocumentCommand` / `ViewportCommand` enums. Misclassifying a viewport command as a document command floods peers; misclassifying a document command as viewport silently drops shared state. See [Document vs Viewport Command Classification](../../gotchas/document-vs-viewport-classification.md).
+- **The classification gate is call-site discipline backed by types on BOTH sides.** `applyDocumentCommand` (sends to server, awaits Ack/CommandBroadcast) vs `applyViewportCommand` (applies locally + emits presence) is the choice point; the Rust side enforces it at compile time via the disjoint `DocumentCommand` / `ViewportCommand` enums, and the TS side mirrors that in `commands.ts` — the seam functions take the mirrored unions (tag-disjoint by a compile-time assertion), so a misclassified or typo'd command literal is a tsc error, not a silent serde-default. Misclassifying a viewport command as a document command floods peers; misclassifying a document command as viewport silently drops shared state. See [Document vs Viewport Command Classification](../../gotchas/document-vs-viewport-classification.md).
+- **The TS command vocabulary is locked against the real wasm.** `commands.test.ts` round-trips one representative of every `commands.ts` variant through the built `lucida-core/pkg` `apply_command` (acceptance + state read-back, plus an unknown-tag must-throw probe), so a Rust-side tag/field rename fails the web suite. Division of labor: the wire goldens byte-lock the client<->server envelopes and deliberately stop at the WebSocket; this lock covers the local TS->wasm `apply_command` seam, including viewport commands that never cross the server wire.
 - **`Scene::apply_command` is called for every incoming command broadcast** so all clients converge on the same document state. Local viewport commands take a separate path (`applyViewportCommand`).
 
 ## Gotchas

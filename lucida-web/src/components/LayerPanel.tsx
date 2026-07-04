@@ -3,6 +3,7 @@ import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
+import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import "./LayerPanel.css";
 
 export interface LayerInfo {
@@ -54,9 +55,9 @@ interface Props {
   onSetOpacity: (id: string, opacity: number) => void;
   onSetContrast: (id: string, min: number, max: number) => void;
   onSetGamma: (id: string, gamma: number) => void;
-  onSetColormap: (id: string, colormap: string) => void;
-  onSetBlendMode: (id: string, mode: string) => void;
-  onSetRenderMode: (id: string, mode: string) => void;
+  onSetColormap: (id: string, colormap: Colormap) => void;
+  onSetBlendMode: (id: string, mode: BlendMode) => void;
+  onSetRenderMode: (id: string, mode: RenderMode) => void;
   onSetDetailLevelOverride: (id: string, level: number | null) => void;
   onAutoContrast: (id: string) => void;
   onAutoContrastToggle: (id: string) => void;
@@ -68,7 +69,7 @@ interface Props {
   /** Editor-only affordances (rename) are shown only when true. */
   canEdit: boolean;
   onChannelSetVisible?: (id: string, ch: number, visible: boolean) => void;
-  onChannelSetColormap?: (id: string, ch: number, colormap: string) => void;
+  onChannelSetColormap?: (id: string, ch: number, colormap: Colormap) => void;
   /** Set (`name`) or clear (`null`) a user display-name override for a
    *  channel. Editor-only; gated behind the same `canEdit` as the layer
    *  rename. An emptied input passes `null` to clear back to the omero
@@ -76,7 +77,7 @@ interface Props {
   onChannelSetName?: (id: string, ch: number, name: string | null) => void;
   onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
   onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
-  onChannelSetBlendMode?: (id: string, blendMode: string) => void;
+  onChannelSetBlendMode?: (id: string, blendMode: BlendMode) => void;
   /** Toggle a single label overlay's visibility. */
   onLabelSetVisible?: (id: string, label: number, visible: boolean) => void;
   /** Set a single label overlay's opacity (0..1). */
@@ -454,7 +455,7 @@ export function LayerPanel({
                         <select
                           aria-label={`${layer.name} channel blend mode`}
                           value={layer.channelBlendMode}
-                          onChange={(e) => onChannelSetBlendMode?.(layer.id, e.target.value)}
+                          onChange={(e) => onChannelSetBlendMode?.(layer.id, e.target.value as BlendMode)}
                         >
                           <option value="alpha">Alpha</option>
                           <option value="additive">Additive</option>
@@ -547,7 +548,7 @@ export function LayerPanel({
                     <select
                       aria-label={`${layer.name} blend mode`}
                       value={layer.blendMode}
-                      onChange={(e) => onSetBlendMode(layer.id, e.target.value)}
+                      onChange={(e) => onSetBlendMode(layer.id, e.target.value as BlendMode)}
                     >
                       <option value="alpha">Alpha</option>
                       <option value="additive">Additive</option>
@@ -559,7 +560,7 @@ export function LayerPanel({
                     <select
                       aria-label={`${layer.name} rendering mode`}
                       value={layer.renderMode}
-                      onChange={(e) => onSetRenderMode(layer.id, e.target.value)}
+                      onChange={(e) => onSetRenderMode(layer.id, e.target.value as RenderMode)}
                     >
                       <option value="translucent">Translucent</option>
                       <option value="max_intensity">Max Intensity</option>

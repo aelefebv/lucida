@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
 import type { Session } from "../session.ts";
+import type { ViewportCommand } from "../commands.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -70,13 +71,14 @@ export function useIntensityBatcher({
         const scene = wasmSceneRef.current;
         if (scene) {
           const c = scene.c();
-          scene.apply_command(JSON.stringify({
+          const cmd: ViewportCommand = {
             type: "set_channel_contrast",
             dataset_id: datasetId,
             channel: c,
             min: mergedMin,
             max: mergedMax,
-          }));
+          };
+          scene.apply_command(JSON.stringify(cmd));
           bumpSettingsGeneration();
           loopRef.current?.markResidencyDirty();
           sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());

@@ -5,6 +5,7 @@ export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import { Axis } from "../axes.ts";
 import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
+import type { ViewportCommand } from "../commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "../pipeline/fetch/index.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
@@ -764,12 +765,13 @@ export function useBridge({
       const scene = wasmSceneRef.current;
       if (scene) {
         // Touch the last channel to grow the vec via ensure_channel
-        scene.apply_command(JSON.stringify({
+        const cmd: ViewportCommand = {
           type: "set_channel_visible",
           dataset_id: datasetId,
           channel: channelCount - 1,
           visible: true,
-        }));
+        };
+        scene.apply_command(JSON.stringify(cmd));
         bumpSettingsGeneration();
       }
     }

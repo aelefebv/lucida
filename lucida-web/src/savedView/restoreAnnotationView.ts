@@ -45,6 +45,7 @@
 // `[1,1,1]` sentinel (the #814 regression class).
 
 import type { WasmScene } from "lucida-core";
+import type { ViewportCommand } from "../commands.ts";
 import { clampViewIndices, clampNotice, datasetDisplayCommands } from "./applier.ts";
 import type { DimensionExtentsResolver } from "./applier.ts";
 import type { Camera, DatasetId, SavedView } from "./types.ts";
@@ -52,7 +53,7 @@ import type { Camera, DatasetId, SavedView } from "./types.ts";
 /** Apply one viewport/display command locally (never sent to peers). Kept inline
  * (rather than importing `applyViewportCommand`) so this module's surface is
  * obviously local-only and self-contained; identical behavior. */
-function applyLocal(scene: WasmScene, cmd: Record<string, unknown>): void {
+function applyLocal(scene: WasmScene, cmd: ViewportCommand): void {
   scene.apply_command(JSON.stringify(cmd));
 }
 
