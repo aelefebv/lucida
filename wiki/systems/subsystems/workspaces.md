@@ -5,14 +5,14 @@ description: "A workspace is the durable, server-stored container users return t
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/workspaces.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Workspaces
 
 A workspace is the durable, server-stored container users return to: a set of opened datasets, a set of saved views, and a membership/access policy, all addressed by an opaque id — the browser page route is `/w/:id` (`WorkspaceRoot.tsx`); the per-workspace WebSocket endpoint is `/ws/workspaces/{workspace_id}` (don't confuse the two). It is the **unit of collaboration and of the live session** — presence, follow, the sequenced document, and the broadcast channel are all per-workspace. A workspace is *not* a browser tab, a login session, a transient WebSocket runtime, or a saved view; live sessions attach to a workspace while users are active but do not define it.
 
-Implemented in `lucida-server/src/workspace.rs` (one large module): `WorkspaceManager` owns live orchestration + authorization + the document command flow; the `WorkspaceStore` trait (with `SqliteWorkspaceStore`) owns durable rows in the shared `lucida.db`. The web side is `WorkspaceDashboard.tsx` (`/`), `WorkspaceRoot.tsx` (`/w/:id`), `WorkspaceSharingDialog.tsx`, and `workspaceApi.ts`. All REST lives under `/api/workspaces/...`; admin override under `/admin/workspaces/...`.
+Implemented in `lucida-server/src/workspace/` (layout in [lucida-server](../crates/lucida-server.md)): `WorkspaceManager` (`manager.rs`) owns live orchestration + authorization + the document command flow; the `WorkspaceStore` trait (`store/`, with `SqliteWorkspaceStore`) owns durable rows in the shared `lucida.db`. The web side is `WorkspaceDashboard.tsx` (`/`), `WorkspaceRoot.tsx` (`/w/:id`), `WorkspaceSharingDialog.tsx`, and `workspaceApi.ts`. All REST lives under `/api/workspaces/...`; admin override under `/admin/workspaces/...`.
 
 ## Two dataset identities — the central distinction
 
