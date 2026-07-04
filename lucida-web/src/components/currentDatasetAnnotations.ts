@@ -23,7 +23,7 @@
  * a selection. A truthy `selectedDatasetId` always wins, so a user who has a
  * dataset selected sees exactly the previous behavior (their dataset, scoped).
  */
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 /** The minimal slice of `WasmScene` this resolver reads — kept structural so it
  * needn't depend on the WASM type and is trivial to drive in a test (the real

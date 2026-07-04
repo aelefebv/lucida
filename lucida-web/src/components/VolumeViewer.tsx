@@ -11,6 +11,8 @@ import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
 import type { AnnotationDraft } from "./annotationDraft.ts";
+import { exceedsClickSlop } from "./annotationInteraction.ts";
+import { eventToScreenPx } from "./cameraProjection.ts";
 
 interface Props {
   session: Session;
@@ -46,10 +48,6 @@ interface Props {
    * shift-drag writes it and clears it on release/cancel. */
   annotationDraftRef: RefObject<AnnotationDraft | null>;
 }
-
-/** Max pointer travel (CSS px) for a shift press+release to count as a pin
- * drop rather than a shift-pan drag. Mirrors SliceViewer's PIN_CLICK_SLOP. */
-const PIN_CLICK_SLOP = 4;
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
 const INTERACTION_RENDER_SCALE = 0.5;
@@ -252,12 +250,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     (clientX: number, clientY: number): [number, number, number] | null => {
       const datasetId = annotationDatasetIdRef.current;
       if (!datasetId) return null;
-      const dpr = devicePixelRatio;
-      const rect = canvas.getBoundingClientRect();
       // pick_annotation_voxel takes physical-pixel screen coords (the same space
       // the WASM viewport uses), matching project_to_screen.
-      const screenX = (clientX - rect.left) * dpr;
-      const screenY = (clientY - rect.top) * dpr;
+      const [screenX, screenY] = eventToScreenPx(canvas, { clientX, clientY });
       const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
       return voxel.length < 3 ? null : [voxel[0], voxel[1], voxel[2]];
     },
@@ -366,7 +361,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       // A line/box draw owns the whole drag: track that it moved (so release
       // knows it's a real two-vertex shape) but never pan/rotate the camera.
       if (press?.shape) {
-        if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > PIN_CLICK_SLOP) {
+        if (exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           press.moved = true;
         }
         // Live draw preview: once past the slop, publish the in-progress shape
@@ -385,7 +380,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       // a tiny jitter still resolves to a pin drop on release. Once it crosses
       // the slop it's a deliberate shift-pan — mark it moved and pan as before.
       if (press && !press.moved) {
-        if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= PIN_CLICK_SLOP) {
+        if (!exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           return;
         }
         press.moved = true;

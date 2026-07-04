@@ -5,7 +5,7 @@ description: "A collaborative markup layer over a dataset: point/line/box pins, 
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/annotations.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # Annotations, comments, and mentions
@@ -100,6 +100,20 @@ re-reads the set. Both render the **one** shared `ThreadPopover` (comment
 list/add/edit/remove + two-step pin delete + `@`-mention picker + "Copy link" +
 "Go to author's view"), so the thread is identical in 2D and 3D.
 `AnnotationDraftOverlay` previews a box/line **screen-space** while it's drawn.
+
+The overlay components keep only their genuinely dimensional differences
+(marker projection, pan-vs-orbit gestures, `focusPin` recenter mechanics, the
+2D-only hover-revealed reshape handles); everything view-independent lives in
+shared non-component modules both import: `annotationDocument` (the pin/comment
+model + the one tolerant `readAnnotations`), `useAnnotationOverlay` (pin-set
+re-read on version/dataset change; the open thread's close-on-vanish /
+close-on-dataset-change / close-on-hide lifecycle), `annotationInteraction`
+(the ONE `PIN_CLICK_SLOP` click-vs-drag threshold + tolerant pointer-capture
+helpers + `emitMoveAnnotation`, the single `move_annotation` construction site
+— its field order is byte-locked by the wire goldens), `cameraProjection` (the
+event↔world↔screen conversions `SliceViewer`/`VolumeViewer`/`PeerCursors` share
+too), and `AnnotationPinBadges` (the comment-count pill and off-context locator
+— both views render both, so a pin reads identically in 2D and 3D).
 
 - **Author identity** comes from `annotationIdentity` — a `localStorage`-persisted
   id, *not* the per-connection `bridge.myId` — so author-only affordances

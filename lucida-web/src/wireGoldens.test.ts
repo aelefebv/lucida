@@ -1261,8 +1261,8 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   [
     "move_annotation (reshape)",
     "session/client_command_move_annotation.json",
-    // AnnotationOverlay.tsx / AnnotationOverlay3D.tsx handle-drag reshape
-    // (carries both vertices).
+    // annotationInteraction.ts emitMoveAnnotation — the one construction site
+    // for every overlay move/reshape; a reshape carries both vertices.
     {
       type: "move_annotation",
       dataset_id: "wds-0f3a",

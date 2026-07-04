@@ -20,8 +20,17 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { SavedView } from "../savedView/types.ts";
-import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { applyViewportCommand } from "../applyAndSend.ts";
+import type { Annotation } from "./annotationDocument.ts";
+import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
+import {
+  capturePointer,
+  emitMoveAnnotation,
+  exceedsClickSlop,
+  releasePointer,
+} from "./annotationInteraction.ts";
+import { eventToWorld, makeWorldToScreen, type ClientPoint } from "./cameraProjection.ts";
+import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import {
   annotationVertices,
   isClosedShape,
@@ -35,72 +44,16 @@ import {
   type BoxHandle,
   type LineEndpoints,
   type LineHandle,
-  type ScreenPoint,
 } from "./annotationGeometry.ts";
-import { isOffContext, offContextLabel, type ViewContext } from "./annotationContext.ts";
+import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
 
-/** One comment in a pin's thread (as returned nested in `annotations()`). */
-export interface Comment {
-  id: string;
-  author: string;
-  text: string;
-}
-
-/** One pin, as returned by `WasmScene.annotations()`. `position` is the
- * in-plane world point; `z` is the additive depth, so the pin's full world
- * point is `(position[0], position[1], z)`. */
-export interface Annotation {
-  id: string;
-  position: [number, number];
-  /** The second in-plane world vertex: a line's far endpoint or a box's
-   * opposite corner. Absent/`null` for a point (and for any slice-1..4 pin). */
-  end?: [number, number] | null;
-  /** Additive depth. Absent on a slice-1/2 pin → defaulted to 0 on read. */
-  z?: number;
-  /** The timepoint (T) the pin was placed on. Absent on a pre-slice-14 pin →
-   * defaulted to 0 on read. Drives off-context rendering vs the current view. */
-  t?: number;
-  /** The channel (C) the pin was placed on. Absent on a pre-slice-14 pin →
-   * defaulted to 0 on read. Drives off-context rendering vs the current view. */
-  c?: number;
-  author: string;
-  /** "point" | "line" | "box". Absent on a slice-1 pin → treated as "point". */
-  kind: string;
-  /** Flat, insertion-ordered comment thread. Absent on a slice-1 pin →
-   * defaulted to an empty array on read. */
-  comments?: Comment[];
-  /** The author's captured view at creation — a {@link SavedView} snapshot
-   * (camera + slice/timepoint/channel + per-dataset display) in
-   * workspace-dataset-id form (empty `datasets`, no source URLs), so a later
-   * slice can restore that view on navigation. Absent on any pin created
-   * before this slice (and on the wire it is omitted when unset). */
-  view?: SavedView | null;
-}
-
-/**
- * Imperative seam for opening a pin's thread FROM OUTSIDE the overlay (issue
- * #526, "mentions of me"): `openPinId` is internal overlay state, so a host that
- * wants to jump to a pin (e.g. clicking a "mentions of me" item) needs a clean
- * handle to drive it. The host holds a ref to the overlay and calls
- * `focusPin(pinId)`, which opens that pin's thread AND recenters the view on it.
- *
- * The SAME handle shape is exposed by both the 2D ({@link AnnotationOverlay}) and
- * 3D ({@link AnnotationOverlay3D}) overlays, so the host wires navigation
- * identically for either view — only the recenter MECHANICS differ inside: the
- * 2D overlay moves the slice camera with `set_center`, while the 3D overlay
- * issues `arcball_center_on_voxel` to make the pin's world point the arcball
- * target (a `set_center` would be a no-op on the 3D camera). Either way the host
- * brings the pin on-context first (its Z/T/C) and marks the loop dirty, so the
- * pin is actually visible after the jump in BOTH views.
- */
-export interface AnnotationOverlayHandle {
-  /** Open `pinId`'s comment thread and recenter the view on it. A no-op (but
-   * safe) if the pin isn't in the current set, the overlay is hidden, or the
-   * scene isn't ready — so a stale id can never throw or wedge the UI. */
-  focusPin: (pinId: string) => void;
-}
+// The pin/comment model and the imperative focus handle live in the shared
+// annotation document module; re-exported here so overlay consumers keep one
+// import site alongside the component itself.
+export type { Annotation, Comment, AnnotationOverlayHandle } from "./annotationDocument.ts";
+import type { AnnotationOverlayHandle } from "./annotationDocument.ts";
 
 interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
@@ -159,11 +112,6 @@ interface Props {
    * unwired. */
   onGoToAuthorView?: (pinId: string) => void;
 }
-
-/** Max pointer travel (CSS px) for a press+release to count as a click, not a
- * drag. Mirrors SliceViewer's PIN_CLICK_SLOP so moving a pin and dropping one
- * share the same "did the pointer really travel?" threshold. */
-const PIN_CLICK_SLOP = 4;
 
 /** Side length (CSS px) of a square resize handle. Small, so the handles are a
  * distinct, deliberate target that doesn't swallow the box body. */
@@ -312,29 +260,20 @@ function shapeVertices(pin: Annotation): ShapeVertices | null {
   return { position: [pin.position[0], pin.position[1]], end: [end[0], end[1]] };
 }
 
-function readAnnotations(scene: WasmScene | null, datasetId: string): Annotation[] {
-  if (!scene) return [];
-  try {
-    const json = scene.annotations(datasetId);
-    const parsed = JSON.parse(json) as Annotation[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // SVG geometry element per non-point pin (the line segment / box outline),
   // re-projected each frame through the SAME world->screen math as the dot.
   const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
-  const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  // Which pin's thread popover is open (by pin id), or null when none. The
-  // overlay owns only WHICH pin is open and where it sits on screen; the thread
-  // UI itself (comment list, add box, edit/remove, delete+confirm) lives in the
-  // shared <ThreadPopover>, which owns its own ephemeral draft/edit/confirm state
-  // and is remounted (keyed by pin id) whenever the open pin changes.
-  const [openPinId, setOpenPinId] = useState<string | null>(null);
+  // The authoritative pin set + which thread is open, with their shared
+  // lifecycle (re-read on version/dataset change, close on vanish/dataset
+  // switch/hide) — the view-independent overlay state.
+  const { annotations, annotationsRef, openPinId, setOpenPinId } = useAnnotationOverlay({
+    wasmSceneRef,
+    datasetId,
+    version,
+    visible,
+  });
 
   // The live pin drag, if any. A ref (not state) so the per-pointer handlers
   // mutate it without re-rendering mid-drag; the RAF tick keeps repositioning
@@ -406,61 +345,25 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     [],
   );
 
-  // Hiding all annotations (issue #792) starts the next re-show CLEAN: when the
-  // overlay is hidden, drop any open thread and any hovered-shape handle reveal
-  // (and cancel a pending linger-hide), so flipping back doesn't pop a stale
-  // popover open or flash handles on a shape the cursor is no longer over. The
-  // early `return null` below renders nothing while hidden; this only resets the
-  // transient view state so a re-show begins from a quiet baseline. Runs on the
-  // false→… transition (and harmlessly while staying hidden); when visible it's
-  // inert, so normal behavior is untouched.
+  // Hiding all annotations (issue #792) starts the next re-show CLEAN: the
+  // shared overlay state already drops any open thread; this overlay must also
+  // drop the hovered-shape handle reveal (and cancel a pending linger-hide) —
+  // 2D-only state — so flipping back doesn't flash handles on a shape the
+  // cursor is no longer over. The early `return null` below renders nothing
+  // while hidden; this only resets the transient view state so a re-show begins
+  // from a quiet baseline. Runs on the false→… transition (and harmlessly while
+  // staying hidden); when visible it's inert, so normal behavior is untouched.
   useEffect(() => {
     if (!visible) {
-      // Deliberate transient-UI reset on a prop (visibility) change: hiding the
-      // overlay drops the open thread and the hovered-shape handle reveal (and
-      // cancels a pending linger-hide) so a later re-show starts from a quiet
-      // baseline (no stale popover, no flashed handles). Syncing transient state
-      // to a changed prop — keep the effect.
-       
-      setOpenPinId(null);
+      // Deliberate transient-UI reset on a prop (visibility) change: syncing
+      // transient state to a changed prop — keep the effect.
       setActiveShapeId(null);
-       
       if (hideHandlesTimer.current !== null) {
         clearTimeout(hideHandlesTimer.current);
         hideHandlesTimer.current = null;
       }
     }
   }, [visible]);
-
-  // Re-read the authoritative pin set (with threads) from WASM whenever the
-  // document version changes (a pin/comment was added/removed locally or by a
-  // peer) or the scoped dataset changes. Reading happens in an effect (not
-  // render) so we never touch the scene ref during render. The RAF tick below
-  // only repositions existing DOM nodes; it does not re-read or allocate.
-  useEffect(() => {
-    setAnnotations(readAnnotations(wasmSceneRef.current, datasetId));
-  }, [wasmSceneRef, datasetId, version]);
-
-  // If the pin whose thread is open disappears (removed by its author or a
-  // peer, or its dataset changed), close the popover so it can't dangle.
-  useEffect(() => {
-    if (openPinId !== null && !annotations.some((p) => p.id === openPinId)) {
-      // Deliberate cleanup: the pin backing the open thread was removed (by its
-      // author or a peer, or the dataset changed), so the popover must close or
-      // it would dangle. External-data-driven reset, not avoidable derived render
-      // state — keep the effect.
-       
-      setOpenPinId(null);
-    }
-  }, [annotations, openPinId]);
-
-  useEffect(() => {
-    // Deliberate transient-UI reset on a prop (dataset) change: the open thread
-    // belongs to the previous dataset's pin, so switching datasets must close it.
-    // Syncing transient state to a changed prop — keep the effect.
-     
-    setOpenPinId(null);
-  }, [datasetId]);
 
   // If the active (hovered) shape disappears — removed, or its dataset changed —
   // drop the hover so its handles can't linger as orphans pointing at a pin that
@@ -482,15 +385,6 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // closing the thread, switching pins, or a pin vanishing all drop that
   // transient state automatically: re-opening a pin always starts back at the
   // plain Delete trigger with an empty edit/draft. No effect is needed here.
-
-  // Reposition markers every frame from world space using the live camera,
-  // exactly like PeerCursors. Read the latest pins via a ref so the loop
-  // doesn't remount when the set changes. Mirroring a value into a ref in the
-  // render phase is the same idempotent pattern PeerCursors uses for its
-  // per-frame reads — written, never read, during this render.
-  const annotationsRef = useRef(annotations);
-   
-  annotationsRef.current = annotations;
 
   // Imperative navigation seam (issue #526): let a host jump to a pin from
   // OUTSIDE the overlay (e.g. a "mentions of me" item) even though `openPinId` is
@@ -521,7 +415,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         }
       },
     }),
-    [wasmSceneRef, onViewportChanged],
+    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
   );
 
   useEffect(() => {
@@ -529,21 +423,11 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
-        const dpr = devicePixelRatio;
-        const physW = Math.round(canvas.clientWidth * dpr);
-        const physH = Math.round(canvas.clientHeight * dpr);
-        const zoom = scene.zoom();
-        const center = scene.center();
-        const centerX = center[0];
-        const centerY = center[1];
-        // world -> screen (inverse of SliceViewer's screen -> world); divide by
-        // dpr to land in CSS pixels. This is the single per-vertex projection
-        // every kind reuses — the dot, the line, and the box corners all go
-        // through it.
-        const project = (v: ScreenPoint): ScreenPoint => [
-          ((v[0] - centerX) * zoom + physW / 2) / dpr,
-          ((v[1] - centerY) * zoom + physH / 2) / dpr,
-        ];
+        // world -> screen in CSS pixels (the exact inverse of the shared
+        // screen -> world), snapshotting the camera once for this frame. This
+        // is the single per-vertex projection every kind reuses — the dot, the
+        // line, and the box corners all go through it.
+        const project = makeWorldToScreen(scene, canvas);
 
         // The pin (if any) being actively MOVE-dragged past the slop: its dot is
         // positioned by the pointermove handler under the cursor, so the tick
@@ -676,24 +560,15 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [wasmSceneRef, canvas]);
+  }, [wasmSceneRef, canvas, annotationsRef]);
 
-  /** Convert a pointer event to 2D world coords — the inverse camera projection,
-   * identical to SliceViewer's `eventToWorld` (world = (screenPx − half)/zoom +
-   * center). Reused so a moved pin lands in the SAME world frame add_annotation
-   * stores, regardless of pan/zoom. */
-  const eventToWorld = (e: { clientX: number; clientY: number }): [number, number] => {
+  /** The shared inverse camera projection (`eventToWorld`, the same math
+   * SliceViewer's pointer handlers use), tolerating an unready scene. Reused so
+   * a moved pin lands in the SAME world frame add_annotation stores, regardless
+   * of pan/zoom. */
+  const pointerWorld = (e: ClientPoint): [number, number] => {
     const scene = wasmSceneRef.current;
-    if (!scene) return [0, 0];
-    const dpr = devicePixelRatio;
-    const rect = canvas.getBoundingClientRect();
-    const cursorX = (e.clientX - rect.left) * dpr;
-    const cursorY = (e.clientY - rect.top) * dpr;
-    const zoom = scene.zoom();
-    const center = scene.center();
-    const halfW = (canvas.clientWidth * dpr) / 2;
-    const halfH = (canvas.clientHeight * dpr) / 2;
-    return [(cursorX - halfW) / zoom + center[0], (cursorY - halfH) / zoom + center[1]];
+    return scene ? eventToWorld(scene, canvas, e) : [0, 0];
   };
 
   // --- Pin gesture (Shift+drag moves; plain drag pans) -----------------------
@@ -744,13 +619,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       moved: false,
     };
     // Bind the pointer to the marker so move/up land here through the drag.
-    // happy-dom may lack pointer capture; it's a progressive enhancement, never
-    // required for the gesture to complete.
-    try {
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    } catch {
-      // capture unsupported (e.g. test env) — moves/ups still arrive on target
-    }
+    capturePointer(e.currentTarget as Element, e.pointerId);
   };
 
   const onPinPointerMove = (pin: Annotation) => (e: ReactPointerEvent) => {
@@ -761,8 +630,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     // that don't echo the id on every event.
     if (!drag || drag.pinId !== pin.id) return;
     if (!drag.moved) {
-      const travel = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
-      if (travel <= PIN_CLICK_SLOP) return; // still within click slop — not yet a drag
+      // still within click slop — not yet a drag
+      if (!exceedsClickSlop(drag.startX, drag.startY, e.clientX, e.clientY)) return;
       drag.moved = true;
     }
 
@@ -804,12 +673,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
     dragRef.current = null;
-    try {
-      // Release the pointer we actually captured (its id from pointerdown).
-      (e.currentTarget as Element).releasePointerCapture?.(drag.pointerId);
-    } catch {
-      // ignore — capture may not have been taken
-    }
+    // Release the pointer we actually captured (its id from pointerdown).
+    releasePointer(e.currentTarget as Element, drag.pointerId);
 
     // A plain (pan) gesture never moves the pin. If it actually traveled, it was
     // a real pan, so swallow the trailing click the browser fires on release —
@@ -834,16 +699,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     suppressClickRef.current = pin.id;
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    const position = eventToWorld(e);
-    applyDocumentCommand(
+    emitMoveAnnotation(
       scene,
-      {
-        type: "move_annotation",
-        dataset_id: datasetId,
-        id: pin.id,
-        position,
-        z: drag.z,
-      },
+      { datasetId, id: pin.id, position: pointerWorld(e), z: drag.z },
       sendCommand,
     );
     onDocumentChanged();
@@ -856,11 +714,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     // the RAF tick snaps the dot back to its stored world position next frame.
     const captured = drag.pointerId;
     dragRef.current = null;
-    try {
-      (e.currentTarget as Element).releasePointerCapture?.(captured);
-    } catch {
-      // ignore
-    }
+    releasePointer(e.currentTarget as Element, captured);
   };
 
   // --- Shape reshape gesture (drag a box corner/edge OR a line endpoint) ------
@@ -907,11 +761,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         moved: false,
         preview: null,
       };
-      try {
-        (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-      } catch {
-        // capture unsupported (e.g. test env) — moves/ups still arrive on target
-      }
+      capturePointer(e.currentTarget as Element, e.pointerId);
     };
 
   const onHandlePointerMove =
@@ -919,14 +769,14 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       if (!drag.moved) {
-        const travel = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
-        if (travel <= PIN_CLICK_SLOP) return; // within click slop — not yet a drag
+        // within click slop — not yet a drag
+        if (!exceedsClickSlop(drag.startX, drag.startY, e.clientX, e.clientY)) return;
         drag.moved = true;
       }
       // Recompute the two vertices from the FIXED press-time base (never the
       // running preview) so the held vertex stays anchored and there's no drift.
       // The RAF tick reprojects the outline/segment + handles from this preview.
-      const world = eventToWorld(e);
+      const world = pointerWorld(e);
       drag.preview = reshapeShape(drag.kind, drag.base, drag.handle, world);
     };
 
@@ -935,11 +785,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       handleDragRef.current = null;
-      try {
-        (e.currentTarget as Element).releasePointerCapture?.(drag.pointerId);
-      } catch {
-        // ignore — capture may not have been taken
-      }
+      releasePointer(e.currentTarget as Element, drag.pointerId);
       // Re-arm the hysteresis hide now the drag is over. While the handle was
       // captured, every leave that crossed the shape fired a hide that the
       // in-flight guard (scheduleHideHandles) correctly no-op'd — so at release
@@ -960,19 +806,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       // frame, and emit exactly one reshape move carrying BOTH vertices. For a
       // line endpoint drag this moves only the grabbed end (`reshapeLine` holds
       // the other), so the far endpoint equals the line's original vertex.
-      const vertices = reshapeShape(drag.kind, drag.base, drag.handle, eventToWorld(e));
+      const vertices = reshapeShape(drag.kind, drag.base, drag.handle, pointerWorld(e));
       const scene = wasmSceneRef.current;
       if (!scene) return;
-      applyDocumentCommand(
+      emitMoveAnnotation(
         scene,
-        {
-          type: "move_annotation",
-          dataset_id: datasetId,
-          id: pin.id,
-          position: vertices.position,
-          end: vertices.end,
-          z: drag.z,
-        },
+        { datasetId, id: pin.id, position: vertices.position, end: vertices.end, z: drag.z },
         sendCommand,
       );
       onDocumentChanged();
@@ -984,11 +823,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       if (!drag || drag.pinId !== pin.id) return;
       const captured = drag.pointerId;
       handleDragRef.current = null;
-      try {
-        (e.currentTarget as Element).releasePointerCapture?.(captured);
-      } catch {
-        // ignore
-      }
+      releasePointer(e.currentTarget as Element, captured);
       // Cancelled: never reshape; the RAF tick snaps the shape + handles back to
       // the stored geometry next frame. Re-arm the hysteresis hide for the same
       // reason as on a normal release (above): the in-flight guard swallowed
@@ -1373,62 +1208,16 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
               }}
             />
             {/* Off-context helptext (issue #779): only when the pin lives on a
-                different Z/T/C than the current view. Names where the pin
-                actually lives in the exact contract form `slice <z> · t=<t> · ch
-                =<c>`, mirroring the off-view peer cursor's locator badge. The
-                marker above still renders + clicks (its thread still opens), so
-                this is purely an informative overlay. Absent entirely when the
-                pin is on-context — so an on-context pin carries NO
-                annot-offcontext-<id> testid. */}
-            {offCtx && (
-              <div
-                data-testid={`annot-offcontext-${pin.id}`}
-                title={`This pin lives on ${offContextLabel(pin)} — navigate there to edit it in place`}
-                style={{
-                  position: "absolute",
-                  left: 10,
-                  top: -10,
-                  fontSize: 10,
-                  fontFamily: "monospace",
-                  color: "white",
-                  backgroundColor: "rgba(0,0,0,0.7)",
-                  padding: "1px 4px",
-                  borderRadius: 3,
-                  whiteSpace: "nowrap",
-                  pointerEvents: "none",
-                }}
-              >
-                {offContextLabel(pin)}
-              </div>
-            )}
+                different Z/T/C than the current view — the shared locator badge
+                naming where it lives, identical in 2D and 3D. */}
+            {offCtx && <OffContextHelptext pin={pin} />}
             {/* Comment-count badge: only when the pin has at least one comment.
-                A tiny pill at the pin's upper-right, like a notification count. */}
-            {comments.length > 0 && (
-              <div
-                aria-label={`${comments.length} comment${comments.length === 1 ? "" : "s"}`}
-                onClick={() => setOpenPinId((cur) => (cur === pin.id ? null : pin.id))}
-                style={{
-                  position: "absolute",
-                  top: -14,
-                  left: 4,
-                  minWidth: 16,
-                  height: 16,
-                  padding: "0 4px",
-                  borderRadius: 8,
-                  backgroundColor: "#1f6feb",
-                  color: "white",
-                  fontSize: 11,
-                  lineHeight: "16px",
-                  textAlign: "center",
-                  fontWeight: 600,
-                  boxShadow: "0 1px 2px rgba(0,0,0,0.5)",
-                  pointerEvents: "auto",
-                  cursor: "pointer",
-                }}
-              >
-                {comments.length}
-              </div>
-            )}
+                The shared notification-count pill, identical in 2D and 3D. */}
+            <CommentCountBadge
+              count={comments.length}
+              onToggleThread={() => setOpenPinId((cur) => (cur === pin.id ? null : pin.id))}
+            />
+
             {/* Thread popover: the flat, ordered comment list plus an add box,
                 edit/remove, and delete+confirm — all in the shared
                 <ThreadPopover>, the ONE place this UI lives (2D and 3D). Anchored

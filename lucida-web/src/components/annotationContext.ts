@@ -15,7 +15,7 @@
  * which is what makes navigating to the pin's slice flip it back to normal
  * automatically.
  */
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 /** The current view's discrete Z/T/C selectors — what App passes from `dims`.
  * A pin is on-context iff its own z/t/c all equal these. */

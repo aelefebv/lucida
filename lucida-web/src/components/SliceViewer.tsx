@@ -7,6 +7,8 @@ import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
+import { exceedsClickSlop } from "./annotationInteraction.ts";
+import { eventToWorld as sceneEventToWorld } from "./cameraProjection.ts";
 
 interface Props {
   z: number;
@@ -44,9 +46,6 @@ interface Props {
    * on release/cancel, when the real annotation is committed. */
   annotationDraftRef: RefObject<AnnotationDraft | null>;
 }
-
-/** Max pointer travel (CSS px) for a press+release to count as a click, not a drag. */
-const PIN_CLICK_SLOP = 4;
 
 export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
@@ -111,19 +110,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     loopRef.current?.markInteractiveDirty();
   }, [remoteDocumentVersion]);
 
-  /** Convert a pointer event to 2D world coords (inverse of the camera). */
+  /** Convert a pointer event to 2D world coords (inverse of the camera) —
+   * the shared projection, bound to this viewer's scene + canvas. */
   const eventToWorld = useCallback(
-    (e: PointerEvent): [number, number] => {
-      const dpr = devicePixelRatio;
-      const rect = canvas.getBoundingClientRect();
-      const cursorX = (e.clientX - rect.left) * dpr;
-      const cursorY = (e.clientY - rect.top) * dpr;
-      const zoom = scene.zoom();
-      const centerArr = scene.center();
-      const halfW = (canvas.clientWidth * dpr) / 2;
-      const halfH = (canvas.clientHeight * dpr) / 2;
-      return [(cursorX - halfW) / zoom + centerArr[0], (cursorY - halfH) / zoom + centerArr[1]];
-    },
+    (e: PointerEvent): [number, number] => sceneEventToWorld(scene, canvas, e),
     [canvas, scene],
   );
 
@@ -146,18 +136,11 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
-      // All coordinates scaled to physical pixels to match WASM viewport
       const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
-      const cursorX = (e.clientX - rect.left) * dpr;
-      const cursorY = (e.clientY - rect.top) * dpr;
-      const zoom = scene.zoom();
-      const centerArr = scene.center();
-      const halfW = canvas.clientWidth * dpr / 2;
-      const halfH = canvas.clientHeight * dpr / 2;
-      const worldX = (cursorX - halfW) / zoom + centerArr[0];
-      const worldY = (cursorY - halfH) / zoom + centerArr[1];
-      sendCursor([worldX, worldY]);
+      // Cursor presence rides the same shared inverse camera projection every
+      // world-anchored producer uses.
+      sendCursor(eventToWorld(e));
 
       // Live box/line draw preview: while a shift-press is drawing a line/box,
       // publish the in-progress shape (screen-space CSS px, relative to the
@@ -167,9 +150,9 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const press = pressStart.current;
       if (press?.pin) {
         const drawKind = annotationKindRef.current;
-        const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
         annotationDraftRef.current =
-          (drawKind === "line" || drawKind === "box") && moved > PIN_CLICK_SLOP
+          (drawKind === "line" || drawKind === "box") &&
+          exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)
             ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
             : null;
       }
@@ -185,7 +168,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       emitPresence();
       loopRef.current?.markInteractiveDirty();
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
+    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
   );
 
   const onPointerUp = useCallback(
@@ -203,15 +186,15 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const datasetId = annotationDatasetIdRef.current;
       if (!datasetId) return;
 
-      const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+      const pastSlop = exceedsClickSlop(press.x, press.y, e.clientX, e.clientY);
       const kind = annotationKindRef.current;
       // A line/box needs a real drag (two distinct vertices). A click — or a
       // line/box that never left the slop — falls back to dropping a point, so a
       // stray shift-click never leaves an invisible zero-size shape. A point
       // kind drops only on a genuine click (travel within slop), exactly as
       // before; a point-kind drag is a no-op.
-      const drawShape = (kind === "line" || kind === "box") && moved > PIN_CLICK_SLOP;
-      const dropPoint = !drawShape && moved <= PIN_CLICK_SLOP;
+      const drawShape = (kind === "line" || kind === "box") && pastSlop;
+      const dropPoint = !drawShape && !pastSlop;
       if (!drawShape && !dropPoint) return;
 
       const id = globalThis.crypto?.randomUUID
@@ -298,10 +281,9 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const canvasW = canvas.clientWidth * dpr;
       const canvasH = canvas.clientHeight * dpr;
 
-      const oldZoom = scene.zoom();
-      const centerArr = scene.center();
-      const worldX = (cursorX - canvasW / 2) / oldZoom + centerArr[0];
-      const worldY = (cursorY - canvasH / 2) / oldZoom + centerArr[1];
+      // The world point under the cursor (the zoom anchor), via the shared
+      // inverse projection — read BEFORE the zoom changes the camera.
+      const [worldX, worldY] = sceneEventToWorld(scene, canvas, e);
 
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
       breakFollow();

@@ -44,7 +44,7 @@ WASM owns:
 - [Presence and Follow Mode](../subsystems/presence-and-follow-mode.md) — peer-to-peer presence, transitive follow chains
 - [Layout System](../subsystems/layout-system.md) — registered layouts, switching, derived placements
 - [Multi-Channel and Colormaps](../subsystems/multichannel-and-colormaps.md) — per-channel settings, LUT textures, composite
-- [Saved Views](../subsystems/saved-views.md) annotations/mentions/comment-threads — `AnnotationOverlay{,3D}` + draft overlay, `MentionsOfMe`, `ThreadPopover`, `annotation*.ts`, and `savedView/{build,restore}AnnotationView.ts`
+- [Saved Views](../subsystems/saved-views.md) annotations/mentions/comment-threads — `AnnotationOverlay{,3D}` + draft overlay, `MentionsOfMe`, `ThreadPopover`, `annotation*.ts` (the shared non-component family: `annotationDocument` model/read, `useAnnotationOverlay` document/thread state, `annotationInteraction` slop/capture/move-emit, `annotationGeometry`, `annotationContext`, plus the shared `AnnotationPinBadges` and the `cameraProjection` event↔world↔screen math), and `savedView/{build,restore}AnnotationView.ts`
 
 ## Top-level files in `src/`
 

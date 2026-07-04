@@ -32,7 +32,7 @@
  * count — this is "who pointed at me", regardless of who typed it.
  */
 import { useMemo, useState } from "react";
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 import { splitMentionTokens } from "./annotationMentions.ts";
 import { deriveHandle, handleFromName } from "./annotationParticipants.ts";
 

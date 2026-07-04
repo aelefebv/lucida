@@ -653,3 +653,33 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
     expect(goToCalls).toEqual(["pin-v"]);
   });
 });
+
+describe("AnnotationOverlay3D — comment-count badge on the marker", () => {
+  it("a pin with comments carries the count badge (pluralized aria-label)", () => {
+    renderOverlay({
+      pins: [
+        ownPin({
+          comments: [
+            { id: "c1", author: String(MY_ID), text: "first" },
+            { id: "c2", author: "peer", text: "second" },
+          ],
+        }),
+      ],
+    });
+    expect(screen.getByLabelText("2 comments").textContent).toBe("2");
+  });
+
+  it("a pin with an empty thread carries no badge", () => {
+    renderOverlay({ pins: [ownPin({ comments: [] })] });
+    expect(screen.queryByLabelText(/comment/)).toBeNull();
+  });
+
+  it("clicking the badge opens the pin's thread (same toggle as the dot)", () => {
+    renderOverlay({
+      pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi from 3d" }] })],
+    });
+    fireEvent.click(screen.getByLabelText("1 comment"));
+    expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
+    expect(screen.getByText("hi from 3d")).toBeTruthy();
+  });
+});
