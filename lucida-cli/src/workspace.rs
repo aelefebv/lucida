@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{CliConfig, EffectiveServer};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::http::send_json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -367,40 +368,30 @@ impl WorkspaceClient {
         Ok(())
     }
 
-    async fn send(
-        &self,
-        mut request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, CliError> {
-        if let Some(token) = self.token.as_deref() {
-            request = request.bearer_auth(token);
+    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, CliError> {
+        send_json(request, self.token.as_deref(), map_workspace_http_error).await
+    }
+}
+
+fn map_workspace_http_error(status: reqwest::StatusCode, _body: &str) -> CliError {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => CliError::new(
+            ErrorKind::Unauthenticated,
+            "not authenticated; run `lucida auth login`",
+        ),
+        reqwest::StatusCode::FORBIDDEN => {
+            CliError::new(ErrorKind::Unauthorized, "workspace request was forbidden")
         }
-        let response = request
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await?;
-        match response.status() {
-            status if status.is_success() => Ok(response),
-            reqwest::StatusCode::UNAUTHORIZED => Err(CliError::new(
-                ErrorKind::Unauthenticated,
-                "not authenticated; run `lucida auth login`",
-            )),
-            reqwest::StatusCode::FORBIDDEN => Err(CliError::new(
-                ErrorKind::Unauthorized,
-                "workspace request was forbidden",
-            )),
-            reqwest::StatusCode::NOT_FOUND => Err(CliError::new(
-                ErrorKind::MissingResource,
-                "workspace was not found",
-            )),
-            reqwest::StatusCode::CONFLICT | reqwest::StatusCode::GONE => Err(CliError::new(
-                ErrorKind::ArchivedWorkspace,
-                "workspace is archived",
-            )),
-            status => Err(CliError::new(
-                ErrorKind::Protocol,
-                format!("unexpected workspace response: HTTP {}", status.as_u16()),
-            )),
+        reqwest::StatusCode::NOT_FOUND => {
+            CliError::new(ErrorKind::MissingResource, "workspace was not found")
         }
+        reqwest::StatusCode::CONFLICT | reqwest::StatusCode::GONE => {
+            CliError::new(ErrorKind::ArchivedWorkspace, "workspace is archived")
+        }
+        status => CliError::new(
+            ErrorKind::Protocol,
+            format!("unexpected workspace response: HTTP {}", status.as_u16()),
+        ),
     }
 }
 

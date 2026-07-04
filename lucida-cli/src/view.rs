@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use lucida_core::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::chunk::ChunkCoord;
@@ -16,16 +16,15 @@ use lucida_core::view::ViewState;
 use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::{Request as WsRequest, StatusCode as WsStatusCode};
-use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::http::{api_url, response_detail, send_json};
+use crate::session::{
+    IncomingSessionMessage, SessionWait, WorkspaceSnapshot, connect_workspace_socket,
+    incoming_messages, observe_until, send_client_message, wait_for_workspace_snapshot,
+};
 use crate::workspace::{WorkspaceRecord, WorkspaceTarget};
 
 #[derive(Debug, Serialize)]
@@ -492,17 +491,8 @@ struct UpsertViewerProfileBody<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspacePresenceSnapshot {
-    seq: u64,
-    document: DocumentState,
-    peers: Vec<PresenceState>,
-    your_id: ClientId,
-    generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
-}
-
-#[derive(Debug, Clone)]
 struct DiagnosticScene {
-    snapshot: WorkspacePresenceSnapshot,
+    snapshot: WorkspaceSnapshot,
     source: DiagnosticViewSource,
     scene: Scene,
 }
@@ -526,10 +516,7 @@ impl ViewWorkspaceClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<ViewApplyResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -547,10 +534,7 @@ impl ViewWorkspaceClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<DatasetPresenceResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -563,10 +547,7 @@ impl ViewWorkspaceClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<DatasetPresenceResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -594,10 +575,7 @@ impl PeerWorkspaceClient {
     }
 
     pub async fn list(&self, wait: Duration) -> Result<PeerListResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -613,10 +591,7 @@ impl PeerWorkspaceClient {
     where
         F: FnOnce(PeerFollowResult) -> Result<(), CliError>,
     {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -662,10 +637,7 @@ impl PeerWorkspaceClient {
             return Err(CliError::config("peer cursor coordinates must be finite"));
         }
 
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -705,10 +677,7 @@ impl ViewerProfileClient {
         profile: &str,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -723,10 +692,7 @@ impl ViewerProfileClient {
         command: ViewportCommand,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -763,10 +729,7 @@ impl ViewerProfileClient {
         profile: &str,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -781,10 +744,7 @@ impl ViewerProfileClient {
         command: DatasetDisplayCommand,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -821,10 +781,7 @@ impl ViewerProfileClient {
         viewport: [u32; 2],
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -932,10 +889,7 @@ impl ViewerProfileClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<DiagnosticScene, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -980,7 +934,7 @@ impl ViewerProfileClient {
         &self,
         workspace: &WorkspaceRecord,
         profile: &str,
-        snapshot: &WorkspacePresenceSnapshot,
+        snapshot: &WorkspaceSnapshot,
     ) -> Result<WorkspaceViewerProfileRecord, CliError> {
         if let Some(record) = self.get_profile(workspace, profile).await? {
             return Ok(record);
@@ -994,7 +948,7 @@ impl ViewerProfileClient {
     async fn seed_view(
         &self,
         workspace: &WorkspaceRecord,
-        snapshot: &WorkspacePresenceSnapshot,
+        snapshot: &WorkspaceSnapshot,
     ) -> Result<(SavedView, String), CliError> {
         if let Some(default_saved_view_id) = workspace.default_saved_view_id.as_deref() {
             let saved_view = self
@@ -1066,23 +1020,13 @@ impl ViewerProfileClient {
         decode_viewer_profile_json(response, "saved view seed get").await
     }
 
-    async fn send(
-        &self,
-        mut request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, CliError> {
-        if let Some(token) = self.token.as_deref() {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        let body = response.text().await.unwrap_or_default();
-        Err(map_viewer_profile_http_error(status, &body))
+    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, CliError> {
+        send_json(
+            request,
+            self.token.as_deref(),
+            map_viewer_profile_http_error,
+        )
+        .await
     }
 }
 
@@ -1453,7 +1397,7 @@ fn format_layers(layers: &[LayerState]) -> String {
 }
 
 fn apply_presence_command(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     command: ViewportCommand,
     from_peer: Option<ClientId>,
 ) -> Result<ViewApplyResult, CliError> {
@@ -1495,7 +1439,7 @@ fn apply_presence_command(
 }
 
 fn dataset_presence_state(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     from_peer: Option<ClientId>,
 ) -> Result<DatasetPresenceResult, CliError> {
     let own_presence = find_presence(snapshot, snapshot.your_id).ok_or_else(|| {
@@ -1522,7 +1466,7 @@ fn dataset_presence_state(
 }
 
 fn apply_dataset_presence_command(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     command: DatasetDisplayCommand,
     from_peer: Option<ClientId>,
 ) -> Result<DatasetPresenceResult, CliError> {
@@ -1554,7 +1498,7 @@ fn apply_dataset_presence_command(
 }
 
 fn dataset_presence_result(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     source_client_id: ClientId,
     own_presence: &PresenceState,
     command: Option<ViewportCommand>,
@@ -2112,17 +2056,14 @@ fn channel_state(settings: &DatasetDisplaySettings, channel: u32) -> ChannelStat
     }
 }
 
-fn find_presence(
-    snapshot: &WorkspacePresenceSnapshot,
-    client_id: ClientId,
-) -> Option<&PresenceState> {
+fn find_presence(snapshot: &WorkspaceSnapshot, client_id: ClientId) -> Option<&PresenceState> {
     snapshot
         .peers
         .iter()
         .find(|presence| presence.client_id == client_id)
 }
 
-fn own_presence(snapshot: &WorkspacePresenceSnapshot) -> Result<&PresenceState, CliError> {
+fn own_presence(snapshot: &WorkspaceSnapshot) -> Result<&PresenceState, CliError> {
     find_presence(snapshot, snapshot.your_id).ok_or_else(|| {
         CliError::new(
             ErrorKind::Protocol,
@@ -2131,7 +2072,7 @@ fn own_presence(snapshot: &WorkspacePresenceSnapshot) -> Result<&PresenceState, 
     })
 }
 
-fn peer_list_result(snapshot: &WorkspacePresenceSnapshot) -> PeerListResult {
+fn peer_list_result(snapshot: &WorkspaceSnapshot) -> PeerListResult {
     let peers = snapshot
         .peers
         .iter()
@@ -2163,10 +2104,7 @@ fn peer_list_result(snapshot: &WorkspacePresenceSnapshot) -> PeerListResult {
     }
 }
 
-fn validate_follow_request(
-    snapshot: &WorkspacePresenceSnapshot,
-    target: ClientId,
-) -> Result<(), CliError> {
+fn validate_follow_request(snapshot: &WorkspaceSnapshot, target: ClientId) -> Result<(), CliError> {
     let own = own_presence(snapshot)?;
     if target == snapshot.your_id {
         return Err(CliError::new(
@@ -2202,7 +2140,7 @@ fn validate_follow_request(
 }
 
 fn plan_visible_chunks_result(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     source: DiagnosticViewSource,
     scene: &Scene,
     dataset: Option<&str>,
@@ -2224,7 +2162,7 @@ fn plan_visible_chunks_result(
 }
 
 fn plan_dataset_diagnostic(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     scene: &Scene,
     dataset_id: &DatasetId,
 ) -> Option<PlanDatasetDiagnostic> {
@@ -2265,7 +2203,7 @@ fn plan_dataset_diagnostic(
 }
 
 fn debug_state_result(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     source: DiagnosticViewSource,
     scene: &Scene,
 ) -> DebugStateResult {
@@ -2311,10 +2249,7 @@ fn diagnostic_dataset_ids(
     Ok(ids)
 }
 
-fn debug_dataset_states(
-    snapshot: &WorkspacePresenceSnapshot,
-    scene: &Scene,
-) -> Vec<DebugDatasetState> {
+fn debug_dataset_states(snapshot: &WorkspaceSnapshot, scene: &Scene) -> Vec<DebugDatasetState> {
     diagnostic_dataset_ids(&scene.document, &scene.dataset_order, None)
         .unwrap_or_default()
         .into_iter()
@@ -2401,7 +2336,7 @@ fn chunk_tier_diagnostics(tier: &'static str, chunks: &[ChunkCoord]) -> Vec<Chun
 }
 
 fn dataset_generated_availability(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
 ) -> Vec<DatasetGeneratedAvailabilityDiagnostic> {
     snapshot
         .generated_availability
@@ -2476,7 +2411,7 @@ fn debug_state_caveats() -> Vec<&'static str> {
 }
 
 fn viewer_profile_result(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     record: WorkspaceViewerProfileRecord,
     command: Option<ViewportCommand>,
 ) -> ViewerProfileResult {
@@ -2501,7 +2436,7 @@ fn viewer_profile_result(
 }
 
 fn viewer_source_result(
-    snapshot: &WorkspacePresenceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     source: DiagnosticViewSource,
     scene: Scene,
 ) -> ViewerSourceResult {
@@ -2544,104 +2479,6 @@ fn cursor_message(position: Option<[f64; 2]>) -> ClientMessage {
     ClientMessage::Cursor { position }
 }
 
-async fn send_client_message<W>(write: &mut W, message: &ClientMessage) -> Result<(), CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-{
-    let json = serde_json::to_string(message)?;
-    write
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(map_websocket_error)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IncomingViewMessage {
-    Text(String),
-    Close,
-    Ignore,
-}
-
-fn incoming_messages<S>(read: S) -> impl Stream<Item = Result<IncomingViewMessage, CliError>>
-where
-    S: Stream<Item = Result<Message, WebSocketError>>,
-{
-    read.map(|message| match message {
-        Ok(Message::Text(text)) => Ok(IncomingViewMessage::Text(text.to_string())),
-        Ok(Message::Close(_)) => Ok(IncomingViewMessage::Close),
-        Ok(_) => Ok(IncomingViewMessage::Ignore),
-        Err(error) => Err(map_websocket_error(error)),
-    })
-}
-
-async fn wait_for_workspace_snapshot<S>(
-    messages: &mut S,
-    wait: Duration,
-) -> Result<WorkspacePresenceSnapshot, CliError>
-where
-    S: Stream<Item = Result<IncomingViewMessage, CliError>> + Unpin,
-{
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingViewMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Snapshot {
-                            seq,
-                            document,
-                            peers,
-                            your_id,
-                            generated_availability,
-                        } => {
-                            return Ok(WorkspacePresenceSnapshot {
-                                seq,
-                                document,
-                                peers,
-                                your_id,
-                                generated_availability,
-                            });
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before snapshot",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingViewMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before snapshot",
-                    ));
-                }
-                IncomingViewMessage::Ignore => {}
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before snapshot",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for workspace snapshot after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
 async fn wait_for_follow_change<S>(
     messages: &mut S,
     client_id: ClientId,
@@ -2649,65 +2486,32 @@ async fn wait_for_follow_change<S>(
     wait: Duration,
 ) -> Result<Vec<PeerFollowChange>, CliError>
 where
-    S: Stream<Item = Result<IncomingViewMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    tokio::time::timeout(wait, async {
-        let mut changes = Vec::new();
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingViewMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::FollowChanged {
-                            client_id: changed_client_id,
-                            target: changed_target,
-                        } => {
-                            changes.push(PeerFollowChange {
-                                client_id: changed_client_id,
-                                target: changed_target,
-                            });
-                            if changed_client_id == client_id && changed_target == target {
-                                return Ok(changes);
-                            }
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before follow confirmation",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingViewMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before follow confirmation",
-                    ));
-                }
-                IncomingViewMessage::Ignore => {}
+    const FOLLOW_WAIT: SessionWait = SessionWait {
+        expectation: "follow confirmation",
+        archived_outcome: "follow confirmation",
+        timeout_subject: "follow confirmation",
+        timeout_kind: ErrorKind::RejectedCommand,
+    };
+    let mut changes = Vec::new();
+    observe_until(messages, wait, &FOLLOW_WAIT, |message| {
+        if let ServerMessage::FollowChanged {
+            client_id: changed_client_id,
+            target: changed_target,
+        } = message
+        {
+            changes.push(PeerFollowChange {
+                client_id: changed_client_id,
+                target: changed_target,
+            });
+            if changed_client_id == client_id && changed_target == target {
+                return Ok(Some(std::mem::take(&mut changes)));
             }
         }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before follow confirmation",
-        ))
+        Ok(None)
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::RejectedCommand,
-            format!(
-                "timed out waiting for follow confirmation after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
 }
 
 fn viewer_profile_url(
@@ -2742,44 +2546,6 @@ fn saved_view_item_url(
             saved_view_id,
         ],
     )
-}
-
-fn api_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
-    let mut url = reqwest::Url::parse(server_url)
-        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| CliError::invalid_server("server URL cannot be used as a base URL"))?;
-        path.clear();
-        for segment in segments {
-            path.push(segment);
-        }
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
-fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsRequest<()>, CliError> {
-    let mut request = ws_url.into_client_request().map_err(|error| {
-        CliError::new(
-            ErrorKind::InvalidServer,
-            format!("invalid workspace WebSocket URL: {error}"),
-        )
-    })?;
-    if let Some(token) = token {
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|error| {
-                CliError::new(
-                    ErrorKind::Config,
-                    format!("failed to build bearer authorization header: {error}"),
-                )
-            })?,
-        );
-    }
-    Ok(request)
 }
 
 async fn decode_viewer_profile_json<T: DeserializeOwned>(
@@ -2837,56 +2603,6 @@ fn map_viewer_profile_http_error(status: reqwest::StatusCode, body: &str) -> Cli
                     status.as_u16()
                 )
             }),
-        ),
-    }
-}
-
-fn response_detail(body: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
-    value
-        .get("detail")
-        .or_else(|| value.get("error"))
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-}
-
-fn map_websocket_error(error: WebSocketError) -> CliError {
-    match error {
-        WebSocketError::Http(response) => match response.status() {
-            WsStatusCode::UNAUTHORIZED => CliError::new(
-                ErrorKind::Unauthenticated,
-                "not authenticated; run `lucida auth login`",
-            ),
-            WsStatusCode::FORBIDDEN => CliError::new(
-                ErrorKind::Unauthorized,
-                "workspace WebSocket request was forbidden",
-            ),
-            WsStatusCode::NOT_FOUND => CliError::new(
-                ErrorKind::MissingResource,
-                "workspace WebSocket target was not found",
-            ),
-            WsStatusCode::GONE | WsStatusCode::CONFLICT => {
-                CliError::new(ErrorKind::ArchivedWorkspace, "workspace is archived")
-            }
-            status => CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "workspace WebSocket upgrade failed with HTTP {}",
-                    status.as_u16()
-                ),
-            ),
-        },
-        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected",
-        ),
-        WebSocketError::Io(error) => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket I/O failed: {error}"),
-        ),
-        other => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket failed: {other}"),
         ),
     }
 }
@@ -3081,8 +2797,8 @@ mod tests {
         }
     }
 
-    fn snapshot() -> WorkspacePresenceSnapshot {
-        WorkspacePresenceSnapshot {
+    fn snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
             seq: 12,
             document: DocumentState::default(),
             peers: vec![presence(7, [0.0, 0.0]), presence(9, [100.0, 200.0])],
@@ -3178,8 +2894,8 @@ mod tests {
         .unwrap()
     }
 
-    fn display_snapshot() -> WorkspacePresenceSnapshot {
-        WorkspacePresenceSnapshot {
+    fn display_snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
             seq: 13,
             document: document_with_two_datasets(),
             peers: vec![presence(7, [0.0, 0.0])],
@@ -3411,7 +3127,7 @@ mod tests {
     fn followed_own_presence_breaks_follow_before_presence_emit() {
         let mut own = presence(7, [0.0, 0.0]);
         own.following = Some(9);
-        let snapshot = WorkspacePresenceSnapshot {
+        let snapshot = WorkspaceSnapshot {
             peers: vec![own, presence(9, [0.0, 0.0])],
             ..snapshot()
         };
@@ -3430,7 +3146,7 @@ mod tests {
         own.dataset_order = vec![DatasetId("wds-test".to_string())];
         let mut follower = presence(9, [3.0, 4.0]);
         follower.following = Some(7);
-        let snapshot = WorkspacePresenceSnapshot {
+        let snapshot = WorkspaceSnapshot {
             peers: vec![own, follower],
             ..snapshot()
         };
@@ -3470,7 +3186,7 @@ mod tests {
 
         let mut target = presence(9, [0.0, 0.0]);
         target.following = Some(11);
-        let snapshot = WorkspacePresenceSnapshot {
+        let snapshot = WorkspaceSnapshot {
             peers: vec![presence(7, [0.0, 0.0]), target],
             ..snapshot()
         };
@@ -3716,7 +3432,7 @@ mod tests {
     fn layer_current_channel_commands_resolve_scene_channel() {
         let mut peer = presence(7, [0.0, 0.0]);
         peer.view.c = 2;
-        let snapshot = WorkspacePresenceSnapshot {
+        let snapshot = WorkspaceSnapshot {
             peers: vec![peer],
             ..display_snapshot()
         };
