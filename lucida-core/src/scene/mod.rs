@@ -67,6 +67,44 @@ impl VisibleContentBounds2D {
     }
 }
 
+/// The multi-dataset placement correction for one volume, produced by
+/// [`Scene::placement_correction`]: a uniform scale (`correction`, with its
+/// exact reciprocal ratio `inv_correction`) that preserves relative physical
+/// sizes across datasets, plus a Y translation (`top_align`) that top-aligns
+/// volumes of different heights in 3D. Kept in `f64`; consumers that build
+/// `f32` matrices cast at application time ([`Self::apply`]), consumers that
+/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the fields directly.
+#[derive(Debug, Clone, Copy)]
+struct PlacementCorrection {
+    correction: f64,
+    inv_correction: f64,
+    top_align: f64,
+}
+
+impl PlacementCorrection {
+    /// Fold this correction into a forward/inverse matrix pair (column-major
+    /// `[f32; 16]`): scale the diagonal and XY translation of `model` and add
+    /// the top-align term to its Y translation; apply the reciprocal to
+    /// `inv_model` so the pair keeps composing to the identity.
+    fn apply(&self, model: &mut [f32; 16], inv_model: &mut [f32; 16]) {
+        let correction = self.correction as f32;
+        let inv_correction = self.inv_correction as f32;
+        let top_align = self.top_align as f32;
+
+        model[0] *= correction;
+        model[5] *= correction;
+        model[10] *= correction;
+        model[12] *= correction;
+        model[13] *= correction;
+        model[13] += top_align;
+
+        inv_model[0] *= inv_correction;
+        inv_model[5] *= inv_correction;
+        inv_model[10] *= inv_correction;
+        inv_model[13] -= top_align * inv_model[5];
+    }
+}
+
 /// The complete viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
@@ -121,6 +159,25 @@ impl Scene {
             .and_then(|d| d.members.first())
             .and_then(|m| m.levels.first())
             .map(|l| [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
+    }
+
+    /// World-space bounding-box diagonal of the first dataset's first volume,
+    /// **after** the multi-dataset global correction
+    /// ([`Self::placement_correction`]) — the same scale the renderer draws it
+    /// at. Consumers size world-space motion from it (fly-camera base speed,
+    /// initial 3D framing). Returns `1.0` when no volume is loaded so speed
+    /// seeding always has a sane basis.
+    pub fn volume_diagonal(&self) -> f64 {
+        let member = self.derived.values().next().and_then(|d| d.members.first());
+        let Some(m) = member else {
+            return 1.0;
+        };
+        let t = &m.volume_transform;
+        let correction = self.placement_correction(t).correction;
+        let sx = t.model[0] as f64 * correction;
+        let sy = t.model[5] as f64 * correction;
+        let sz = t.model[10] as f64 * correction;
+        (sx * sx + sy * sy + sz * sz).sqrt()
     }
 
     /// Switch to 2D mode, preserving the current viewport.
@@ -534,6 +591,34 @@ impl Scene {
         Some(plans)
     }
 
+    /// The scene-global placement correction for one volume: the multi-dataset
+    /// scale normalization (`max_physical_extent / global_max_physical_extent`)
+    /// and the 3D top-alignment translation
+    /// (`(global_max_physical_y - phys_y) / global_max`).
+    ///
+    /// This is the **single owner** of that arithmetic. Every consumer of
+    /// placement — [`Self::rendering_transform`] (and through it
+    /// [`Self::member_world_matrix`] / `dataset_world_bounds`), the
+    /// dataset-level [`Self::dataset_model_matrix`] /
+    /// [`Self::dataset_inv_model_matrix`], and [`Self::volume_diagonal`] —
+    /// derives its correction from here, so a policy change propagates to the
+    /// renderer, the minimap, picking, and framing together.
+    fn placement_correction(&self, t: &VolumeTransform) -> PlacementCorrection {
+        let max_phys = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
+        let global_max = self.global_max_physical_extent();
+        let phys_y = t.model[5] as f64 * max_phys;
+        let global_max_y = self.global_max_physical_y();
+        PlacementCorrection {
+            correction: max_phys / global_max,
+            inv_correction: global_max / max_phys,
+            top_align: (global_max_y - phys_y) / global_max,
+        }
+    }
+
     /// Build the rendering model matrix for a member — the same transform
     /// the GPU uses, including Y-flip, global normalization, and top-alignment.
     ///
@@ -599,29 +684,10 @@ impl Scene {
         );
 
         // Global correction for multi-dataset scenes
-        let global_max = self.global_max_physical_extent();
-        let correction = (max_phys / global_max) as f32;
-        let inv_correction = (global_max / max_phys) as f32;
-
-        let phys_y = t.model[5] as f64 * max_phys;
-        let global_max_y = self.global_max_physical_y();
-        let top_align = ((global_max_y - phys_y) / global_max) as f32;
-
-        // Forward model
         let mut model = mt.model;
-        model[0] *= correction;
-        model[5] *= correction;
-        model[10] *= correction;
-        model[12] *= correction;
-        model[13] *= correction;
-        model[13] += top_align;
-
-        // Inverse model
         let mut inv_model = mt.inv_model;
-        inv_model[0] *= inv_correction;
-        inv_model[5] *= inv_correction;
-        inv_model[10] *= inv_correction;
-        inv_model[13] -= top_align * inv_model[5];
+        self.placement_correction(t)
+            .apply(&mut model, &mut inv_model);
 
         let fwd = VolumeTransform {
             model,
@@ -634,6 +700,53 @@ impl Scene {
             max_physical_extent: max_phys,
         };
         (fwd, inv)
+    }
+
+    /// The **dataset-level** model matrix (column-major `[f32; 16]`): the first
+    /// member's unit-cube volume transform with the same global correction and
+    /// top-alignment as [`Self::rendering_transform`], but **without** the
+    /// member's layout position offset — the dataset's volume treated as if it
+    /// sat at the scene origin. The minimap projects orbit rays through this
+    /// (and its inverse) to relate whole-dataset unit space to world space, and
+    /// `ray_hit_local` uses the inverse to express hits in `[0,1]³`.
+    ///
+    /// For a dataset whose first member has layout position `[0, 0]` this
+    /// equals [`Self::member_world_matrix`]; for an offset member (e.g. a plate
+    /// well) the two differ only by the corrected XY translation.
+    ///
+    /// Returns the identity for an unknown dataset or one with no members, so
+    /// consumers degrade to an uncorrected unit cube rather than a special
+    /// case.
+    pub fn dataset_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
+        self.dataset_placement_matrices(dataset_id).0
+    }
+
+    /// Inverse of [`Self::dataset_model_matrix`] (world space → the first
+    /// member's `[0,1]³` unit space), built from the same
+    /// [`Self::placement_correction`] so the pair composes to the identity.
+    /// Returns the identity for an unknown dataset or one with no members.
+    pub fn dataset_inv_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
+        self.dataset_placement_matrices(dataset_id).1
+    }
+
+    /// Shared body of [`Self::dataset_model_matrix`] /
+    /// [`Self::dataset_inv_model_matrix`]: resolve the first member and fold
+    /// the placement correction into its volume transform pair.
+    fn dataset_placement_matrices(&self, dataset_id: &str) -> ([f32; 16], [f32; 16]) {
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let ds_id = DatasetId(dataset_id.to_string());
+        let member = self.derived.get(&ds_id).and_then(|d| d.members.first());
+        let Some(m) = member else {
+            return (identity, identity);
+        };
+        let t = &m.volume_transform;
+        let mut model = t.model;
+        let mut inv_model = t.inv_model;
+        self.placement_correction(t)
+            .apply(&mut model, &mut inv_model);
+        (model, inv_model)
     }
 
     /// Pick the closest entity hit by a ray cast from screen coordinates.
@@ -2456,6 +2569,253 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Open a 512-voxel-cube dataset ("big") next to a two-well plate whose
+    /// wells are 256 voxels across ("plate", first well at the layout origin,
+    /// second offset). With isotropic unit spacing the plate's global
+    /// correction is a real 0.5 and its top-align term is (512-200)/512 —
+    /// non-trivial placement on every axis this module corrects.
+    fn scene_with_big_and_plate() -> Scene {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "big",
+                "big",
+                1,
+                [1, 1, 10, 512, 512],
+                [1, 1, 1, 128, 128],
+                1,
+            ))
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "plate",
+                "plate",
+                vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 1, 128, 128],
+            ))
+            .into(),
+        );
+        scene
+    }
+
+    /// The dataset-level model matrix must carry the SAME global correction
+    /// and top-alignment as the render path: for a first member at the layout
+    /// origin it equals `rendering_transform`'s forward model
+    /// element-for-element (the dataset-level matrix omits layout offsets, and
+    /// an origin member has none). Checked for a single-image dataset and a
+    /// plate whose correction is a real 0.5 — so a policy change in
+    /// `rendering_transform`'s placement would be caught here, not silently
+    /// desync the minimap.
+    #[test]
+    fn dataset_model_matrix_matches_rendering_transform_for_origin_member() {
+        let scene = scene_with_big_and_plate();
+
+        for ds in ["big", "plate"] {
+            let derived = scene
+                .derived
+                .get(&DatasetId(ds.into()))
+                .expect("derived state");
+            let first = derived.members.first().expect("first member");
+            assert_eq!(
+                first.position,
+                [0.0, 0.0],
+                "fixture invariant: first member sits at the layout origin"
+            );
+            let canonical = scene.rendering_transform(first).0.model;
+            let dataset = scene.dataset_model_matrix(ds);
+            for i in 0..16 {
+                assert!(
+                    (dataset[i] - canonical[i]).abs() < 1e-6,
+                    "dataset_model_matrix drifted from rendering_transform at \
+                     element {i}: {} vs {} (dataset {ds})",
+                    dataset[i],
+                    canonical[i],
+                );
+            }
+        }
+
+        // The plate is half the physical size of "big": its correction is a
+        // real 0.5 (halved scales) and it is top-aligned below the taller
+        // dataset's rim — this is NOT an identity or uncorrected transform.
+        let plate = scene.dataset_model_matrix("plate");
+        assert!(
+            (plate[0] - 0.5).abs() < 1e-6,
+            "global correction should halve the plate's X scale, got {}",
+            plate[0]
+        );
+        assert!(
+            (plate[5] - 0.5 * 200.0 / 256.0).abs() < 1e-6,
+            "corrected Y scale wrong: {}",
+            plate[5]
+        );
+        assert!(
+            (plate[13] - (512.0 - 200.0) / 512.0).abs() < 1e-6,
+            "top-align term missing or wrong: {}",
+            plate[13]
+        );
+        // "big" attains the global max: correction 1, no top-align shift.
+        let big = scene.dataset_model_matrix("big");
+        assert!((big[0] - 1.0).abs() < 1e-6, "big X scale: {}", big[0]);
+        assert!(
+            big[13].abs() < 1e-6,
+            "big top-align should be 0: {}",
+            big[13]
+        );
+    }
+
+    /// The dataset-level inverse must be the render path's inverse (for an
+    /// origin member) and must compose with the forward matrix to the
+    /// identity — the minimap runs rays through both halves, so a one-sided
+    /// change would scramble picking.
+    #[test]
+    fn dataset_inv_model_matrix_matches_render_inverse_and_round_trips() {
+        let scene = scene_with_big_and_plate();
+
+        // Multiply two column-major 4x4 matrices: returns a*b.
+        let mul = |a: &[f32; 16], b: &[f32; 16]| -> [f32; 16] {
+            let mut out = [0.0f32; 16];
+            for col in 0..4 {
+                for row in 0..4 {
+                    let mut sum = 0.0f32;
+                    for k in 0..4 {
+                        sum += a[k * 4 + row] * b[col * 4 + k];
+                    }
+                    out[col * 4 + row] = sum;
+                }
+            }
+            out
+        };
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+
+        for ds in ["big", "plate"] {
+            let derived = scene
+                .derived
+                .get(&DatasetId(ds.into()))
+                .expect("derived state");
+            let first = derived.members.first().expect("first member");
+            let canonical_inv = scene.rendering_transform(first).1.inv_model;
+            let inv = scene.dataset_inv_model_matrix(ds);
+            for i in 0..16 {
+                assert!(
+                    (inv[i] - canonical_inv[i]).abs() < 1e-6,
+                    "dataset_inv_model_matrix drifted from rendering_transform \
+                     at element {i}: {} vs {} (dataset {ds})",
+                    inv[i],
+                    canonical_inv[i],
+                );
+            }
+
+            let fwd = scene.dataset_model_matrix(ds);
+            let composed = mul(&inv, &fwd);
+            for i in 0..16 {
+                assert!(
+                    (composed[i] - identity[i]).abs() < 1e-5,
+                    "inverse · forward not identity at element {i}: {} \
+                     (dataset {ds})",
+                    composed[i],
+                );
+            }
+        }
+    }
+
+    /// `volume_diagonal` must be the diagonal of the CORRECTED render scale —
+    /// the world-space size the volume is actually drawn at (fly base speed
+    /// and framing are seeded from it), not the uncorrected unit-cube size.
+    #[test]
+    fn volume_diagonal_is_the_corrected_scale_diagonal() {
+        // Alone in the scene, the plate needs no correction: the diagonal is
+        // its anisotropic normalized-cube diagonal.
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "plate",
+                "plate",
+                vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 1, 128, 128],
+            ))
+            .into(),
+        );
+        let plate_alone: f64 =
+            (1.0f64 + (200.0f64 / 256.0).powi(2) + (4.0f64 / 256.0).powi(2)).sqrt();
+        assert!(
+            (scene.volume_diagonal() - plate_alone).abs() < 1e-6,
+            "uncorrected diagonal wrong: {}",
+            scene.volume_diagonal()
+        );
+
+        // Opening a physically larger dataset re-normalizes the scene.
+        // Whichever dataset happens to be first, the diagonal must equal the
+        // diagonal of ITS corrected render scale (the diagonal terms of
+        // rendering_transform's forward model).
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "big",
+                "big",
+                1,
+                [1, 1, 10, 512, 512],
+                [1, 1, 1, 128, 128],
+                1,
+            ))
+            .into(),
+        );
+        let first = scene
+            .derived
+            .values()
+            .next()
+            .and_then(|d| d.members.first())
+            .expect("first member");
+        let rt = scene.rendering_transform(first).0.model;
+        let expected =
+            ((rt[0] as f64).powi(2) + (rt[5] as f64).powi(2) + (rt[10] as f64).powi(2)).sqrt();
+        assert!(
+            (scene.volume_diagonal() - expected).abs() < 1e-6,
+            "corrected diagonal drifted from render scale: {} vs {}",
+            scene.volume_diagonal(),
+            expected
+        );
+
+        // Deterministic correction!=1 coverage (independent of map order):
+        // through the dataset-level matrix, the plate's corrected diagonal is
+        // exactly half its standalone diagonal.
+        let m = scene.dataset_model_matrix("plate");
+        let plate_diag =
+            ((m[0] as f64).powi(2) + (m[5] as f64).powi(2) + (m[10] as f64).powi(2)).sqrt();
+        assert!(
+            (plate_diag - 0.5 * plate_alone).abs() < 1e-6,
+            "plate's corrected diagonal should be half its standalone one: {plate_diag}"
+        );
+    }
+
+    /// Absent-dataset fallbacks: identity matrices and a 1.0 diagonal, both on
+    /// an empty scene and for an unknown id in a populated one — consumers
+    /// degrade to an uncorrected unit cube instead of panicking.
+    #[test]
+    fn dataset_matrix_and_diagonal_fallbacks() {
+        let identity = [
+            1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut scene = Scene::new([800, 600]);
+        assert_eq!(scene.volume_diagonal(), 1.0);
+        assert_eq!(scene.dataset_model_matrix("nope"), identity);
+        assert_eq!(scene.dataset_inv_model_matrix("nope"), identity);
+
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "ds1", 1))
+                .into(),
+        );
+        assert_eq!(scene.dataset_model_matrix("nope"), identity);
+        assert_eq!(scene.dataset_inv_model_matrix("nope"), identity);
+        assert!(
+            scene.volume_diagonal().is_finite() && scene.volume_diagonal() > 0.0,
+            "diagonal must stay finite once data is loaded"
+        );
     }
 
     /// `dataset_world_bounds` is folded directly from

@@ -469,28 +469,11 @@ impl WasmScene {
     }
 
     /// Compute the world-space bounding box diagonal of the volume.
+    ///
+    /// The placement math is owned by [`Scene::volume_diagonal`] (non-gated,
+    /// alongside the rest of the global-correction plumbing); this delegates.
     pub fn volume_diagonal(&self) -> f64 {
-        let first_member = self
-            .inner
-            .derived
-            .values()
-            .next()
-            .and_then(|d| d.members.first());
-        let t = match first_member {
-            Some(m) => &m.volume_transform,
-            None => return 1.0,
-        };
-        let global_max = self.inner.global_max_physical_extent();
-        let ds_max = if t.max_physical_extent > 0.0 {
-            t.max_physical_extent
-        } else {
-            1.0
-        };
-        let correction = ds_max / global_max;
-        let sx = t.model[0] as f64 * correction;
-        let sy = t.model[5] as f64 * correction;
-        let sz = t.model[10] as f64 * correction;
-        (sx * sx + sy * sy + sz * sz).sqrt()
+        self.inner.volume_diagonal()
     }
 
     // --- Clip distance methods ---
@@ -695,74 +678,22 @@ impl WasmScene {
         Ok(())
     }
 
+    /// Returns the dataset-level model matrix (first member, layout offsets
+    /// excluded) used by the minimap projection.
+    ///
+    /// The placement math is owned by [`Scene::dataset_model_matrix`]
+    /// (non-gated, next to `rendering_transform`); this only converts to the
+    /// JS-friendly `Vec<f32>`. Identity for an unknown/empty dataset.
     pub fn scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
-        let ds_id = DatasetId(dataset_id.to_string());
-        let member = self
-            .inner
-            .derived
-            .get(&ds_id)
-            .and_then(|d| d.members.first());
-        match member {
-            Some(m) => {
-                let t = &m.volume_transform;
-                let global_max = self.inner.global_max_physical_extent();
-                let ds_max = if t.max_physical_extent > 0.0 {
-                    t.max_physical_extent
-                } else {
-                    1.0
-                };
-                let correction = (ds_max / global_max) as f32;
-                let mut mat = t.model;
-                mat[0] *= correction;
-                mat[5] *= correction;
-                mat[10] *= correction;
-                // Top-align
-                let phys_y = t.model[5] as f64 * ds_max;
-                let global_max_y = self.inner.global_max_physical_y();
-                mat[13] = ((global_max_y - phys_y) / global_max) as f32;
-                mat.to_vec()
-            }
-            None => {
-                vec![
-                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                ]
-            }
-        }
+        self.inner.dataset_model_matrix(dataset_id).to_vec()
     }
 
+    /// Inverse of [`Self::scene_model_matrix_for`] (world space → the first
+    /// member's `[0,1]³` unit space); owned by
+    /// [`Scene::dataset_inv_model_matrix`]. Identity for an unknown/empty
+    /// dataset.
     pub fn inv_scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
-        let ds_id = DatasetId(dataset_id.to_string());
-        let member = self
-            .inner
-            .derived
-            .get(&ds_id)
-            .and_then(|d| d.members.first());
-        match member {
-            Some(m) => {
-                let t = &m.volume_transform;
-                let global_max = self.inner.global_max_physical_extent();
-                let ds_max = if t.max_physical_extent > 0.0 {
-                    t.max_physical_extent
-                } else {
-                    1.0
-                };
-                let inv_correction = (global_max / ds_max) as f32;
-                let mut mat = t.inv_model;
-                mat[0] *= inv_correction;
-                mat[5] *= inv_correction;
-                mat[10] *= inv_correction;
-                let phys_y = t.model[5] as f64 * ds_max;
-                let global_max_y = self.inner.global_max_physical_y();
-                let ty = ((global_max_y - phys_y) / global_max) as f32;
-                mat[13] = -ty * mat[5];
-                mat.to_vec()
-            }
-            None => {
-                vec![
-                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                ]
-            }
-        }
+        self.inner.dataset_inv_model_matrix(dataset_id).to_vec()
     }
 
     pub fn epochs(&self) -> String {

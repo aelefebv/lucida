@@ -33,7 +33,7 @@ Re-exports symbols from [lucida-content](lucida-content.md) and [lucida-protocol
 
 Module-level only — see the source for signatures.
 
-- `scene/` — split into `scene/mod.rs` (`Scene`, `DerivedState`, layout resolution) and `scene/types.rs` (the display/document/colormap types: `DocumentState`, `DatasetDisplaySettings`, `Colormap`)
+- `scene/` — split into `scene/mod.rs` (`Scene`, `DerivedState`, layout resolution) and `scene/types.rs` (the display/document/colormap types: `DocumentState`, `DatasetDisplaySettings`, `Colormap`). `scene/mod.rs` also owns the multi-dataset placement math — the global size correction and 3D top-alignment (`Scene::placement_correction`) behind `rendering_transform`/`member_world_matrix`, the dataset-level `dataset_model_matrix`/`dataset_inv_model_matrix` (minimap projection), and `volume_diagonal` (fly-speed/framing basis) — so the wasm bindings delegate to it rather than re-deriving placement
 - `command.rs` — `Command`, `DocumentCommand`, `ViewportCommand`; `Scene::apply` is the command entry point (viewport arms bump epochs by scoped change detection — see [Scene State and Epochs](../subsystems/scene-state-and-epochs.md))
 - `protocol.rs` — `ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`. `ServerMessage::BookmarkChanged { id, action, dataset_urls }` is unsequenced, like the presence variants (PeerJoined, PresenceUpdate, CursorUpdate, FollowChanged) — a session-scoped notification for [Saved Views](../subsystems/saved-views.md), not a sequenced document command.
 - `epoch.rs` — `SceneEpochs` (content/layout/view/selection/asset/annotation)
