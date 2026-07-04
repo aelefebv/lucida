@@ -74,7 +74,7 @@ Subdirectories:
 - `hooks/` — the React hooks driving App.tsx
 - `components/` — React components: viewers, controls, file browser, plate selector, peer cursors, FPS counter, minimap, layout switcher, layer panel, colormap selector, dimension controls, contrast controls, and the annotation/mentions/thread overlays
 - `config/` — `keyBindings.ts` (keyboard binding map)
-- `debug/` — DebugPanel and debugStats — runtime telemetry overlay
+- `debug/` — DebugPanel/DebugOverlays and debugStats — runtime telemetry overlay. The panel + overlay components are code-split: App.tsx loads them via `React.lazy` as a separate on-demand chunk (first Debug-button click / overlay toggle), so they stay out of the main production bundle; only the small gate/stat modules (`logging.ts`, `debugStats.ts`) are statically imported. Dev-build editable, prod read-only — see [Debug overlays & diagnostics UI](../subsystems/debug-overlays.md)
 - `zarr/intensitySampler.ts` — coarse-LOD intensity readout for the volume sampler
 
 The WASM bundle is **not** a `src/` subdir: `npm run build:wasm` builds it into `lucida-core/pkg/`, consumed via the `"lucida-core": "file:../lucida-core/pkg"` package alias in `package.json`.

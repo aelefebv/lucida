@@ -11,6 +11,20 @@
  * and clears its epoch cache on each change so the next frame
  * replans from the new values.
  *
+ * Every knob here is a developer planning tunable, and edits persist to
+ * localStorage where the planner reads them on every tick — so writes
+ * are dev-build only (`editable` defaults to `import.meta.env.DEV`). In
+ * production builds the tab renders the live values read-only: still
+ * useful for inspecting what the planner is running with, but not a
+ * control surface. One exception: "Reset all to defaults" works in every
+ * build — persisted knobs from an earlier session still apply in prod,
+ * and resetting *toward* defaults is a safety valve, not a steering
+ * control; without it the only recovery from stale persisted knobs is a
+ * manual localStorage wipe. The one planning-config field that IS
+ * product config, `depthBiasView`, is deliberately not rendered here —
+ * it lives in the main 3-D view UI (components/FocalDepthControl.tsx)
+ * and stays writable in every build.
+ *
  * Cross-constraint warnings (warn but allow):
  *   - `detailThresholdPx <= farThresholdPx + 2*hysteresisPx`: the
  *     middle band collapses; `fields-with-proxy-fallback` becomes
@@ -191,7 +205,7 @@ function usePlanningConfig(): PlanningConfig {
   );
 }
 
-function CoarseDetailToggle({ cfg }: { cfg: PlanningConfig }) {
+function CoarseDetailToggle({ cfg, editable }: { cfg: PlanningConfig; editable: boolean }) {
   const dirty = cfg.coarseDetailEnabled !== DEFAULT_PLANNING_CONFIG.coarseDetailEnabled;
   return (
     <div className="debug-config-tunable-row">
@@ -203,9 +217,13 @@ function CoarseDetailToggle({ cfg }: { cfg: PlanningConfig }) {
           id="cfg-coarse-detail-enabled"
           type="checkbox"
           checked={cfg.coarseDetailEnabled}
-          onChange={(e) => configStore.set("coarseDetailEnabled", e.target.checked)}
+          disabled={!editable}
+          onChange={(e) => {
+            if (!editable) return;
+            configStore.set("coarseDetailEnabled", e.target.checked);
+          }}
         />
-        {dirty ? (
+        {editable && dirty ? (
           <button
             type="button"
             className="debug-config-reset"
@@ -234,10 +252,12 @@ function TunableRow({
   spec,
   cfg,
   warning,
+  editable,
 }: {
   spec: TunableSpec;
   cfg: PlanningConfig;
   warning: string | null;
+  editable: boolean;
 }) {
   const value = cfg[spec.field] as number;
   const def = DEFAULT_PLANNING_CONFIG[spec.field] as number;
@@ -246,6 +266,7 @@ function TunableRow({
   const dirty = value !== def;
 
   const onChange = (next: number) => {
+    if (!editable) return;
     if (Number.isNaN(next)) return;
     const clamped = Math.min(spec.max, Math.max(minActive, next));
     configStore.set(spec.field, clamped as PlanningConfig[typeof spec.field]);
@@ -274,6 +295,7 @@ function TunableRow({
           max={spec.max}
           step={spec.step}
           value={value}
+          disabled={!editable}
           onPointerDown={startRadiusPreview}
           onChange={(e) => onChange(Number(e.target.value))}
           className="debug-config-tunable-slider"
@@ -285,11 +307,12 @@ function TunableRow({
           max={spec.max}
           step={spec.step}
           value={value}
+          disabled={!editable}
           onChange={(e) => onChange(Number(e.target.value))}
           className="debug-config-input"
           aria-label={`${spec.label} value`}
         />
-        {dirty ? (
+        {editable && dirty ? (
           <button
             type="button"
             className="debug-config-reset"
@@ -315,7 +338,12 @@ function TunableRow({
   );
 }
 
-export function ConfigTab() {
+export function ConfigTab({
+  editable = import.meta.env.DEV,
+}: {
+  /** Whether the knobs accept edits. Defaults to dev-build-only. */
+  editable?: boolean;
+} = {}) {
   const cfg = usePlanningConfig();
   // Lane offsets default to collapsed — they're a structural knob most
   // users should not be tweaking; surface a warning above them when
@@ -343,10 +371,23 @@ export function ConfigTab() {
     <>
       <div className="debug-section">
         <div className="debug-title">Planning Config</div>
-        <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
-          Live tunables. Each change replans on the next frame and
-          persists to localStorage.
-        </div>
+        {editable ? (
+          <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
+            Live tunables. Each change replans on the next frame and
+            persists to localStorage.
+          </div>
+        ) : (
+          <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }} role="note">
+            Read-only in this build: live planner values shown for
+            inspection; editing is a dev-build capability. Reset all
+            still works, clearing any persisted knobs.
+          </div>
+        )}
+        {/* Reset-all stays enabled in EVERY build (only individual knob
+            edits are dev-gated): knobs persisted by an earlier session
+            still steer the planner in prod, and moving toward defaults
+            is a safety valve — without it the only recovery from stale
+            persisted knobs would be a manual localStorage wipe. */}
         <button
           type="button"
           onClick={() => configStore.reset()}
@@ -365,6 +406,7 @@ export function ConfigTab() {
             spec={spec}
             cfg={cfg}
             warning={warningFor(spec.field)}
+            editable={editable}
           />
         ))}
       </div>
@@ -377,6 +419,7 @@ export function ConfigTab() {
             spec={spec}
             cfg={cfg}
             warning={warningFor(spec.field)}
+            editable={editable}
           />
         ))}
       </div>
@@ -386,13 +429,14 @@ export function ConfigTab() {
         <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
           Render radius is a visible-view multiplier; max disables radius filtering.
         </div>
-        <CoarseDetailToggle cfg={cfg} />
+        <CoarseDetailToggle cfg={cfg} editable={editable} />
         {RESIDENCY_BUDGETS.map((spec) => (
           <TunableRow
             key={spec.field}
             spec={spec}
             cfg={cfg}
             warning={warningFor(spec.field)}
+            editable={editable}
           />
         ))}
       </div>
@@ -423,6 +467,7 @@ export function ConfigTab() {
                 spec={spec}
                 cfg={cfg}
                 warning={warningFor(spec.field)}
+                editable={editable}
               />
             ))}
           </div>

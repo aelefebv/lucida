@@ -56,6 +56,7 @@ export {
   ConsecutiveTickDetector,
 } from "./telemetry/sustained.ts";
 export { UploadTelemetry } from "./telemetry/upload.ts";
+export { orchTelemetryActive } from "./telemetry/active.ts";
 export {
   ColdStateTelemetry,
   type ColdStateCauseKey,

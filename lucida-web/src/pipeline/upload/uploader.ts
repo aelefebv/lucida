@@ -42,6 +42,7 @@ import {
 import { WorkerResourceTracker } from "./delivery/resources.ts";
 import { UploadTelemetry } from "./telemetry/upload.ts";
 import { ColdStateTelemetry } from "./telemetry/coldState.ts";
+import { orchTelemetryActive } from "./telemetry/active.ts";
 
 export class Uploader {
   private readonly workerFeedback = new WorkerFeedback();
@@ -150,7 +151,13 @@ export class Uploader {
     };
     const manifestByImage = buildManifestByImage(ctx.datasets);
 
+    // Rolling-window/anomaly telemetry only aggregates while someone can
+    // see it (panel open or `orch` log category on); the send loop below
+    // is unaffected either way. Sampled once per tick so recordEvent and
+    // publish agree within the tick.
+    const telemetryActive = orchTelemetryActive();
     const recordUpload = (bytes: number, kind: "chunk" | "proxy"): void => {
+      if (!telemetryActive) return;
       this.uploadTelemetry.recordEvent(tickStart, bytes, false, kind);
     };
 
@@ -203,7 +210,9 @@ export class Uploader {
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
-    this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
+    if (telemetryActive) {
+      this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
+    }
 
     return sentAny || budgetExhausted;
   }

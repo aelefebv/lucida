@@ -5,7 +5,7 @@ description: "Cross-process conventions for debug logging."
 tags: [lucida, decision]
 source_path: wiki/decisions/0012-logging-conventions.md
 created: 2026-04-20
-modified: 2026-07-03
+modified: 2026-07-04
 ---
 
 # Logging Conventions
@@ -44,7 +44,8 @@ When in doubt: **the prefix should be the most useful word to grep for.** If you
 - **`localStorage.debug` gating is per-browser-profile.** Fine for solo debugging; for shared bug repros, narrate the toggle explicitly.
 - **Event names are not enforced.** The dot-scope naming is convention, not type-checked. Reviewers should flag drift.
 - **DebugPanel toggle has a bootstrap gap.** Events that fire before the panel mounts (initial WS connect, first frame) aren't captured by a freshly-flicked toggle. Workaround: enable, reload, then capture the next session.
-- **WASM logger holds its own copy of the enabled set.** WASM can't read `localStorage` directly. JS pushes via `set_debug_categories(csv)` on init (in `useWasmScene`) and on every panel toggle (via `onDebugCategoriesChanged`). Out-of-band changes to `localStorage` (e.g., DevTools console without reload) only update the JS-side gate; WASM stays stale until JS calls the setter.
+- **The JS gate is cached, not read per call.** `logging.ts` reads `localStorage.debug` once at module init and on refresh events; `isDebugEnabled` is an in-memory Set lookup (it sits on the bridge/cache/render hot paths, so a per-call `localStorage.getItem` is not acceptable). The cache refreshes via `setDebugEnabled` (panel toggles) and the cross-tab `storage` event. Consequence: a same-tab out-of-band `localStorage.debug` write (DevTools console) updates **neither** the JS gate nor WASM until `refreshDebugCategories()` runs or the page reloads.
+- **WASM logger holds its own copy of the enabled set.** WASM can't read `localStorage` directly. JS pushes via `set_debug_categories(csv)` on init (in `useWasmScene`) and on every category-set change (via `onDebugCategoriesChanged`, which also fires on the refresh paths above).
 
 ## How this decision shows up in code
 

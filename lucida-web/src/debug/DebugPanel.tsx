@@ -29,6 +29,14 @@ import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
 
+/**
+ * The Cache tab's budget/fetch-limit inputs write live CpuCache config
+ * (`cpuCache.updateConfig`). Like the planning knobs in ConfigTab, that
+ * is a dev-build control surface; production builds render the values
+ * read-only so the panel inspects without steering the fetch pipeline.
+ */
+const CACHE_CONFIG_EDITABLE: boolean = import.meta.env.DEV;
+
 /** Short label for an EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
   switch (mode) {
@@ -1112,13 +1120,21 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 {/* Config */}
                 <div className="debug-section">
                   <div className="debug-title">Config</div>
+                  {!CACHE_CONFIG_EDITABLE && (
+                    <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }} role="note">
+                      Read-only in this build: live cache budgets shown for
+                      inspection; editing is a dev-build capability.
+                    </div>
+                  )}
                   <div className="debug-config-row">
                     <span>Main budget (MB)</span>
                     <input
                       className="debug-config-input"
                       type="number"
                       value={Math.round(cacheTelemetry.mainBudget / (1024 * 1024))}
+                      disabled={!CACHE_CONFIG_EDITABLE}
                       onChange={e => {
+                        if (!CACHE_CONFIG_EDITABLE) return;
                         const mb = Number(e.target.value);
                         if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ mainBudgetBytes: mb * 1024 * 1024 });
                       }}
@@ -1130,7 +1146,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       className="debug-config-input"
                       type="number"
                       value={Math.round(cacheTelemetry.overviewBudget / (1024 * 1024))}
+                      disabled={!CACHE_CONFIG_EDITABLE}
                       onChange={e => {
+                        if (!CACHE_CONFIG_EDITABLE) return;
                         const mb = Number(e.target.value);
                         if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ overviewBudgetBytes: mb * 1024 * 1024 });
                       }}
@@ -1142,7 +1160,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       className="debug-config-input"
                       type="number"
                       value={cacheTelemetry.maxConcurrentFetches}
+                      disabled={!CACHE_CONFIG_EDITABLE}
                       onChange={e => {
+                        if (!CACHE_CONFIG_EDITABLE) return;
                         const v = Number(e.target.value);
                         if (v > 0) sessionRef?.current?.cpuCache.updateConfig({ maxConcurrentFetches: v });
                       }}
@@ -1154,7 +1174,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       className="debug-config-input"
                       type="number"
                       value={Math.round(cacheTelemetry.maxBytesInFlight / (1024 * 1024))}
+                      disabled={!CACHE_CONFIG_EDITABLE}
                       onChange={e => {
+                        if (!CACHE_CONFIG_EDITABLE) return;
                         const mb = Number(e.target.value);
                         if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ maxBytesInFlight: mb * 1024 * 1024 });
                       }}

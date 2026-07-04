@@ -45,6 +45,7 @@ import {
   type OrchDebug,
 } from "../debug/debugStats.ts";
 import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
+import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
 import type { Uploader } from "./upload/uploader.ts";
 
@@ -254,7 +255,11 @@ export class TickCoordinator {
     }
 
     if (isHit) {
-      this.uploader.coldStateTelemetry.recordHit(tickStart);
+      // Cold-state window telemetry aggregates only while someone can
+      // observe it — the panel (debugStats) or the `orch` log category.
+      if (orchTelemetryActive()) {
+        this.uploader.coldStateTelemetry.recordHit(tickStart);
+      }
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
         debugStats.orch.coldState = this.uploader.coldStateTelemetry.publish();
@@ -653,11 +658,15 @@ export class TickCoordinator {
     }
 
     // Record cause + duration after step 4 so the OrchDebug published
-    // this tick reflects this rebuild.
-    const tickEnd = performance.now();
-    this.uploader.coldStateTelemetry.recordRebuild(
-      tickStart, causes, tickEnd - tickStart,
-    );
+    // this tick reflects this rebuild. Gated like recordHit above: the
+    // rebuild window, cause attribution, and churn detector only run
+    // while observable.
+    if (orchTelemetryActive()) {
+      const tickEnd = performance.now();
+      this.uploader.coldStateTelemetry.recordRebuild(
+        tickStart, causes, tickEnd - tickStart,
+      );
+    }
     if (debugStats.enabled && debugStats.orch) {
       debugStats.orch.coldState = this.uploader.coldStateTelemetry.publish();
     }

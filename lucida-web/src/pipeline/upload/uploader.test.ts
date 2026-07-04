@@ -372,6 +372,26 @@ describe("Uploader unified delivery", () => {
     ]);
   });
 
+  it("skips telemetry aggregation when neither the panel nor the orch category is on", () => {
+    // debugStats.enabled=false + no `orch` log category (node env has no
+    // localStorage, so no categories) → orchTelemetryActive() is false.
+    scopedDebugStats.enabled = false;
+    const chunk = makeChunkDelivery();
+    const cpuCache = makeCpuCache([chunk]);
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+
+    const ret = new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    // The send loop itself is unaffected by the telemetry gate.
+    expect(sliceChunkData).toHaveBeenCalledTimes(1);
+    expect(cpuCache.markSent).toHaveBeenCalledTimes(1);
+    expect(ret).toBe(true);
+    // No rolling-window aggregation was published.
+    expect(scopedDebugStats.upload.tick).toBeNull();
+    expect(scopedDebugStats.upload.rolling).toBeNull();
+  });
+
   it("tracks worker member ids for lifecycle cleanup without using delivery state", () => {
     const cpuCache = makeCpuCache([makeChunkDelivery({ c: 2 })]);
     const sliceChunkData = vi.fn();

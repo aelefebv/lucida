@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
@@ -35,9 +35,8 @@ import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
-import { DebugPanel } from "./debug/DebugPanel.tsx";
-import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
+import { DEBUG_OVERLAYS, isOverlayEnabled, onOverlaysChanged } from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -63,6 +62,20 @@ import {
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import "./App.css";
+
+// The debug UI (side panel + on-canvas overlay layer) is code-split into
+// its own on-demand chunk: the panel loads on the first Debug-button
+// click, the overlay layer only when an overlay toggle is persisted on
+// (or the panel is open). A session that never opens either never
+// downloads the code — the main bundle keeps only the tiny gate/stat
+// modules (debug/logging.ts, debug/debugStats.ts) that production code
+// paths already share.
+const DebugPanel = lazy(() =>
+  import("./debug/DebugPanel.tsx").then((m) => ({ default: m.DebugPanel })),
+);
+const DebugOverlays = lazy(() =>
+  import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
+);
 
 interface AppProps {
   workspaceId: string;
@@ -795,8 +808,14 @@ function App({
   // Expose the tickCoordinator + cpuCache on `window.__orch` (also
   // aliased as `__lucidaOrch`) so the dev console can call
   // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to
-  // verify the proxy fetch wire flow.
+  // verify the proxy fetch wire flow. Dev builds only: requestTestProxy
+  // issues real fetches, so production gets no such hook. (The
+  // load-bearing capture globals — `__lucidaCaptureReady` published by
+  // renderLoop.ts, `__lucidaAutoContrast` by useIntensityBatcher.ts —
+  // are a separate contract and stay present in every build; the CLI
+  // capture path and the tryout harness read them.)
   useEffect(() => {
+    if (!import.meta.env.DEV) return;
     const loop = render.activeLoop;
     const cache = bridge.sessionRef.current?.cpuCache;
     if (!loop || !cache) return;
@@ -943,6 +962,17 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  // Whether any on-canvas debug overlay is toggled on (persisted in
+  // localStorage `debug.overlays`, independent of the panel). Drives the
+  // mount of the code-split DebugOverlays layer: with every overlay off
+  // and the panel closed there is nothing it could draw, so the chunk
+  // isn't fetched. The panel being open also mounts it — the Config
+  // tab's radius-slider drag previews render through the overlay layer.
+  const anyOverlayEnabled = useSyncExternalStore(
+    onOverlaysChanged,
+    () => DEBUG_OVERLAYS.some((o) => isOverlayEnabled(o)),
+    () => false,
+  );
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   // Default the Explore panel OPEN on a fresh dataset open so a first-timer finds
   // the guided-exploration affordance — but stay CLOSED when the page loads into a
@@ -1398,14 +1428,18 @@ function App({
             {render.clientReady && render.clientRef.current && (
               <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
             )}
-            <DebugOverlays
-              wasmSceneRef={scene.wasmSceneRef}
-              canvasRef={render.canvasRef}
-              datasets={datasetsRef.current}
-              renderLoopRef={render.loopRef}
-              cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
-              viewMode={dims.viewMode}
-            />
+            {(showDebug || anyOverlayEnabled) && (
+              <Suspense fallback={null}>
+                <DebugOverlays
+                  wasmSceneRef={scene.wasmSceneRef}
+                  canvasRef={render.canvasRef}
+                  datasets={datasetsRef.current}
+                  renderLoopRef={render.loopRef}
+                  cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
+                  viewMode={dims.viewMode}
+                />
+              </Suspense>
+            )}
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Non-blocking graceful-degrade notice from the LIGHT annotation
@@ -1489,15 +1523,17 @@ function App({
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
           </div>
           {showDebug && (
-            <DebugPanel
-              wasmSceneRef={scene.wasmSceneRef}
-              datasetId={selectedDatasetId}
-              lastClickScreen={lastClickScreen}
-              datasets={datasetsRef.current}
-              sessionRef={bridge.sessionRef}
-              renderLoopRef={render.loopRef}
-              style={{ height: layout.canvasHeight }}
-            />
+            <Suspense fallback={null}>
+              <DebugPanel
+                wasmSceneRef={scene.wasmSceneRef}
+                datasetId={selectedDatasetId}
+                lastClickScreen={lastClickScreen}
+                datasets={datasetsRef.current}
+                sessionRef={bridge.sessionRef}
+                renderLoopRef={render.loopRef}
+                style={{ height: layout.canvasHeight }}
+              />
+            </Suspense>
           )}
         </div>
         {datasetsVersion > 0 && (
