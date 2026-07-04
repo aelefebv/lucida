@@ -20,7 +20,6 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
-use crate::handler;
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -1080,7 +1079,7 @@ impl WorkspaceManager {
             dataset_sources = sources.len(),
             "workspace.live_restore_started"
         );
-        handler::restore_workspace_bindings(
+        crate::binding_restore::restore_workspace_bindings(
             Arc::clone(&live.session),
             live.tx.clone(),
             sources,
@@ -1332,6 +1331,64 @@ impl WorkspaceManager {
         Ok((seq, command))
     }
 
+    /// Apply a client-issued document command to the live workspace: editor
+    /// gate first, then apply to the shared session, then persist. Together
+    /// with [`Self::rename_dataset`] (which adds validation and DB
+    /// display-name sync on top of the same editor gate) this is the single
+    /// authorization + persistence path for workspace-scoped document
+    /// commands — the WS handler only translates the returned
+    /// `(seq, command)` or [`CommandApplyError`] into wire traffic, it
+    /// holds no policy.
+    ///
+    /// The error is split by phase (see [`CommandApplyError`]): a role that
+    /// denies is `Forbidden`, a role lookup that *errors* is
+    /// `GateUnavailable` (transient store failure is not an authorization
+    /// verdict), and `PersistFailed` means the command HAS already been
+    /// applied to the in-memory session (the seq advanced) — the caller
+    /// must not broadcast it, so peers converge again from the next
+    /// snapshot.
+    pub async fn apply_document_command(
+        &self,
+        live: &LiveWorkspace,
+        principal: &AuthPrincipal,
+        command: DocumentCommand,
+    ) -> Result<(u64, DocumentCommand), CommandApplyError> {
+        match self.require_editor(&live.workspace_id, principal).await {
+            Ok(_) => {}
+            Err(WorkspaceError::Store(e)) => return Err(CommandApplyError::GateUnavailable(e)),
+            Err(_) => return Err(CommandApplyError::Forbidden),
+        }
+        let (seq, document) = {
+            let mut sess = live.session.lock().await;
+            let seq = sess.apply(command.clone());
+            (seq, sess.document.clone())
+        };
+        self.persist_applied_command(live, &command, seq, &document)
+            .await
+            .map_err(CommandApplyError::PersistFailed)?;
+        Ok((seq, command))
+    }
+
+    /// Resolve the persisted source for a dataset-retry request: editor
+    /// gate first (retrying rebuilds server bindings — the same authority
+    /// as opening the dataset), then the membership lookup. `Ok(None)`
+    /// means the workspace has no such dataset row.
+    ///
+    /// A role lookup that *errors* surfaces as `WorkspaceError::Store`,
+    /// deliberately distinct from `Forbidden`: transient store failure is
+    /// not an authorization verdict, so transports report it as retryable
+    /// lookup trouble rather than a denial.
+    pub async fn dataset_source_for_retry(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        workspace_dataset_id: &DatasetId,
+    ) -> Result<Option<WorkspaceDatasetSource>, WorkspaceError> {
+        self.require_editor(workspace_id, principal).await?;
+        self.dataset_by_workspace_dataset(workspace_id, workspace_dataset_id)
+            .await
+    }
+
     async fn current_sharing_settings(
         &self,
         workspace_id: &str,
@@ -1527,6 +1584,27 @@ pub enum WorkspaceError {
     BadRequest(String),
     #[error("{0}")]
     Store(StoreError),
+}
+
+/// Failure modes of [`WorkspaceManager::apply_document_command`], split by
+/// phase so the transport can report each one truthfully instead of
+/// collapsing them into a single verdict.
+#[derive(Debug, Error)]
+pub enum CommandApplyError {
+    /// The principal's role denies the command. Nothing was applied.
+    #[error("forbidden")]
+    Forbidden,
+    /// The editor gate could not be evaluated: the role lookup itself
+    /// failed. Nothing was applied. A transient store failure is not an
+    /// authorization denial — callers should surface it as retryable
+    /// infrastructure trouble, never as a permissions verdict.
+    #[error("workspace role lookup failed: {0}")]
+    GateUnavailable(StoreError),
+    /// The command WAS applied to the in-memory session (the seq advanced)
+    /// but persistence failed. The caller must not broadcast it, so peers
+    /// converge again from the next snapshot.
+    #[error("{0}")]
+    PersistFailed(WorkspaceError),
 }
 
 impl WorkspaceError {

@@ -5,7 +5,7 @@ description: "lucida-store's import_dataset produces an ImportResult with three 
 tags: [lucida, decision]
 source_path: wiki/decisions/0005-three-output-import-model.md
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-07-03
 ---
 
 # Three-Output Import Model
@@ -37,7 +37,7 @@ The three-output split is a single responsibility per output: manifest = "what i
 ## How this decision shows up in code
 
 - `lucida-store/src/import.rs::import_dataset` returns `ImportResult { manifest, fetch, binding_seed }`.
-- `lucida-server/src/handler.rs::handle_open_remote_dataset` builds `DatasetOpened { manifest, fetch, catalog }` from the manifest and fetch (server adds the catalog from the manifest's entity list); it builds a `ChunkResolver` from the binding seed and stores it in `ServerBinding`.
+- `lucida-server/src/dataset_open.rs::open_dataset` builds `DatasetOpened { manifest, fetch, catalog }` from the manifest and fetch (server adds the catalog from the manifest's entity list); it builds a `ChunkResolver` from the binding seed and stores it in `ServerBinding`.
 - `lucida-protocol/src/register.rs::DatasetOpened` is the wire shape — manifest + fetch + catalog only, no binding seed.
 
 ## Renaming history

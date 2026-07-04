@@ -488,3 +488,200 @@ async fn live_workspace_sessions_are_independent() {
 // RED TEAM (#817 issue-sweep): probe the new transition allow-list and
 // the surrounding never-leak / self-approve invariants.
 // ===================================================================
+
+// --- Manager-layer command authorization ---------------------------
+
+// Generic document commands are authorized (and persisted) by the
+// manager, mirroring `rename_dataset`: the WS handler holds no role
+// checks, so a gate that only lived there would be bypassable by any
+// new transport. These tests drive the manager API directly to prove
+// the gate bites without any websocket.
+
+#[tokio::test]
+async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+    let viewer = principal("viewer@example.com", false);
+    manager
+        .upsert_member(
+            &workspace_id,
+            &owner,
+            &viewer.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+    // A viewer cannot apply a document command — Forbidden (role-first).
+    let err = manager
+        .apply_document_command(
+            &live,
+            &viewer,
+            DocumentCommand::RemoveDataset { id: wds_id.clone() },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CommandApplyError::Forbidden));
+
+    // A non-member is denied identically, so membership never leaks.
+    let stranger = principal("stranger@example.com", false);
+    let err = manager
+        .apply_document_command(
+            &live,
+            &stranger,
+            DocumentCommand::RemoveDataset { id: wds_id.clone() },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CommandApplyError::Forbidden));
+
+    // Denied commands touched nothing: dataset still present, seq unmoved.
+    {
+        let sess = live.session.lock().await;
+        assert!(sess.document.manifests.contains_key(&wds_id));
+        assert_eq!(sess.seq, 1);
+    }
+
+    // The owner's command applies AND persists (RemoveDataset routes
+    // through the membership-row removal path).
+    let (seq, applied) = manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RemoveDataset { id: wds_id.clone() },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seq, 2);
+    assert!(matches!(applied, DocumentCommand::RemoveDataset { .. }));
+    assert!(
+        !live
+            .session
+            .lock()
+            .await
+            .document
+            .manifests
+            .contains_key(&wds_id)
+    );
+    let persisted = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(persisted.seq, 2);
+    assert!(!persisted.document.manifests.contains_key(&wds_id));
+    assert!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &wds_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "RemoveDataset must also drop the workspace_datasets row"
+    );
+}
+
+#[tokio::test]
+async fn dataset_source_for_retry_is_editor_gated() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+
+    let viewer = principal("viewer@example.com", false);
+    manager
+        .upsert_member(
+            &workspace_id,
+            &owner,
+            &viewer.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    // Viewer and non-member are denied before any row is read.
+    let err = manager
+        .dataset_source_for_retry(&workspace_id, &viewer, &wds_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::Forbidden));
+    let stranger = principal("stranger@example.com", false);
+    let err = manager
+        .dataset_source_for_retry(&workspace_id, &stranger, &wds_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::Forbidden));
+
+    // An editor-capable principal resolves the persisted source…
+    let source = manager
+        .dataset_source_for_retry(&workspace_id, &owner, &wds_id)
+        .await
+        .unwrap()
+        .expect("seeded dataset source must resolve");
+    assert_eq!(source.workspace_dataset_id, wds_id);
+    assert_eq!(source.canonical_url, "file:///data/original.zarr");
+
+    // …and an unknown dataset id resolves to None (not an error).
+    assert!(
+        manager
+            .dataset_source_for_retry(&workspace_id, &owner, &DatasetId("wds_missing".into()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The editor gate's two failure modes must never be conflated: a role
+/// that DENIES is an authorization verdict, but a role lookup that
+/// ERRORS is transient store trouble — no verdict was reached. Closing
+/// the sqlite pool makes every subsequent query fail, so both manager
+/// entry points can be driven against a genuinely failing store.
+#[tokio::test]
+async fn gate_store_failure_is_infrastructure_not_an_authorization_verdict() {
+    let (store, pool) = fresh_store_with_pool().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+
+    // Kill the store: role lookups (and everything else) now error.
+    pool.close().await;
+
+    // Command apply: reported as GateUnavailable — NOT Forbidden (no
+    // verdict was reached) and NOT PersistFailed (nothing was applied).
+    let err = manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RemoveDataset { id: wds_id.clone() },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, CommandApplyError::GateUnavailable(_)),
+        "expected GateUnavailable, got: {err:?}"
+    );
+    {
+        let sess = live.session.lock().await;
+        assert!(
+            sess.document.manifests.contains_key(&wds_id),
+            "a gate store failure must not mutate the document"
+        );
+        assert_eq!(sess.seq, 1, "seq must not advance");
+    }
+
+    // Retry lookup: surfaces as a Store error, distinct from Forbidden,
+    // so the transport maps it to the retryable lookup diagnostic (pinned
+    // in the handler's `dataset_retry_failure_diagnostic` tests) rather
+    // than an authorization denial.
+    let err = manager
+        .dataset_source_for_retry(&workspace_id, &owner, &wds_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, WorkspaceError::Store(_)),
+        "expected Store, got: {err:?}"
+    );
+}

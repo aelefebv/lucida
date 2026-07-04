@@ -37,7 +37,9 @@ pub use http::{
     UpdateWorkspacePinRequest, UpdateWorkspaceSavedViewRequest, UpsertMemberRequest,
     UpsertWorkspaceViewerProfileRequest, WorkspaceResponse, WorkspacesState, router,
 };
-pub use manager::{LiveWorkspace, WorkspaceError, WorkspaceManager, WorkspaceRuntimeConfig};
+pub use manager::{
+    CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager, WorkspaceRuntimeConfig,
+};
 pub use store::{SqliteWorkspaceStore, StoreError, WorkspaceStore};
 pub use types::{
     SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,

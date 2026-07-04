@@ -5,7 +5,7 @@ description: "Cross-process conventions for debug logging."
 tags: [lucida, decision]
 source_path: wiki/decisions/0012-logging-conventions.md
 created: 2026-04-20
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Logging Conventions
@@ -55,7 +55,7 @@ When in doubt: **the prefix should be the most useful word to grep for.** If you
 - `lucida-web/src/debug/DebugPanel.tsx` — "Logging" tab UI over `localStorage.debug`.
 - `lucida-core/src/wasm_log.rs` — WASM `set_categories` / `is_enabled` / `log_raw` / `wasm_log!` macro.
 - `lucida-core/src/wasm.rs::set_debug_categories` — wasm-bindgen entry point JS calls.
-- `lucida-server/src/handler.rs::handle_open_remote_dataset` — first instrumented handler.
+- `lucida-server/src/dataset_open.rs::open_dataset` (the `dataset_open` span) — first instrumented handler.
 - `lucida-server/src/main.rs` — subscriber configured with `FmtSpan::CLOSE` for free per-span timing.
 - See [Flow: Dataset Opening](../flows/dataset-opening.md) for the trace where this convention is in force.
 

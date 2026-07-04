@@ -2,44 +2,34 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use lucida_content::url::{
-    dataset_id_for_url, dataset_url_hash16, is_local_dataset_url, normalize_dataset_url,
-};
-use lucida_content::{DatasetId, DatasetManifest, EntityId, EntityKind, ImageId};
+use lucida_content::url::normalize_dataset_url;
+use lucida_content::{DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, PeerIdentity, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
+    AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
     DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
-    DatasetSourceHealth, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot,
-    GeneratedChunkStatus, ProxyAvailability, ProxyFootprint,
+    DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
 };
-use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec, estimate_proxy_dims};
+use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use crate::binding::{ChunkResolver, ServerBinding};
+use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
 use crate::decode::decode_storage_bytes;
 use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
-    GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
-    plan_generated_coarse_for_manifest,
+    GeneratedCoarseService,
 };
-use crate::proxy::{ProxyCache, ProxyGenerator};
+use crate::open_diagnostics::{backend_kind_for_url, is_not_found, open_failure, open_progress};
+use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
-use crate::workspace::{LiveWorkspace, WorkspaceDatasetSource, WorkspaceManager};
+use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
-
-#[derive(Clone)]
-struct WorkspaceClientContext {
-    live: Arc<LiveWorkspace>,
-    manager: Arc<WorkspaceManager>,
-    principal: AuthPrincipal,
-}
 
 pub async fn handle_workspace_client(
     id: ClientId,
@@ -59,199 +49,13 @@ pub async fn handle_workspace_client(
         tx,
         unicast_routes,
         proxy_config,
-        Some(WorkspaceClientContext {
+        Some(WorkspaceScope {
             live,
             manager,
             principal,
         }),
     )
     .await;
-}
-
-/// Rebuild server-private dataset bindings for a lazily restored workspace.
-///
-/// The durable workspace document stores client-facing dataset state, but
-/// operational chunk/proxy/generated services are intentionally not part of
-/// `DocumentState`. On first open after a server restart, rebuild those
-/// bindings from the structured `workspace_datasets → dataset_sources`
-/// records before the first snapshot goes out.
-pub async fn restore_workspace_bindings(
-    session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
-    sources: Vec<WorkspaceDatasetSource>,
-    proxy_config: ProxyConfig,
-) {
-    for source in sources {
-        {
-            let mut sess = session.lock().await;
-            if sess
-                .server_bindings
-                .contains_key(&source.workspace_dataset_id)
-            {
-                continue;
-            }
-            sess.record_binding_source(
-                source.workspace_dataset_id.clone(),
-                normalize_dataset_url(&source.canonical_url),
-                Some(source.dataset_source_id.clone()),
-                source.display_name.clone(),
-            );
-        }
-        if let Err(e) =
-            restore_one_workspace_binding(Arc::clone(&session), tx.clone(), &source, &proxy_config)
-                .await
-        {
-            {
-                let mut sess = session.lock().await;
-                sess.record_binding_restore_failure(
-                    source.workspace_dataset_id.clone(),
-                    normalize_dataset_url(&source.canonical_url),
-                    Some(source.dataset_source_id.clone()),
-                    source.display_name.clone(),
-                    e.clone(),
-                );
-            }
-            tracing::warn!(
-                dataset_id = %source.workspace_dataset_id,
-                dataset_source_id = %source.dataset_source_id,
-                url = %source.canonical_url,
-                error = %e.message,
-                stage = ?e.stage,
-                kind = ?e.kind,
-                retryable = e.retryable,
-                "workspace.binding_restore_failed"
-            );
-        }
-    }
-}
-
-async fn restore_one_workspace_binding(
-    session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
-    source: &WorkspaceDatasetSource,
-    proxy_config: &ProxyConfig,
-) -> Result<(), DatasetOpenFailureDiagnostic> {
-    let canonical_url = normalize_dataset_url(&source.canonical_url);
-    let dataset_id = source.workspace_dataset_id.0.clone();
-    let dataset_id_key = DatasetId(dataset_id.clone());
-
-    let store =
-        lucida_store::backend::open(&canonical_url).map_err(|e| backend_open_failure(&e))?;
-    let result = lucida_store::import::import_dataset(&store, &dataset_id, &source.display_name)
-        .await
-        .map_err(|e| import_failure(&e))?;
-
-    let catalog_entries =
-        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
-    let dataset_opened = DatasetOpened {
-        manifest: result.manifest.clone(),
-        fetch: result.fetch,
-        catalog: AssetCatalog {
-            entries: catalog_entries.clone(),
-        },
-        // Server-side workspace restore has no originating client, so no peer
-        // should auto-fit off this broadcast.
-        opener_client_id: None,
-    };
-
-    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
-    let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
-    let generated_config = GeneratedCoarseConfig {
-        target_long_axis: proxy_config.generated_target_long_axis,
-        chunk_long_axis: proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
-    };
-    let generated_plans = if proxy_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
-    } else {
-        vec![]
-    };
-
-    let url_hash16 = dataset_url_hash16(&canonical_url);
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        proxy_config.generated_cache_dir.clone(),
-        url_hash16,
-        proxy_config.generated_disk_budget_bytes,
-    ));
-    let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
-    for plan in &generated_plans {
-        match derived_chunks.register_generated_plan(plan) {
-            Ok(delta) => {
-                generated_initial_delta.levels.extend(delta.levels);
-                generated_initial_delta.chunks.extend(delta.chunks);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    dataset_id = %dataset_id,
-                    image = %plan.image_id.0,
-                    error = %e,
-                    "workspace.binding_restore.generated_registration_failed"
-                );
-                derived_chunks.upsert_level(plan.availability.clone());
-                generated_initial_delta
-                    .levels
-                    .push(plan.availability.clone());
-            }
-        }
-    }
-    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
-    let generated_service = Arc::new(GeneratedCoarseService::new(
-        generated_plans.clone(),
-        Arc::new(result.manifest.clone()),
-        cached.clone(),
-        resolver.clone(),
-        derived_chunks.clone(),
-        Arc::clone(&session),
-        tx,
-        GeneratedSchedulingConfig {
-            concurrency: proxy_config.generated_concurrency,
-            background_chunk_limit: proxy_config.generated_background_chunk_limit,
-            ..GeneratedSchedulingConfig::default()
-        },
-    ));
-    generated_service.start();
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cached.clone(),
-        resolver.clone(),
-        Arc::new(result.manifest),
-        proxy_config.concurrency,
-    ));
-
-    let binding = ServerBinding {
-        source_url: canonical_url.clone(),
-        store,
-        resolver,
-        cache: cached,
-        dataset_opened,
-        derived_chunks,
-        generated_service: generated_service.clone(),
-        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
-        proxy_cache,
-        proxy_generator,
-    };
-
-    {
-        let mut sess = session.lock().await;
-        sess.record_binding_source(
-            dataset_id_key.clone(),
-            canonical_url,
-            Some(source.dataset_source_id.clone()),
-            source.display_name.clone(),
-        );
-        sess.clear_binding_restore_failure(&dataset_id_key);
-        if !generated_initial_delta.levels.is_empty() {
-            sess.apply_generated_availability_delta(
-                dataset_id_key.clone(),
-                generated_initial_delta.clone(),
-            );
-        }
-        sess.server_bindings.insert(dataset_id_key, binding);
-    }
-    if !generated_plans.is_empty() {
-        generated_service.enqueue_background_fill().await;
-    }
-    Ok(())
 }
 
 pub async fn handle_client(
@@ -265,6 +69,24 @@ pub async fn handle_client(
     handle_client_inner(id, ws, session, tx, unicast_routes, proxy_config, None).await;
 }
 
+/// Serialize an applied `(seq, command)` pair into the broadcast/ack
+/// envelope: the sender receives `Ack { seq }`, everyone else the
+/// `CommandBroadcast`.
+fn broadcast_applied_command(
+    tx: &broadcast::Sender<BroadcastItem>,
+    sender: ClientId,
+    seq: u64,
+    command: DocumentCommand,
+) {
+    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
+    let ack_msg = ServerMessage::Ack { seq };
+    let _ = tx.send(BroadcastItem::CommandBroadcast {
+        sender,
+        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+        ack_json: serde_json::to_string(&ack_msg).unwrap(),
+    });
+}
+
 async fn handle_client_inner(
     id: ClientId,
     ws: WebSocket,
@@ -272,7 +94,7 @@ async fn handle_client_inner(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
-    workspace: Option<WorkspaceClientContext>,
+    workspace: Option<WorkspaceScope>,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -418,13 +240,17 @@ async fn handle_client_inner(
                                     );
                                     continue;
                                 }
-                                // A dataset rename has its own authorize +
-                                // validate + exists-check + DB-sync path. Route
-                                // it through `rename_dataset` (which does
-                                // require_editor itself), then broadcast the
-                                // resulting command exactly like the generic
-                                // path below — peers apply it live, and the new
-                                // name is already persisted (document + DB row).
+                                // Workspace command authorization lives in
+                                // WorkspaceManager, not here: a dataset rename
+                                // has its own authorize + validate +
+                                // exists-check + DB-sync path
+                                // (`rename_dataset`); every other document
+                                // command goes through
+                                // `apply_document_command` (editor gate +
+                                // apply + persist). This loop only translates
+                                // the manager's verdict to the wire —
+                                // broadcast the applied command so peers
+                                // apply it live, or drop it with a log line.
                                 if let DocumentCommand::RenameDataset { id: ds_id, name } = &command
                                 {
                                     match ctx
@@ -433,19 +259,7 @@ async fn handle_client_inner(
                                         .await
                                     {
                                         Ok((seq, applied)) => {
-                                            let broadcast_msg = ServerMessage::CommandBroadcast {
-                                                seq,
-                                                command: applied,
-                                            };
-                                            let ack_msg = ServerMessage::Ack { seq };
-                                            let _ = tx.send(BroadcastItem::CommandBroadcast {
-                                                sender: id,
-                                                broadcast_json: serde_json::to_string(
-                                                    &broadcast_msg,
-                                                )
-                                                .unwrap(),
-                                                ack_json: serde_json::to_string(&ack_msg).unwrap(),
-                                            });
+                                            broadcast_applied_command(&tx, id, seq, applied);
                                         }
                                         Err(e) => {
                                             tracing::warn!(
@@ -458,51 +272,57 @@ async fn handle_client_inner(
                                     }
                                     continue;
                                 }
-                                if let Err(e) = ctx
+                                match ctx
                                     .manager
-                                    .require_editor(&ctx.live.workspace_id, &ctx.principal)
+                                    .apply_document_command(&ctx.live, &ctx.principal, command)
                                     .await
                                 {
-                                    tracing::warn!(
-                                        client_id = %id,
-                                        workspace_id = %ctx.live.workspace_id,
-                                        error = %e,
-                                        "workspace.command.forbidden"
-                                    );
-                                    continue;
+                                    Ok((seq, applied)) => {
+                                        broadcast_applied_command(&tx, id, seq, applied);
+                                    }
+                                    Err(e @ CommandApplyError::Forbidden) => {
+                                        tracing::warn!(
+                                            client_id = %id,
+                                            workspace_id = %ctx.live.workspace_id,
+                                            error = %e,
+                                            "workspace.command.forbidden"
+                                        );
+                                    }
+                                    // A role-lookup store failure is not an
+                                    // authorization verdict — no role was
+                                    // read and nothing was applied — so it
+                                    // gets its own event: operators should
+                                    // see infrastructure trouble, not a
+                                    // permissions decision or a persistence
+                                    // fault.
+                                    Err(e @ CommandApplyError::GateUnavailable(_)) => {
+                                        tracing::error!(
+                                            client_id = %id,
+                                            workspace_id = %ctx.live.workspace_id,
+                                            error = %e,
+                                            "workspace.command.authorization_unavailable"
+                                        );
+                                    }
+                                    Err(e @ CommandApplyError::PersistFailed(_)) => {
+                                        tracing::error!(
+                                            client_id = %id,
+                                            workspace_id = %ctx.live.workspace_id,
+                                            error = %e,
+                                            "workspace.command.persist_failed"
+                                        );
+                                    }
                                 }
-                            }
-
-                            let (seq, document) = {
-                                let mut sess = session.lock().await;
-                                let seq = sess.apply(command.clone());
-                                let document = sess.document.clone();
-                                (seq, document)
-                            };
-
-                            if let Some(ctx) = workspace.as_ref()
-                                && let Err(e) = ctx
-                                    .manager
-                                    .persist_applied_command(&ctx.live, &command, seq, &document)
-                                    .await
-                            {
-                                tracing::error!(
-                                    client_id = %id,
-                                    workspace_id = %ctx.live.workspace_id,
-                                    error = %e,
-                                    "workspace.command.persist_failed"
-                                );
                                 continue;
                             }
 
-                            let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-                            let ack_msg = ServerMessage::Ack { seq };
-
-                            let _ = tx.send(BroadcastItem::CommandBroadcast {
-                                sender: id,
-                                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-                                ack_json: serde_json::to_string(&ack_msg).unwrap(),
-                            });
+                            // Non-workspace `/ws` session: this path has no
+                            // workspace authorization by design — apply
+                            // directly; nothing to persist.
+                            let seq = {
+                                let mut sess = session.lock().await;
+                                sess.apply(command.clone())
+                            };
+                            broadcast_applied_command(&tx, id, seq, command);
                         }
                         ClientMessage::Presence {
                             camera,
@@ -639,30 +459,17 @@ async fn handle_client_inner(
                                 .await;
                                 continue;
                             };
-                            if let Err(e) = ctx
-                                .manager
-                                .require_editor(&ctx.live.workspace_id, &ctx.principal)
-                                .await
-                            {
-                                send_open_failed(
-                                    id,
-                                    &request_id,
-                                    dataset_id.as_ref(),
-                                    open_failure(
-                                        DatasetOpenStage::Authorization,
-                                        DatasetOpenFailureKind::Authorization,
-                                        false,
-                                        "workspace role cannot retry dataset bindings",
-                                        Some(e.to_string()),
-                                    ),
-                                    &unicast_routes,
-                                )
-                                .await;
-                                continue;
-                            }
+                            // Authorization is the manager's
+                            // (`dataset_source_for_retry` gates on editor
+                            // before the lookup); here we only translate its
+                            // verdict into the open-failure diagnostics.
                             let source = match ctx
                                 .manager
-                                .dataset_by_workspace_dataset(&ctx.live.workspace_id, &dataset_id)
+                                .dataset_source_for_retry(
+                                    &ctx.live.workspace_id,
+                                    &ctx.principal,
+                                    &dataset_id,
+                                )
                                 .await
                             {
                                 Ok(Some(source)) => source,
@@ -688,13 +495,7 @@ async fn handle_client_inner(
                                         id,
                                         &request_id,
                                         dataset_id.as_ref(),
-                                        open_failure(
-                                            DatasetOpenStage::SourceLookup,
-                                            DatasetOpenFailureKind::WorkspaceLookup,
-                                            true,
-                                            "workspace dataset source lookup failed",
-                                            Some(e.to_string()),
-                                        ),
+                                        dataset_retry_failure_diagnostic(e),
                                         &unicast_routes,
                                     )
                                     .await;
@@ -957,40 +758,6 @@ async fn handle_client_inner(
     }
 
     eprintln!("client {id} disconnected");
-}
-
-// `dataset_id_for_url` and `dataset_url_hash16` live in
-// `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
-// the storage layer, and this handler share one implementation. See
-// `wiki/decisions/0042-canonical-dataset-url-form.md`.
-
-fn new_workspace_dataset_id() -> DatasetId {
-    DatasetId(format!("wds-{}", uuid::Uuid::new_v4().simple()))
-}
-
-fn find_loaded_binding(
-    sess: &Session,
-    dataset_id: &DatasetId,
-    canonical_url: &str,
-    allow_source_url_match: bool,
-) -> Option<(DatasetId, DatasetOpened)> {
-    if sess.document.manifests.contains_key(dataset_id)
-        && let Some(binding) = sess.server_bindings.get(dataset_id)
-    {
-        return Some((dataset_id.clone(), binding.dataset_opened.clone()));
-    }
-
-    if allow_source_url_match {
-        for (existing_id, binding) in &sess.server_bindings {
-            if binding.source_url == canonical_url
-                && sess.document.manifests.contains_key(existing_id)
-            {
-                return Some((existing_id.clone(), binding.dataset_opened.clone()));
-            }
-        }
-    }
-
-    None
 }
 
 fn dataset_health_snapshot(sess: &Session, filter: Option<&DatasetId>) -> Vec<DatasetSourceHealth> {
@@ -1275,154 +1042,29 @@ fn combine_health(
     }
 }
 
-fn backend_kind_for_url(url: &str) -> String {
-    if is_local_dataset_url(url) {
-        "local".to_string()
-    } else if url.starts_with("gs://") {
-        "gcs".to_string()
-    } else if url.starts_with("s3://") {
-        "s3".to_string()
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        "http".to_string()
-    } else {
-        "unknown".to_string()
-    }
-}
-
-fn open_failure(
-    stage: DatasetOpenStage,
-    kind: DatasetOpenFailureKind,
-    retryable: bool,
-    message: impl Into<String>,
-    detail: Option<String>,
-) -> DatasetOpenFailureDiagnostic {
-    DatasetOpenFailureDiagnostic {
-        stage,
-        kind,
-        retryable,
-        message: message.into(),
-        detail,
-    }
-}
-
-fn open_progress(
-    stage: DatasetOpenStage,
-    message: impl Into<String>,
-    workspace_dataset_id: Option<DatasetId>,
-    dataset_source_id: Option<String>,
-    detail: Option<String>,
-) -> DatasetOpenProgressDiagnostic {
-    DatasetOpenProgressDiagnostic {
-        stage,
-        message: message.into(),
-        workspace_dataset_id,
-        dataset_source_id,
-        detail,
-    }
-}
-
-fn backend_open_failure(error: &lucida_store::backend::StoreError) -> DatasetOpenFailureDiagnostic {
-    match error {
-        lucida_store::backend::StoreError::UnsupportedScheme(_) => open_failure(
-            DatasetOpenStage::BackendOpen,
-            DatasetOpenFailureKind::UnsupportedScheme,
+/// Map a [`WorkspaceManager::dataset_source_for_retry`] failure onto the
+/// open-failure diagnostic vocabulary. `Forbidden` is an authorization
+/// verdict and is final (not retryable). Every other failure is a store
+/// error — and that deliberately includes the editor gate's own role
+/// lookup failing: a transient store failure is not an authorization
+/// denial, so it maps to the retryable lookup diagnostic, never to the
+/// Authorization one.
+fn dataset_retry_failure_diagnostic(error: WorkspaceError) -> DatasetOpenFailureDiagnostic {
+    match &error {
+        WorkspaceError::Forbidden => open_failure(
+            DatasetOpenStage::Authorization,
+            DatasetOpenFailureKind::Authorization,
             false,
-            error.to_string(),
-            None,
+            "workspace role cannot retry dataset bindings",
+            Some(error.to_string()),
         ),
-        lucida_store::backend::StoreError::Metadata(message) => {
-            let lower = message.to_ascii_lowercase();
-            let kind = if lower.contains("bucket") || lower.contains("credential") {
-                DatasetOpenFailureKind::CloudConfiguration
-            } else {
-                DatasetOpenFailureKind::MissingMetadata
-            };
-            open_failure(
-                DatasetOpenStage::BackendOpen,
-                kind,
-                false,
-                error.to_string(),
-                None,
-            )
-        }
-        lucida_store::backend::StoreError::ObjectStore(inner) => {
-            let message = inner.to_string();
-            let lower = message.to_ascii_lowercase();
-            let (kind, retryable) = if is_not_found(inner) {
-                (DatasetOpenFailureKind::MissingObject, false)
-            } else if lower.contains("canonical")
-                || lower.contains("no such file")
-                || lower.contains("not a directory")
-            {
-                (DatasetOpenFailureKind::LocalPath, false)
-            } else if lower.contains("permission")
-                || lower.contains("forbidden")
-                || lower.contains("unauthorized")
-                || lower.contains("denied")
-            {
-                (DatasetOpenFailureKind::Permission, false)
-            } else if lower.contains("credential")
-                || lower.contains("token")
-                || lower.contains("region")
-                || lower.contains("bucket")
-            {
-                (DatasetOpenFailureKind::CloudConfiguration, false)
-            } else if lower.contains("http") || lower.contains("status") {
-                (DatasetOpenFailureKind::Http, true)
-            } else {
-                (DatasetOpenFailureKind::StorageBackend, true)
-            };
-            open_failure(
-                DatasetOpenStage::BackendOpen,
-                kind,
-                retryable,
-                format!("storage error: {message}"),
-                None,
-            )
-        }
-    }
-}
-
-fn import_failure(error: &dyn std::fmt::Display) -> DatasetOpenFailureDiagnostic {
-    let message = error.to_string();
-    let lower = message.to_ascii_lowercase();
-    let kind = if lower.contains("codec")
-        || lower.contains("blosc")
-        || lower.contains("cname")
-        || lower.contains("compressor")
-    {
-        DatasetOpenFailureKind::UnsupportedCodec
-    } else if lower.contains("chunk")
-        || lower.contains("axis")
-        || lower.contains("non-prefix")
-        || lower.contains("layout")
-    {
-        DatasetOpenFailureKind::UnsupportedLayout
-    } else if lower.contains("missing") || lower.contains("not found") {
-        DatasetOpenFailureKind::MissingMetadata
-    } else if lower.contains("json")
-        || lower.contains("metadata")
-        || lower.contains("multiscale")
-        || lower.contains("malformed")
-    {
-        DatasetOpenFailureKind::MalformedMetadata
-    } else {
-        DatasetOpenFailureKind::Import
-    };
-    open_failure(DatasetOpenStage::MetadataImport, kind, false, message, None)
-}
-
-fn open_success(
-    url: &str,
-    opened: &DatasetOpened,
-    dataset_source_id: Option<String>,
-) -> DatasetOpenSuccessDiagnostic {
-    DatasetOpenSuccessDiagnostic {
-        stage: DatasetOpenStage::Complete,
-        source_url: url.to_string(),
-        workspace_dataset_id: opened.manifest.dataset_id.clone(),
-        dataset_source_id,
-        message: "dataset opened and broadcast".to_string(),
+        _ => open_failure(
+            DatasetOpenStage::SourceLookup,
+            DatasetOpenFailureKind::WorkspaceLookup,
+            true,
+            "workspace dataset source lookup failed",
+            Some(error.to_string()),
+        ),
     }
 }
 
@@ -1432,23 +1074,12 @@ struct OpenRemoteDatasetRequest {
     url: String,
 }
 
-/// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
-///
-/// The incoming `url` is normalized once at entry via
-/// [`lucida_content::url::normalize_dataset_url`]; every downstream
-/// derivation (`dataset_id_for_url` for source identity,
-/// `dataset_url_hash16` for cache identity, `backend::open`, the
-/// binding's `source_url`, and the name extraction) uses the canonical
-/// form. Workspace clients receive an opaque workspace-local
-/// `DatasetId`; the source-derived id is retained only for membership
-/// dedupe and shared source/cache routing. This makes spelling variants
-/// of the same path dedup to one source — see
-/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
-#[tracing::instrument(
-    name = "dataset_open",
-    skip(session, tx, unicast_routes, proxy_config, workspace),
-    fields(url = %request.url, client_id = %client_id)
-)]
+/// Handle OpenRemoteDataset over the socket: run the headless
+/// [`dataset_open::open_dataset`] orchestration and adapt its per-stage
+/// progress plus terminal success/failure diagnostics onto the requesting
+/// client's unicast channel. All domain behavior — authorization, dedup,
+/// import, binding construction, persistence, broadcast — lives in
+/// [`crate::dataset_open`]; this function only moves messages.
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     request: OpenRemoteDatasetRequest,
@@ -1456,901 +1087,76 @@ async fn handle_open_remote_dataset(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
-    workspace: Option<WorkspaceClientContext>,
+    workspace: Option<WorkspaceScope>,
 ) {
     let OpenRemoteDatasetRequest { request_id, url } = request;
-
-    // Normalize at the input boundary. Drive-letter case, slash
-    // direction, `file://` prefix, UNC backslashes — see ADR-0042.
-    // Idempotent (safe even though `backend::open` will also normalize),
-    // and required *here* because `dataset_id_for_url` /
-    // `dataset_url_hash16` must hash the canonical form for the dedup
-    // short-circuit to fire across spelling variants.
+    // Wire envelopes carry the canonical URL — the same (idempotent)
+    // normalization the orchestration applies at its own entry.
     let canonical_url = normalize_dataset_url(&url);
 
-    // Stable, content-derived source ID. This is intentionally not the
-    // client-facing dataset ID inside a workspace: workspace document
-    // state uses an opaque workspace-local ID so the same source can be
-    // opened independently in different workspaces while sharing the
-    // source/cache identity below.
-    let dataset_source_id = dataset_id_for_url(&canonical_url);
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::RequestReceived,
-            "dataset open request received",
-            None,
-            Some(dataset_source_id.clone()),
-            Some(format!("normalized source: {canonical_url}")),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    if let Some(ctx) = workspace.as_ref()
-        && ctx.live.background_cancelled()
-    {
-        tracing::info!(
-            client_id = %client_id,
-            workspace_id = %ctx.live.workspace_id,
-            url = %canonical_url,
-            "open_remote_dataset.cancelled_workspace_runtime"
-        );
-        send_open_failed(
-            client_id,
-            &request_id,
-            &canonical_url,
-            open_failure(
-                DatasetOpenStage::Authorization,
-                DatasetOpenFailureKind::SessionClosed,
-                true,
-                "workspace runtime is closed",
-                None,
-            ),
-            &unicast_routes,
-        )
-        .await;
-        return;
-    }
-
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::Authorization,
-            "checking workspace permission",
-            None,
-            Some(dataset_source_id.clone()),
-            workspace
-                .as_ref()
-                .map(|ctx| format!("workspace: {}", ctx.live.workspace_id)),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    if let Some(ctx) = workspace.as_ref()
-        && let Err(e) = ctx
-            .manager
-            .require_editor(&ctx.live.workspace_id, &ctx.principal)
-            .await
-    {
-        tracing::warn!(
-            client_id = %client_id,
-            workspace_id = %ctx.live.workspace_id,
-            url = %canonical_url,
-            error = %e,
-            "open_remote_dataset.forbidden"
-        );
-        send_open_failed(
-            client_id,
-            &request_id,
-            &canonical_url,
-            open_failure(
-                DatasetOpenStage::Authorization,
-                DatasetOpenFailureKind::Authorization,
-                false,
-                "workspace role cannot add datasets",
-                Some(e.to_string()),
-            ),
-            &unicast_routes,
-        )
-        .await;
-        return;
-    }
-
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::Authorization,
-            "workspace permission accepted",
-            None,
-            Some(dataset_source_id.clone()),
-            workspace
-                .as_ref()
-                .map(|ctx| format!("workspace: {}", ctx.live.workspace_id)),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    let existing_workspace_source = if let Some(ctx) = workspace.as_ref() {
-        send_open_progress(
-            client_id,
-            &request_id,
-            &canonical_url,
-            open_progress(
-                DatasetOpenStage::SourceLookup,
-                "checking persisted workspace dataset source",
-                None,
-                Some(dataset_source_id.clone()),
-                Some(format!("workspace: {}", ctx.live.workspace_id)),
-            ),
-            &unicast_routes,
-        )
-        .await;
-        match ctx
-            .manager
-            .dataset_by_source(&ctx.live.workspace_id, &dataset_source_id)
-            .await
-        {
-            Ok(source) => source,
-            Err(e) => {
-                tracing::error!(
-                    client_id = %client_id,
-                    workspace_id = %ctx.live.workspace_id,
-                    dataset_source_id = %dataset_source_id,
-                    url = %canonical_url,
-                    error = %e,
-                    "open_remote_dataset.source_lookup_failed"
-                );
-                send_open_failed(
+    // Forward per-stage progress to the requesting client as it happens.
+    // The forwarder drains fully (its sender is dropped first) before the
+    // terminal success/failure message goes out, so per-client ordering
+    // on the unicast channel is progress* → terminal.
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let forwarder = {
+        let unicast_routes = Arc::clone(&unicast_routes);
+        let request_id = request_id.clone();
+        let canonical_url = canonical_url.clone();
+        tokio::spawn(async move {
+            while let Some(diagnostic) = progress_rx.recv().await {
+                send_open_progress(
                     client_id,
                     &request_id,
                     &canonical_url,
-                    open_failure(
-                        DatasetOpenStage::SourceLookup,
-                        DatasetOpenFailureKind::WorkspaceLookup,
-                        true,
-                        "workspace dataset lookup failed",
-                        Some(e.to_string()),
-                    ),
+                    diagnostic,
                     &unicast_routes,
                 )
                 .await;
-                return;
             }
-        }
-    } else {
-        None
-    };
-
-    let dataset_id_key = existing_workspace_source
-        .as_ref()
-        .map(|source| source.workspace_dataset_id.clone())
-        .unwrap_or_else(|| {
-            if workspace.is_some() {
-                new_workspace_dataset_id()
-            } else {
-                DatasetId(dataset_source_id.clone())
-            }
-        });
-    let dataset_id = dataset_id_key.0.clone();
-    let workspace_scoped = workspace.is_some();
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::SourceLookup,
-            "workspace dataset source resolved",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            existing_workspace_source
-                .as_ref()
-                .map(|source| format!("display name: {}", source.display_name)),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    // If we've already imported this URL in this session, reuse the binding.
-    // Re-broadcast the existing DatasetOpened (held on the binding) so the
-    // requesting client receives the same content graph + fetch descriptor
-    // without re-importing.
-    {
-        let sess = session.lock().await;
-        if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
-        {
-            // Re-broadcast the CURRENT document manifest, not the stale
-            // import-time one cached on the binding: a `DatasetOpened` apply
-            // does a full manifest replace, so reusing the cached manifest
-            // here would clobber a since-applied rename (the document is the
-            // source of truth for the display name). Other manifest fields
-            // (images/transforms/source layouts) are immutable post-import, so
-            // adopting the document copy is otherwise a no-op.
-            if let Some(doc_manifest) = sess.document.manifests.get(&existing_dataset_id) {
-                existing.manifest = doc_manifest.clone();
-            }
-            // Re-stamp the opener with the CURRENT requester. This is the
-            // everyday multi-user path (someone opens a URL already loaded in
-            // the session); the binding's cached copy holds whoever first
-            // opened it (or None for a server-side restore), but the client
-            // that just requested this open is the one whose camera should
-            // auto-fit when the rebroadcast reaches it. Mirrors the lost-race
-            // re-stamp below.
-            existing.opener_client_id = Some(client_id);
-            let opened = existing.clone();
-            let command = DocumentCommand::DatasetOpened(existing);
-            let seq = sess.seq;
-            drop(sess);
-            send_open_progress(
-                client_id,
-                &request_id,
-                &canonical_url,
-                open_progress(
-                    DatasetOpenStage::BindingBuild,
-                    "reusing existing server binding",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    None,
-                ),
-                &unicast_routes,
-            )
-            .await;
-            send_open_progress(
-                client_id,
-                &request_id,
-                &canonical_url,
-                open_progress(
-                    DatasetOpenStage::Broadcast,
-                    "broadcasting existing dataset to workspace clients",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    Some(format!("seq: {seq}")),
-                ),
-                &unicast_routes,
-            )
-            .await;
-            let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-            let _ = tx.send(BroadcastItem::CommandBroadcast {
-                sender: u64::MAX,
-                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-                ack_json: String::new(),
-            });
-            tracing::info!(
-                dataset_id = %existing_dataset_id,
-                dataset_source_id = %dataset_source_id,
-                url = %canonical_url,
-                "open_remote_dataset.dedup_reuse"
-            );
-            send_open_succeeded(
-                client_id,
-                &request_id,
-                &canonical_url,
-                seq,
-                opened.clone(),
-                open_success(&canonical_url, &opened, Some(dataset_source_id.clone())),
-                &unicast_routes,
-            )
-            .await;
-            return;
-        }
-    }
-
-    // Open storage backend. `backend::open` re-normalizes (idempotent)
-    // and dispatches via `is_local_dataset_url`.
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::BackendOpen,
-            "opening dataset storage backend",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!("backend: {}", backend_kind_for_url(&canonical_url))),
-        ),
-        &unicast_routes,
-    )
-    .await;
-    let store = match lucida_store::backend::open(&canonical_url) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
-            send_open_failed(
-                client_id,
-                &request_id,
-                &canonical_url,
-                backend_open_failure(&e),
-                &unicast_routes,
-            )
-            .await;
-            return;
-        }
-    };
-
-    // Extract dataset name from URL (last path component). Canonical
-    // form is always forward-slash, so a single `rsplit('/')` works for
-    // every platform.
-    let name = existing_workspace_source
-        .as_ref()
-        .map(|source| source.display_name.clone())
-        .unwrap_or_else(|| {
-            canonical_url
-                .rsplit('/')
-                .find(|s| !s.is_empty())
-                .unwrap_or("dataset")
-                .to_string()
-        });
-
-    // Import dataset via the new pipeline.
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::MetadataImport,
-            "importing OME-Zarr metadata",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!("name: {name}")),
-        ),
-        &unicast_routes,
-    )
-    .await;
-    tracing::info!(
-        url = %canonical_url,
-        id = %dataset_id,
-        dataset_source_id = %dataset_source_id,
-        name = %name,
-        "importing dataset"
-    );
-    let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "open_remote_dataset.import_failed");
-            send_open_failed(
-                client_id,
-                &request_id,
-                &canonical_url,
-                import_failure(&e),
-                &unicast_routes,
-            )
-            .await;
-            return;
-        }
-    };
-
-    if let Some(ctx) = workspace.as_ref()
-        && ctx.live.background_cancelled()
-    {
-        tracing::info!(
-            client_id = %client_id,
-            workspace_id = %ctx.live.workspace_id,
-            dataset_id = %dataset_id,
-            dataset_source_id = %dataset_source_id,
-            "open_remote_dataset.cancelled_after_import"
-        );
-        return;
-    }
-
-    // Log import result summary.
-    let n_entities = result.manifest.entities().len();
-    let n_images = result.manifest.images().len();
-    let n_levels = result
-        .manifest
-        .images()
-        .first()
-        .map(|i| i.multiscale.levels.len())
-        .unwrap_or(0);
-    tracing::info!(
-        id = %dataset_id,
-        kind = ?result.manifest.kind,
-        entities = n_entities,
-        images = n_images,
-        levels = n_levels,
-        binding_images = result.binding_seed.images.len(),
-        "import complete"
-    );
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::MetadataImport,
-            "metadata import complete",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!(
-                "entities: {n_entities}, images: {n_images}, first image levels: {n_levels}"
-            )),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    // Build operational binding.
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::BindingBuild,
-            "building server chunk binding",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!(
-                "binding images: {}",
-                result.binding_seed.images.len()
-            )),
-        ),
-        &unicast_routes,
-    )
-    .await;
-    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
-    let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
-    let generated_config = GeneratedCoarseConfig {
-        target_long_axis: proxy_config.generated_target_long_axis,
-        chunk_long_axis: proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
-    };
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::GeneratedCoarsePlanning,
-            if proxy_config.generated_enabled {
-                "planning generated coarse levels"
-            } else {
-                "generated coarse planning disabled"
-            },
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            None,
-        ),
-        &unicast_routes,
-    )
-    .await;
-    let generated_plans = if proxy_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
-    } else {
-        vec![]
-    };
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::GeneratedCoarsePlanning,
-            "generated coarse planning complete",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!("planned levels: {}", generated_plans.len())),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    // Legacy proxy fallback is opt-in after the coarse/detail default
-    // flip. The default DatasetOpened catalog is empty so fallback
-    // availability comes from chunk tier metadata instead of proxies.
-    let catalog_entries =
-        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
-
-    let dataset_opened = DatasetOpened {
-        manifest: result.manifest.clone(),
-        fetch: result.fetch,
-        catalog: AssetCatalog {
-            entries: catalog_entries.clone(),
-        },
-        // Stamp the requesting client so the broadcast's recipients can tell
-        // whether they are the opener; only the opener auto-fits its camera.
-        opener_client_id: Some(client_id),
-    };
-
-    // Per-dataset proxy infrastructure. Cache root is keyed by the
-    // 16-byte URL hash so a single shared `cache_dir` can host many
-    // datasets without collision. The generator owns its own bounded
-    // semaphore + in-flight dedup map.
-    let url_hash16 = dataset_url_hash16(&canonical_url);
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        proxy_config.generated_cache_dir.clone(),
-        url_hash16,
-        proxy_config.generated_disk_budget_bytes,
-    ));
-    let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
-    for plan in &generated_plans {
-        match derived_chunks.register_generated_plan(plan) {
-            Ok(delta) => {
-                generated_initial_delta.levels.extend(delta.levels);
-                generated_initial_delta.chunks.extend(delta.chunks);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    dataset_id = %dataset_id,
-                    image = %plan.image_id.0,
-                    error = %e,
-                    "generated coarse derived-cache registration failed"
-                );
-                derived_chunks.upsert_level(plan.availability.clone());
-                generated_initial_delta
-                    .levels
-                    .push(plan.availability.clone());
-            }
-        }
-    }
-    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
-    let generated_manifest = Arc::new(result.manifest.clone());
-    let generated_store = cached.clone();
-    let generated_resolver = resolver.clone();
-    let generated_service = Arc::new(GeneratedCoarseService::new(
-        generated_plans.clone(),
-        generated_manifest,
-        generated_store,
-        generated_resolver,
-        derived_chunks.clone(),
-        session.clone(),
-        tx.clone(),
-        GeneratedSchedulingConfig {
-            concurrency: proxy_config.generated_concurrency,
-            background_chunk_limit: proxy_config.generated_background_chunk_limit,
-            ..GeneratedSchedulingConfig::default()
-        },
-    ));
-    generated_service.start();
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cached.clone(),
-        resolver.clone(),
-        Arc::new(result.manifest),
-        proxy_config.concurrency,
-    ));
-
-    // Clone for the (T=0, C=0) pre-generation task spawned below.
-    let prefetch_generator = proxy_generator.clone();
-    let prefetch_entries = catalog_entries.clone();
-    let prefetch_live = workspace.as_ref().map(|ctx| ctx.live.clone());
-
-    let binding = ServerBinding {
-        source_url: canonical_url.clone(),
-        store: store.clone(),
-        resolver,
-        cache: cached,
-        dataset_opened: dataset_opened.clone(),
-        derived_chunks: derived_chunks.clone(),
-        generated_service: generated_service.clone(),
-        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
-        proxy_cache,
-        proxy_generator,
-    };
-
-    // Build DatasetOpened command (manifest + fetch, no server-private state).
-    let command = DocumentCommand::DatasetOpened(dataset_opened);
-
-    // Apply command and register server binding. Re-check the binding
-    // presence under the lock in case a concurrent open raced ahead.
-    let (seq, document) = {
-        let mut sess = session.lock().await;
-        if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
-        {
-            // Lost the race: another open completed the import. Drop our
-            // duplicate binding/command and rebroadcast the canonical one.
-            // Re-stamp the opener with the CURRENT requester: the binding's
-            // stored copy holds whoever first opened it (or None for a
-            // server-side restore), but the client that just requested this
-            // open is the one whose camera should auto-fit when the
-            // rebroadcast reaches it.
-            existing.opener_client_id = Some(client_id);
-            let seq = sess.seq;
-            drop(sess);
-            let broadcast_msg = ServerMessage::CommandBroadcast {
-                seq,
-                command: DocumentCommand::DatasetOpened(existing),
-            };
-            let opened = match &broadcast_msg {
-                ServerMessage::CommandBroadcast {
-                    command: DocumentCommand::DatasetOpened(opened),
-                    ..
-                } => opened.clone(),
-                _ => unreachable!("constructed above"),
-            };
-            send_open_progress(
-                client_id,
-                &request_id,
-                &canonical_url,
-                open_progress(
-                    DatasetOpenStage::BindingBuild,
-                    "reusing binding from concurrent dataset open",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    None,
-                ),
-                &unicast_routes,
-            )
-            .await;
-            send_open_progress(
-                client_id,
-                &request_id,
-                &canonical_url,
-                open_progress(
-                    DatasetOpenStage::Broadcast,
-                    "broadcasting existing dataset to workspace clients",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    Some(format!("seq: {seq}")),
-                ),
-                &unicast_routes,
-            )
-            .await;
-            let _ = tx.send(BroadcastItem::CommandBroadcast {
-                sender: u64::MAX,
-                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-                ack_json: String::new(),
-            });
-            tracing::info!(
-                dataset_id = %existing_dataset_id,
-                dataset_source_id = %dataset_source_id,
-                "open_remote_dataset.lost_race"
-            );
-            send_open_succeeded(
-                client_id,
-                &request_id,
-                &canonical_url,
-                seq,
-                opened.clone(),
-                open_success(&canonical_url, &opened, Some(dataset_source_id.clone())),
-                &unicast_routes,
-            )
-            .await;
-            return;
-        }
-        let seq = sess.apply(command.clone());
-        if !generated_initial_delta.levels.is_empty() {
-            sess.apply_generated_availability_delta(
-                dataset_id_key.clone(),
-                generated_initial_delta.clone(),
-            );
-        }
-        sess.record_binding_source(
-            dataset_id_key.clone(),
-            canonical_url.clone(),
-            Some(dataset_source_id.clone()),
-            name.clone(),
-        );
-        sess.clear_binding_restore_failure(&dataset_id_key);
-        sess.server_bindings.insert(dataset_id_key.clone(), binding);
-        let document = sess.document.clone();
-        (seq, document)
-    };
-
-    if workspace.is_some() {
-        send_open_progress(
-            client_id,
-            &request_id,
-            &canonical_url,
-            open_progress(
-                DatasetOpenStage::WorkspacePersist,
-                "persisting workspace dataset membership",
-                Some(dataset_id_key.clone()),
-                Some(dataset_source_id.clone()),
-                Some(format!("seq: {seq}")),
-            ),
-            &unicast_routes,
-        )
-        .await;
-    }
-
-    if let Some(ctx) = workspace.as_ref()
-        && let Err(e) = ctx
-            .manager
-            .persist_dataset_opened(
-                &ctx.live,
-                &dataset_id_key,
-                &dataset_source_id,
-                &canonical_url,
-                &name,
-                &ctx.principal,
-                seq,
-                &document,
-            )
-            .await
-    {
-        tracing::error!(
-            client_id = %client_id,
-            workspace_id = %ctx.live.workspace_id,
-            dataset_id = %dataset_id,
-            dataset_source_id = %dataset_source_id,
-            error = %e,
-            "open_remote_dataset.persist_failed"
-        );
-        send_open_failed(
-            client_id,
-            &request_id,
-            &canonical_url,
-            open_failure(
-                DatasetOpenStage::WorkspacePersist,
-                DatasetOpenFailureKind::Persistence,
-                true,
-                "workspace persistence failed",
-                Some(e.to_string()),
-            ),
-            &unicast_routes,
-        )
-        .await;
-        return;
-    }
-
-    if workspace.is_some() {
-        send_open_progress(
-            client_id,
-            &request_id,
-            &canonical_url,
-            open_progress(
-                DatasetOpenStage::WorkspacePersist,
-                "workspace dataset membership persisted",
-                Some(dataset_id_key.clone()),
-                Some(dataset_source_id.clone()),
-                Some(format!("seq: {seq}")),
-            ),
-            &unicast_routes,
-        )
-        .await;
-    }
-
-    // Broadcast to ALL clients including the requester.
-    // Use u64::MAX as sender so no client matches — everyone gets the
-    // CommandBroadcast (not an Ack), since the requester hasn't applied
-    // the DatasetOpened locally.
-    let opened = match &command {
-        DocumentCommand::DatasetOpened(opened) => opened.clone(),
-        _ => unreachable!("dataset open command must be DatasetOpened"),
-    };
-    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-
-    send_open_progress(
-        client_id,
-        &request_id,
-        &canonical_url,
-        open_progress(
-            DatasetOpenStage::Broadcast,
-            "broadcasting dataset to workspace clients",
-            Some(dataset_id_key.clone()),
-            Some(dataset_source_id.clone()),
-            Some(format!("seq: {seq}")),
-        ),
-        &unicast_routes,
-    )
-    .await;
-
-    let _ = tx.send(BroadcastItem::CommandBroadcast {
-        sender: u64::MAX,
-        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-        ack_json: String::new(), // unused — no client will match
-    });
-
-    if !generated_initial_delta.levels.is_empty() {
-        let msg = ServerMessage::GeneratedAvailabilityUpdate {
-            dataset_id: DatasetId(dataset_id.clone()),
-            delta: generated_initial_delta.clone(),
-        };
-        let _ = tx.send(BroadcastItem::GeneratedAvailabilityUpdate {
-            json: serde_json::to_string(&msg).unwrap(),
-        });
-    }
-
-    tracing::info!(
-        dataset_id = %dataset_id,
-        seq,
-        "open_remote_dataset.broadcast_sent"
-    );
-    send_open_succeeded(
-        client_id,
-        &request_id,
-        &canonical_url,
-        seq,
-        opened.clone(),
-        open_success(&canonical_url, &opened, Some(dataset_source_id.clone())),
-        &unicast_routes,
-    )
-    .await;
-
-    if !generated_plans.is_empty() {
-        generated_service.enqueue_background_fill().await;
-    }
-
-    // Kick off background generation for the initial (T=0, C=0) view
-    // of every advertised entity at the lowest priority. Errors are logged
-    // but do not propagate — the open succeeds either way, and downstream
-    // requests will surface the failure with their own error path.
-    if !prefetch_entries.is_empty() {
-        let dataset_id_for_log = dataset_id.clone();
-        tokio::spawn(async move {
-            for availability in prefetch_entries {
-                for kind in availability.kinds {
-                    if prefetch_live
-                        .as_ref()
-                        .is_some_and(|live| live.background_cancelled())
-                    {
-                        tracing::info!(
-                            dataset = %dataset_id_for_log,
-                            "background proxy pre-generation cancelled"
-                        );
-                        return;
-                    }
-                    let spec = ProxySpec {
-                        entity_id: availability.entity_id.clone(),
-                        kind,
-                        t: 0,
-                        c: 0,
-                        target_long_axis: PROXY_TARGET_LONG_AXIS,
-                    };
-                    if let Err(e) = prefetch_generator.request(spec, 0).await {
-                        tracing::warn!(
-                            dataset = %dataset_id_for_log,
-                            entity = %availability.entity_id.0,
-                            kind = ?kind,
-                            error = %e,
-                            "background proxy pre-generation failed"
-                        );
-                    }
-                }
-            }
-        });
-    }
-}
-
-/// Soft cap on the longest output dimension of a proxy. Mirrors the value
-/// used by `serve_asset_request` so the cache key (which is derived from
-/// `(entity, kind, t, c)` only, not the target) stays in lockstep with the
-/// pre-generation task.
-const PROXY_TARGET_LONG_AXIS: u32 = 128;
-
-fn proxy_catalog_entries_for_manifest(
-    manifest: &lucida_content::DatasetManifest,
-    legacy_proxy_enabled: bool,
-) -> Vec<ProxyAvailability> {
-    if !legacy_proxy_enabled {
-        return vec![];
-    }
-
-    // Build the legacy proxy availability catalog by enumerating
-    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
-    // and bare Images advertise FieldProxy3D (the proxy generator falls
-    // back to FieldProxy semantics for non-Well entities — see
-    // `build_server_proxy_source`). Entities without a contributing image
-    // are skipped — Planning has nothing to fetch for them.
-    manifest
-        .entities()
-        .iter()
-        .filter_map(|entity| {
-            let kinds = match entity.kind {
-                EntityKind::Well => vec![ProxyKind::WellProxy3D],
-                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
-            };
-            // Only advertise entities that own an image (Wells aggregate
-            // their fields' images downstream, so we keep all Wells).
-            let has_image = matches!(entity.kind, EntityKind::Well)
-                || manifest.images().iter().any(|img| img.owner == entity.id);
-            if !has_image {
-                return None;
-            }
-            let footprints = proxy_footprints_for_entity(manifest, &entity.id, &kinds);
-            Some(ProxyAvailability {
-                entity_id: entity.id.clone(),
-                kinds,
-                footprints,
-            })
         })
-        .collect()
+    };
+
+    let ctx = DatasetOpenContext {
+        session,
+        tx,
+        proxy_config,
+        workspace,
+    };
+    let result = dataset_open::open_dataset(client_id, &url, &ctx, &progress_tx).await;
+    drop(progress_tx);
+    let _ = forwarder.await;
+
+    match result {
+        Ok(DatasetOpenOutcome::Opened {
+            seq,
+            opened,
+            diagnostic,
+        }) => {
+            send_open_succeeded(
+                client_id,
+                &request_id,
+                &canonical_url,
+                seq,
+                *opened,
+                diagnostic,
+                &unicast_routes,
+            )
+            .await;
+        }
+        // The workspace runtime shut down mid-open: nothing more to send.
+        Ok(DatasetOpenOutcome::Cancelled) => {}
+        Err(diagnostic) => {
+            send_open_failed(
+                client_id,
+                &request_id,
+                &canonical_url,
+                diagnostic,
+                &unicast_routes,
+            )
+            .await;
+        }
+    }
 }
 
 enum ChunkDispatch {
@@ -2364,28 +1170,6 @@ enum ChunkDispatch {
         derived_chunks: Arc<DerivedChunkCache>,
         generated_service: Arc<GeneratedCoarseService>,
     },
-}
-
-fn proxy_footprints_for_entity(
-    manifest: &DatasetManifest,
-    entity_id: &EntityId,
-    kinds: &[ProxyKind],
-) -> Vec<ProxyFootprint> {
-    kinds
-        .iter()
-        .filter_map(|kind| {
-            let spec = ProxySpec {
-                entity_id: entity_id.clone(),
-                kind: *kind,
-                t: 0,
-                c: 0,
-                target_long_axis: PROXY_TARGET_LONG_AXIS,
-            };
-            estimate_proxy_dims(&spec, manifest)
-                .ok()
-                .map(|dims| ProxyFootprint::u16(*kind, dims))
-        })
-        .collect()
 }
 
 /// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
@@ -2515,12 +1299,6 @@ async fn serve_chunk_from_store(
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Binary(buf.into()));
     }
-}
-
-fn is_not_found(error: &object_store::Error) -> bool {
-    matches!(error, object_store::Error::NotFound { .. })
-        || error.to_string().contains("not found")
-        || error.to_string().contains("No such file or directory")
 }
 
 async fn serve_generated_chunk_request(
@@ -2830,69 +1608,9 @@ async fn send_open_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lucida_content::{
-        Axis, AxisKind, DataType, DatasetKind, Entity, EntityId, EntityKind, EntityLabels,
-        LevelGeometry, MultiscaleInfo,
-    };
+    use crate::test_fixtures::single_image_manifest;
+    use lucida_content::EntityId;
     use lucida_proxy::{ProxyDtype, ProxyHeader};
-
-    fn single_image_manifest() -> lucida_content::DatasetManifest {
-        let entity_id = EntityId("entity-1".into());
-        lucida_content::DatasetManifest::new(
-            DatasetId("ds-1".into()),
-            "test".into(),
-            DatasetKind::Single,
-            vec![Entity {
-                id: entity_id.clone(),
-                kind: EntityKind::Image,
-                parent: None,
-                labels: EntityLabels::default(),
-            }],
-            vec![],
-            vec![lucida_content::ImageSpec {
-                image_id: ImageId("img-1".into()),
-                owner: entity_id,
-                multiscale: MultiscaleInfo {
-                    axes: vec![
-                        Axis {
-                            name: "t".into(),
-                            kind: AxisKind::Time,
-                        },
-                        Axis {
-                            name: "c".into(),
-                            kind: AxisKind::Channel,
-                        },
-                        Axis {
-                            name: "z".into(),
-                            kind: AxisKind::Space,
-                        },
-                        Axis {
-                            name: "y".into(),
-                            kind: AxisKind::Space,
-                        },
-                        Axis {
-                            name: "x".into(),
-                            kind: AxisKind::Space,
-                        },
-                    ],
-                    levels: vec![LevelGeometry {
-                        level_index: 0,
-                        shape: [1, 1, 1, 256, 256],
-                        chunk_shape: [1, 1, 1, 128, 128],
-                        grid_shape: [1, 1, 1, 2, 2],
-                        scale: [1.0, 1.0, 1.0, 1.0, 1.0],
-                    }],
-                    coarse_level_index: None,
-                    generated_levels: vec![],
-                    data_type: DataType::Uint16,
-                    pinned_axes: vec![],
-                    channel_infos: vec![],
-                },
-            }],
-            vec![],
-            None,
-        )
-    }
 
     #[test]
     fn dataset_health_reports_recorded_restore_failure() {
@@ -2936,6 +1654,36 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| message.contains("last restore failure"))
+        );
+    }
+
+    #[test]
+    fn dataset_retry_forbidden_maps_to_authorization_denial() {
+        let diag = dataset_retry_failure_diagnostic(WorkspaceError::Forbidden);
+        assert_eq!(diag.stage, DatasetOpenStage::Authorization);
+        assert_eq!(diag.kind, DatasetOpenFailureKind::Authorization);
+        assert!(!diag.retryable, "a role denial is final, not retryable");
+        assert_eq!(diag.message, "workspace role cannot retry dataset bindings");
+        assert_eq!(diag.detail.as_deref(), Some("forbidden"));
+    }
+
+    #[test]
+    fn dataset_retry_store_failure_maps_to_retryable_lookup() {
+        // A store failure — INCLUDING the editor gate's role lookup
+        // erroring — is infrastructure trouble, not an authorization
+        // verdict: it must surface as the retryable lookup diagnostic.
+        let diag = dataset_retry_failure_diagnostic(WorkspaceError::Store(
+            crate::workspace::StoreError::Backend("connection pool closed".into()),
+        ));
+        assert_eq!(diag.stage, DatasetOpenStage::SourceLookup);
+        assert_eq!(diag.kind, DatasetOpenFailureKind::WorkspaceLookup);
+        assert!(diag.retryable);
+        assert_eq!(diag.message, "workspace dataset source lookup failed");
+        assert!(
+            diag.detail
+                .as_deref()
+                .unwrap()
+                .contains("connection pool closed")
         );
     }
 
@@ -3020,21 +1768,6 @@ mod tests {
     fn proxy_kind_str_pins_variant_names() {
         assert_eq!(proxy_kind_str(ProxyKind::WellProxy3D), "WellProxy3D");
         assert_eq!(proxy_kind_str(ProxyKind::FieldProxy3D), "FieldProxy3D");
-    }
-
-    #[test]
-    fn proxy_catalog_is_empty_on_default_path() {
-        let manifest = single_image_manifest();
-        let entries = proxy_catalog_entries_for_manifest(&manifest, false);
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn proxy_catalog_is_available_only_for_legacy_bridge() {
-        let manifest = single_image_manifest();
-        let entries = proxy_catalog_entries_for_manifest(&manifest, true);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
     }
 
     #[test]
@@ -3195,177 +1928,5 @@ mod tests {
             }
             _ => panic!("expected GeneratedChunkStatus"),
         }
-    }
-
-    /// Build a `DatasetOpened` whose manifest carries `name`, wired to the
-    /// shared `single_image_manifest` shape but renamed. Used to seed both the
-    /// document and a `ServerBinding`'s cached import-time copy.
-    fn dataset_opened_named(name: &str) -> DatasetOpened {
-        let mut manifest = single_image_manifest();
-        manifest.name = name.to_string();
-        let image_id = manifest.images()[0].image_id.clone();
-        DatasetOpened {
-            manifest,
-            fetch: lucida_protocol::FetchSource::Proxied(lucida_protocol::ProxiedFetchDescriptor {
-                images: vec![lucida_protocol::ProxiedImageSpec {
-                    image_id,
-                    wire_format: lucida_protocol::WireFormat::Raw {
-                        data_type: DataType::Uint16,
-                    },
-                }],
-            }),
-            catalog: lucida_protocol::AssetCatalog::default(),
-            opener_client_id: None,
-        }
-    }
-
-    /// Construct a `ServerBinding` carrying `opened` as its cached, import-time
-    /// `dataset_opened`, with inert/stub proxy + generated infrastructure (none
-    /// of it is exercised here). Mirrors the helper in
-    /// `tests/dataset_id_stable.rs`.
-    fn make_test_binding(source_url: &str, opened: &DatasetOpened) -> ServerBinding {
-        let store =
-            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-        let cache = Arc::new(CachedStore::new(store.clone(), 1024));
-        let resolver = Arc::new(ChunkResolver::new(
-            &lucida_store::import_types::ServerBindingSeed { images: vec![] },
-        ));
-        let url_hash = lucida_content::url::dataset_url_hash16(source_url);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let proxy_cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), url_hash));
-        std::mem::forget(tmp); // keep the dir alive for the test process
-        let proxy_generator = Arc::new(ProxyGenerator::new(
-            proxy_cache.clone(),
-            cache.clone(),
-            resolver.clone(),
-            Arc::new(opened.manifest.clone()),
-            1,
-        ));
-        let derived_chunks = Arc::new(DerivedChunkCache::default());
-        ServerBinding {
-            source_url: source_url.to_string(),
-            store,
-            resolver,
-            cache,
-            dataset_opened: opened.clone(),
-            derived_chunks: derived_chunks.clone(),
-            generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
-            legacy_proxy_enabled: false,
-            proxy_cache,
-            proxy_generator,
-        }
-    }
-
-    /// Regression for the dedup-reuse-after-rename bug (#701): re-opening an
-    /// already-loaded dataset URL must re-broadcast the dataset under its
-    /// CURRENT document name, not the stale import-time name cached on the
-    /// `ServerBinding`.
-    ///
-    /// The bug: `handle_open_remote_dataset`'s reuse short-circuit cloned the
-    /// binding's cached `dataset_opened` (whose manifest is frozen at import
-    /// time) into the re-broadcast `DatasetOpened`. Because applying a
-    /// `DatasetOpened` does a full manifest *replace*, a re-open after a rename
-    /// silently clobbered the new name back to the import-time one for every
-    /// client that received the re-broadcast.
-    ///
-    /// This drives the real reuse-shortcut body: it seeds a `Session` with a
-    /// dataset (real `Session::apply(DatasetOpened)`) and a matching
-    /// `ServerBinding`, renames it through the real document path
-    /// (`Session::apply(RenameDataset)`), then runs the handler's own
-    /// `find_loaded_binding` lookup + the fix's document-manifest adoption +
-    /// opener re-stamp, and asserts the resulting re-broadcast command carries
-    /// the renamed name AND the re-stamped opener id. As a guard, it confirms
-    /// the binding's own cached copy is deliberately left stale (proving the
-    /// document — not the binding — is the source of truth for the display
-    /// name).
-    #[test]
-    fn dedup_reuse_after_rename_rebroadcasts_renamed_name() {
-        const URL: &str = "gs://lucida-test/datasets/rename-me.zarr";
-        const FIRST_OPENER: ClientId = 11;
-        const SECOND_REQUESTER: ClientId = 42;
-        let import_name = "import-time-name.zarr";
-        let renamed = "Renamed By Editor";
-
-        let dataset_id = single_image_manifest().dataset_id;
-        let mut session = Session::new();
-
-        // First open: apply DatasetOpened (import-time name, stamped with the
-        // first opener) + register binding.
-        let mut opened = dataset_opened_named(import_name);
-        opened.opener_client_id = Some(FIRST_OPENER);
-        session.apply(DocumentCommand::DatasetOpened(opened.clone()));
-        session
-            .server_bindings
-            .insert(dataset_id.clone(), make_test_binding(URL, &opened));
-        assert_eq!(
-            session.document.manifests[&dataset_id].name, import_name,
-            "precondition: document carries the import-time name"
-        );
-
-        // Rename through the real document path.
-        session.apply(DocumentCommand::RenameDataset {
-            id: dataset_id.clone(),
-            name: renamed.to_string(),
-        });
-        assert_eq!(
-            session.document.manifests[&dataset_id].name, renamed,
-            "precondition: rename updated the live document manifest"
-        );
-        // The binding's cached import-time copy is (intentionally) untouched by
-        // a rename — this is exactly the stale state the bug re-broadcast.
-        assert_eq!(
-            session.server_bindings[&dataset_id]
-                .dataset_opened
-                .manifest
-                .name,
-            import_name,
-            "the binding cache stays at the import-time name; the fix must not \
-             rely on it for the display name"
-        );
-        assert_eq!(
-            session.server_bindings[&dataset_id]
-                .dataset_opened
-                .opener_client_id,
-            Some(FIRST_OPENER),
-            "precondition: the binding cache holds the FIRST opener's id"
-        );
-
-        // Re-open the SAME URL as a DIFFERENT client: run the handler's real
-        // reuse short-circuit. `find_loaded_binding` is the production helper;
-        // the manifest adoption + opener re-stamp immediately below are the
-        // exact fixes under test (mirroring handler.rs's dedup-reuse path).
-        let client_id: ClientId = SECOND_REQUESTER;
-        let (existing_dataset_id, mut existing) =
-            find_loaded_binding(&session, &dataset_id, URL, true)
-                .expect("re-open must find the existing binding (dedup short-circuit)");
-        if let Some(doc_manifest) = session.document.manifests.get(&existing_dataset_id) {
-            existing.manifest = doc_manifest.clone();
-        }
-        existing.opener_client_id = Some(client_id);
-        let rebroadcast = DocumentCommand::DatasetOpened(existing);
-
-        // The re-broadcast DatasetOpened — what peers re-apply — must carry the
-        // renamed name, NOT the import-time name.
-        let DocumentCommand::DatasetOpened(rebroadcast_opened) = &rebroadcast else {
-            panic!("expected DatasetOpened");
-        };
-        assert_eq!(
-            rebroadcast_opened.manifest.name, renamed,
-            "dedup re-open must re-broadcast the renamed name, not the stale \
-             import-time manifest name"
-        );
-        assert_eq!(
-            rebroadcast_opened.manifest.dataset_id, dataset_id,
-            "dedup re-open must target the same dataset id"
-        );
-        // The dedup-reuse rebroadcast must re-stamp the CURRENT requester so
-        // the everyday multi-user case (open a URL already loaded in the
-        // session) auto-fits for the opener — not the original first opener.
-        assert_eq!(
-            rebroadcast_opened.opener_client_id,
-            Some(SECOND_REQUESTER),
-            "dedup re-open must re-stamp opener_client_id with the current \
-             requester, not the binding's cached first opener"
-        );
     }
 }

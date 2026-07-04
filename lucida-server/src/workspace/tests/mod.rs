@@ -50,6 +50,14 @@ pub fn principal(email: &str, is_admin: bool) -> AuthPrincipal {
 }
 
 async fn fresh_store() -> SqliteWorkspaceStore {
+    fresh_store_with_pool().await.0
+}
+
+/// Like [`fresh_store`], but also hands back the pool so a test can
+/// `close()` it and drive genuine store failures (every subsequent query
+/// errors) — e.g. to prove that a failed role lookup is reported as
+/// infrastructure trouble, not as an authorization verdict.
+async fn fresh_store_with_pool() -> (SqliteWorkspaceStore, sqlx::sqlite::SqlitePool) {
     let opts = SqliteConnectOptions::new()
         .filename(":memory:")
         .create_if_missing(true);
@@ -59,7 +67,7 @@ async fn fresh_store() -> SqliteWorkspaceStore {
         .await
         .unwrap();
     MIGRATOR.run(&pool).await.unwrap();
-    SqliteWorkspaceStore::new(pool)
+    (SqliteWorkspaceStore::new(pool.clone()), pool)
 }
 
 fn idle_eviction_config() -> WorkspaceRuntimeConfig {
