@@ -1160,7 +1160,7 @@ function App({
         onLayoutChange={() => {
           render.loopRef.current?.markInteractiveDirty();
           // A local layout switch re-anchors plate annotations in core (issue
-          // #780), but — unlike an inbound peer switch (see useBridge) — it
+          // #780), but — unlike an inbound peer switch (see sessionController.ts) — it
           // doesn't bump the remote document version on its own, so the overlay
           // would keep showing pins at their pre-switch positions for the
           // switcher. Bump it here so the overlay re-reads the re-anchored pins,

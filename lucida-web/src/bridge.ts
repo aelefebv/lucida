@@ -1,3 +1,23 @@
+/**
+ * WebSocket client for the workspace session: the raw transport (connect /
+ * reconnect, throttled presence/cursor/dataset-presence sends, the binary
+ * chunk envelope) together with the sequenced-document layer (last-applied-
+ * seq tracking, gap grace/retry buffering with snapshot resync, the document
+ * membership mirror, pending local-command replay across mid-session
+ * snapshots).
+ *
+ * The sequenced-document layer is a nameable internal seam — `handleSequenced`
+ * / `drainPendingSequenced` / `deliverStale`, the `pendingSequenced` /
+ * `pendingLocalCommands` / `documentDatasetIds` state, and the resync timers,
+ * delivering through `onSnapshot`/`onCommand`/`onAck` — and could compose as
+ * a separate documentSync module the Bridge owns. It stays in-file
+ * deliberately: its resets are interleaved with the connection lifecycle
+ * (`onclose`, `destroy`, per-connection re-seeding) and its send-side hook
+ * (`sendCommand`'s pending tracking) with transport readiness, so extracting
+ * it would churn the client's most delicate reliability code for zero
+ * behavioral gain. Take the split if and when the sequenced layer next
+ * changes behavior.
+ */
 import { isDebugEnabled } from "./debug/logging.ts";
 import type {
   GeneratedChunkStatus,

@@ -335,7 +335,7 @@ export function useSavedViewSync({
   // C/T/Z/viewMode/multiChannel back to React state (Bug #3). The applier writes to
   // WASM only; without this the RAF loop sits idle until the next user
   // input and the slider mirrors stay stale. Mirrors the bridge's
-  // follow/presence-update flow (useBridge.ts onPresenceUpdate / onFollowChanged).
+  // follow/presence-update flow (sessionController.ts onPresenceUpdate / onFollowChanged).
   useEffect(() => {
     return bundle.applier.subscribeApplyComplete((view) => {
       const scene = getScene();

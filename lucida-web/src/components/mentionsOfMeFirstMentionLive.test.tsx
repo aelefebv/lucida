@@ -144,7 +144,8 @@ describe("#802 badge: MentionsOfMe reflects a first mention with no selection", 
 
     function Harness() {
       const [version, setVersion] = useState(0);
-      // expose the bump for the test (App bumps this from useBridge.onCommand).
+      // expose the bump for the test (App bumps this from the session
+      // controller's onCommand handler, via useBridge's event wiring).
       bumpRef.current = () => setVersion((v) => v + 1);
       const annotations = useMemo(
         () => currentDatasetAnnotations(scene as AnnotationScene, null),
@@ -168,7 +169,8 @@ describe("#802 badge: MentionsOfMe reflects a first mention with no selection", 
 
     // A peer creates a pin then mentions me — the FIRST mention — while this
     // client has no dataset selected. apply_command updates WASM; the version
-    // bump re-renders (exactly useBridge.onCommand -> bumpRemoteDocumentVersion).
+    // bump re-renders (exactly sessionController onCommand ->
+    // onRemoteDocumentChanged -> bumpRemoteDocumentVersion).
     act(() => {
       scene.apply_command(
         JSON.stringify({

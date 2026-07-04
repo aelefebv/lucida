@@ -1,13 +1,17 @@
 import type { WasmScene } from "lucida-core";
-import type { Dispatch, SetStateAction } from "react";
 import type { ViewMode } from "../types.ts";
 
+/**
+ * Plain value setters (not React dispatchers) so non-React owners — the
+ * session controller — can supply them directly; React `setState` functions
+ * are assignable as-is.
+ */
 export interface SceneViewStateSetters {
-  setZ: Dispatch<SetStateAction<number>>;
-  setC: Dispatch<SetStateAction<number>>;
-  setT: Dispatch<SetStateAction<number>>;
-  setViewMode: Dispatch<SetStateAction<ViewMode>>;
-  setMultiChannel: Dispatch<SetStateAction<boolean>>;
+  setZ: (z: number) => void;
+  setC: (c: number) => void;
+  setT: (t: number) => void;
+  setViewMode: (mode: ViewMode) => void;
+  setMultiChannel: (multiChannel: boolean) => void;
 }
 
 export function syncSceneViewState(scene: WasmScene, setters: SceneViewStateSetters): void {

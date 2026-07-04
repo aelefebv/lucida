@@ -903,7 +903,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(onCommand).toHaveBeenCalledTimes(1);
     const [seq, commandJson] = onCommand.mock.calls[0];
     expect(seq).toBe(43);
-    // The same fields useBridge's dataset_opened arm reads (typed, no `as`).
+    // The same fields sessionController's dataset_opened arm reads (typed, no `as`).
     const command: { type: string } & WireDatasetOpened = JSON.parse(commandJson);
     expect(command.type).toBe("dataset_opened");
     expect(command.manifest).toStrictEqual(expectedManifestSingle);

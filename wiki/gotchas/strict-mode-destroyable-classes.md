@@ -5,7 +5,7 @@ description: "A class instance with a destroyed = true flag set in destroy() and
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/strict-mode-destroyable-classes.md
 created: 2026-05-09
-modified: 2026-07-03
+modified: 2026-07-04
 ---
 
 # React Strict-Mode Kills One-Shot `destroy()` Classes
@@ -38,7 +38,7 @@ Use this when a single instance with stable identity (held in `useState`/`useRef
 
 `destroy()` stays genuinely one-shot; instead, the mount effect *constructs* the instance and the cleanup destroys it and clears the ref, so the Strict-Mode remount builds a brand-new stack rather than restarting a dead one. "Constructed ⇒ live, destroyed ⇒ dead forever" stays a true invariant. This is how the session/connection stack works:
 
-- `lucida-web/src/hooks/useBridge.ts` — the wasm-ready effect constructs the `Bridge` + `Session` pair; its cleanup calls `session.destroy()` (idempotent), nulls `sessionRef`, and resets the per-connection dataset registry and connection-scoped state, so the remount's `sessionRef.current` guard passes and the effect rebuilds the whole stack against a fresh WebSocket.
+- `lucida-web/src/hooks/useBridge.ts` — the wasm-ready effect constructs a `SessionController` (`src/sessionController.ts`, which itself builds the DecodePool/ContentSource/CpuCache/Bridge/Session stack); its cleanup calls `controller.destroy()` (idempotent — tears down the stack and clears the per-connection dataset registry), nulls `controllerRef`/`sessionRef`, and resets connection-scoped React state, so the remount's `controllerRef.current` guard passes and the effect builds a brand-new controller against a fresh WebSocket.
 - `lucida-web/src/hooks/useRenderClient.ts` — each effect run constructs a `RenderClient`; the cleanup destroys it and bumps `canvasKey`. The extra wrinkle: `transferControlToOffscreen` (inside the `RenderClient` constructor) is one-shot per `<canvas>` *element*, so a fresh client also needs a fresh element. `App.tsx` keys the canvas element on `canvasKey`, and a `WeakSet` of spent elements stops the re-run from touching an already-transferred canvas before the keyed replacement commits.
 
 Use this when the class wraps a resource that is itself one-shot (a WebSocket connection stack, a transferred canvas, a worker pool) — "re-arming" such an object would amount to reconnecting/reallocating inside it anyway, and reconstruction keeps the object's lifecycle honest.
@@ -55,7 +55,7 @@ The dangerous shape is the *combination*:
 - A `useEffect(() => { instance.start(); return () => instance.destroy(); }, [instance])`
 - A `destroyed` (or `disposed`, `closed`, etc.) boolean checked at method entry, never reset and never bypassed by reconstruction
 
-As of the PR #483 fix, `UrlSync` was the only instance matching all of that. `bridge.ts`, `session.ts`, and `renderer/renderClient.ts` carry the same one-shot `destroyed`/`destroy()` shape but are safe by the second resolution: each is constructed inside the effect whose cleanup destroys it, so no destroyed instance is ever asked to work again. New code in the footgun shape must adopt one of the two resolutions — the failure mode is dev-only and invisible to both vitest and production builds.
+As of the PR #483 fix, `UrlSync` was the only instance matching all of that. `sessionController.ts`, `bridge.ts`, `session.ts`, and `renderer/renderClient.ts` carry the same one-shot `destroyed`/`destroy()` shape but are safe by the second resolution: each is constructed inside (or by an object constructed inside) the effect whose cleanup destroys it, so no destroyed instance is ever asked to work again. New code in the footgun shape must adopt one of the two resolutions — the failure mode is dev-only and invisible to both vitest and production builds.
 
 ## Related
 
