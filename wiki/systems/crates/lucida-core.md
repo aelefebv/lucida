@@ -5,7 +5,7 @@ description: "The Rust core: a single library that compiles to both a native rli
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-core.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # lucida-core
@@ -34,7 +34,7 @@ Re-exports symbols from [lucida-content](lucida-content.md) and [lucida-protocol
 Module-level only — see the source for signatures.
 
 - `scene/` — split into `scene/mod.rs` (`Scene`, `DerivedState`, layout resolution) and `scene/types.rs` (the display/document/colormap types: `DocumentState`, `DatasetDisplaySettings`, `Colormap`)
-- `command.rs` — `Command`, `DocumentCommand`, `ViewportCommand`; `Scene::apply` is the single mutator
+- `command.rs` — `Command`, `DocumentCommand`, `ViewportCommand`; `Scene::apply` is the command entry point (viewport arms bump epochs by scoped change detection — see [Scene State and Epochs](../subsystems/scene-state-and-epochs.md))
 - `protocol.rs` — `ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`. `ServerMessage::BookmarkChanged { id, action, dataset_urls }` is unsequenced, like the presence variants (PeerJoined, PresenceUpdate, CursorUpdate, FollowChanged) — a session-scoped notification for [Saved Views](../subsystems/saved-views.md), not a sequenced document command.
 - `epoch.rs` — `SceneEpochs` (content/layout/view/selection/asset/annotation)
 - `cursor.rs` — peer-cursor world geometry + color assignment for GPU rendering
@@ -52,9 +52,9 @@ Module-level only — see the source for signatures.
 
 ## Invariants
 
-- **`Scene::apply` is the conventional mutation path.** Every command — document or viewport — should flow through it. `Scene` does expose a few other `&mut self` methods (`set_mode_2d`/`set_mode_3d`/`set_mode_fly`, `remove_dataset`, `rebuild_derived`, plus `pub(crate)` `inner_set_viewport`, all in scene/mod.rs), but the rule that command effects route through `apply` is enforced by review, not the type system. Bypassing `apply` skips epoch bumps and derived-state rebuilds (see [Scene State and Epochs](../subsystems/scene-state-and-epochs.md)). (`register_dataset` / `ensure_channel` exist, but on `DocumentState` / `ChannelSettings` in scene/types.rs, not on `Scene`.)
+- **`Scene::apply` is the conventional mutation path for commands.** Every command — document or viewport — should flow through it. Beyond `apply`, `Scene` exposes bulk-restore/framing methods that own their own epoch bumps (`load_document`, `import_presence`, `import_dataset_presence`, `fit_camera_to_dataset`, all in scene/mod.rs) — these are the sanctioned non-command mutators, and the wasm/py bindings delegate to them rather than writing fields or epochs themselves. `Scene` also exposes raw helpers that bump nothing (`set_mode_2d`/`set_mode_3d`/`set_mode_fly`, `remove_dataset`, `rebuild_derived`, plus `pub(crate)` `inner_set_viewport`); calling those directly skips epoch bumps and derived-state rebuilds (see [Scene State and Epochs](../subsystems/scene-state-and-epochs.md)) — a rule enforced by review, not the type system. (`register_dataset` / `ensure_channel` exist, but on `DocumentState` / `ChannelSettings` in scene/types.rs, not on `Scene`.)
 - **Document commands and viewport commands are disjoint enums** — `DocumentCommand` is shared/sequenced, `ViewportCommand` is local-only. The `Command` wrapper uses `#[serde(untagged)]` to deserialize either from the same JSON shape — the server uses this to decide what to broadcast (see [Document vs Viewport Command Split](../../decisions/0001-document-vs-viewport-split.md)).
-- **Epochs only increase.** A fresh `Scene` starts at zero on every counter; `Scene::apply` is the only writer. Consumers compare epoch values to decide whether to reprocess.
+- **Epochs only increase.** A fresh `Scene` starts at zero on every counter; the writers are `Scene::apply` (command.rs) and the `Scene` bulk-restore/framing methods (scene/mod.rs) — always-compiled code, never the bindings. Viewport bumps are conditional on actual change (the web re-asserts `set_z`/`set_t`/`set_c`/`set_viewport` every render tick, so a no-op must be epoch-silent). Consumers compare epoch values to decide whether to reprocess.
 - **`SetActiveLayout` requires special ordering** in `Scene::apply` — document state is applied first, then derived state is rebuilt. All other document commands do their side effects first. The reason is that derived-state computation needs to read the freshly-applied layout selection from `document.active_layout_ids`. The explicit early-return branch lives in `Scene::apply`'s `SetActiveLayout` match arm (command.rs), distinct from the separate `SetActiveLayout` arm inside `DocumentState::apply` (scene/types.rs) that performs the document-level state change.
 
 ## Gotchas

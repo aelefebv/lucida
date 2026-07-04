@@ -202,6 +202,107 @@ impl Camera {
         }
     }
 
+    /// Clamp an externally sourced camera (a peer's presence, a saved view)
+    /// into the same ranges the interactive mutators enforce, and repair
+    /// non-finite or degenerate fields, so an import can never install state
+    /// the local mutation paths could not produce — e.g. a `Slice` with
+    /// `zoom: 0.0` (finite, serializes fine) would otherwise turn the next
+    /// `pan` into a `0/0 = NaN` center, and NaN state defeats epoch change
+    /// detection permanently (NaN is self-unequal, so every subsequent camera
+    /// command reads as a change).
+    ///
+    /// Idempotent, and bit-preserving for any camera already in range: values
+    /// inside the clamp bounds pass through untouched (no renormalization),
+    /// so an unchanged presence re-import still compares equal and stays
+    /// epoch-silent.
+    pub fn sanitize(&mut self) {
+        fn finite_or(v: &mut f64, fallback: f64) {
+            if !v.is_finite() {
+                *v = fallback;
+            }
+        }
+        // Positional components get the same bound the pan/tick mutators
+        // enforce via `step_position`.
+        fn position_or(v: &mut f64, fallback: f64) {
+            *v = if v.is_finite() {
+                v.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX)
+            } else {
+                fallback
+            };
+        }
+        match self {
+            Camera::Slice(v) => {
+                position_or(&mut v.center[0], 0.0);
+                position_or(&mut v.center[1], 0.0);
+                v.zoom = if v.zoom.is_finite() {
+                    v.zoom.clamp(SLICE_ZOOM_MIN, SLICE_ZOOM_MAX)
+                } else {
+                    1.0
+                };
+            }
+            Camera::Arcball(v) => {
+                for c in &mut v.target {
+                    position_or(c, 0.5);
+                }
+                finite_or(&mut v.theta, 0.5);
+                finite_or(&mut v.phi, 0.8);
+                v.theta = wrap_angle(v.theta);
+                v.phi = wrap_angle(v.phi);
+                sanitize_projection(&mut v.fov, &mut v.near, &mut v.far);
+                // The non-finite fallback goes through the same max/min as a
+                // finite value: `sanitize_projection` has already bounded
+                // `near`, so the result always satisfies
+                // `near <= distance <= ARCBALL_DISTANCE_MAX` and a second
+                // sanitize pass is a no-op (idempotence).
+                let distance = if v.distance.is_finite() {
+                    v.distance
+                } else {
+                    1.8
+                };
+                v.distance = distance.max(v.near).min(ARCBALL_DISTANCE_MAX);
+                v.clip_distance = if v.clip_distance.is_finite() {
+                    v.clip_distance.clamp(0.0, CLIP_DISTANCE_MAX)
+                } else {
+                    0.0
+                };
+            }
+            Camera::Fly(v) => {
+                for c in &mut v.position {
+                    position_or(c, 0.5);
+                }
+                // Repair only a clearly broken quaternion (non-finite or
+                // near-zero norm — `quat_rotate_vector` with it degenerates
+                // the camera axes toward zero, collapsing the view basis;
+                // `quat_normalize` itself returns identity below its own
+                // cutoff, so this repairs earlier, at norm² < 1e-12, rather
+                // than waiting for that). A merely non-unit quaternion is
+                // left alone: renormalizing would perturb the last bit of a
+                // legitimate unit quaternion and make unchanged re-imports
+                // compare unequal.
+                let norm_sq: f64 = v.orientation.iter().map(|c| c * c).sum();
+                if !norm_sq.is_finite() || norm_sq < 1e-12 {
+                    v.orientation = [0.0, 0.0, 0.0, 1.0];
+                }
+                sanitize_projection(&mut v.fov, &mut v.near, &mut v.far);
+                v.speed_multiplier = if v.speed_multiplier.is_finite() {
+                    v.speed_multiplier.clamp(0.01, 100.0)
+                } else {
+                    1.0
+                };
+                v.base_speed = if v.base_speed.is_finite() {
+                    v.base_speed.clamp(FLY_BASE_SPEED_MIN, FLY_BASE_SPEED_MAX)
+                } else {
+                    1.0
+                };
+                v.clip_distance = if v.clip_distance.is_finite() {
+                    v.clip_distance.clamp(0.0, CLIP_DISTANCE_MAX)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
     pub fn effective_zoom(&self) -> f64 {
         match self {
             Camera::Slice(v) => v.zoom,
@@ -360,6 +461,124 @@ impl Camera {
     }
 }
 
+// --- Interactive-range clamps ---
+//
+// Every camera mutator clamps its writes into these ranges so that FINITE
+// inputs — of ANY magnitude — can only ever produce FINITE state. This is
+// load-bearing for epoch change detection: `Scene::apply` diffs camera state
+// before/after each command, and a non-finite value minted by camera math is
+// self-unequal once a NaN lands (NaN != NaN), so every later camera-scope
+// command (including the per-render-tick viewport re-assert) would read as
+// "changed" and force a full replan per frame, permanently; a stored NaN
+// also serializes to JSON `null`, which breaks every peer's presence parse.
+// Every kind of accumulator gets its own guard, closing every way camera
+// math can go non-finite:
+//
+// - multiplicative state (`Slice::zoom`, `Arcball::distance`) saturates at a
+//   floor/ceiling, so repeated scaling can neither underflow to exactly 0.0
+//   (poisoning later divides) nor overflow to Inf;
+// - additive accumulators (`clip_distance`) saturate at
+//   `[0, CLIP_DISTANCE_MAX]` on every nudge, so repeated huge deltas cannot
+//   stack to Inf, and a huge negative delta always comes back down to 0;
+// - positional state (`Slice::center`, `Arcball::target`, `Fly::position`)
+//   accumulates through [`step_position`], which saturates an overflowing
+//   step at the bound and drops a NaN step (an `Inf − Inf` cancellation from
+//   an extreme finite input) instead of storing it; absolute positional
+//   writes (set-center, center-on-voxel, the fit targets) clamp to the same
+//   bound;
+// - orbit angles accumulate through [`wrap_angle`]: a bit-identical
+//   pass-through across the whole interactive range, wrapping by 2π (which
+//   is trig-periodic — the identical camera) only past a huge guard, so
+//   repeated huge deltas cannot reach ±Inf, where `sin(Inf) = NaN` would
+//   poison `eye_position` every frame.
+//
+// The bounds are far beyond any dataset scale (world space is normalized;
+// slice space is voxels; slice zoom is screen pixels per world unit) yet far
+// inside f64 range, so the multiplies/divides downstream of a clamped value
+// stay finite by construction.
+
+/// Floor for [`Slice::zoom`]. Keeps `Slice::pan`'s divide-by-zoom finite.
+pub const SLICE_ZOOM_MIN: f64 = 1e-9;
+/// Ceiling for [`Slice::zoom`].
+pub const SLICE_ZOOM_MAX: f64 = 1e9;
+/// Ceiling for [`Arcball::distance`]; the floor is the camera's own `near`
+/// (mirroring [`Arcball::zoom`]'s `.max(near)`). Without a ceiling, repeated
+/// zoom-out multiplies `distance` to Inf, and `Arcball::pan` with a zero
+/// delta then computes `0 × Inf = NaN` into `target`.
+pub const ARCBALL_DISTANCE_MAX: f64 = 1e9;
+/// Component-wise bound for positional camera state (slice `center`, arcball
+/// `target`, fly `position`). Generous for any real world coordinate (slice
+/// space is voxels; the largest images are ~1e9 voxels across) while keeping
+/// sums and products with the other clamped ranges finite.
+pub const CAMERA_POSITION_MAX: f64 = 1e12;
+/// Ceiling for `clip_distance` (arcball and fly). Clipping farther away than
+/// the maximum orbit distance is meaningless, and the accumulate-per-nudge
+/// entry point needs a ceiling so repeated huge deltas saturate instead of
+/// stacking to Inf. The floor is 0 (no clip).
+pub const CLIP_DISTANCE_MAX: f64 = 1e9;
+/// Bounds for [`Fly::base_speed`] (world units per second). Bounded so the
+/// per-tick displacement (`base_speed × speed_multiplier × dt`) can never
+/// overflow position to Inf in a realistic number of ticks.
+pub const FLY_BASE_SPEED_MIN: f64 = 1e-9;
+/// Upper bound for [`Fly::base_speed`]. See [`FLY_BASE_SPEED_MIN`].
+pub const FLY_BASE_SPEED_MAX: f64 = 1e9;
+/// Guard for accumulated orbit angles (`theta`/`phi`). Inside this range
+/// [`wrap_angle`] is a bit-identical pass-through — ~159,000 full turns, far
+/// past any real session, so ordinary rotation state (including large
+/// accumulated over-the-pole values) is untouched. Past it, the angle wraps
+/// by 2π, which describes the identical camera.
+pub const ANGLE_WRAP_LIMIT: f64 = 1e6;
+
+/// Accumulate an orbit angle without ever reaching ±Inf. Values inside
+/// [`ANGLE_WRAP_LIMIT`] pass through bit-identical; beyond it the value
+/// wraps by 2π (`sin`/`cos` are 2π-periodic, so the camera is unchanged).
+/// Because stored angles are always inside the guard, adding any finite
+/// delta stays finite (|state| + f64::MAX rounds to f64::MAX, never Inf).
+fn wrap_angle(v: f64) -> f64 {
+    if v.abs() <= ANGLE_WRAP_LIMIT {
+        v
+    } else {
+        v % std::f64::consts::TAU
+    }
+}
+
+/// Advance one positional component by `step`, keeping the result inside
+/// `±CAMERA_POSITION_MAX`.
+///
+/// Saturates at the bound when the sum overflows to `±Inf`, and leaves the
+/// component **unchanged** when the sum is NaN — an `Inf − Inf` cancellation
+/// between overflowing terms carries no usable direction, and storing the
+/// NaN would defeat epoch change detection permanently.
+fn step_position(current: f64, step: f64) -> f64 {
+    let next = current + step;
+    if next.is_finite() {
+        next.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX)
+    } else if next == f64::INFINITY {
+        CAMERA_POSITION_MAX
+    } else if next == f64::NEG_INFINITY {
+        -CAMERA_POSITION_MAX
+    } else {
+        current
+    }
+}
+
+/// Repair a perspective triple to a renderable state: `fov` strictly inside
+/// `(0, π)`; `near` positive and no larger than [`ARCBALL_DISTANCE_MAX`] (so
+/// a distance clamped to the ceiling can still satisfy `distance >= near`);
+/// `far > near`. Values already in range pass through bit-identical (this
+/// must be idempotent — see [`Camera::sanitize`]).
+fn sanitize_projection(fov: &mut f64, near: &mut f64, far: &mut f64) {
+    if !fov.is_finite() || *fov <= 1e-3 || *fov >= std::f64::consts::PI - 1e-3 {
+        *fov = std::f64::consts::FRAC_PI_4;
+    }
+    if !near.is_finite() || *near <= 0.0 || *near > ARCBALL_DISTANCE_MAX {
+        *near = 0.01;
+    }
+    if !far.is_finite() || *far <= *near {
+        *far = *near * 1e4;
+    }
+}
+
 // --- Slice implementation ---
 
 impl Slice {
@@ -372,12 +591,38 @@ impl Slice {
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
-        self.center[0] += dx / self.zoom;
-        self.center[1] += dy / self.zoom;
+        // The divide is never by zero (every write to `zoom` clamps to
+        // `SLICE_ZOOM_MIN..=SLICE_ZOOM_MAX`), and `step_position` bounds the
+        // accumulated center — a huge finite delta at the zoom floor saturates
+        // at ±CAMERA_POSITION_MAX instead of storing Inf. Center stays finite
+        // for every finite input.
+        self.center[0] = step_position(self.center[0], dx / self.zoom);
+        self.center[1] = step_position(self.center[1], dy / self.zoom);
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
-        self.zoom *= factor;
+        // Saturates at the range ends: a zero/tiny factor lands on the floor
+        // instead of underflowing to 0.0 (which would poison `pan`'s divide),
+        // and repeated zoom-in lands on the ceiling instead of Inf.
+        self.zoom = (self.zoom * factor).clamp(SLICE_ZOOM_MIN, SLICE_ZOOM_MAX);
+    }
+
+    /// Set the zoom directly, clamped into the interactive range. Zero,
+    /// negative, and out-of-range values saturate — `zoom` must stay a
+    /// positive finite divisor for [`Self::pan`].
+    pub fn set_zoom(&mut self, value: f64) {
+        self.zoom = value.clamp(SLICE_ZOOM_MIN, SLICE_ZOOM_MAX);
+    }
+
+    /// Set the center directly, each component clamped to the same
+    /// `±CAMERA_POSITION_MAX` bound the pan path enforces — an absolute
+    /// write must not be able to install a coordinate the accumulating
+    /// writes could never reach.
+    pub fn set_center(&mut self, x: f64, y: f64) {
+        self.center = [
+            x.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX),
+            y.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX),
+        ];
     }
 
     /// The visible region in world coordinates: (min_x, min_y, max_x, max_y).
@@ -405,8 +650,12 @@ impl Slice {
     /// math lives in [`crate::framing::slice_framing`].
     pub fn fit_to_bounds(&mut self, min: [f64; 2], max: [f64; 2], margin: f64) {
         let (center, zoom) = slice_framing(min, max, self.viewport, margin);
-        self.center = center;
-        self.zoom = zoom;
+        // Positional write: same component bound as the pan path.
+        self.set_center(center[0], center[1]);
+        // `slice_framing` already guarantees a finite positive zoom; the clamp
+        // keeps "zoom is always in the interactive range" a single invariant
+        // with no exceptions.
+        self.zoom = zoom.clamp(SLICE_ZOOM_MIN, SLICE_ZOOM_MAX);
     }
 }
 
@@ -450,10 +699,22 @@ impl Arcball {
     pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
         let (target, distance, near, far) =
             arcball_containment(min, max, self.viewport, self.fov, margin);
-        self.target = target;
-        self.distance = distance;
-        self.near = near;
-        self.far = far;
+        // Positional write: same component bound as the pan path.
+        for (dst, src) in self.target.iter_mut().zip(target) {
+            *dst = src.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX);
+        }
+        // Same ceiling as [`Self::zoom`] — every distance write clamps. When
+        // the cap engages (absurdly large finite bounds), rebuild the
+        // near/far bracket around the capped distance; containment's bracket
+        // was derived from the uncapped one and could exceed it.
+        self.distance = distance.min(ARCBALL_DISTANCE_MAX);
+        if self.distance < distance {
+            self.near = (self.distance * 1e-3).max(1e-4);
+            self.far = self.distance * 2.0;
+        } else {
+            self.near = near;
+            self.far = far;
+        }
     }
 
     /// Camera forward direction (normalized), pointing from eye toward target.
@@ -467,12 +728,22 @@ impl Arcball {
     }
 
     pub fn rotate(&mut self, d_theta: f64, d_phi: f64) {
-        self.theta += d_theta;
-        self.phi += d_phi;
+        // Unconstrained across the whole interactive range (phi is NOT
+        // clamped to a hemisphere — rotating over the pole accumulates
+        // freely); `wrap_angle` only steps in past its huge guard so the
+        // angles can never accumulate to ±Inf.
+        self.theta = wrap_angle(self.theta + d_theta);
+        self.phi = wrap_angle(self.phi + d_phi);
     }
 
     pub fn zoom(&mut self, delta: f64) {
-        self.distance = (self.distance * (1.0 + delta)).max(self.near);
+        // Floor at `near` (a zoom-in can't pass through the target plane) and
+        // ceiling at the interactive range end so repeated zoom-out saturates
+        // instead of multiplying `distance` to Inf — `pan` scales by
+        // `distance`, and `0 × Inf` would put NaN into `target`.
+        self.distance = (self.distance * (1.0 + delta))
+            .max(self.near)
+            .min(ARCBALL_DISTANCE_MAX);
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -485,8 +756,13 @@ impl Arcball {
         let right = normalize3(cross3(forward, self.up_vector()));
         let up = cross3(right, forward);
         let scale = self.distance * 0.002;
+        // `step_position` keeps `target` inside ±CAMERA_POSITION_MAX: a huge
+        // finite delta saturates instead of storing Inf, and an Inf − Inf
+        // cancellation between the two terms is dropped instead of storing
+        // NaN. Without the bound, an Inf target would make the NEXT pan's
+        // `normalize3(target − eye)` all-NaN and poison every component.
         for i in 0..3 {
-            self.target[i] += (right[i] * -dx + up[i] * dy) * scale;
+            self.target[i] = step_position(self.target[i], (right[i] * -dx + up[i] * dy) * scale);
         }
     }
 
@@ -723,10 +999,13 @@ pub(crate) fn quat_from_axis_angle(axis: [f64; 3], angle: f64) -> [f64; 4] {
     [axis[0] * s, axis[1] * s, axis[2] * s, half.cos()]
 }
 
-/// Normalize a quaternion to unit length.
+/// Normalize a quaternion to unit length. Degenerate input — near-zero or
+/// non-finite length (NaN included: the `is_finite` check runs first, since
+/// `NaN < x` is false and would slip past the near-zero test alone) —
+/// returns the identity quaternion instead of dividing a NaN/Inf through.
 pub(crate) fn quat_normalize(q: [f64; 4]) -> [f64; 4] {
     let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    if len < 1e-12 {
+    if !len.is_finite() || len < 1e-12 {
         return [0.0, 0.0, 0.0, 1.0];
     }
     [q[0] / len, q[1] / len, q[2] / len, q[3] / len]
@@ -801,20 +1080,30 @@ impl Fly {
     pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
         let (center, distance, near, far) =
             arcball_containment(min, max, self.viewport, self.fov, margin);
+        // Same distance ceiling as the arcball fit; positional writes go
+        // through the shared component bound. When the cap engages, rebuild
+        // the near/far bracket around the capped distance (containment's
+        // bracket was derived from the uncapped one).
+        let capped = distance.min(ARCBALL_DISTANCE_MAX);
         let forward = self.forward_vector();
         // Place the eye `distance` behind the box center along the look ray, so
         // the center is straight ahead.
-        self.position = [
-            center[0] - forward[0] * distance,
-            center[1] - forward[1] * distance,
-            center[2] - forward[2] * distance,
-        ];
-        self.near = near;
-        self.far = far;
+        for i in 0..3 {
+            self.position[i] =
+                (center[i] - forward[i] * capped).clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX);
+        }
+        if capped < distance {
+            self.near = (capped * 1e-3).max(1e-4);
+            self.far = capped * 2.0;
+        } else {
+            self.near = near;
+            self.far = far;
+        }
         // Diagonal from sanitized bounds so an inverted/non-finite box still
-        // yields a finite, positive base speed.
+        // yields a finite, positive base speed — clamped like every other
+        // base-speed write.
         let diagonal = 2.0 * Aabb::sanitized(min, max).bounding_radius();
-        self.base_speed = (diagonal * 0.3).max(1e-6);
+        self.base_speed = (diagonal * 0.3).clamp(1e-6, FLY_BASE_SPEED_MAX);
     }
 
     /// Advance the fly camera by one tick.
@@ -835,12 +1124,20 @@ impl Fly {
         pitch: f64,
         roll: f64,
     ) {
-        let dt = dt.min(0.1);
+        // Clamp both ends: the ceiling bounds a hitchy frame, the zero floor
+        // rejects a negative dt (a raw caller's bad clock delta), which would
+        // otherwise integrate a huge finite displacement toward ±Inf.
+        let dt = dt.clamp(0.0, 0.1);
 
         // Apply rotation: build axis-angle quaternions for each rotation axis
         // yaw = rotation around camera's local Y axis
         // pitch = rotation around camera's local X axis
         // roll = rotation around camera's local -Z axis (forward)
+        //
+        // Rotation rates need no clamp for state finiteness: sin/cos are
+        // bounded for any finite argument and the product is renormalized, so
+        // orientation stays a finite unit quaternion — an extreme rate merely
+        // lands at an arbitrary angle.
         if yaw.abs() > 1e-12 || pitch.abs() > 1e-12 || roll.abs() > 1e-12 {
             let q_yaw = quat_from_axis_angle([0.0, 1.0, 0.0], yaw * dt);
             let q_pitch = quat_from_axis_angle([1.0, 0.0, 0.0], pitch * dt);
@@ -851,15 +1148,24 @@ impl Fly {
             self.orientation = quat_normalize(quat_multiply(self.orientation, local_rot));
         }
 
-        // Apply translation using camera's local axes
+        // Apply translation using camera's local axes. The axes are unit
+        // inputs by contract (-1, 0, or 1); clamping enforces it so a raw
+        // caller passing a huge finite axis can't teleport the camera —
+        // per-tick displacement stays bounded by `base_speed × multiplier ×
+        // dt`, and `step_position` bounds the accumulated position.
+        let forward = forward.clamp(-1.0, 1.0);
+        let right = right.clamp(-1.0, 1.0);
+        let up = up.clamp(-1.0, 1.0);
         if forward.abs() > 1e-12 || right.abs() > 1e-12 || up.abs() > 1e-12 {
             let forward_vec = quat_rotate_vector(self.orientation, [0.0, 0.0, -1.0]);
             let right_vec = quat_rotate_vector(self.orientation, [1.0, 0.0, 0.0]);
             let up_vec = quat_rotate_vector(self.orientation, [0.0, 1.0, 0.0]);
             let speed = self.base_speed * self.speed_multiplier * dt;
             for i in 0..3 {
-                self.position[i] +=
-                    (forward_vec[i] * forward + right_vec[i] * right + up_vec[i] * up) * speed;
+                self.position[i] = step_position(
+                    self.position[i],
+                    (forward_vec[i] * forward + right_vec[i] * right + up_vec[i] * up) * speed,
+                );
             }
         }
     }
@@ -2562,5 +2868,120 @@ mod tests {
         assert!((eye[0] as f64 - 0.5).abs() < 1e-4, "eye x centered");
         assert!((eye[1] as f64 - 0.5).abs() < 1e-4, "eye y centered");
         assert!(eye[2] as f64 > 0.5, "eye sits in front of the cube on +Z");
+    }
+
+    // --- Finite inputs must produce finite state (camera-level) ---
+
+    #[test]
+    fn arcball_fit_caps_distance_and_keeps_bracket_consistent() {
+        let mut a = Arcball::new([800, 600]);
+        a.fit_to_bounds([-1e15; 3], [1e15; 3], FIT_MARGIN_3D);
+        assert_eq!(a.distance, ARCBALL_DISTANCE_MAX, "ceiling must engage");
+        assert!(
+            a.near.is_finite() && a.near > 0.0 && a.near < a.distance,
+            "bracket floor must sit below the capped distance, got near {}",
+            a.near
+        );
+        assert!(a.far.is_finite() && a.far > a.near);
+        for c in a.target {
+            assert!(c.is_finite());
+        }
+
+        // Normal-scale bounds are untouched by the cap: same bracket the
+        // containment math computed.
+        let mut b = Arcball::new([800, 600]);
+        b.fit_to_bounds([0.0; 3], [1.0; 3], FIT_MARGIN_3D);
+        assert!(b.distance < ARCBALL_DISTANCE_MAX);
+        assert!(b.near > 0.0 && b.near < b.distance && b.far > b.near);
+    }
+
+    #[test]
+    fn arcball_fit_clamps_target_components() {
+        // The fit target is an absolute positional write and must obey the
+        // same component bound as the pan path — one rule for the whole
+        // positional-write family.
+        let mut a = Arcball::new([800, 600]);
+        a.fit_to_bounds([1e300; 3], [1e300; 3], FIT_MARGIN_3D);
+        assert_eq!(a.target, [CAMERA_POSITION_MAX; 3]);
+        assert!(a.distance.is_finite() && a.distance > 0.0);
+        assert!(a.near > 0.0 && a.far > a.near);
+    }
+
+    #[test]
+    fn fly_fit_clamps_base_speed_and_position() {
+        let mut f = Fly::new([800, 600]);
+        f.fit_to_bounds([-1e15; 3], [1e15; 3], FIT_MARGIN_3D);
+        assert_eq!(
+            f.base_speed, FLY_BASE_SPEED_MAX,
+            "base speed must clamp like every other write"
+        );
+        for c in f.position {
+            assert!(c.is_finite() && c.abs() <= CAMERA_POSITION_MAX);
+        }
+        assert!(f.near > 0.0 && f.far > f.near);
+    }
+
+    #[test]
+    fn sanitize_is_idempotent_with_large_near() {
+        // A peer can send a large-but-valid near plane; the non-finite
+        // distance fallback must still land at >= near so a second sanitize
+        // changes nothing.
+        let mut cam = Camera::Arcball(Arcball {
+            near: 5000.0,
+            far: 10000.0,
+            distance: f64::NAN,
+            ..Arcball::new([64, 64])
+        });
+        cam.sanitize();
+        match &cam {
+            Camera::Arcball(v) => {
+                assert!(v.distance >= v.near, "fallback must respect near");
+                assert_eq!(v.distance, 5000.0);
+            }
+            other => panic!("expected Arcball, got {other:?}"),
+        }
+        let once = cam.clone();
+        cam.sanitize();
+        assert_eq!(cam, once, "sanitize(sanitize(x)) must equal sanitize(x)");
+
+        // A near beyond the distance ceiling resets, keeping
+        // `near <= distance <= ceiling` satisfiable.
+        let mut cam = Camera::Arcball(Arcball {
+            near: 1e300,
+            far: 1e301,
+            ..Arcball::new([64, 64])
+        });
+        cam.sanitize();
+        match &cam {
+            Camera::Arcball(v) => {
+                assert!(v.near <= ARCBALL_DISTANCE_MAX && v.near > 0.0);
+                assert!(v.distance >= v.near && v.distance <= ARCBALL_DISTANCE_MAX);
+            }
+            other => panic!("expected Arcball, got {other:?}"),
+        }
+        let once = cam.clone();
+        cam.sanitize();
+        assert_eq!(cam, once);
+    }
+
+    #[test]
+    fn sanitize_bounds_positional_state() {
+        // Positional fields obey the same component bound the pan/tick
+        // mutators enforce.
+        let mut cam = Camera::Slice(Slice {
+            center: [1e300, -1e300],
+            zoom: 1.0,
+            viewport: [64, 64],
+        });
+        cam.sanitize();
+        match &cam {
+            Camera::Slice(v) => {
+                assert_eq!(v.center, [CAMERA_POSITION_MAX, -CAMERA_POSITION_MAX]);
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        let once = cam.clone();
+        cam.sanitize();
+        assert_eq!(cam, once);
     }
 }

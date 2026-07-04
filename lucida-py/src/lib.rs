@@ -31,8 +31,7 @@ impl PyScene {
     fn load_document(&mut self, json: &str) -> PyResult<()> {
         let doc: lucida_core::scene::DocumentState = serde_json::from_str(json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        self.inner.document = doc;
-        self.inner.rebuild_derived();
+        self.inner.load_document(doc);
         Ok(())
     }
 
@@ -140,11 +139,7 @@ impl PyScene {
         }
         let p: Presence = serde_json::from_str(json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let viewport = self.inner.camera.viewport();
-        self.inner.camera = p.camera;
-        self.inner.camera.set_viewport(viewport[0], viewport[1]);
-        self.inner.view = p.view;
-        self.inner.display = p.display;
+        self.inner.import_presence(p.camera, p.view, p.display);
         Ok(())
     }
 

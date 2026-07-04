@@ -1585,6 +1585,9 @@ fn scene_from_presence(document: &DocumentState, presence: &PresenceState) -> Sc
     let mut scene = Scene::new(presence.camera.viewport());
     scene.document = document.clone();
     scene.camera = presence.camera.clone();
+    // Peer-sourced camera: clamp into the ranges the interactive mutators
+    // enforce (same rule as `Scene::import_presence`).
+    scene.camera.sanitize();
     scene.view = presence.view.clone();
     scene.display = presence.display.clone();
     scene.dataset_order = presence.dataset_order.clone();
@@ -1597,6 +1600,9 @@ fn scene_from_saved_view(document: &DocumentState, view: &SavedView) -> Scene {
     let mut scene = Scene::new(view.camera.viewport());
     scene.document = document.clone();
     scene.camera = view.camera.clone();
+    // Stored camera: clamp into the ranges the interactive mutators enforce
+    // (same rule as `Scene::import_presence`).
+    scene.camera.sanitize();
     scene.view = view.view.clone();
     scene.display = view.display.clone();
     scene.dataset_order = view.dataset_order.clone();
@@ -3007,6 +3013,9 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::Zoom3D { .. } => "camera zoom",
         ViewportCommand::Pan3D { .. } => "camera pan",
         ViewportCommand::FlyTick { .. } => "camera fly-tick",
+        ViewportCommand::FlySetBaseSpeed { .. } => "camera fly-base-speed",
+        ViewportCommand::FlyAdjustSpeed { .. } => "camera fly-speed",
+        ViewportCommand::AdjustClipDistance { .. } => "camera clip-nudge",
         ViewportCommand::SetZ { .. } => "view slice z",
         ViewportCommand::SetZRange { .. } => "view z-range",
         ViewportCommand::SetT { .. } => "view slice t",

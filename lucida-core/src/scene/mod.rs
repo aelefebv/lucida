@@ -318,8 +318,10 @@ impl Scene {
     ///
     /// Returns `true` if it framed something, `false` if the dataset has no bounds
     /// in the active space (unknown id / no members) — in which case the camera is
-    /// left untouched. The borrow is resolved by computing the bounds *before*
-    /// mutating the camera.
+    /// left untouched (and no epoch bumps). The borrow is resolved by computing
+    /// the bounds *before* mutating the camera. On success it bumps `epochs.view`
+    /// (exactly as pan/zoom/rotate do) so viewport consumers re-read the camera
+    /// and redraw with the new framing.
     pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
         if let Camera::Slice(_) = self.camera {
             // 2D: the Slice camera lives in voxel space — frame the voxel AABB.
@@ -329,15 +331,15 @@ impl Scene {
             if let Camera::Slice(s) = &mut self.camera {
                 s.fit_to_bounds(min, max, crate::framing::FIT_MARGIN_2D);
             }
-            true
         } else {
             // 3D (Arcball/Fly): the camera lives in normalized world space.
             let Some((min, max)) = self.dataset_world_bounds(dataset_id) else {
                 return false;
             };
             self.camera.fit_to_bounds(min, max);
-            true
         }
+        self.epochs.view += 1;
+        true
     }
 
     /// Return aggregate bounds for all visible image members in scene XY space.
@@ -834,6 +836,107 @@ impl Scene {
         let vy = (1.0 - unit[1]) * shape[1];
         let vz = unit[2] * shape[2];
         Some([vx, vy, vz])
+    }
+
+    /// Replace the document portion (content graphs) wholesale, preserving the
+    /// local camera/view/display, then make every document-derived piece of
+    /// state consistent with it:
+    ///
+    /// - `derived` is rebuilt for all manifests (via [`Self::rebuild_derived`]).
+    /// - `dataset_order` gains any restored dataset it didn't already list and
+    ///   drops ids no longer in the document.
+    /// - `dataset_settings` is seeded for each restored manifest with the
+    ///   COMPLETE per-channel + per-label settings (the same
+    ///   [`DatasetDisplaySettings::seeded_for`] the `DatasetOpened` apply path
+    ///   uses) rather than a bare `Default` — the empty default has NO
+    ///   channel/label entries, which would leave the layer panel's per-channel
+    ///   and per-label controls unable to render on a document restore. Entries
+    ///   that already exist (locally adjusted settings) are kept untouched;
+    ///   entries for removed datasets are pruned.
+    ///
+    /// A document load can change any document-scoped state, so it bumps every
+    /// document-scoped epoch (`content`, `layout`, `asset`, `annotation`) plus
+    /// `selection` (dataset order/settings may have changed) — consumers must
+    /// re-read rather than render from a stale plan. `view` is deliberately NOT
+    /// bumped: the local camera is untouched by design.
+    pub fn load_document(&mut self, doc: DocumentState) {
+        self.document = doc;
+        self.rebuild_derived();
+
+        for id in self.document.manifests.keys().cloned().collect::<Vec<_>>() {
+            if !self.dataset_order.contains(&id) {
+                self.dataset_order.push(id.clone());
+            }
+            if !self.dataset_settings.contains_key(&id) {
+                let seeded = self
+                    .document
+                    .manifests
+                    .get(&id)
+                    .map(DatasetDisplaySettings::seeded_for)
+                    .unwrap_or_default();
+                self.dataset_settings.insert(id, seeded);
+            }
+        }
+        let dataset_ids: std::collections::HashSet<&DatasetId> =
+            self.document.manifests.keys().collect();
+        self.dataset_order.retain(|id| dataset_ids.contains(id));
+        self.dataset_settings
+            .retain(|id, _| dataset_ids.contains(id));
+
+        self.epochs.content += 1;
+        self.epochs.layout += 1;
+        self.epochs.asset += 1;
+        self.epochs.annotation += 1;
+        self.epochs.selection += 1;
+    }
+
+    /// Adopt another client's camera + view + display (follow mode / saved-view
+    /// restore), preserving the local viewport size — the follower's canvas
+    /// dimensions are its own.
+    ///
+    /// Epoch semantics match [`Scene::apply`]'s viewport policy: `epochs.view`
+    /// bumps iff the (viewport-preserving) camera actually changed, and
+    /// `epochs.selection` bumps iff view or display changed. The change checks
+    /// keep an unchanged presence heartbeat from invalidating consumers' caches
+    /// every message, while a real remote camera move reliably invalidates the
+    /// chunk plan instead of leaving the renderer on a stale one.
+    pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
+        let viewport = self.camera.viewport();
+        let mut camera = camera;
+        camera.set_viewport(viewport[0], viewport[1]);
+        // A peer's camera is clamped into the same ranges the local mutators
+        // enforce (`Camera::sanitize`): a follow target must not be able to
+        // hand this scene state its own mutation paths could never produce —
+        // e.g. a finite `zoom: 0.0` that would NaN-poison the next pan.
+        // Sanitize is bit-preserving for in-range cameras, so the equality
+        // check below still sees an unchanged re-import as unchanged.
+        camera.sanitize();
+        if self.camera != camera {
+            self.camera = camera;
+            self.epochs.view += 1;
+        }
+        if self.view != view || self.display != display {
+            self.view = view;
+            self.display = display;
+            self.epochs.selection += 1;
+        }
+    }
+
+    /// Adopt another client's dataset ordering + per-dataset display settings
+    /// (the layer-panel half of follow mode). Bumps `epochs.selection` iff
+    /// something actually changed — the epoch the per-dataset display commands
+    /// bump — so consumers re-read settings without an unchanged rebroadcast
+    /// forcing a replan.
+    pub fn import_dataset_presence(
+        &mut self,
+        dataset_order: Vec<DatasetId>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    ) {
+        if self.dataset_order != dataset_order || self.dataset_settings != dataset_settings {
+            self.dataset_order = dataset_order;
+            self.dataset_settings = dataset_settings;
+            self.epochs.selection += 1;
+        }
     }
 
     /// Rebuild derived state from the document's dataset manifests.
@@ -2635,5 +2738,234 @@ mod tests {
             }
             other => panic!("expected an Arcball camera, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_bumps_view_epoch_on_success_only() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let baseline = scene.epochs.clone();
+
+        // Unknown id: camera untouched, no bump — the caller can ignore the
+        // failure without side effects.
+        assert!(!scene.fit_camera_to_dataset("ghost"));
+        assert_eq!(scene.epochs, baseline);
+
+        // Success: exactly one view bump (like pan/zoom/rotate), nothing else.
+        assert!(scene.fit_camera_to_dataset("ds1"));
+        assert_eq!(scene.epochs.view, baseline.view + 1);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+    }
+
+    // --- load_document ---
+
+    #[test]
+    fn load_document_restores_state_and_advances_epochs() {
+        // Donor: a live document with one 2-channel dataset.
+        let mut donor = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 2);
+        donor.apply(DocumentCommand::DatasetOpened(reg).into());
+        let doc = donor.document.clone();
+
+        // Restore into a fresh scene with a distinctive local camera.
+        let mut scene = Scene::new([640, 480]);
+        scene.apply(crate::command::ViewportCommand::SetCenter { x: 42.0, y: 7.0 }.into());
+        let baseline = scene.epochs.clone();
+        let camera_before = scene.camera.clone();
+
+        scene.load_document(doc);
+
+        let ds_id = DatasetId("ds1".into());
+        assert!(scene.document.manifests.contains_key(&ds_id));
+        assert!(
+            scene.derived.contains_key(&ds_id),
+            "derived must be rebuilt"
+        );
+        assert!(scene.dataset_order.contains(&ds_id));
+        // Settings must be seeded COMPLETE (per-channel entries present), not a
+        // bare Default with an empty channel list.
+        let settings = scene
+            .dataset_settings
+            .get(&ds_id)
+            .expect("settings seeded for restored dataset");
+        assert!(
+            settings.channel_settings.len() >= 2,
+            "expected per-channel settings seeded from the manifest, got {}",
+            settings.channel_settings.len()
+        );
+
+        // Every document-scoped epoch advances so consumers re-read...
+        assert!(scene.epochs.content > baseline.content);
+        assert!(scene.epochs.layout > baseline.layout);
+        assert!(scene.epochs.asset > baseline.asset);
+        assert!(scene.epochs.annotation > baseline.annotation);
+        assert!(scene.epochs.selection > baseline.selection);
+        // ...but the local camera is untouched, so view does not.
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.camera, camera_before);
+    }
+
+    #[test]
+    fn load_document_keeps_local_settings_and_prunes_removed_datasets() {
+        let mut donor = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        donor.apply(DocumentCommand::DatasetOpened(reg).into());
+        let doc = donor.document.clone();
+
+        // The receiving scene already has ds1 (locally hidden) plus a stale
+        // entry for a dataset the incoming document no longer contains.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(
+            crate::command::ViewportCommand::SetDatasetVisible {
+                dataset_id: "ds1".into(),
+                visible: false,
+            }
+            .into(),
+        );
+        let stale = DatasetId("gone".into());
+        scene.dataset_order.push(stale.clone());
+        scene
+            .dataset_settings
+            .insert(stale.clone(), DatasetDisplaySettings::default());
+
+        scene.load_document(doc);
+
+        let ds_id = DatasetId("ds1".into());
+        assert!(
+            !scene.dataset_settings[&ds_id].visible,
+            "locally adjusted settings must survive a re-load"
+        );
+        assert!(!scene.dataset_order.contains(&stale));
+        assert!(!scene.dataset_settings.contains_key(&stale));
+    }
+
+    // --- import_presence / import_dataset_presence ---
+
+    #[test]
+    fn import_presence_preserves_viewport_and_bumps_iff_changed() {
+        let mut scene = Scene::new([800, 600]);
+        let baseline = scene.epochs.clone();
+
+        // A peer's presence: different camera center, T selector, and gamma,
+        // captured at a different canvas size.
+        let mut remote_camera = Camera::new_2d([1920, 1080]);
+        if let Camera::Slice(v) = &mut remote_camera {
+            v.center = [100.0, 200.0];
+        }
+        let mut remote_view = ViewState::new();
+        remote_view.t = 3;
+        let remote_display = DisplayState {
+            gamma: 2.0,
+            ..DisplayState::default()
+        };
+
+        scene.import_presence(
+            remote_camera.clone(),
+            remote_view.clone(),
+            remote_display.clone(),
+        );
+
+        // Local viewport size wins; everything else is the peer's.
+        assert_eq!(scene.camera.viewport(), [800, 600]);
+        if let Camera::Slice(v) = &scene.camera {
+            assert_eq!(v.center, [100.0, 200.0]);
+        } else {
+            panic!("expected Slice camera");
+        }
+        assert_eq!(scene.view.t, 3);
+        assert_eq!(scene.display.gamma, 2.0);
+        assert_eq!(scene.epochs.view, baseline.view + 1);
+        assert_eq!(scene.epochs.selection, baseline.selection + 1);
+
+        // Re-importing the identical presence (an unchanged heartbeat) must
+        // not invalidate consumers' epoch-keyed caches.
+        let after_first = scene.epochs.clone();
+        scene.import_presence(remote_camera, remote_view, remote_display);
+        assert_eq!(scene.epochs, after_first);
+    }
+
+    #[test]
+    fn imported_presence_camera_is_clamped_to_mutator_ranges() {
+        use crate::camera::{Arcball, SLICE_ZOOM_MIN, Slice};
+        use crate::scene::DisplayState;
+
+        // A peer's slice camera with zoom 0.0 is finite, serializes fine, and
+        // — unclamped — would turn the next pan into a 0/0 = NaN center. The
+        // import must clamp it into the range local mutators enforce.
+        let mut scene = Scene::new([800, 600]);
+        let zero_zoom = Camera::Slice(Slice {
+            center: [10.0, 20.0],
+            zoom: 0.0,
+            viewport: [64, 64],
+        });
+        scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
+        match &scene.camera {
+            Camera::Slice(v) => {
+                assert_eq!(v.zoom, SLICE_ZOOM_MIN, "imported zoom must be clamped");
+                assert_eq!(v.viewport, [800, 600], "local viewport wins");
+            }
+            other => panic!("expected Slice camera, got {other:?}"),
+        }
+
+        // Sanitizing is idempotent: re-importing the identical (still
+        // out-of-range) presence clamps to the same camera → epoch-silent.
+        let epochs = scene.epochs.clone();
+        scene.import_presence(zero_zoom, ViewState::new(), DisplayState::default());
+        assert_eq!(scene.epochs, epochs);
+
+        // Pan after the clamp stays finite.
+        scene.apply(crate::command::ViewportCommand::Pan { dx: 3.0, dy: 0.0 }.into());
+        match &scene.camera {
+            Camera::Slice(v) => {
+                assert!(v.center[0].is_finite() && v.center[1].is_finite());
+            }
+            other => panic!("expected Slice camera, got {other:?}"),
+        }
+
+        // Same rule for a 3D peer: a zero orbit distance clamps to >= near
+        // (what the arcball's own zoom mutator enforces).
+        let bad_arcball = Camera::Arcball(Arcball {
+            distance: 0.0,
+            ..Arcball::new([32, 32])
+        });
+        scene.import_presence(bad_arcball, ViewState::new(), DisplayState::default());
+        match &scene.camera {
+            Camera::Arcball(v) => {
+                assert!(
+                    v.distance.is_finite() && v.distance >= v.near && v.near > 0.0,
+                    "imported distance {} must be clamped to >= near {}",
+                    v.distance,
+                    v.near
+                );
+            }
+            other => panic!("expected Arcball camera, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_dataset_presence_bumps_selection_iff_changed() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let baseline = scene.epochs.clone();
+
+        let ds_id = DatasetId("ds1".into());
+        let order = vec![ds_id.clone()];
+        let mut settings = scene.dataset_settings.clone();
+        settings.get_mut(&ds_id).unwrap().opacity = 0.25;
+
+        scene.import_dataset_presence(order.clone(), settings.clone());
+        assert_eq!(scene.dataset_settings[&ds_id].opacity, 0.25);
+        assert_eq!(scene.epochs.selection, baseline.selection + 1);
+        assert_eq!(scene.epochs.view, baseline.view);
+
+        // Identical rebroadcast: no further bump.
+        scene.import_dataset_presence(order, settings);
+        assert_eq!(scene.epochs.selection, baseline.selection + 1);
     }
 }

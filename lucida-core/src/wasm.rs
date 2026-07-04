@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
-use lucida_content::{DatasetId, LayoutId, LayoutSpec};
+use lucida_content::DatasetId;
 
 use crate::camera::{Arcball, Camera, ClipMode};
-use crate::command::Command;
+use crate::command::{Command, ViewportCommand};
 use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState, Scene};
 use crate::view::ViewState;
 
@@ -74,60 +74,21 @@ impl WasmScene {
     }
 
     // --- Command protocol ---
+    //
+    // Every mutator below is a thin JSON adapter: parse, then delegate to
+    // `Scene::apply` (a `ViewportCommand`/`Command`) or to a `Scene` method.
+    // All mutation and epoch semantics are owned by the always-compiled
+    // `Scene` (`scene/` + `command.rs`), where `cargo test` reaches them —
+    // this binding never touches `epochs` itself, so a mutator can't leave
+    // the renderer on a stale plan by forgetting a bump.
 
-    pub fn load_snapshot(&mut self, json: &str) -> Result<(), JsError> {
-        let mut scene: Scene =
-            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        scene.rebuild_derived();
-        self.inner = scene;
-        Ok(())
-    }
-
-    /// Load only the document portion (content graphs), preserving local camera/view/display.
+    /// Load only the document portion (content graphs), preserving local
+    /// camera/view/display. See [`Scene::load_document`] for the settings
+    /// seeding and epoch semantics.
     pub fn load_document(&mut self, json: &str) -> Result<(), JsError> {
         let doc: DocumentState =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        self.inner.document = doc;
-        // Rebuild derived state for all content graphs.
-        self.inner.rebuild_derived();
-        // Ensure dataset_order and dataset_settings are consistent. Seed the
-        // COMPLETE per-channel + per-label settings from each restored manifest
-        // (via the same `seeded_for` the `DatasetOpened` apply path uses) rather
-        // than a bare `Default` — the empty default has NO channel/label entries,
-        // which would leave the layer panel's per-channel and per-label controls
-        // unable to render on a document restore. `or_insert_with` keeps any
-        // existing (locally adjusted) settings untouched across a re-load.
-        for id in self
-            .inner
-            .document
-            .manifests
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            if !self.inner.dataset_order.contains(&id) {
-                self.inner.dataset_order.push(id.clone());
-            }
-            if !self.inner.dataset_settings.contains_key(&id) {
-                let seeded = self
-                    .inner
-                    .document
-                    .manifests
-                    .get(&id)
-                    .map(DatasetDisplaySettings::seeded_for)
-                    .unwrap_or_default();
-                self.inner.dataset_settings.insert(id, seeded);
-            }
-        }
-        // Remove stale entries for datasets no longer in the document.
-        let dataset_ids: std::collections::HashSet<&DatasetId> =
-            self.inner.document.manifests.keys().collect();
-        self.inner
-            .dataset_order
-            .retain(|id| dataset_ids.contains(id));
-        self.inner
-            .dataset_settings
-            .retain(|id, _| dataset_ids.contains(id));
+        self.inner.load_document(doc);
         Ok(())
     }
 
@@ -148,6 +109,7 @@ impl WasmScene {
     }
 
     /// Import another client's camera + view + display (for follow mode).
+    /// The local viewport size is preserved; see [`Scene::import_presence`].
     pub fn import_presence(&mut self, json: &str) -> Result<(), JsError> {
         #[derive(serde::Deserialize)]
         struct Presence {
@@ -156,12 +118,7 @@ impl WasmScene {
             display: DisplayState,
         }
         let p: Presence = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        // Preserve local viewport size
-        let viewport = self.inner.camera.viewport();
-        self.inner.camera = p.camera;
-        self.inner.camera.set_viewport(viewport[0], viewport[1]);
-        self.inner.view = p.view;
-        self.inner.display = p.display;
+        self.inner.import_presence(p.camera, p.view, p.display);
         Ok(())
     }
 
@@ -172,15 +129,15 @@ impl WasmScene {
     }
 
     /// Frame the named dataset's full world extent in the main viewport,
-    /// preserving the current camera mode (2D stays 2D, 3D stays 3D). This is the
-    /// "auto-fit on open" entry point the web bridge calls for a freshly-opened
-    /// dataset; bumping the view epoch (exactly as pan/zoom/rotate do) makes the
-    /// viewport redraw with the new framing. Returns `Err` if the dataset has no
-    /// bounds (unknown id / no members), leaving the camera unchanged so the
-    /// caller can ignore it without side effects.
+    /// preserving the current camera mode (2D stays 2D, 3D stays 3D). This is
+    /// the "auto-fit on open" entry point the web bridge calls for a
+    /// freshly-opened dataset; [`Scene::fit_camera_to_dataset`] bumps the view
+    /// epoch (exactly as pan/zoom/rotate do) so the viewport redraws with the
+    /// new framing. Returns `Err` if the dataset has no bounds (unknown id /
+    /// no members), leaving the camera unchanged so the caller can ignore it
+    /// without side effects.
     pub fn fit_camera_to_dataset_bounds(&mut self, dataset_id: &str) -> Result<(), JsError> {
         if self.inner.fit_camera_to_dataset(dataset_id) {
-            self.inner.epochs.view += 1;
             Ok(())
         } else {
             Err(JsError::new(&format!(
@@ -191,19 +148,12 @@ impl WasmScene {
 
     // --- Mode switching ---
 
-    pub fn set_mode_slice(&mut self) {
-        self.inner.set_mode_2d();
-        self.inner.epochs.view += 1;
-    }
-
     pub fn set_mode_arcball(&mut self) {
-        self.inner.set_mode_3d();
-        self.inner.epochs.view += 1;
+        self.inner.apply(ViewportCommand::SetMode3D.into());
     }
 
     pub fn set_mode_fly(&mut self) {
-        self.inner.set_mode_fly();
-        self.inner.epochs.view += 1;
+        self.inner.apply(ViewportCommand::SetModeFly.into());
     }
 
     pub fn camera_mode(&self) -> String {
@@ -216,36 +166,14 @@ impl WasmScene {
 
     // --- Shared viewport ---
 
+    /// Assert the canvas size. Called every render tick, so it relies on
+    /// `Scene::apply`'s no-change guard: a same-size re-assert bumps nothing.
     pub fn set_viewport(&mut self, width: u32, height: u32) {
-        let old = self.inner.camera.viewport();
-        self.inner.camera.set_viewport(width, height);
-        if self.inner.camera.viewport() != old {
-            self.inner.epochs.view += 1;
-        }
+        self.inner
+            .apply(ViewportCommand::SetViewport { width, height }.into());
     }
 
-    // --- 2D camera methods ---
-
-    pub fn pan(&mut self, dx: f64, dy: f64) {
-        if let Camera::Slice(ref mut v) = self.inner.camera {
-            v.pan(dx, dy);
-            self.inner.epochs.view += 1;
-        }
-    }
-
-    pub fn zoom_by(&mut self, factor: f64) {
-        if let Camera::Slice(ref mut v) = self.inner.camera {
-            v.zoom_by(factor);
-            self.inner.epochs.view += 1;
-        }
-    }
-
-    pub fn set_center(&mut self, x: f64, y: f64) {
-        if let Camera::Slice(ref mut v) = self.inner.camera {
-            v.center = [x, y];
-            self.inner.epochs.view += 1;
-        }
-    }
+    // --- 2D camera queries ---
 
     pub fn center(&self) -> Vec<f64> {
         if let Camera::Slice(ref v) = self.inner.camera {
@@ -255,56 +183,27 @@ impl WasmScene {
         }
     }
 
-    pub fn set_zoom(&mut self, value: f64) {
-        if let Camera::Slice(ref mut v) = self.inner.camera {
-            v.zoom = value;
-            self.inner.epochs.view += 1;
-        }
-    }
-
     // --- View state ---
+    //
+    // `set_z`/`set_t`/`set_c` are also re-asserted every render tick, so they
+    // too lean on the apply-side no-change guard.
 
     pub fn set_z(&mut self, z: u32) {
-        let old = self.inner.view.z_range.clone();
-        self.inner.view.set_z(z);
-        if self.inner.view.z_range != old {
-            self.inner.epochs.selection += 1;
-        }
-    }
-
-    pub fn set_z_range(&mut self, start: u32, end: u32) {
-        let old = self.inner.view.z_range.clone();
-        self.inner.view.set_z_range(start..end);
-        if self.inner.view.z_range != old {
-            self.inner.epochs.selection += 1;
-        }
+        self.inner.apply(ViewportCommand::SetZ { z }.into());
     }
 
     pub fn set_t(&mut self, t: u32) {
-        if self.inner.view.t != t {
-            self.inner.view.t = t;
-            self.inner.epochs.selection += 1;
-        }
+        self.inner.apply(ViewportCommand::SetT { t }.into());
     }
 
     pub fn set_c(&mut self, c: u32) {
-        if self.inner.view.c != c {
-            self.inner.view.c = c;
-            self.inner.epochs.selection += 1;
-        }
+        self.inner.apply(ViewportCommand::SetC { c }.into());
     }
 
     // --- Multi-channel ---
 
     pub fn multi_channel(&self) -> bool {
         self.inner.view.multi_channel
-    }
-
-    pub fn set_multi_channel(&mut self, enabled: bool) {
-        if self.inner.view.multi_channel != enabled {
-            self.inner.view.multi_channel = enabled;
-            self.inner.epochs.selection += 1;
-        }
     }
 
     // --- Display state ---
@@ -522,29 +421,6 @@ impl WasmScene {
         self.inner.rendering_transform(member).1.inv_model.to_vec()
     }
 
-    // --- 3D camera methods ---
-
-    pub fn arcball_rotate(&mut self, d_theta: f64, d_phi: f64) {
-        if let Camera::Arcball(ref mut v) = self.inner.camera {
-            v.rotate(d_theta, d_phi);
-            self.inner.epochs.view += 1;
-        }
-    }
-
-    pub fn arcball_zoom(&mut self, delta: f64) {
-        if let Camera::Arcball(ref mut v) = self.inner.camera {
-            v.zoom(delta);
-            self.inner.epochs.view += 1;
-        }
-    }
-
-    pub fn arcball_pan(&mut self, dx: f64, dy: f64) {
-        if let Camera::Arcball(ref mut v) = self.inner.camera {
-            v.pan(dx, dy);
-            self.inner.epochs.view += 1;
-        }
-    }
-
     // --- Fly camera methods ---
 
     pub fn fly_tick(
@@ -557,25 +433,31 @@ impl WasmScene {
         pitch: f64,
         roll: f64,
     ) {
-        if let Camera::Fly(ref mut v) = self.inner.camera {
-            v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
-            self.inner.epochs.view += 1;
-        }
+        self.inner.apply(
+            ViewportCommand::FlyTick {
+                dt,
+                forward,
+                right,
+                up,
+                yaw,
+                pitch,
+                roll,
+            }
+            .into(),
+        );
     }
 
     /// Set the base movement speed for the fly camera (world units per second).
     pub fn fly_set_base_speed(&mut self, speed: f64) {
-        if let Camera::Fly(ref mut v) = self.inner.camera {
-            v.base_speed = speed;
-        }
+        self.inner
+            .apply(ViewportCommand::FlySetBaseSpeed { speed }.into());
     }
 
     /// Multiply the fly camera's speed_multiplier by the given factor.
     /// Used for scroll-wheel speed adjustment.
     pub fn fly_adjust_speed(&mut self, factor: f64) {
-        if let Camera::Fly(ref mut v) = self.inner.camera {
-            v.speed_multiplier = (v.speed_multiplier * factor).clamp(0.01, 100.0);
-        }
+        self.inner
+            .apply(ViewportCommand::FlyAdjustSpeed { factor }.into());
     }
 
     /// Return the fly camera's current speed multiplier.
@@ -635,45 +517,9 @@ impl WasmScene {
         }
     }
 
-    pub fn set_clip_distance(&mut self, distance: f64) {
-        let d = distance.max(0.0);
-        match &mut self.inner.camera {
-            Camera::Arcball(v) => {
-                v.clip_distance = d;
-                self.inner.epochs.selection += 1;
-            }
-            Camera::Fly(v) => {
-                v.clip_distance = d;
-                self.inner.epochs.selection += 1;
-            }
-            Camera::Slice(_) => {}
-        }
-    }
-
-    pub fn set_clip_mode(&mut self, mode: &str) {
-        let m = match mode {
-            "sphere" => ClipMode::Sphere,
-            _ => ClipMode::Plane,
-        };
-        match &mut self.inner.camera {
-            Camera::Arcball(v) => {
-                v.clip_mode = m;
-                self.inner.epochs.selection += 1;
-            }
-            Camera::Fly(v) => {
-                v.clip_mode = m;
-                self.inner.epochs.selection += 1;
-            }
-            Camera::Slice(_) => {}
-        }
-    }
-
     pub fn adjust_clip_distance(&mut self, delta: f64) {
-        match &mut self.inner.camera {
-            Camera::Arcball(v) => v.clip_distance = (v.clip_distance + delta).max(0.0),
-            Camera::Fly(v) => v.clip_distance = (v.clip_distance + delta).max(0.0),
-            Camera::Slice(_) => {}
-        }
+        self.inner
+            .apply(ViewportCommand::AdjustClipDistance { delta }.into());
     }
 
     /// Camera forward direction in world space (normalized). Returns [fx, fy, fz].
@@ -834,6 +680,8 @@ impl WasmScene {
         serde_json::to_string(&p).unwrap()
     }
 
+    /// Import another client's dataset order + per-dataset display settings
+    /// (for follow mode). See [`Scene::import_dataset_presence`].
     pub fn import_dataset_presence(&mut self, json: &str) -> Result<(), JsError> {
         #[derive(serde::Deserialize)]
         struct DatasetPresence {
@@ -842,8 +690,8 @@ impl WasmScene {
         }
         let p: DatasetPresence =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        self.inner.dataset_order = p.dataset_order;
-        self.inner.dataset_settings = p.dataset_settings;
+        self.inner
+            .import_dataset_presence(p.dataset_order, p.dataset_settings);
         Ok(())
     }
 
@@ -1002,27 +850,10 @@ impl WasmScene {
     }
 
     // --- Layout management ---
-
-    /// Register a new layout for a dataset. The layout is parsed from JSON.
-    pub fn register_layout(&mut self, dataset_id: &str, layout_json: &str) -> Result<(), JsError> {
-        let layout: LayoutSpec =
-            serde_json::from_str(layout_json).map_err(|e| JsError::new(&e.to_string()))?;
-        let cmd = Command::Document(crate::command::DocumentCommand::RegisterLayout {
-            dataset_id: DatasetId(dataset_id.to_string()),
-            layout,
-        });
-        self.inner.apply(cmd);
-        Ok(())
-    }
-
-    /// Set the active layout for a dataset, triggering a derived state rebuild.
-    pub fn set_active_layout(&mut self, dataset_id: &str, layout_id: &str) {
-        let cmd = Command::Document(crate::command::DocumentCommand::SetActiveLayout {
-            dataset_id: DatasetId(dataset_id.to_string()),
-            layout_id: LayoutId(layout_id.to_string()),
-        });
-        self.inner.apply(cmd);
-    }
+    //
+    // Layout mutations (`register_layout` / `set_active_layout`) arrive as
+    // ordinary document commands through [`Self::apply_command`]; only the
+    // read side lives here.
 
     /// Returns a JSON array of `{id, name}` for all available layouts
     /// (source_layouts + registered_layouts) for a dataset.

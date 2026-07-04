@@ -140,9 +140,13 @@ pub(crate) fn invert4_f64(m: [f64; 16]) -> [f64; 16] {
     out
 }
 
+/// Normalize a 3-vector. Degenerate input — near-zero or non-finite length
+/// (NaN included: the `is_finite` check runs first, since `NaN < x` is false
+/// and would slip past the near-zero test alone) — returns the zero vector
+/// instead of dividing a NaN/Inf through into every component.
 pub(crate) fn normalize3(v: [f64; 3]) -> [f64; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len < 1e-12 {
+    if !len.is_finite() || len < 1e-12 {
         return [0.0, 0.0, 0.0];
     }
     [v[0] / len, v[1] / len, v[2] / len]
@@ -218,6 +222,18 @@ mod tests {
         let v2 = normalize3([1.0, 1.0, 1.0]);
         let len = (v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]).sqrt();
         assert!((len - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn normalize3_non_finite_input_degenerates_to_zero() {
+        // NaN and Inf lengths must take the degenerate branch, not divide
+        // through into every component.
+        assert_eq!(normalize3([f64::NAN, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        assert_eq!(
+            normalize3([f64::INFINITY, f64::NEG_INFINITY, 0.0]),
+            [0.0, 0.0, 0.0]
+        );
+        assert_eq!(normalize3([1e308, 1e308, 1e308]), [0.0, 0.0, 0.0]);
     }
 
     #[test]
