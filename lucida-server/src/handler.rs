@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -156,6 +157,7 @@ async fn handle_client_inner(
     });
 
     // Outbound: forward broadcast + unicast messages to this client.
+    let outbound_session = Arc::clone(&session);
     let outbound = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -200,7 +202,40 @@ async fn handle_client_inner(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("client {id} lagged by {n} messages");
+                            // This client's broadcast receiver overflowed and
+                            // dropped `n` messages — among them possibly
+                            // sequenced CommandBroadcasts, so its document has
+                            // silently diverged. Push a fresh snapshot to
+                            // repair it.
+                            //
+                            // Ordering discipline (mirrors the join path's
+                            // subscribe-under-lock): `recv()` has ALREADY
+                            // repositioned this receiver past the loss, so
+                            // every message this client will never see was
+                            // stamped — and applied to the session — before
+                            // this point. Taking the session lock now yields a
+                            // snapshot whose `seq` is >= every lost message's
+                            // seq: no hole can open between the snapshot and
+                            // the resume position. Retained items forwarded
+                            // after the snapshot may carry seq <= the
+                            // snapshot's; the client's seq discipline drops
+                            // those instead of double-applying.
+                            tracing::warn!(
+                                client_id = %id,
+                                skipped = n,
+                                "ws.outbound.lagged_pushing_snapshot"
+                            );
+                            let snapshot_json = {
+                                let sess = outbound_session.lock().await;
+                                serde_json::to_string(&sess.snapshot(id)).unwrap()
+                            };
+                            if ws_tx
+                                .send(Message::Text(snapshot_json.into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -218,6 +253,14 @@ async fn handle_client_inner(
             }
         }
     });
+
+    // Throttle for client-requested snapshots: serving one clones the whole
+    // document under the session lock, so RequestSnapshot must not become a
+    // cheap amplification lever. One per interval per client is plenty —
+    // the web's own resync retry sits at 5s, well above this floor, and a
+    // throttled client simply retries.
+    const REQUEST_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+    let mut last_requested_snapshot: Option<Instant> = None;
 
     // Inbound: parse client messages, apply/route.
     while let Some(Ok(msg)) = ws_rx.next().await {
@@ -541,6 +584,33 @@ async fn handle_client_inner(
                             };
                             if let Some(service) = service {
                                 service.apply_viewer_interest(id, interest).await;
+                            }
+                        }
+                        ClientMessage::RequestSnapshot => {
+                            // Client-detected seq gap: answer with the same
+                            // fresh-snapshot construction as the join path and
+                            // the outbound loop's Lagged push. The snapshot is
+                            // built under the session lock, so its `seq`
+                            // covers every command applied so far; sequenced
+                            // messages still in flight with seq <= that are
+                            // dropped by the client's seq discipline, and
+                            // everything newer keeps arriving on the live
+                            // broadcast receiver — no hole, no double-apply.
+                            if last_requested_snapshot
+                                .is_some_and(|at| at.elapsed() < REQUEST_SNAPSHOT_MIN_INTERVAL)
+                            {
+                                tracing::debug!(client_id = %id, "request_snapshot.throttled");
+                                continue;
+                            }
+                            last_requested_snapshot = Some(Instant::now());
+                            tracing::info!(client_id = %id, "request_snapshot.received");
+                            let snapshot_json = {
+                                let sess = session.lock().await;
+                                serde_json::to_string(&sess.snapshot(id)).unwrap()
+                            };
+                            let senders = unicast_routes.lock().await;
+                            if let Some(sender) = senders.get(&id) {
+                                let _ = sender.send(Message::Text(snapshot_json.into()));
                             }
                         }
                         ClientMessage::DatasetPresence {

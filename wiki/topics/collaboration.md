@@ -5,7 +5,7 @@ description: "Multi-client coordination — what gets shared, what stays local, 
 tags: [lucida, topic]
 source_path: wiki/topics/collaboration.md
 created: 2026-05-07
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # Topic: Collaboration
@@ -36,7 +36,7 @@ This page is a curated index. Articles live in their canonical homes; follow the
 
 ## Cross-cutting flows
 
-- [Flow: Document Command Application](../flows/document-command-application.md) — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
+- [Flow: Document Command Application](../flows/document-command-application.md) — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client; includes the loss-recovery path (seq-gap detection → `RequestSnapshot` / server-pushed snapshot on broadcast overflow)
 - [Flow: Presence Propagation](../flows/presence-propagation.md) — local viewport change → throttled wire emit → server fan-out (self-filtered) → peer apply (or follow-mirror)
 - [Flow: Follow Chain Resolution](../flows/follow-chain-resolution.md) — `set_follow` validation, transitive flatten into stars, disconnect-driven reset
 - [Flow: Saved-View Recipient Apply](../flows/saved-view-recipient-apply.md) — `#view=…` or `#b=<id>` → bootstrap parse → diff datasets → open missing → apply layouts/settings/camera in fixed order

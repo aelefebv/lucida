@@ -216,6 +216,10 @@ export function useBridge({
                 // the forward reference works at runtime via JS hoisting and
                 // is intentional (effect setup needs the helper, helper needs
                 // closures over things declared between).
+                // Registration only: unlike the dataset_opened broadcast arm
+                // below, this deliberately skips auto-fit and the
+                // savedViewHooks notification — a snapshot is a join/repair,
+                // not a user-initiated open.
                 // eslint-disable-next-line react-hooks/immutability
                 setupFetchPipeline(manifest as DatasetManifest, fetchDesc);
               }
@@ -241,6 +245,22 @@ export function useBridge({
                 const fallback = (manifest as DatasetManifest).default_layout_id;
                 const activeId = snapActive ?? fallback;
                 if (activeId) registry.setActiveLocal(dsId, activeId);
+              }
+            }
+            // A snapshot is authoritative for membership, and this handler
+            // also runs mid-session (reconnect, or a server-pushed /
+            // requested resync after broadcast loss). Drop any local dataset
+            // the document no longer contains — its `remove_dataset`
+            // broadcast may be exactly what was lost. Mirrors the
+            // `remove_dataset` command arm below; a first snapshot sees an
+            // empty registry and this is a no-op.
+            for (const dsId of Array.from(datasetsRef.current.keys())) {
+              if (!(dsId in doc.manifests)) {
+                bridgeLog("snapshot.stale_dataset_removed", { datasetId: dsId });
+                datasetCallbacksRef.current.removeDataset(dsId);
+                sessionRef.current?.ensureAssetCatalog()?.removeDataset(dsId);
+                sessionRef.current?.generatedAvailability.removeDataset(dsId);
+                sessionRef.current?.ensureLayoutRegistry()?.removeDataset(dsId);
               }
             }
           }

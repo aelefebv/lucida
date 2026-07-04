@@ -1457,6 +1457,31 @@ describe("wire goldens: client messages through Bridge senders", () => {
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
   });
 
+  it("a persistent seq gap in the broadcast stream emits the request_snapshot envelope", () => {
+    // Producer-level lock through the real production trigger: the Bridge
+    // itself sends `request_snapshot` when a `command_broadcast` arrives
+    // with a seq past the last applied one and the hole outlives the
+    // reorder-grace window (i.e. real server-side broadcast loss, not
+    // benign out-of-order delivery).
+    const { ws } = openBridge();
+    deliver(
+      ws,
+      JSON.stringify({ type: "snapshot", seq: 42, document: {}, peers: [], your_id: 7 }),
+    );
+    deliver(
+      ws,
+      JSON.stringify({
+        type: "command_broadcast",
+        seq: 45,
+        command: { type: "remove_dataset", id: "wds-0f3a" },
+      }),
+    );
+    vi.advanceTimersByTime(250); // past the reorder-grace window
+    expect(lastSent(ws)).toStrictEqual(
+      coveredFixture("session/client_request_snapshot.json"),
+    );
+  });
+
   it("sendViewerInterest wraps the tick coordinator's hint verbatim", () => {
     const { bridge, ws } = openBridge();
     bridge.sendViewerInterest(expectedInterestHint);
