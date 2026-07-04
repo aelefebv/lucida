@@ -285,7 +285,8 @@ impl Camera {
                 }
                 sanitize_projection(&mut v.fov, &mut v.near, &mut v.far);
                 v.speed_multiplier = if v.speed_multiplier.is_finite() {
-                    v.speed_multiplier.clamp(0.01, 100.0)
+                    v.speed_multiplier
+                        .clamp(FLY_SPEED_MULTIPLIER_MIN, FLY_SPEED_MULTIPLIER_MAX)
                 } else {
                     1.0
                 };
@@ -522,6 +523,14 @@ pub const CLIP_DISTANCE_MAX: f64 = 1e9;
 pub const FLY_BASE_SPEED_MIN: f64 = 1e-9;
 /// Upper bound for [`Fly::base_speed`]. See [`FLY_BASE_SPEED_MIN`].
 pub const FLY_BASE_SPEED_MAX: f64 = 1e9;
+/// Bounds for [`Fly::speed_multiplier`] (the scroll-wheel speed scale on top
+/// of `base_speed`). Every write — the multiplicative `FlyAdjustSpeed`
+/// accumulate and the [`Camera::sanitize`] import repair — clamps into this
+/// range, so repeated scroll steps can neither collapse the multiplier
+/// toward 0 nor stack it toward Inf.
+pub const FLY_SPEED_MULTIPLIER_MIN: f64 = 0.01;
+/// Upper bound for [`Fly::speed_multiplier`]. See [`FLY_SPEED_MULTIPLIER_MIN`].
+pub const FLY_SPEED_MULTIPLIER_MAX: f64 = 100.0;
 /// Guard for accumulated orbit angles (`theta`/`phi`). Inside this range
 /// [`wrap_angle`] is a bit-identical pass-through — ~159,000 full turns, far
 /// past any real session, so ordinary rotation state (including large

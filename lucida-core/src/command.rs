@@ -289,7 +289,9 @@ pub enum ViewportCommand {
         speed: f64,
     },
     /// Multiply the fly camera's `speed_multiplier` by `factor` (scroll-wheel
-    /// speed adjustment), clamped to `[0.01, 100.0]`. No-op outside fly mode.
+    /// speed adjustment), clamped into
+    /// `FLY_SPEED_MULTIPLIER_MIN..=FLY_SPEED_MULTIPLIER_MAX` (see
+    /// [`crate::camera`]). No-op outside fly mode.
     FlyAdjustSpeed {
         factor: f64,
     },
@@ -913,7 +915,10 @@ impl Scene {
             }
             ViewportCommand::FlyAdjustSpeed { factor } => {
                 if let Camera::Fly(ref mut v) = self.camera {
-                    v.speed_multiplier = (v.speed_multiplier * factor).clamp(0.01, 100.0);
+                    v.speed_multiplier = (v.speed_multiplier * factor).clamp(
+                        crate::camera::FLY_SPEED_MULTIPLIER_MIN,
+                        crate::camera::FLY_SPEED_MULTIPLIER_MAX,
+                    );
                 }
             }
             ViewportCommand::AdjustClipDistance { delta } => {
@@ -2861,10 +2866,12 @@ mod tests {
             other => panic!("expected Fly camera, got {other:?}"),
         }
 
-        // The multiplier clamps to [0.01, 100.0].
+        // The multiplier clamps to FLY_SPEED_MULTIPLIER_MIN..=MAX.
         scene.apply(ViewportCommand::FlyAdjustSpeed { factor: 1e9 }.into());
         match &scene.camera {
-            Camera::Fly(v) => assert_eq!(v.speed_multiplier, 100.0),
+            Camera::Fly(v) => {
+                assert_eq!(v.speed_multiplier, crate::camera::FLY_SPEED_MULTIPLIER_MAX)
+            }
             other => panic!("expected Fly camera, got {other:?}"),
         }
 

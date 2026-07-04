@@ -15,6 +15,11 @@
 //! - the enum vocabulary fixture (`vocab/enum_vocabulary.json`): one exemplar
 //!   per variant for every enum whose string form the web switches on.
 //!
+//! `ViewportCommand` is out of wire scope by design and needs no fixtures:
+//! viewport commands never cross the socket — `ClientMessage::Command`
+//! carries `DocumentCommand` only, and presence carries viewport *state*,
+//! not commands (see wiki/decisions/0001-document-vs-viewport-split.md).
+//!
 //! This test constructs the exact same values in code, serializes them with
 //! serde, and asserts byte-for-byte equality with the committed files. The
 //! companion vitest suite (`lucida-web/src/wireGoldens.test.ts`) parses the
@@ -834,7 +839,9 @@ fn arcball_camera() -> Camera {
         theta: std::f64::consts::FRAC_PI_4,
         phi: std::f64::consts::FRAC_PI_3,
         distance: 6000.0,
-        fov: 45.0,
+        // fov is radians: Camera::sanitize repairs anything outside (0, π),
+        // so a degrees-style value would not survive an import intact.
+        fov: std::f64::consts::FRAC_PI_4,
         viewport: [1920, 1080],
         near: 1.0,
         far: 50000.0,
@@ -1409,7 +1416,8 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     camera: Camera::Fly(Fly {
                         position: [512.0, 512.0, -300.0],
                         orientation: [0.1, 0.2, 0.3, 0.9273],
-                        fov: 60.0,
+                        // Radians, like every camera fov on the wire.
+                        fov: std::f64::consts::FRAC_PI_3,
                         viewport: [1280, 720],
                         near: 0.1,
                         far: 10000.0,

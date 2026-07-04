@@ -5,7 +5,7 @@ description: "A class instance with a destroyed = true flag set in destroy() and
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/strict-mode-destroyable-classes.md
 created: 2026-05-09
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # React Strict-Mode Kills One-Shot `destroy()` Classes
@@ -24,23 +24,42 @@ Add a `console.log({ destroyed: this.destroyed })` at the top of any "early-retu
 
 The unit-test gap is real: `@testing-library/react`'s `render` does NOT wrap in `<StrictMode>` by default. To repro Strict-Mode behavior in a test, render `<StrictMode><Component /></StrictMode>` explicitly.
 
-## Fix pattern
+## Two resolutions
 
-`start()` must reset the destroyed flag (`this.destroyed = false`) AND short-circuit if already started (early-return when the listener handle is non-null). See `lucida-web/src/savedView/urlSync.ts::start()` for the canonical implementation.
+Both patterns below are live in the codebase. The invariant either must protect: after Strict-Mode's mount → unmount → mount, whatever instance the second mount uses is fully functional.
 
-`destroy()` should remain non-idempotent if you want destroyed to be observable, but the contract becomes "destroyable then re-armable" rather than "one-shot."
+### Re-arm on `start()` — for stable-identity singletons
+
+`start()` resets the destroyed flag (`this.destroyed = false`) AND short-circuits if already started (early-return when the listener handle is non-null). `destroy()` stays non-idempotent if you want destroyed to be observable; the contract becomes "destroyable then re-armable" rather than "one-shot." See `lucida-web/src/savedView/urlSync.ts::start()` for the canonical implementation.
+
+Use this when a single instance with stable identity (held in `useState`/`useRef`, surviving across effect runs) is meant to be started and stopped repeatedly, and starting is cheap.
+
+### Fresh instance per effect mount — for per-session stacks
+
+`destroy()` stays genuinely one-shot; instead, the mount effect *constructs* the instance and the cleanup destroys it and clears the ref, so the Strict-Mode remount builds a brand-new stack rather than restarting a dead one. "Constructed ⇒ live, destroyed ⇒ dead forever" stays a true invariant. This is how the session/connection stack works:
+
+- `lucida-web/src/hooks/useBridge.ts` — the wasm-ready effect constructs the `Bridge` + `Session` pair; its cleanup calls `session.destroy()` (idempotent), nulls `sessionRef`, and resets the per-connection dataset registry and connection-scoped state, so the remount's `sessionRef.current` guard passes and the effect rebuilds the whole stack against a fresh WebSocket.
+- `lucida-web/src/hooks/useRenderClient.ts` — each effect run constructs a `RenderClient`; the cleanup destroys it and bumps `canvasKey`. The extra wrinkle: `transferControlToOffscreen` (inside the `RenderClient` constructor) is one-shot per `<canvas>` *element*, so a fresh client also needs a fresh element. `App.tsx` keys the canvas element on `canvasKey`, and a `WeakSet` of spent elements stops the re-run from touching an already-transferred canvas before the keyed replacement commits.
+
+Use this when the class wraps a resource that is itself one-shot (a WebSocket connection stack, a transferred canvas, a worker pool) — "re-arming" such an object would amount to reconnecting/reallocating inside it anyway, and reconstruction keeps the object's lifecycle honest.
+
+### Choosing between them
+
+- Stable identity, cheap start/stop, other code holds long-lived references to the instance → **re-arm**.
+- Per-mount lifecycle, expensive or inherently one-shot underlying resource, nothing outside the effect keeps the instance past cleanup → **instance per mount**.
 
 ## Where this could bite again
 
-Anywhere we have:
-- A class instance constructed in `useState` or `useRef` with stable identity
+The dangerous shape is the *combination*:
+- A class instance with **stable identity across effect runs** (constructed in `useState`/`useRef` or module scope)
 - A `useEffect(() => { instance.start(); return () => instance.destroy(); }, [instance])`
-- A `destroyed` (or `disposed`, `closed`, etc.) boolean checked at method entry
+- A `destroyed` (or `disposed`, `closed`, etc.) boolean checked at method entry, never reset and never bypassed by reconstruction
 
-As of the PR #483 fix, `UrlSync` is the only instance matching *all* of the above — stable-identity instance, `useEffect` start/cleanup, and an entry-guard flag that `destroy()` permanently sets. Other classes carry a partial `destroyed`/`destroy()` shape (`bridge.ts`, `renderer/renderClient.ts`) but don't hit the full footgun. New code in this shape needs the re-arm pattern.
+As of the PR #483 fix, `UrlSync` was the only instance matching all of that. `bridge.ts`, `session.ts`, and `renderer/renderClient.ts` carry the same one-shot `destroyed`/`destroy()` shape but are safe by the second resolution: each is constructed inside the effect whose cleanup destroys it, so no destroyed instance is ever asked to work again. New code in the footgun shape must adopt one of the two resolutions — the failure mode is dev-only and invisible to both vitest and production builds.
 
 ## Related
 
 - `lucida-web/src/savedView/urlSync.ts::start()` — the canonical re-arm-after-destroy implementation
+- `lucida-web/src/hooks/useBridge.ts` / `lucida-web/src/hooks/useRenderClient.ts` — the canonical instance-per-mount implementations
 - [Saved Views](../systems/subsystems/saved-views.md) — the subsystem that tripped over this
 - `wiki/gotchas/app-tsx-hook-order.md` — adjacent React-quirk territory
