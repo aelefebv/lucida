@@ -3,7 +3,7 @@ import {
   resolveAnnotationDeepLink,
   type AnnotationDocScene,
 } from "./annotationDeepLink.ts";
-import type { Annotation } from "../components/AnnotationOverlay.tsx";
+import type { Annotation } from "../components/annotationDocument.ts";
 
 /** A structural scene stub exposing only what the resolver reads:
  *  annotation_dataset_ids() (the annotated datasets in doc order) and

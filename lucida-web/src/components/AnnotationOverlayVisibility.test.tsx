@@ -20,7 +20,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
-import { AnnotationOverlay, type Annotation } from "./AnnotationOverlay.tsx";
+import { AnnotationOverlay } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 import { AnnotationOverlay3D } from "./AnnotationOverlay3D.tsx";
 
 const MY_ID = "7";

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, renderHook } from "@testing-library/react";
 import { useAnnotationDeepLink } from "./useAnnotationDeepLink.ts";
 import type { AnnotationDocScene } from "../savedView/annotationDeepLink.ts";
-import type { Annotation } from "../components/AnnotationOverlay.tsx";
+import type { Annotation } from "../components/annotationDocument.ts";
 
 function pin(id: string): Annotation {
   return {

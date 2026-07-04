@@ -4,7 +4,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
-import { AnnotationOverlay, type Annotation } from "./AnnotationOverlay.tsx";
+import { AnnotationOverlay } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 /**
  * A hand-rolled stand-in for the WASM scene, exercising only the surface this

@@ -50,9 +50,8 @@ import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
 
 // The pin/comment model and the imperative focus handle live in the shared
-// annotation document module; re-exported here so overlay consumers keep one
-// import site alongside the component itself.
-export type { Annotation, Comment, AnnotationOverlayHandle } from "./annotationDocument.ts";
+// annotation document module (`annotationDocument.ts`) — every consumer
+// imports them from there, so the model has exactly one import site.
 import type { AnnotationOverlayHandle } from "./annotationDocument.ts";
 
 interface Props {

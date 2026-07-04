@@ -108,11 +108,17 @@ interface PendingSequenced {
 
 /** A document command this client applied locally (optimistic apply) and
  *  transmitted, whose `Ack` has not arrived yet. A mid-session snapshot's
- *  full-replace would silently erase its local effect — the server built
- *  the snapshot before applying this command — so these are replayed
- *  locally after snapshot adoption. The ack retires them FIFO: the server
- *  processes one client's commands in send order and acks each exactly
- *  once. */
+ *  full-replace would silently erase its local effect — usually because
+ *  the server built the snapshot before applying this command — so these
+ *  are replayed locally after snapshot adoption. That premise is not
+ *  airtight: acks ride the broadcast queue while snapshots ride the
+ *  unicast queue, so a snapshot whose seq already covers this command can
+ *  arrive BEFORE its ack, and the replay then re-applies this value over
+ *  any newer peer edit the snapshot carried. Accepted tradeoff: that
+ *  divergence is local-only and bounded by the next edit or snapshot,
+ *  whereas skipping the replay would erase the author's own edit in the
+ *  common case. The ack retires entries FIFO: the server processes one
+ *  client's commands in send order and acks each exactly once. */
 interface PendingLocalCommand {
   commandJson: string;
   commandType?: string;
@@ -161,6 +167,19 @@ const MAX_PENDING_SEQUENCED = 4096;
  *  optimistic apply is never rolled back), so the list is capped (oldest
  *  shed) and cleared on disconnect rather than trusted to drain. */
 const MAX_PENDING_LOCAL_COMMANDS = 64;
+
+/** Throttle for presence and cursor updates — the high-frequency ephemeral
+ *  channel (camera/view/display state and pointer position fire per mouse
+ *  move). Presence sends leading+trailing edge; cursor sends trailing. */
+const PRESENCE_THROTTLE_MS = 50;
+
+/** Throttle for dataset-presence updates (dataset order + per-dataset
+ *  settings) — lower frequency and heavier than camera presence, so it
+ *  coalesces over a longer window (trailing edge only). */
+const DATASET_PRESENCE_THROTTLE_MS = 200;
+
+/** Delay before attempting to reconnect a closed WebSocket. */
+const RECONNECT_DELAY_MS = 2000;
 
 /** Membership key of a document command, for the datasets-present mirror:
  *  `dataset_opened` adds `manifest.dataset_id`, `remove_dataset` removes
@@ -472,11 +491,16 @@ export class Bridge {
                 msg.your_id ?? 0,
                 msg.generated_availability ?? {},
               );
-              // Replay our own locally-applied-but-unacked commands: the
-              // server built this snapshot before applying them (their acks
-              // are still in flight), so the full-replace just erased their
-              // optimistic local effect. Re-applying restores the author's
-              // view; the pending entry retires when its ack lands.
+              // Replay our own locally-applied-but-unacked commands:
+              // usually the server built this snapshot before applying
+              // them (their acks are still in flight), so the full-replace
+              // just erased their optimistic local effect and re-applying
+              // restores the author's view. If the snapshot in fact
+              // already covered a pending command (its ack lost the
+              // unicast-vs-broadcast queue race), the replay stomps any
+              // newer peer value with our own — see [`PendingLocalCommand`]
+              // for why that is accepted. The pending entry retires when
+              // its ack lands.
               for (const entry of replay) {
                 bridgeLog("snapshot.replayed_pending_command", {
                   commandType: entry.commandType ?? null,
@@ -680,7 +704,7 @@ export class Bridge {
 
   private scheduleReconnect() {
     if (this.destroyed) return;
-    this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+    this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_DELAY_MS);
   }
 
   /**
@@ -965,7 +989,8 @@ export class Bridge {
     this.send(JSON.stringify({ type: "command", command: cmd }));
   }
 
-  /** Send presence update, throttled to ~50ms (leading+trailing edge). */
+  /** Send presence update, throttled to [`PRESENCE_THROTTLE_MS`]
+   *  (leading+trailing edge). */
   sendPresence(presenceJson: string) {
     // Merge type field into the presence object
     const obj = JSON.parse(presenceJson);
@@ -980,14 +1005,15 @@ export class Bridge {
           this.send(this.pendingPresence);
           this.pendingPresence = null;
         }
-      }, 50);
+      }, PRESENCE_THROTTLE_MS);
     } else {
       // During cooldown: store latest for trailing edge
       this.pendingPresence = json;
     }
   }
 
-  /** Send dataset presence update, throttled to ~200ms. */
+  /** Send dataset presence update, throttled to
+   *  [`DATASET_PRESENCE_THROTTLE_MS`]. */
   sendDatasetPresence(json: string) {
     const obj = JSON.parse(json);
     this.pendingDatasetPresence = JSON.stringify({ type: "dataset_presence", ...obj });
@@ -998,7 +1024,7 @@ export class Bridge {
           this.send(this.pendingDatasetPresence);
           this.pendingDatasetPresence = null;
         }
-      }, 200);
+      }, DATASET_PRESENCE_THROTTLE_MS);
     }
   }
 
@@ -1058,7 +1084,8 @@ export class Bridge {
     this.send(JSON.stringify({ type: "follow", target }));
   }
 
-  /** Send a cursor position update, throttled to ~50ms. Null sends immediately. */
+  /** Send a cursor position update, throttled to [`PRESENCE_THROTTLE_MS`].
+   *  Null sends immediately. */
   sendCursor(position: [number, number] | null) {
     if (position === null) {
       if (this.cursorTimer !== null) {
@@ -1077,7 +1104,7 @@ export class Bridge {
           this.send(this.pendingCursor);
           this.pendingCursor = null;
         }
-      }, 50);
+      }, PRESENCE_THROTTLE_MS);
     }
   }
 

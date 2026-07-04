@@ -86,7 +86,7 @@ describe("emitMoveAnnotation", () => {
     expect(sent).toEqual(applied);
   });
 
-  it("a rigid move (no end) serializes with the locked field order and NO end key", () => {
+  it("a rigid move (no end) serializes with NO end key (omitted, not null)", () => {
     const { scene, applied } = makeScene();
     emitMoveAnnotation(scene, { datasetId: "wds-1", id: "pin-a", position: [100, 100], z: 3 }, () => {});
     expect(applied[0]).toBe(
@@ -101,7 +101,9 @@ describe("emitMoveAnnotation", () => {
       { datasetId: "wds-0f3a", id: "pin-4c1d", position: [355, 470.5], end: [465, 520.5], z: 12.5 },
       () => {},
     );
-    // The exact byte shape the wire golden locks for the reshape envelope.
+    // The wire goldens lock this envelope's field presence and values
+    // (parsed comparison); the exact byte string asserted here additionally
+    // pins this producer's serialization locally.
     expect(applied[0]).toBe(
       '{"type":"move_annotation","dataset_id":"wds-0f3a","id":"pin-4c1d","position":[355,470.5],"end":[465,520.5],"z":12.5}',
     );

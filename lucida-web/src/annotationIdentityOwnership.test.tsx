@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
-import { AnnotationOverlay, type Annotation } from "./components/AnnotationOverlay.tsx";
+import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
+import type { Annotation } from "./components/annotationDocument.ts";
 import {
   annotationAuthorId,
   __resetAnnotationIdentityForTesting,

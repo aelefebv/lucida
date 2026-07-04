@@ -20,6 +20,7 @@ This page is a curated index. Articles live in their canonical homes; follow the
 - [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md) — the foundational split that everything else in collaboration is downstream of
 - [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — peer-to-peer presence model, transitive follow chains, throttling
 - [Saved Views](../systems/subsystems/saved-views.md) — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks, surfaced through the `WorkspaceSavedViewsSidebar` component with live cross-peer updates
+- [Annotations, comments, and mentions](../systems/subsystems/annotations.md) — point/line/box pins with per-pin comment threads and inline `@mention`s, shared through the sequenced document like any other collaborative state; overlays in 2D and 3D, a mentions inbox, and captured author views
 
 ## Crate ownership
 

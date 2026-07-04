@@ -15,11 +15,12 @@
  *  3. State: a handful of commands assert the scene actually changed via the
  *     scene's query surface, proving the values land (not just parse).
  *
- * Division of labor with `wireGoldens.test.ts`: the goldens byte-lock the
+ * Division of labor with `wireGoldens.test.ts`: the goldens lock the
  * client<->server envelopes (including the document-command bodies as
- * producers serialize them) against Rust-generated fixtures; this suite locks
- * the local-apply vocabulary — including every viewport command, which never
- * crosses the server wire at all.
+ * producers serialize them) against Rust-generated fixtures — field presence
+ * and values via parsed comparison; JSON key order is serde-irrelevant and
+ * not locked. This suite locks the local-apply vocabulary — including every
+ * viewport command, which never crosses the server wire at all.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";

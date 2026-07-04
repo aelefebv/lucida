@@ -110,7 +110,8 @@ re-read on version/dataset change; the open thread's close-on-vanish /
 close-on-dataset-change / close-on-hide lifecycle), `annotationInteraction`
 (the ONE `PIN_CLICK_SLOP` click-vs-drag threshold + tolerant pointer-capture
 helpers + `emitMoveAnnotation`, the single `move_annotation` construction site
-— its field order is byte-locked by the wire goldens), `cameraProjection` (the
+— its field presence/values are locked by the wire goldens, which compare
+parsed frames; key order is serde-irrelevant), `cameraProjection` (the
 event↔world↔screen conversions `SliceViewer`/`VolumeViewer`/`PeerCursors` share
 too), and `AnnotationPinBadges` (the comment-count pill and off-context locator
 — both views render both, so a pin reads identically in 2D and 3D).

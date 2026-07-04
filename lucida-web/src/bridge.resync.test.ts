@@ -17,7 +17,10 @@ import { Bridge, type BridgeHandlers } from "./bridge.ts";
  *   for datasets the document still contains — a retained rebroadcast
  *   must not resurrect a dataset the snapshot deleted;
  * - the author's locally-applied-but-unacked commands are replayed after
- *   a snapshot full-replace and retired by their acks.
+ *   a snapshot full-replace and retired by their acks — including the
+ *   accepted tradeoff when a snapshot outruns an ack and the replay
+ *   stomps a newer peer value (local-only, bounded by the next
+ *   edit/snapshot).
  */
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -521,6 +524,45 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     deliver(ws, ackMsg(13));
     deliver(ws, snapshotMsg(13, { "wds-1": {} }));
     expect(appliedCommands(handlers)).toEqual([RENAME_JSON]); // no second replay
+  });
+
+  it("accepted tradeoff: a snapshot outrunning our ack replays our stale value over the newer peer value it carried (local-only, bounded by the next edit/snapshot)", () => {
+    // The premise behind pending replay — "the server built the snapshot
+    // before applying our command" — loses a queue race: acks ride the
+    // broadcast queue, snapshots ride the per-client unicast queue, so a
+    // snapshot whose seq already COVERS our command (here seq 12 >= our
+    // command's seq 11, and it carries a peer's even newer value for the
+    // same entity) can arrive before our ack does.
+    const OURS = JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "Ours" });
+    const { bridge, ws, handlers } = openBridge();
+    deliver(ws, snapshotMsg(10, { "wds-1": { name: "Original" } }));
+    bridge.sendCommand(OURS); // sequenced server-side at 11; ack in flight
+
+    // Peer renamed to "Theirs" at seq 12; the snapshot (built at 12) holds
+    // the peer's value AND already reflects our seq-11 command. It arrives
+    // ahead of our ack — the bridge cannot tell covered from pre-apply, so
+    // it replays "Ours" over the snapshot's newer "Theirs".
+    deliver(ws, snapshotMsg(12, { "wds-1": { name: "Theirs" } }));
+    const snapshotDoc = (handlers.onSnapshot as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
+    expect(JSON.parse(snapshotDoc)).toStrictEqual({ manifests: { "wds-1": { name: "Theirs" } } });
+    expect(appliedCommands(handlers)).toEqual([OURS]); // the stomp
+
+    // The late ack retires the pending entry but corrects nothing: no
+    // further apply, no resync — the divergence stands, local-only, until
+    // the next edit or snapshot converges it. This is accepted over the
+    // alternative (skipping replay), which would erase the author's own
+    // edit in the common pre-apply case.
+    deliver(ws, ackMsg(11));
+    expect(handlers.onAck).toHaveBeenCalledWith(11);
+    expect(appliedCommands(handlers)).toEqual([OURS]);
+    vi.advanceTimersByTime(1000);
+    expect(resyncRequests(ws)).toBe(0);
+
+    // Bounded: the retired entry is not replayed onto the next snapshot,
+    // which re-delivers the converged document.
+    deliver(ws, snapshotMsg(13, { "wds-1": { name: "Theirs" } }));
+    expect(appliedCommands(handlers)).toEqual([OURS]); // no second replay
+    expect(handlers.onSnapshot).toHaveBeenCalledTimes(3);
   });
 
   it("a command acked before the snapshot is not replayed", () => {

@@ -95,7 +95,7 @@ import {
   type ViewState as WireViewState,
 } from "./savedView/types.ts";
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
-import type { Annotation } from "./components/AnnotationOverlay.tsx";
+import type { Annotation } from "./components/annotationDocument.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture loading

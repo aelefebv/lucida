@@ -57,9 +57,10 @@ export function releasePointer(target: Element, pointerId: number): void {
  * vertices; `end` absent → a rigid whole-shape translate (the backend
  * distinguishes exactly this way).
  *
- * Field order in the constructed literal is load-bearing: `JSON.stringify`
- * preserves it, and the wire goldens byte-lock the envelope — keep
- * `type, dataset_id, id, position, (end,) z`.
+ * The wire goldens lock this literal's field presence and values, not its
+ * key order (the web suite compares parsed frames, and serde ignores JSON
+ * key order): adding, dropping, or renaming a field fails them; reordering
+ * does not.
  */
 export function emitMoveAnnotation(
   scene: WasmScene,

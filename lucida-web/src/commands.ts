@@ -24,9 +24,10 @@
  * Runtime lock: `commands.test.ts` round-trips one representative value of
  * every variant below through the REAL wasm `apply_command`, so a Rust-side
  * tag/field rename fails that suite even though these mirrors are hand-written.
- * Field ORDER in producer literals is load-bearing for the wire-golden byte
- * locks (`JSON.stringify` preserves literal key order) — keep producers'
- * existing order when migrating call sites.
+ * The wire goldens lock producer field PRESENCE and VALUES, not key order:
+ * the web suite compares parsed frames (`toStrictEqual`), and serde ignores
+ * JSON key order — so reordering fields in a producer literal is safe, while
+ * adding/dropping/renaming one fails the goldens.
  */
 
 import type { LayoutSpec } from "./manifestTypes.ts";

@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay3D } from "./AnnotationOverlay3D.tsx";
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 /**
  * Stand-in for the WASM scene exercising only the 3D overlay's surface:
