@@ -5,7 +5,7 @@ description: "The byte layout of the EntityDescriptor struct lives in exactly on
 tags: [lucida, decision]
 source_path: wiki/decisions/0036-descriptor-byte-layout-ssot-and-wgsl-lock-test.md
 created: 2026-05-16
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Descriptor byte-layout single source of truth + WGSL ↔ TS lock test
@@ -59,4 +59,5 @@ The pattern is a generalizable seam for any future cross-language byte-shape con
 - [All GPU Work on a Dedicated Web Worker](0003-gpu-on-dedicated-worker.md) — establishes the worker / WGSL boundary this lock test polices
 - [GPU Residency](../systems/subsystems/gpu-residency.md) — descriptor buffer architecture context
 - [Worker Protocol](../systems/subsystems/worker-protocol.md) — discriminated-union message contract; sibling boundary type protected by `tsc` rather than a lock test
+- [lucida-protocol](../systems/crates/lucida-protocol.md) — the JSON wire protocol now carries the same framing at the Rust ↔ TS boundary: committed golden fixtures in `wire-fixtures/`, byte-locked by `lucida-server/tests/wire_goldens.rs` and consumed by `lucida-web/src/wireGoldens.test.ts`
 - PRD #622, Slice 3 (`87bff09`) — the commit that introduced the SSoT + lock test

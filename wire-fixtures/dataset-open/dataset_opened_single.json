@@ -1,0 +1,339 @@
+{
+  "manifest": {
+    "dataset_id": "wds-0f3a",
+    "name": "kidney-multiplex.zarr",
+    "kind": "Single",
+    "entities": [
+      {
+        "id": "img-0",
+        "kind": "Image",
+        "parent": null,
+        "labels": {
+          "name": "kidney-multiplex.zarr"
+        }
+      }
+    ],
+    "transforms": [
+      {
+        "from": "img-0",
+        "to": "img-0",
+        "transform": {
+          "matrix": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            128.0,
+            -64.0,
+            0.0,
+            1.0
+          ]
+        }
+      }
+    ],
+    "images": [
+      {
+        "image_id": "multiscale-0",
+        "owner": "img-0",
+        "multiscale": {
+          "axes": [
+            {
+              "name": "t",
+              "kind": "Time"
+            },
+            {
+              "name": "c",
+              "kind": "Channel"
+            },
+            {
+              "name": "z",
+              "kind": "Space"
+            },
+            {
+              "name": "y",
+              "kind": "Space"
+            },
+            {
+              "name": "x",
+              "kind": "Space"
+            }
+          ],
+          "levels": [
+            {
+              "level_index": 0,
+              "shape": [
+                3,
+                2,
+                50,
+                4096,
+                4096
+              ],
+              "chunk_shape": [
+                1,
+                1,
+                1,
+                256,
+                256
+              ],
+              "grid_shape": [
+                3,
+                2,
+                50,
+                16,
+                16
+              ],
+              "scale": [
+                1.0,
+                1.0,
+                2.0,
+                0.25,
+                0.25
+              ]
+            },
+            {
+              "level_index": 1,
+              "shape": [
+                3,
+                2,
+                50,
+                2048,
+                2048
+              ],
+              "chunk_shape": [
+                1,
+                1,
+                1,
+                256,
+                256
+              ],
+              "grid_shape": [
+                3,
+                2,
+                50,
+                8,
+                8
+              ],
+              "scale": [
+                1.0,
+                1.0,
+                2.0,
+                0.5,
+                0.5
+              ]
+            },
+            {
+              "level_index": 2,
+              "shape": [
+                3,
+                2,
+                50,
+                512,
+                512
+              ],
+              "chunk_shape": [
+                1,
+                1,
+                25,
+                512,
+                512
+              ],
+              "grid_shape": [
+                3,
+                2,
+                2,
+                1,
+                1
+              ],
+              "scale": [
+                1.0,
+                1.0,
+                2.0,
+                2.0,
+                2.0
+              ]
+            }
+          ],
+          "coarse_level_index": 2,
+          "generated_levels": [
+            {
+              "level_index": 2,
+              "role": "coarse",
+              "provenance": {
+                "generator": "coarse-v1",
+                "config_id": "max-axis-1024",
+                "source_content_id": "blake3:9f2ce6"
+              }
+            }
+          ],
+          "data_type": "Uint16",
+          "pinned_axes": [
+            {
+              "name": "m",
+              "size": 4,
+              "pinned_index": 0
+            }
+          ],
+          "channel_infos": [
+            {
+              "label": "DAPI",
+              "color": "0000FF"
+            },
+            {
+              "label": "GFP"
+            }
+          ]
+        }
+      }
+    ],
+    "source_layouts": [
+      {
+        "id": "layout-source",
+        "name": "Source positions",
+        "placements": [
+          {
+            "entity_id": "img-0",
+            "position": [
+              12.5,
+              -8.0
+            ]
+          }
+        ]
+      }
+    ],
+    "default_layout_id": "layout-source",
+    "labels": [
+      {
+        "name": "nuclei",
+        "source_image_id": "multiscale-0",
+        "image": {
+          "image_id": "multiscale-0:label:nuclei",
+          "owner": "img-0",
+          "multiscale": {
+            "axes": [
+              {
+                "name": "z",
+                "kind": "Space"
+              },
+              {
+                "name": "y",
+                "kind": "Space"
+              },
+              {
+                "name": "x",
+                "kind": "Space"
+              }
+            ],
+            "levels": [
+              {
+                "level_index": 0,
+                "shape": [
+                  1,
+                  1,
+                  50,
+                  1024,
+                  1024
+                ],
+                "chunk_shape": [
+                  1,
+                  1,
+                  1,
+                  256,
+                  256
+                ],
+                "grid_shape": [
+                  1,
+                  1,
+                  50,
+                  4,
+                  4
+                ],
+                "scale": [
+                  1.0,
+                  1.0,
+                  2.0,
+                  1.0,
+                  1.0
+                ]
+              }
+            ],
+            "data_type": "Uint32",
+            "pinned_axes": []
+          }
+        },
+        "colors": [
+          {
+            "value": 1,
+            "rgba": [
+              255,
+              64,
+              0,
+              255
+            ]
+          },
+          {
+            "value": 92801,
+            "rgba": [
+              0,
+              128,
+              255,
+              128
+            ]
+          }
+        ],
+        "source_declared": true
+      }
+    ]
+  },
+  "fetch": {
+    "Proxied": {
+      "images": [
+        {
+          "image_id": "multiscale-0",
+          "wire_format": {
+            "Zstd": {
+              "data_type": "Uint16"
+            }
+          }
+        },
+        {
+          "image_id": "multiscale-0:label:nuclei",
+          "wire_format": {
+            "Raw": {
+              "data_type": "Uint32"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "catalog": {
+    "entries": [
+      {
+        "entity_id": "img-0",
+        "kinds": [
+          "FieldProxy3D"
+        ],
+        "footprints": [
+          {
+            "kind": "FieldProxy3D",
+            "dims": [
+              50,
+              128,
+              128
+            ],
+            "bytes": 1638400
+          }
+        ]
+      }
+    ]
+  },
+  "opener_client_id": 7
+}

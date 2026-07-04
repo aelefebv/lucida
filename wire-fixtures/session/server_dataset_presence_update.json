@@ -1,0 +1,43 @@
+{
+  "type": "dataset_presence_update",
+  "client_id": 3,
+  "dataset_order": [
+    "wds-0f3a"
+  ],
+  "dataset_settings": {
+    "wds-0f3a": {
+      "visible": true,
+      "opacity": 0.8,
+      "contrast_min": 120.0,
+      "contrast_max": 4096.0,
+      "gamma": 0.85,
+      "blend_mode": "max",
+      "render_mode": "max_intensity",
+      "channel_settings": [
+        {
+          "visible": true,
+          "colormap": "magenta",
+          "contrast_min": 100.0,
+          "contrast_max": 12000.0,
+          "gamma": 1.0,
+          "name": "Nuclei"
+        },
+        {
+          "visible": false,
+          "colormap": "green",
+          "contrast_min": 0.0,
+          "contrast_max": 65535.0,
+          "gamma": 1.2
+        }
+      ],
+      "label_settings": [
+        {
+          "visible": true,
+          "opacity": 0.35
+        }
+      ],
+      "channel_blend_mode": "additive",
+      "detail_level_override": 1
+    }
+  }
+}

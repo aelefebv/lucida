@@ -1,0 +1,21 @@
+{
+  "Local": {
+    "images": [
+      {
+        "image_id": "multiscale-0",
+        "wire_format": {
+          "Raw": {
+            "data_type": "Float32"
+          }
+        },
+        "levels": [
+          {
+            "level_index": 0,
+            "path": "/data/kidney-multiplex.zarr/0"
+          }
+        ],
+        "store_prefix": null
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "type": "command",
+  "command": {
+    "type": "apply_asset_catalog_delta",
+    "dataset_id": "wds-0f3a",
+    "delta": {
+      "added": [
+        {
+          "entity_id": "img-0",
+          "kinds": [
+            "WellProxy3D",
+            "FieldProxy3D"
+          ],
+          "footprints": [
+            {
+              "kind": "WellProxy3D",
+              "dims": [
+                50,
+                256,
+                256
+              ],
+              "bytes": 6553600
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

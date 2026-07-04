@@ -1,0 +1,65 @@
+{
+  "type": "generated_availability_update",
+  "dataset_id": "wds-0f3a",
+  "delta": {
+    "levels": [
+      {
+        "image_id": "multiscale-0",
+        "info": {
+          "level_index": 2,
+          "role": "coarse",
+          "provenance": {
+            "generator": "coarse-v1",
+            "config_id": "max-axis-1024",
+            "source_content_id": "blake3:9f2ce6"
+          }
+        },
+        "level": {
+          "level_index": 2,
+          "shape": [
+            3,
+            2,
+            50,
+            512,
+            512
+          ],
+          "chunk_shape": [
+            1,
+            1,
+            25,
+            512,
+            512
+          ],
+          "grid_shape": [
+            3,
+            2,
+            2,
+            1,
+            1
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        "summary": {
+          "total_chunks": 12,
+          "ready_chunks": 7,
+          "pending_chunks": 3,
+          "failed_chunks": 2
+        }
+      }
+    ],
+    "chunks": [
+      {
+        "image_id": "multiscale-0",
+        "level_index": 2,
+        "key": "2/0/0/1/0/0",
+        "status": "ready"
+      }
+    ]
+  }
+}

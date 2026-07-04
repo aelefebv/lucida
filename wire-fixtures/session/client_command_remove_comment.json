@@ -1,0 +1,9 @@
+{
+  "type": "command",
+  "command": {
+    "type": "remove_comment",
+    "dataset_id": "wds-0f3a",
+    "annotation_id": "pin-4c1d",
+    "id": "comment-92"
+  }
+}

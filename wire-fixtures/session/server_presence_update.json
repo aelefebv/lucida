@@ -1,0 +1,38 @@
+{
+  "type": "presence_update",
+  "client_id": 3,
+  "camera": {
+    "mode": "arcball",
+    "target": [
+      2048.0,
+      2048.0,
+      50.0
+    ],
+    "theta": 0.7853981633974483,
+    "phi": 1.0471975511965979,
+    "distance": 6000.0,
+    "fov": 45.0,
+    "viewport": [
+      1920,
+      1080
+    ],
+    "near": 1.0,
+    "far": 50000.0,
+    "clip_distance": 120.0,
+    "clip_mode": "sphere"
+  },
+  "view": {
+    "z_range": {
+      "start": 10,
+      "end": 14
+    },
+    "t": 2,
+    "c": 1,
+    "multi_channel": true
+  },
+  "display": {
+    "contrast_min": 120.0,
+    "contrast_max": 4096.0,
+    "gamma": 0.85
+  }
+}

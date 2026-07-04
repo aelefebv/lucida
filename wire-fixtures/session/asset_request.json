@@ -1,0 +1,8 @@
+{
+  "type": "asset_request",
+  "dataset_id": "wds-plate-77",
+  "entity_id": "field-A1-f0",
+  "kind": "FieldProxy3D",
+  "t": 0,
+  "c": 2
+}

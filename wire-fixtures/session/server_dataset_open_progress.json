@@ -1,0 +1,12 @@
+{
+  "type": "dataset_open_progress",
+  "request_id": "web-7d2f45aa",
+  "url": "gs://lucida-fixtures/kidney-multiplex.zarr",
+  "diagnostic": {
+    "stage": "generated_coarse_planning",
+    "message": "planning generated coarse levels",
+    "workspace_dataset_id": "wds-0f3a",
+    "dataset_source_id": "source-9b31",
+    "detail": "1 derived level over 2 source levels"
+  }
+}

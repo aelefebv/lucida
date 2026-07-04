@@ -1,0 +1,49 @@
+{
+  "type": "viewer_interest",
+  "interest": {
+    "client_id": null,
+    "dataset_id": "wds-0f3a",
+    "generation": 9,
+    "t": 2,
+    "z": 12,
+    "channels": [
+      0,
+      1
+    ],
+    "mode": "slice",
+    "viewport": {
+      "xy_bounds": [
+        0.0,
+        0.0,
+        4096.0,
+        4096.0
+      ],
+      "z_range": [
+        10.0,
+        14.0
+      ]
+    },
+    "desired_keys": [
+      {
+        "image_id": "multiscale-0",
+        "key": "1/2/1/12/3/4",
+        "lane": "visible"
+      },
+      {
+        "image_id": "multiscale-0",
+        "key": "0/2/1/12/3/4",
+        "lane": "background"
+      }
+    ],
+    "predicted_keys": [
+      {
+        "image_id": "multiscale-0",
+        "key": "1/2/1/13/3/4",
+        "lane": "predicted"
+      }
+    ],
+    "interaction": "scrubbing",
+    "timestamp_ms": 1767225600123,
+    "ttl_ms": 2000
+  }
+}

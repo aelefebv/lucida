@@ -1,0 +1,11 @@
+{
+  "type": "command",
+  "command": {
+    "type": "add_comment",
+    "dataset_id": "wds-0f3a",
+    "annotation_id": "pin-4c1d",
+    "id": "comment-92",
+    "author": "7",
+    "text": "agreed — recheck at t=3"
+  }
+}

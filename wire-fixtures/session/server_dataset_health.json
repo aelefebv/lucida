@@ -1,0 +1,56 @@
+{
+  "type": "dataset_health",
+  "request_id": "web-health-55e0",
+  "datasets": [
+    {
+      "workspace_dataset_id": "wds-0f3a",
+      "name": "kidney-multiplex.zarr",
+      "status": "degraded",
+      "source_url": "gs://lucida-fixtures/kidney-multiplex.zarr",
+      "backend": "gcs",
+      "binding": {
+        "status": "healthy",
+        "message": "bound to gcs source"
+      },
+      "source_cache": {
+        "max_bytes": 536870912,
+        "current_bytes": 268435456,
+        "used_percent": 50,
+        "entry_count": 1024,
+        "hits": 9137,
+        "misses": 421,
+        "evictions": 17,
+        "backend_errors": 2
+      },
+      "generated_coarse": {
+        "status": "degraded",
+        "level_count": 1,
+        "ready_chunks": 40,
+        "pending_chunks": 3,
+        "failed_chunks": 2,
+        "unavailable_chunks": 1,
+        "message": "2 chunks failed in the last generation pass",
+        "cache": {
+          "storage": "disk",
+          "current_bytes": 73400320,
+          "max_bytes": 1073741824,
+          "used_percent": 6,
+          "evictions": 4,
+          "root": "/var/cache/lucida/generated"
+        },
+        "recent_failures": [
+          {
+            "image_id": "multiscale-0",
+            "level_index": 2,
+            "key": "2/1/0/1/0/0",
+            "status": "failed_transient",
+            "message": "source read timed out"
+          }
+        ]
+      },
+      "messages": [
+        "generated coarse cache is warming"
+      ]
+    }
+  ]
+}

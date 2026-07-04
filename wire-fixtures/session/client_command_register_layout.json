@@ -1,0 +1,20 @@
+{
+  "type": "command",
+  "command": {
+    "type": "register_layout",
+    "dataset_id": "wds-0f3a",
+    "layout": {
+      "id": "layout-grid",
+      "name": "Grid",
+      "placements": [
+        {
+          "entity_id": "img-0",
+          "position": [
+            0.0,
+            4224.0
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "type": "command",
+  "command": {
+    "type": "move_annotation",
+    "dataset_id": "wds-0f3a",
+    "id": "pin-4c1d",
+    "position": [
+      355.0,
+      470.5
+    ],
+    "end": [
+      465.0,
+      520.5
+    ],
+    "z": 12.5
+  }
+}
