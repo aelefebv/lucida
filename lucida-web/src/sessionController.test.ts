@@ -313,6 +313,61 @@ describe("SessionController self id", () => {
   });
 });
 
+describe("SessionController remote-document-changed coalescing", () => {
+  it("a snapshot with N pending replays emits onRemoteDocumentChanged exactly once, after the replays", async () => {
+    const { handlers, events, scene } = makeHarness();
+    const docChanged = events.onRemoteDocumentChanged as ReturnType<typeof vi.fn>;
+    let applyCallsAtEmit = -1;
+    docChanged.mockImplementation(() => {
+      applyCallsAtEmit = scene.apply_command.mock.calls.length;
+    });
+
+    // Mirror the bridge's snapshot burst: onSnapshot, then the pending local
+    // commands replayed synchronously through onCommand with the snapshot's
+    // seq (bridge.ts hands `snapshotSeq` to each replay).
+    handlers.onSnapshot(5, snapshotJson(["wds-1"]), [], 4, {});
+    handlers.onCommand(5, JSON.stringify({ type: "set_dataset_visible", dataset_id: "wds-1", visible: false }));
+    handlers.onCommand(5, JSON.stringify({ type: "set_dataset_opacity", dataset_id: "wds-1", opacity: 0.5 }));
+
+    // Nothing yet — the burst is still in its synchronous window.
+    expect(docChanged).not.toHaveBeenCalled();
+
+    await Promise.resolve();
+
+    // Exactly one signal for snapshot + 2 replays, delivered after the
+    // replays applied (a synchronous listener sees post-replay state).
+    expect(docChanged).toHaveBeenCalledTimes(1);
+    expect(applyCallsAtEmit).toBe(scene.apply_command.mock.calls.length);
+    expect(scene.apply_command).toHaveBeenCalledWith(
+      JSON.stringify({ type: "set_dataset_opacity", dataset_id: "wds-1", opacity: 0.5 }),
+    );
+  });
+
+  it("a live command outside a snapshot burst still emits synchronously", async () => {
+    const { handlers, events } = makeHarness();
+    const docChanged = events.onRemoteDocumentChanged as ReturnType<typeof vi.fn>;
+
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    await Promise.resolve();
+    expect(docChanged).toHaveBeenCalledTimes(1);
+
+    handlers.onCommand(2, JSON.stringify({ type: "set_dataset_visible", dataset_id: "wds-1", visible: false }));
+    // Synchronous — no flush needed.
+    expect(docChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it("a controller destroyed before the scheduled emission never emits", async () => {
+    const { controller, handlers, events } = makeHarness();
+    const docChanged = events.onRemoteDocumentChanged as ReturnType<typeof vi.fn>;
+
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    controller.destroy();
+    await Promise.resolve();
+
+    expect(docChanged).not.toHaveBeenCalled();
+  });
+});
+
 describe("SessionController teardown", () => {
   it("destroy releases the stack, clears the dataset registry, and is idempotent", () => {
     const { controller, handlers, deps } = makeHarness();

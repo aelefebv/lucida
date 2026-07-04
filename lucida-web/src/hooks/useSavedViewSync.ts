@@ -19,7 +19,7 @@ import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
 import type { DatasetReferenceMode, SavedView, ViewState } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { invalidateAfterViewRestore } from "../invalidation.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
 
 interface Params {
@@ -363,9 +363,7 @@ export function useSavedViewSync({
           return changed ? next : prev;
         });
       }
-      bumpSettingsGeneration();
-      loopRef.current?.markInteractiveDirty("savedview_apply");
-      loopRef.current?.markResidencyDirty("savedview_apply");
+      invalidateAfterViewRestore(loopRef.current, "savedview_apply");
     });
   }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setMultiChannel, setAutoContrastMap]);
 

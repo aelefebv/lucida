@@ -22,6 +22,7 @@ import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
 import { bumpSettingsGeneration } from "./tickCommon.ts";
+import { invalidateDisplaySettings } from "./invalidation.ts";
 import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 
@@ -54,7 +55,8 @@ export interface RemoteDatasetActivity {
  * Every callback fires synchronously from within a bridge handler (or a
  * controller method), never from a deferred task, so a listener that mirrors
  * into React state observes events in exactly the order the protocol
- * delivered them.
+ * delivered them. One deliberate exception: `onRemoteDocumentChanged` for a
+ * snapshot burst — see its doc below.
  *
  * `onPeersChanged` hands over a freshly built `Map` on every change (the
  * controller never mutates a map it has emitted), so the owner may store the
@@ -76,7 +78,17 @@ export interface SessionControllerEvents {
   onSceneChanged: (scene: WasmScene) => void;
   /** Dataset registry membership or manifests changed (version-counter tick). */
   onDatasetsChanged: () => void;
-  /** The shared document changed (any applied command or snapshot). */
+  /** The shared document changed (any applied command or snapshot).
+   *
+   *  Emission timing: a live command emits synchronously from its handler.
+   *  A snapshot is different — the bridge synchronously replays pending
+   *  local commands (and drains gap-buffered ones) right after `onSnapshot`
+   *  returns, so per-change emission would fire 1 + N times for one document
+   *  adoption, and the early emissions would let a synchronous listener read
+   *  the scene BEFORE the replays restored the author's own edits. The
+   *  controller therefore coalesces the whole burst into ONE emission,
+   *  delivered from a microtask after the burst completes — post-replay
+   *  state, exactly once. */
   onRemoteDocumentChanged: () => void;
   onWorkspaceArchived: () => void;
 }
@@ -166,6 +178,11 @@ export class SessionController {
    *  to derive a round-trip on receipt. Approximate when concurrent opens
    *  are in flight — overwritten by each send. */
   private lastOpenSendTime: number | null = null;
+  /** True while a coalesced `onRemoteDocumentChanged` emission is scheduled
+   *  for the current snapshot burst (see the event's doc). Commands applied
+   *  while it is set — the bridge's synchronous pending-command replays and
+   *  gap-buffer drain — are covered by that one emission. */
+  private docChangedEmitPending = false;
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
@@ -304,6 +321,36 @@ export class SessionController {
   private updateRemoteActivity(patch: Partial<RemoteDatasetActivity>): void {
     this.remoteActivity = { ...this.remoteActivity, ...patch };
     this.deps.events.onRemoteDatasetActivity(this.remoteActivity);
+  }
+
+  /**
+   * Emit `onRemoteDocumentChanged` for a live command: synchronous, unless a
+   * snapshot-burst emission is already scheduled (the bridge replays pending
+   * commands and drains its gap buffer synchronously after `onSnapshot`, all
+   * within the flag's window) — then the scheduled emission covers this
+   * change too, keeping the whole burst at exactly one signal.
+   */
+  private notifyRemoteDocumentChanged(): void {
+    if (this.docChangedEmitPending) return;
+    this.deps.events.onRemoteDocumentChanged();
+  }
+
+  /**
+   * Schedule ONE `onRemoteDocumentChanged` for a snapshot burst. The bridge
+   * hands over the snapshot and then synchronously replays every pending
+   * local command through `onCommand`; emitting per change would signal
+   * 1 + N times and expose pre-replay document state to the early listeners.
+   * A microtask runs after that entire synchronous burst, so the single
+   * emission observes post-replay state.
+   */
+  private scheduleRemoteDocumentChanged(): void {
+    if (this.docChangedEmitPending) return;
+    this.docChangedEmitPending = true;
+    queueMicrotask(() => {
+      this.docChangedEmitPending = false;
+      if (this.destroyed) return;
+      this.deps.events.onRemoteDocumentChanged();
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -592,7 +639,7 @@ export class SessionController {
           }
           this.applyGeneratedAvailabilitySnapshots(generatedAvailability);
 
-          this.deps.events.onRemoteDocumentChanged();
+          this.scheduleRemoteDocumentChanged();
           this.deps.events.onDatasetsChanged();
           this.deps.events.onSceneChanged(scene);
           // The session is fully established (WS open + first snapshot
@@ -651,7 +698,7 @@ export class SessionController {
               this.deps.getLoop()?.markInteractiveDirty();
             }
           }
-          this.deps.events.onRemoteDocumentChanged();
+          this.notifyRemoteDocumentChanged();
         } catch (e) {
           let cmdType: string | undefined;
           try {
@@ -759,9 +806,8 @@ export class SessionController {
             try {
               const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
               scene.import_dataset_presence(json);
-              bumpSettingsGeneration();
+              invalidateDisplaySettings(this.deps.getLoop(), "peer_dataset_presence");
               this.deps.bumpLayerSettingsVersion();
-              this.deps.getLoop()?.markInteractiveDirty();
             } catch (e) {
               console.warn("[Bridge] failed to import dataset presence:", e);
             }

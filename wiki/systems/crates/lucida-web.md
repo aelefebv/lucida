@@ -59,6 +59,7 @@ WASM owns:
 - `renderLoop.ts` / `renderLoopTypes.ts` — pull-based RAF loop with typed dirty flags
 - `slicePath.ts` / `volumePath.ts` / `minimapPath.ts` — entry points for the three render paths
 - `tickCommon.ts` — shared tick helpers
+- `invalidation.ts` — composed scene-invalidation intents (`invalidateDisplaySettings` / `invalidateResidency` / `invalidateAfterViewRestore` / `requestRender`): a call site states *what happened* and the module lands the right combination of settings-generation bump + render-loop dirty marks together, so a mutation can't tap one mechanism and forget the other (wiring pinned by `App.wiring.test.tsx`)
 - `session.ts` — session state container
 - `colormaps.ts` — 15 colormap LUTs
 - `savedView/` — web side of [Saved Views](../subsystems/saved-views.md): `encoder.ts` (deep, gzip+base64url with default-stripping), `applier.ts` (deep, async orchestrator with `applyInProgress` flag and `subscribeApplyResult` channel), `urlSync.ts` (deep, debounced `replaceState` + popstate + bootstrap from `#view=…` and `#b=<id>`), `captureBuilder.ts`, `bookmarksApi.ts`, `useBookmarks.ts`, `types.ts`. Components: `BookmarkSidebar.tsx`, `ShareToolbarButton.tsx`, `LoadingViewBanner.tsx`.

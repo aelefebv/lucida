@@ -26,7 +26,11 @@ import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
-import { bumpSettingsGeneration } from "./tickCommon.ts";
+import {
+  invalidateDisplaySettings,
+  invalidateAfterViewRestore,
+  requestRender,
+} from "./invalidation.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
@@ -653,9 +657,7 @@ function App({
     }
     bridge.breakFollow();
     emitPresenceWithUrl();
-    bumpSettingsGeneration();
-    render.loopRef.current?.markInteractiveDirty("annotation_view_restore");
-    render.loopRef.current?.markResidencyDirty("annotation_view_restore");
+    invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
 
     // Surface the graceful-degrade notice (auto-clears below).
     setRestoreNotice(result.notice);
@@ -885,7 +887,7 @@ function App({
     }
 
     setCursorLabels(result.labels);
-    render.loopRef.current?.markInteractiveDirty();
+    requestRender(render.loopRef.current, "peer_cursors");
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
 
   // Auto-clear the light-restore graceful-degrade notice a few seconds after it
@@ -926,7 +928,7 @@ function App({
     setCameraMode(newMode);
     bridge.breakFollow();
     emitPresenceWithUrl();
-    render.loopRef.current?.markInteractiveDirty();
+    requestRender(render.loopRef.current, "camera_mode_toggle");
     render.canvasRef.current?.focus();
   }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
 
@@ -1045,7 +1047,7 @@ function App({
       debugStats.enabled = !prev;
       return !prev;
     });
-    render.loopRef.current?.markInteractiveDirty();
+    requestRender(render.loopRef.current, "debug_toggle");
   }, [render.loopRef]);
   const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!showDebug) return;
@@ -1158,7 +1160,14 @@ function App({
         layoutRegistry={layoutRegistry}
         sendCommand={bridge.sendCommand}
         onLayoutChange={() => {
-          render.loopRef.current?.markInteractiveDirty();
+          // The switcher already applied `set_active_layout` to the scene
+          // (LayoutRegistry.setActive). Match the inbound-peer arm in
+          // sessionController.ts, which bumps the settings generation after
+          // every applied command and marks interactive — so the planner
+          // re-reads and the canvas replans/renders without waiting for a
+          // pan/zoom (the #780 class: a missed signal here leaves plate
+          // members drawn at their pre-switch positions).
+          invalidateDisplaySettings(render.loopRef.current, "layout_switch");
           // A local layout switch re-anchors plate annotations in core (issue
           // #780), but — unlike an inbound peer switch (see sessionController.ts) — it
           // doesn't bump the remote document version on its own, so the overlay
@@ -1295,7 +1304,7 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
+                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
@@ -1323,7 +1332,7 @@ function App({
                     if (!ws) return;
                     applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
                     emitPresenceWithUrl();
-                    render.loopRef.current?.markInteractiveDirty();
+                    requestRender(render.loopRef.current, "plate_well_click");
                   }}
                 />
               );
@@ -1366,7 +1375,7 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
+                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}

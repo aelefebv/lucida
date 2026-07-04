@@ -5,7 +5,7 @@ description: "The web client's render loop (lucida-web/src/renderLoop.ts) is pul
 tags: [lucida, decision]
 source_path: wiki/decisions/0009-pull-based-raf-with-typed-dirty.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # Pull-Based RAF Render Loop with Typed Dirty Flags
@@ -36,14 +36,14 @@ The typed split lets the loop be aggressive when the user wants snap response (`
 
 ## Tradeoffs
 
-- **Two dirty channels means two sources of mistakes.** Forgetting to set `interactiveDirty` after a viewport change makes the next user input feel lagged. Forgetting `residencyDirty` makes loading visibly stuck.
+- **Two dirty channels means two sources of mistakes.** Forgetting to set `interactiveDirty` after a viewport change makes the next user input feel lagged. Forgetting `residencyDirty` makes loading visibly stuck. Most app-level call sites now go through the composed intents in `lucida-web/src/invalidation.ts` (`invalidateDisplaySettings` / `invalidateResidency` / `invalidateAfterViewRestore` / `requestRender`), which pair the dirty mark with the settings-generation bump the planner needs — a settings mutation can't tap one and forget the other.
 - **The "tick still runs in the gap" rule is non-obvious.** New contributors sometimes try to throttle the whole tick; that starves uploads and breaks the chunk arrival pipeline.
 
 ## How this decision shows up in code
 
 - `lucida-web/src/renderLoop.ts` — the loop. The `residencyDirty` throttle gate lives at ~`:515-548` (the interval check against `RESIDENCY_RENDER_INTERVAL_MS`).
 - `lucida-web/src/renderLoopTypes.ts` — type definitions for the dirty flags.
-- Every place that mutates state calls `loopRef.current.markInteractiveDirty()` or `markResidencyDirty()`. Producers include the WebSocket bridge (presence updates from peers), the `tickCoordinator` (chunk arrivals), and viewport command handlers.
+- Every place that mutates state calls `loopRef.current.markInteractiveDirty()` or `markResidencyDirty()` — app-level settings mutations via the composed intents in `lucida-web/src/invalidation.ts`, which co-tap the planner's settings-generation bump. Producers include the WebSocket bridge (presence updates from peers), the `tickCoordinator` (chunk arrivals), and viewport command handlers.
 
 ## Alternatives considered (inferred)
 

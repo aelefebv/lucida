@@ -3,7 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { Session } from "../session.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
-import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { invalidateResidency } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState } from "../types.ts";
 
@@ -79,8 +79,7 @@ export function useIntensityBatcher({
             max: mergedMax,
           };
           scene.apply_command(JSON.stringify(cmd));
-          bumpSettingsGeneration();
-          loopRef.current?.markResidencyDirty();
+          invalidateResidency(loopRef.current, "auto_contrast");
           sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
         }
       }
