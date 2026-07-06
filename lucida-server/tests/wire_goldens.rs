@@ -437,7 +437,7 @@ fn enum_vocabulary() -> EnumVocabulary {
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
         entity_kinds: vocab!(EntityKind::{ Image, Well, Field }),
         data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Float32, Float64 }),
-        positioning_modes: vocab!(PositioningMode::{ Stage, Grid }),
+        positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
         proxy_kinds: vocab!(ProxyKind::{ WellProxy3D, FieldProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,
@@ -675,7 +675,7 @@ fn single_dataset_opened() -> DatasetOpened {
     }
 }
 
-/// A plate manifest: well/field entity hierarchy, stage positioning, and a
+/// A plate manifest: well/field entity hierarchy, explicit positioning, and a
 /// field-owned image.
 fn plate_dataset_opened() -> DatasetOpened {
     let well_id = EntityId("well-A1".into());
@@ -688,8 +688,8 @@ fn plate_dataset_opened() -> DatasetOpened {
         DatasetKind::Plate {
             rows: vec!["A".into(), "B".into()],
             columns: vec!["1".into(), "2".into(), "3".into()],
-            positioning_mode: PositioningMode::Stage,
-            has_stage_positions: true,
+            positioning_mode: PositioningMode::Explicit,
+            has_explicit_positions: true,
         },
         vec![
             Entity {
@@ -2092,7 +2092,7 @@ fn dataset_open_payloads_match_goldens() {
                 "/manifest/kind/Plate/rows",
                 "/manifest/kind/Plate/columns",
                 "/manifest/kind/Plate/positioning_mode",
-                "/manifest/kind/Plate/has_stage_positions",
+                "/manifest/kind/Plate/has_explicit_positions",
             ],
         ),
         &mut failures,

@@ -374,8 +374,8 @@ const expectedManifestPlate: DatasetManifest = {
     Plate: {
       rows: ["A", "B"],
       columns: ["1", "2", "3"],
-      positioning_mode: "Stage",
-      has_stage_positions: true,
+      positioning_mode: "Explicit",
+      has_explicit_positions: true,
     },
   },
   entities: [
@@ -1579,8 +1579,8 @@ describe("wire goldens: dataset-open payloads", () => {
     if (typeof opened.manifest.kind !== "string") {
       expect(opened.manifest.kind.Plate.rows).toStrictEqual(["A", "B"]);
       expect(opened.manifest.kind.Plate.columns).toStrictEqual(["1", "2", "3"]);
-      expect(opened.manifest.kind.Plate.positioning_mode).toBe("Stage");
-      expect(opened.manifest.kind.Plate.has_stage_positions).toBe(true);
+      expect(opened.manifest.kind.Plate.positioning_mode).toBe("Explicit");
+      expect(opened.manifest.kind.Plate.has_explicit_positions).toBe(true);
     }
     const proxied = "Proxied" in opened.fetch ? opened.fetch.Proxied : null;
     expect(extractDataType(proxied!.images[0].wire_format)).toBe("Uint8");
@@ -1756,7 +1756,7 @@ describe("wire goldens: enum vocabulary", () => {
       axis_kinds: ["Time", "Channel", "Space"],
       entity_kinds: entityKinds,
       data_types: ["Uint8", "Uint16", "Uint32", "Float32", "Float64"],
-      positioning_modes: ["Stage", "Grid"],
+      positioning_modes: ["Explicit", "Derived"],
       proxy_kinds: proxyKinds,
       dataset_open_stages: openStages,
       // No TS union today: the DebugPanel renders the kind string verbatim.

@@ -10,6 +10,6 @@ pub enum DatasetKind {
         rows: Vec<String>,
         columns: Vec<String>,
         positioning_mode: PositioningMode,
-        has_stage_positions: bool,
+        has_explicit_positions: bool,
     },
 }

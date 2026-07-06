@@ -23,7 +23,7 @@ The crate exists so that [lucida-store](lucida-store.md) can produce the manifes
 - `image.rs` — `ImageSpec`, `MultiscaleInfo`, `LevelGeometry { level_index, shape, chunk_shape, grid_shape, scale }`, `Axis`, `AxisKind`, `DataType`, `PinnedAxis`
 - `transform.rs` — `TransformEdge { from, to, transform }`, `VoxelTransform` (4×4 matrix in voxel units) and `AffineTransform` (the inner matrix type `VoxelTransform` is transparent over)
 - `layout.rs` — `LayoutSpec { id, name, placements }`, `EntityPlacement { entity_id, position }`
-- `kind.rs` — `DatasetKind::Single` vs `DatasetKind::Plate { rows, columns, positioning_mode, has_stage_positions }`, `PositioningMode`
+- `kind.rs` — `DatasetKind::Single` vs `DatasetKind::Plate { rows, columns, positioning_mode, has_explicit_positions }`, `PositioningMode`
 - `graph.rs` — `DatasetManifest` itself: holds entities, transforms, images, source layouts, default layout id
 - `plate.rs` — `build_grid_field_transforms`, `build_plate_layout`, `PlateLayoutError`
 - `normalize.rs` — `normalize_to_5d` for axis padding when datasets have fewer than 5 axes; `classify_axes` for splitting a raw OME-Zarr axes list into canonical `{t,c,z,y,x}` and pinned non-canonical members

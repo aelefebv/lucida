@@ -32,7 +32,7 @@ function plate2x2(): DatasetManifest {
   return {
     dataset_id: "plate-2x2",
     name: "plate",
-    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Grid", has_stage_positions: false } },
+    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities: [
       { id: "e0", kind: "Image", parent: null, labels: { row_index: 0, column_index: 0 } },
       { id: "e1", kind: "Image", parent: null, labels: { row_index: 0, column_index: 1 } },

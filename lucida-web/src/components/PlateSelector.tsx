@@ -5,7 +5,7 @@ export interface PlateKind {
   rows: string[];
   columns: string[];
   positioning_mode: string;
-  has_stage_positions: boolean;
+  has_explicit_positions: boolean;
 }
 
 interface PlacedMember {
@@ -48,7 +48,7 @@ export function extractPlateData(
     rows: plate.rows,
     columns: plate.columns,
     positioning_mode: plate.positioning_mode,
-    has_stage_positions: plate.has_stage_positions,
+    has_explicit_positions: plate.has_explicit_positions,
   };
 
   // Derive members from entities + the supplied placements (or fall back
@@ -149,7 +149,7 @@ export function PlateSelector({
     CELL_GAP;
   const panelWidth = Math.max(gridWidth + PADDING * 2, 100);
   const showToggle =
-    plateKind.has_stage_positions && onPositioningModeToggle != null;
+    plateKind.has_explicit_positions && onPositioningModeToggle != null;
 
   return (
     <div
@@ -319,9 +319,9 @@ export function PlateSelector({
               "rgba(255, 255, 255, 0.08)";
           }}
         >
-          {plateKind.positioning_mode === "stage" ? "Stage" : "Grid"}
+          {plateKind.positioning_mode === "Explicit" ? "Explicit positions" : "Grid layout"}
           {" \u2194 "}
-          {plateKind.positioning_mode === "stage" ? "Grid" : "Stage"}
+          {plateKind.positioning_mode === "Explicit" ? "Grid layout" : "Explicit positions"}
         </button>
       )}
     </div>

@@ -63,7 +63,7 @@ function plate2x2Graph(): DatasetManifest {
   return {
     dataset_id: "plate-2x2",
     name: "plate",
-    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Grid", has_stage_positions: false } },
+    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities: ["e0", "e1", "e2", "e3"].map((id) => ({ id, kind: "Image", parent: null, labels: {} })),
     transforms: [],
     images: ["e0", "e1", "e2", "e3"].map((id) => makeImage(`img-${id}`, id, H, W)),
@@ -84,7 +84,7 @@ function plateSparseGraph(): DatasetManifest {
   return {
     dataset_id: "plate-sparse",
     name: "plate-sparse",
-    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Grid", has_stage_positions: false } },
+    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities: ["e0", "e1", "e2"].map((id) => ({ id, kind: "Image", parent: null, labels: {} })),
     transforms: [],
     images: ["e0", "e1", "e2"].map((id) => makeImage(`img-${id}`, id, H, W)),
@@ -195,7 +195,7 @@ function plateWithFieldsGraph(): DatasetManifest {
   return {
     dataset_id: "plate-with-fields",
     name: "plate-with-fields",
-    kind: { Plate: { rows: ["A"], columns: ["1", "2"], positioning_mode: "Grid", has_stage_positions: false } },
+    kind: { Plate: { rows: ["A"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities,
     transforms,
     images,

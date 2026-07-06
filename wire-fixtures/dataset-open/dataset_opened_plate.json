@@ -13,8 +13,8 @@
           "2",
           "3"
         ],
-        "positioning_mode": "Stage",
-        "has_stage_positions": true
+        "positioning_mode": "Explicit",
+        "has_explicit_positions": true
       }
     },
     "entities": [

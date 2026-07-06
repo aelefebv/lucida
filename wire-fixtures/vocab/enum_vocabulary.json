@@ -52,8 +52,8 @@
     "Float64"
   ],
   "positioning_modes": [
-    "Stage",
-    "Grid"
+    "Explicit",
+    "Derived"
   ],
   "proxy_kinds": [
     "WellProxy3D",

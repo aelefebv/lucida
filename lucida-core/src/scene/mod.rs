@@ -1741,8 +1741,8 @@ pub(crate) mod test_helpers {
             DatasetKind::Plate {
                 rows: vec!["A".to_string()],
                 columns: vec!["1".to_string(), "2".to_string()],
-                positioning_mode: PositioningMode::Grid,
-                has_stage_positions: false,
+                positioning_mode: PositioningMode::Derived,
+                has_explicit_positions: false,
             },
             entities,
             vec![],

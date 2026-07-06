@@ -17,7 +17,9 @@ pub struct EntityPlacement {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PositioningMode {
-    Stage,
+    /// Explicit per-member positions.
+    Explicit,
+    /// Positions derived from the row/column grid.
     #[default]
-    Grid,
+    Derived,
 }

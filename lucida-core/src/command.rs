@@ -676,7 +676,7 @@ impl Scene {
                             "kind": kind_label(&event.manifest.kind),
                             "plate_rows": shape.plate_rows,
                             "plate_columns": shape.plate_columns,
-                            "has_stage_positions": shape.has_stage_positions,
+                            "has_explicit_positions": shape.has_explicit_positions,
                             "default_layout_id": event.manifest.default_layout_id.as_ref().map(|id| id.0.clone()),
                             "epochs": {
                                 "content": self.epochs.content,
@@ -1158,7 +1158,7 @@ struct ManifestShape {
     n_fields_without_image: usize,
     plate_rows: Option<usize>,
     plate_columns: Option<usize>,
-    has_stage_positions: Option<bool>,
+    has_explicit_positions: Option<bool>,
 }
 
 fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
@@ -1166,16 +1166,16 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
     let entity_ids: HashSet<&EntityId> = entities.iter().map(|e| &e.id).collect();
     let image_owners: HashSet<&EntityId> = manifest.images().iter().map(|i| &i.owner).collect();
 
-    let (plate_rows, plate_columns, has_stage_positions) = match &manifest.kind {
+    let (plate_rows, plate_columns, has_explicit_positions) = match &manifest.kind {
         DatasetKind::Plate {
             rows,
             columns,
-            has_stage_positions,
+            has_explicit_positions,
             ..
         } => (
             Some(rows.len()),
             Some(columns.len()),
-            Some(*has_stage_positions),
+            Some(*has_explicit_positions),
         ),
         DatasetKind::Single => (None, None, None),
     };
@@ -1188,7 +1188,7 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
         n_fields_without_image: 0,
         plate_rows,
         plate_columns,
-        has_stage_positions,
+        has_explicit_positions,
     };
 
     for entity in entities {

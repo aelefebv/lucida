@@ -421,11 +421,11 @@ async fn import_plate(
     }
 
     let mut representative_fov_path: Option<String> = None;
-    let mut has_stage_positions = false;
+    let mut has_explicit_positions = false;
     for well in &parsed_wells {
         for fov in &well.fovs {
             if fov.translation.is_some() {
-                has_stage_positions = true;
+                has_explicit_positions = true;
             }
             if representative_fov_path.is_none() {
                 representative_fov_path = Some(fov.store_prefix.clone());
@@ -463,10 +463,10 @@ async fn import_plate(
         &layout.pinned,
     )?;
 
-    let positioning_mode = if has_stage_positions {
-        PositioningMode::Stage
+    let positioning_mode = if has_explicit_positions {
+        PositioningMode::Explicit
     } else {
-        PositioningMode::Grid
+        PositioningMode::Derived
     };
 
     // For stage-positioned plates, OME-Zarr translations are in physical units
@@ -480,7 +480,7 @@ async fn import_plate(
         let valid = |s: f64| s.is_finite() && s != 0.0;
         let sx = if valid(raw_x) { raw_x } else { 1.0 };
         let sy = if valid(raw_y) { raw_y } else { 1.0 };
-        if has_stage_positions && (!valid(raw_x) || !valid(raw_y)) {
+        if has_explicit_positions && (!valid(raw_x) || !valid(raw_y)) {
             eprintln!(
                 "[lucida-store] dataset {id:?} has missing or invalid voxel \
                  scale (scale_x={raw_x}, scale_y={raw_y}); stage translations \
@@ -583,7 +583,7 @@ async fn import_plate(
         // Translations are stored in OME-Zarr in physical units (e.g. microns);
         // convert to voxel units here so downstream consumers see consistent
         // units across grid- and stage-positioned plates.
-        let stage_positions: Vec<Option<[f64; 2]>> = if has_stage_positions {
+        let stage_positions: Vec<Option<[f64; 2]>> = if has_explicit_positions {
             well.fovs
                 .iter()
                 .map(|fov| {
@@ -603,7 +603,7 @@ async fn import_plate(
         };
 
         // Find minimum for normalization within this well.
-        let (min_x, min_y) = if has_stage_positions {
+        let (min_x, min_y) = if has_explicit_positions {
             let mut mx = f64::MAX;
             let mut my = f64::MAX;
             for [x, y] in stage_positions.iter().flatten() {
@@ -637,7 +637,7 @@ async fn import_plate(
             });
 
             // Build field->well transform.
-            if has_stage_positions {
+            if has_explicit_positions {
                 if let Some([x, y]) = stage_positions[fi] {
                     transforms.push(TransformEdge {
                         from: field_entity_id.clone(),
@@ -700,7 +700,7 @@ async fn import_plate(
     }
 
     // Build grid field transforms if not stage-positioned.
-    if !has_stage_positions {
+    if !has_explicit_positions {
         let well_entities: Vec<&Entity> = entities
             .iter()
             .filter(|e| e.kind == EntityKind::Well)
@@ -737,7 +737,7 @@ async fn import_plate(
             rows,
             columns,
             positioning_mode,
-            has_stage_positions,
+            has_explicit_positions,
         },
         entities,
         transforms,
@@ -1523,12 +1523,12 @@ mod tests {
                 rows,
                 columns,
                 positioning_mode,
-                has_stage_positions,
+                has_explicit_positions,
             } => {
                 assert_eq!(rows, &["A", "B"]);
                 assert_eq!(columns, &["1", "2"]);
-                assert_eq!(*positioning_mode, PositioningMode::Grid);
-                assert!(!has_stage_positions);
+                assert_eq!(*positioning_mode, PositioningMode::Derived);
+                assert!(!has_explicit_positions);
             }
             _ => panic!("expected Plate kind"),
         }
@@ -1760,15 +1760,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Should be a stage-positioned plate.
+        // Should be an explicitly-positioned plate.
         if let DatasetKind::Plate {
             positioning_mode,
-            has_stage_positions,
+            has_explicit_positions,
             ..
         } = &result.manifest.kind
         {
-            assert_eq!(*positioning_mode, PositioningMode::Stage);
-            assert!(*has_stage_positions);
+            assert_eq!(*positioning_mode, PositioningMode::Explicit);
+            assert!(*has_explicit_positions);
         } else {
             panic!("expected Plate kind");
         }
@@ -1988,15 +1988,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Sanity: should be Stage-positioned.
+        // Sanity: should be Explicit-positioned.
         if let DatasetKind::Plate {
             positioning_mode,
-            has_stage_positions,
+            has_explicit_positions,
             ..
         } = &result.manifest.kind
         {
-            assert_eq!(*positioning_mode, PositioningMode::Stage);
-            assert!(*has_stage_positions);
+            assert_eq!(*positioning_mode, PositioningMode::Explicit);
+            assert!(*has_explicit_positions);
         } else {
             panic!("expected Plate kind");
         }
@@ -2044,15 +2044,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Sanity: should be Grid-positioned.
+        // Sanity: should be Derived-positioned.
         if let DatasetKind::Plate {
             positioning_mode,
-            has_stage_positions,
+            has_explicit_positions,
             ..
         } = &result.manifest.kind
         {
-            assert_eq!(*positioning_mode, PositioningMode::Grid);
-            assert!(!*has_stage_positions);
+            assert_eq!(*positioning_mode, PositioningMode::Derived);
+            assert!(!*has_explicit_positions);
         } else {
             panic!("expected Plate kind");
         }

@@ -108,7 +108,7 @@ describe("pushLabelLayers", () => {
     const far = image("plate:image:M/13/0", [340, 348], [1, 1], "Uint32", "plate:field:M/13/0");
     const dsm: DatasetManifest = {
       dataset_id: "plate", name: "plate",
-      kind: { Plate: { rows: ["D", "M"], columns: ["3", "13"], positioning_mode: "Grid", has_stage_positions: false } },
+      kind: { Plate: { rows: ["D", "M"], columns: ["3", "13"], positioning_mode: "Derived", has_explicit_positions: false } },
       entities: [], transforms: [], source_layouts: [], default_layout_id: null,
       images: [near, far],
       labels: [
