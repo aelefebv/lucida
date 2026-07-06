@@ -5,7 +5,7 @@ description: "From \"user pastes a URL\" to \"first chunks render.\" Crosses luc
 tags: [lucida, flow]
 source_path: wiki/flows/dataset-opening.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Flow: Dataset Opening
@@ -16,7 +16,7 @@ From "user pastes a URL" to "first chunks render." Crosses [lucida-web](../syste
 
 1. **UI input** — user types/pastes a URL into the open-dataset input. `App.tsx` captures it; `useDatasets.handleUrlSubmit` calls `Bridge.sendOpenRemoteDataset(url)`.
 2. **Wire**: `{type: "open_remote_dataset", url}` JSON to the WebSocket.
-3. **Server** ([lucida-server](../systems/crates/lucida-server.md) `handler.rs::handle_open_remote_dataset`):
+3. **Server** ([lucida-server](../systems/crates/lucida-server.md) `dataset_open.rs::open_dataset`, reached through the thin websocket adapter in `handler.rs`):
    1. Normalize the source and compute the `dataset_source_id` from the URL hash (`dataset_id_for_url`, BLAKE3 → `ds-{16 hex}` — the source/cache dedup key, distinct from the client-facing `DatasetId`). Emit request-correlated `dataset_open_progress` diagnostics. If a `ServerBinding` already exists for this URL, **rebroadcast the canonical `DatasetOpened` and return** (cache the import work). The client-facing workspace id (`wds-{uuid}`, what peers address) is minted separately via `new_workspace_dataset_id`.
    2. Otherwise, `lucida_store::backend::open(url)` → `Arc<dyn ObjectStore>`.
    3. `lucida_store::import::import_dataset(...)` → `ImportResult { manifest, fetch, binding_seed }`.

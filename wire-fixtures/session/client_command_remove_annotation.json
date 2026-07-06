@@ -1,0 +1,8 @@
+{
+  "type": "command",
+  "command": {
+    "type": "remove_annotation",
+    "dataset_id": "wds-0f3a",
+    "id": "pin-4c1d"
+  }
+}

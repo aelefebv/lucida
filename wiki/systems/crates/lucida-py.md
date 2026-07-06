@@ -5,7 +5,7 @@ description: "Python package for Lucida scripting."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-py.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # lucida-py
@@ -17,7 +17,7 @@ Python package for Lucida scripting. It has two surfaces:
 
 The local binding classes (the only `#[pyclass]` types) are:
 
-- **`PyScene`** — wraps `Scene`. Pan/zoom/set-z/set-t/set-c, set camera mode, import presence from JSON, serialize commands as JSON, ask for a chunk plan.
+- **`PyScene`** — wraps `Scene`. Pan/zoom/set-z/set-t/set-c, set camera mode, import presence from JSON, serialize commands as JSON, ask for a chunk plan. `load_document`/`import_presence` share the `Scene` bulk-restore methods with the wasm binding (settings seeding/pruning + conditional epoch bumps in scene/mod.rs), rather than writing `Scene` fields directly.
 - **`PyStore`** — wraps `lucida-store::backend::open` and `import_dataset`. Reads a single chunk by path, returns raw bytes.
 
 `ViewportData` is **not** a binding class — it's a pure-Python `@dataclass` in `python/lucida/zarr_reader.py`, used by the local-analysis OME-Zarr helpers.

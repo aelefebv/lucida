@@ -2,3 +2,8 @@
 # A union merge keeps the appended lines from both sides instead of conflicting,
 # so stacked branches / concurrent entries merge cleanly.
 CHANGELOG.md merge=union
+
+# Wire-protocol golden fixtures are byte-compared by lucida-server's
+# wire_goldens test; normalize line endings so a CRLF checkout cannot
+# break the byte-for-byte lock.
+wire-fixtures/**/*.json text eol=lf

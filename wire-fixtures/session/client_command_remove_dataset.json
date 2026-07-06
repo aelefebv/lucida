@@ -1,0 +1,7 @@
+{
+  "type": "command",
+  "command": {
+    "type": "remove_dataset",
+    "id": "wds-0f3a"
+  }
+}

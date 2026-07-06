@@ -28,8 +28,11 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      # --locked: fail if Cargo.lock is out of sync with the manifests
+      # instead of silently re-resolving deps on the runner. Keeps CI
+      # testing the same dep graph the Docker image builds from.
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
       # Format check: enforces `cargo fmt --all` consistency across the
       # workspace. The format sweep landed alongside the lint debt cleanup
@@ -40,7 +43,7 @@ jobs:
       # Hard gate as of #498 (slices A–C). All pre-existing clippy errors
       # have been resolved; new ones must be fixed before merge.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
 
   web:
     name: Web (wasm-pack + pnpm)
@@ -74,9 +77,14 @@ jobs:
           cache: pnpm
           cache-dependency-path: lucida-web/pnpm-lock.yaml
 
+      # Args after `--` are forwarded to the underlying `cargo build`.
+      # Best-effort only: wasm-pack's own pre-build `cargo metadata`
+      # runs unlocked and would silently repair a desynced Cargo.lock
+      # before the forwarded --locked could reject it. The hard lock
+      # gate is the rust job's `cargo test --locked`.
       - name: Build lucida-core WASM (consumed by lucida-web)
         working-directory: lucida-core
-        run: wasm-pack build --target web --out-dir pkg
+        run: wasm-pack build --target web --out-dir pkg -- --locked
 
       - name: Install web deps
         working-directory: lucida-web
@@ -128,6 +136,7 @@ jobs:
               - 'Dockerfile'
               - '.dockerignore'
               - 'Cargo.toml'
+              - 'Cargo.lock'
               - '**/Cargo.toml'
               - 'lucida-cli/src/**'
               - 'lucida-content/src/**'

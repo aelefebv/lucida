@@ -5,7 +5,7 @@ description: "coarse/detail (ADR 0039-0041)."
 tags: [lucida, flow]
 source_path: wiki/flows/proxy-generation.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Flow: Proxy Generation (S5)
@@ -18,7 +18,7 @@ How a `WellProxy3D` or `FieldProxy3D` request travels from the renderer's "I wan
 
 ## Setup
 
-After a dataset opens, [lucida-server](../systems/crates/lucida-server.md) kicks off best-effort background pre-generation for `(T=0, C=0)` of every advertised entity (in `handle_open_remote_dataset`). The renderer's [Planning Domain](../systems/subsystems/planning-domain.md) also issues on-demand requests when the user moves into a new timepoint or channel.
+After a dataset opens, [lucida-server](../systems/crates/lucida-server.md) kicks off best-effort background pre-generation for `(T=0, C=0)` of every advertised entity (in `dataset_open::open_dataset`). The renderer's [Planning Domain](../systems/subsystems/planning-domain.md) also issues on-demand requests when the user moves into a new timepoint or channel.
 
 ## Trace: on-demand request
 

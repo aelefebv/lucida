@@ -164,6 +164,11 @@ export function useBridge({
   useEffect(() => {
     if (!wasmReady || sessionRef.current) return;
 
+    // Captured for the cleanup below: the map identity is stable for the
+    // life of the App instance, and the cleanup must clear the entries the
+    // handlers registered against THIS connection stack.
+    const datasets = datasetsRef.current;
+
     const decodePool = new DecodePool();
     const contentSource = new ProxiedContentSource(
       (json) => sessionRef.current?.bridge.send(json),
@@ -612,15 +617,52 @@ export function useBridge({
       },
     };
     const bridge = new Bridge(handlers, undefined, workspaceId);
-    sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
+    const session = new Session({ bridge, contentSource, cpuCache, decodePool });
+    sessionRef.current = session;
     // Publish the bridge as React state so consumer hooks
     // (useBookmarks subscribes to `bookmark_changed`) can take a
     // dependency on it and run their subscribe effect once it's live.
     setBridge(bridge);
+
+    return () => {
+      // Tear down the whole connection stack this effect built: the
+      // WebSocket + reconnect/throttle timers, in-flight fetches, pending
+      // request timeouts, and the decode workers. Session.destroy() is
+      // idempotent, so this composes safely with the workspace-archived
+      // path (which already destroyed the bridge).
+      session.destroy();
+      if (sessionRef.current === session) {
+        sessionRef.current = null;
+      }
+      // Drop the per-connection dataset registry the handlers populated
+      // (setupFetchPipeline). A re-run must rebuild fetch pipelines from
+      // its own fresh snapshot; keeping these entries would make the
+      // dataset-exists checks above skip registration against the new
+      // content source, leaving every chunk fetch unroutable.
+      datasets.clear();
+      lastOpenSendTimeRef.current = null;
+      // Reset connection-scoped React state so nothing from the dead
+      // stack is consulted if this hook instance survives the teardown
+      // (dev StrictMode mount→cleanup→mount; all no-ops on real unmount).
+      setBridge(null);
+      setConnected(false);
+      setSessionReady(false);
+      setPeers(new Map());
+      setMyId(0);
+      myIdRef.current = 0;
+      setFollowTarget(null);
+      followTargetRef.current = null;
+      setRemoteDatasetLoading(false);
+      setRemoteDatasetError(null);
+      setRemoteDatasetProgress(null);
+      bumpDatasetsVersion();
+    };
     // Intentionally minimal deps: this is the bridge bootstrap effect
     // that runs once when WASM is ready. Re-running on any of the
     // listed callback/ref/state-bumper deps would re-mount the entire
-    // WebSocket session and tear down all in-flight downloads.
+    // WebSocket session and tear down all in-flight downloads — safe
+    // now that the cleanup above releases everything, but still churn
+    // worth avoiding.
   }, [wasmReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {

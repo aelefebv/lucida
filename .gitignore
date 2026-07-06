@@ -201,9 +201,6 @@ AGENTS.md
 # WASM build output
 lucida-core/pkg/
 
-# Workspace lock file (library crates)
-/Cargo.lock
-
 .claude/
 /.claude
 wiki/.obsidian

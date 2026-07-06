@@ -263,6 +263,9 @@ export class Bridge {
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
+      // A CONNECTING socket can complete after destroy(); a dead bridge
+      // must not announce connectivity.
+      if (this.destroyed) return;
       bridgeLog("ws.connected", { url: this.url }, ws.readyState);
       // The socket is OPEN: `send` will no longer silently drop. Notify the
       // app so readiness-gated work (e.g. the #697 seed open) can fire against
@@ -271,6 +274,11 @@ export class Bridge {
     };
 
     ws.onmessage = (event) => {
+      // A message task can already be queued when destroy() runs; nothing
+      // received afterwards may reach the handler chain (e.g. a late
+      // `workspace_archived` would navigate state outside this bridge's
+      // owner).
+      if (this.destroyed) return;
       // Binary message: chunk data relay
       if (event.data instanceof ArrayBuffer) {
         this.handleBinary(event.data);
@@ -375,12 +383,16 @@ export class Bridge {
     };
 
     ws.onclose = () => {
+      // The close event fires asynchronously after destroy()'s close();
+      // a dead bridge must not report a disconnect (or reconnect).
+      if (this.destroyed) return;
       this.ws = null;
       this.handlers.onDisconnect?.();
       this.scheduleReconnect();
     };
 
     ws.onerror = () => {
+      if (this.destroyed) return;
       ws.close();
     };
 
@@ -580,13 +592,22 @@ export class Bridge {
     };
   }
 
-  /** Low-level send (raw JSON string). */
+  /** Low-level send (raw JSON string). Drops the frame unless the socket is
+   *  OPEN; a destroyed bridge never transmits. */
   send(json: string) {
+    if (this.destroyed) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(json);
     }
   }
 
+  /**
+   * Permanently shut this bridge down. After this returns, no handler
+   * callback fires again (the socket's event handlers are detached and
+   * every callback is additionally gated on `destroyed`, covering event
+   * tasks already queued), no frame is transmitted, no reconnect is
+   * attempted, and every pending request promise is settled. Idempotent.
+   */
   destroy() {
     this.destroyed = true;
     if (this.reconnectTimer !== null) {
@@ -606,8 +627,19 @@ export class Bridge {
       pending.reject(new Error("Bridge destroyed"));
     }
     this.pendingDatasetHealth.clear();
-    this.ws?.close();
+    const ws = this.ws;
     this.ws = null;
+    if (ws) {
+      // Detach before closing: close() only queues the close event, and a
+      // received-message task may already be queued ahead of it. Detaching
+      // (plus the `destroyed` gates in each handler) guarantees neither
+      // dispatches into the handler chain after this point.
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.close();
+    }
   }
 }
 

@@ -29,6 +29,8 @@ export class Session {
   assetCatalog: AssetCatalog | null = null;
   layoutRegistry: LayoutRegistry | null = null;
 
+  private destroyed = false;
+
   constructor(opts: {
     bridge: Bridge;
     contentSource: ProxiedContentSource;
@@ -43,6 +45,28 @@ export class Session {
 
   setScene(scene: WasmScene): void {
     this.scene = scene;
+  }
+
+  /**
+   * Release everything this session owns that holds live resources:
+   * the WebSocket + its reconnect/throttle timers (bridge), in-flight
+   * fetches and their abort controllers / caches (cpuCache), pending
+   * request timeouts (contentSource), and the decode workers
+   * (decodePool). The lazily built catalogs/registry and the scene
+   * reference hold no sockets/workers/timers, so dropping the Session
+   * is enough for them (the scene itself is owned by the caller).
+   *
+   * Idempotent: a second call is a no-op, so overlapping teardown paths
+   * (workspace archive destroys the bridge; unmount destroys the
+   * session) are safe in any order.
+   */
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.bridge.destroy();
+    this.cpuCache.reset();
+    this.contentSource.rejectAll();
+    this.decodePool.terminate();
   }
 
   /**

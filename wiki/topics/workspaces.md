@@ -5,7 +5,7 @@ description: "The durable, server-stored container users return to: a set of ope
 tags: [lucida, topic]
 source_path: wiki/topics/workspaces.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Topic: Workspaces
@@ -39,5 +39,5 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 ## Related
 
 - [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — the live session is per-workspace (each `LiveWorkspace` owns its `Session`, broadcast channel, peer map, and `seq`); the live-collaboration story lives under the collaboration topic, not here
-- [lucida-server](../systems/crates/lucida-server.md) — `workspace.rs` hosts the `WorkspaceManager` (live orchestration + authorization + document flow) and the `WorkspaceStore`
+- [lucida-server](../systems/crates/lucida-server.md) — `workspace/` hosts the `WorkspaceManager` (live orchestration + authorization + document flow) and the `WorkspaceStore`
 - [lucida-cli](../systems/crates/lucida-cli.md) — `workspace`, `share`, and `member` commands drive membership and sharing from the terminal

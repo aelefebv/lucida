@@ -80,7 +80,7 @@ The product CLI command is `lucida`. From a source checkout, run the same binary
 To install the CLI from a checkout for repeated local use:
 
 ```bash
-cargo install --path lucida-cli
+cargo install --locked --path lucida-cli
 lucida --server http://127.0.0.1:9876 status
 ```
 

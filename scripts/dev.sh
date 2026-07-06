@@ -60,13 +60,15 @@ fi
 # Hash the CONTENT of every workspace Rust source + manifest. The wiki gotcha
 # 'wasm-rebuild-after-rust-changes' says any lucida-* crate change must trigger a
 # rebuild; mtime alone lies after a git checkout, so we hash bytes, not times.
-# (Cargo.lock is gitignored/regenerated here, so it is deliberately left out.)
+# (Cargo.lock is committed and hashed too: a dep bump changes the compiled
+# wasm just like a source edit would.)
 # `|| true` keeps a transient file hiccup from aborting under set -e/pipefail; an
 # empty hash just falls through to the pkg-missing check below, which rebuilds.
 current_hash="$(
   {
     find lucida-* -path '*/src/*' -name '*.rs' -type f -print0 2>/dev/null
     find lucida-* -maxdepth 1 -name 'Cargo.toml' -type f -print0 2>/dev/null
+    find . -maxdepth 1 -name 'Cargo.lock' -type f -print0 2>/dev/null
   } | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | awk '{print $1}'
 )" || true
 stored_hash=""

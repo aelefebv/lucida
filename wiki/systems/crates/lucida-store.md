@@ -5,7 +5,7 @@ description: "Storage abstraction and import pipeline."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-store.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 
@@ -67,4 +67,4 @@ The seed remains server-private — never broadcast. See [Three-Output Import Mo
 - **`ImportResult` is JSON-serializable as a whole** for debugging and pretty-printing — but only `DatasetManifest` and `FetchSource` are sent on the wire. `ServerBindingSeed` is server-private. Don't accidentally broadcast it.
 - **The default plate layout uses an 8% inter-FOV gap** for grid plates (`build_grid_field_transforms`). This is an aesthetic constant; see `lucida-content/src/plate.rs` if you need to change it. Stage-positioned plates use the actual translations and ignore the gap.
 - **`PrefixStore` wraps GCS/S3 stores when the URL has a path**, so paths returned by the resolver are relative to the prefix. Local filesystem URLs use `LocalFileSystem::new_with_prefix(url)` instead, which is conceptually similar but a different code path.
-- **`CachedStore` byte budget is 512 MB by default** (set in `handler::handle_open_remote_dataset`). This is per-dataset, not global. Many large datasets in one session can blow up server memory.
+- **`CachedStore` byte budget is 512 MB by default** (set in `dataset_open::open_dataset` and the workspace binding restore). This is per-dataset, not global. Many large datasets in one session can blow up server memory.

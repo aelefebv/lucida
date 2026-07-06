@@ -1,0 +1,8 @@
+{
+  "type": "command",
+  "command": {
+    "type": "set_active_layout",
+    "dataset_id": "wds-0f3a",
+    "layout_id": "layout-grid"
+  }
+}

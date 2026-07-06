@@ -1,0 +1,50 @@
+{
+  "type": "peer_joined",
+  "client_id": 11,
+  "presence": {
+    "client_id": 11,
+    "camera": {
+      "mode": "fly",
+      "position": [
+        512.0,
+        512.0,
+        -300.0
+      ],
+      "orientation": [
+        0.1,
+        0.2,
+        0.3,
+        0.9273
+      ],
+      "fov": 1.0471975511965979,
+      "viewport": [
+        1280,
+        720
+      ],
+      "near": 0.1,
+      "far": 10000.0,
+      "speed_multiplier": 2.0,
+      "base_speed": 340.5,
+      "clip_distance": 0.42,
+      "clip_mode": "sphere"
+    },
+    "view": {
+      "z_range": {
+        "start": 0,
+        "end": 50
+      },
+      "t": 0,
+      "c": 0,
+      "multi_channel": false
+    },
+    "display": {
+      "contrast_min": 0.0,
+      "contrast_max": 65535.0,
+      "gamma": 1.0
+    },
+    "following": null,
+    "cursor": null,
+    "dataset_order": [],
+    "dataset_settings": {}
+  }
+}

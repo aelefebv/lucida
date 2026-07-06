@@ -1,0 +1,29 @@
+{
+  "type": "presence",
+  "camera": {
+    "mode": "slice",
+    "center": [
+      1024.5,
+      -512.25
+    ],
+    "zoom": 1.5,
+    "viewport": [
+      1920,
+      1080
+    ]
+  },
+  "view": {
+    "z_range": {
+      "start": 10,
+      "end": 14
+    },
+    "t": 2,
+    "c": 1,
+    "multi_channel": true
+  },
+  "display": {
+    "contrast_min": 120.0,
+    "contrast_max": 4096.0,
+    "gamma": 0.85
+  }
+}

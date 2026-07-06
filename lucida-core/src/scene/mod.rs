@@ -67,6 +67,44 @@ impl VisibleContentBounds2D {
     }
 }
 
+/// The multi-dataset placement correction for one volume, produced by
+/// [`Scene::placement_correction`]: a uniform scale (`correction`, with its
+/// exact reciprocal ratio `inv_correction`) that preserves relative physical
+/// sizes across datasets, plus a Y translation (`top_align`) that top-aligns
+/// volumes of different heights in 3D. Kept in `f64`; consumers that build
+/// `f32` matrices cast at application time ([`Self::apply`]), consumers that
+/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the fields directly.
+#[derive(Debug, Clone, Copy)]
+struct PlacementCorrection {
+    correction: f64,
+    inv_correction: f64,
+    top_align: f64,
+}
+
+impl PlacementCorrection {
+    /// Fold this correction into a forward/inverse matrix pair (column-major
+    /// `[f32; 16]`): scale the diagonal and XY translation of `model` and add
+    /// the top-align term to its Y translation; apply the reciprocal to
+    /// `inv_model` so the pair keeps composing to the identity.
+    fn apply(&self, model: &mut [f32; 16], inv_model: &mut [f32; 16]) {
+        let correction = self.correction as f32;
+        let inv_correction = self.inv_correction as f32;
+        let top_align = self.top_align as f32;
+
+        model[0] *= correction;
+        model[5] *= correction;
+        model[10] *= correction;
+        model[12] *= correction;
+        model[13] *= correction;
+        model[13] += top_align;
+
+        inv_model[0] *= inv_correction;
+        inv_model[5] *= inv_correction;
+        inv_model[10] *= inv_correction;
+        inv_model[13] -= top_align * inv_model[5];
+    }
+}
+
 /// The complete viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
@@ -121,6 +159,25 @@ impl Scene {
             .and_then(|d| d.members.first())
             .and_then(|m| m.levels.first())
             .map(|l| [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
+    }
+
+    /// World-space bounding-box diagonal of the first dataset's first volume,
+    /// **after** the multi-dataset global correction
+    /// ([`Self::placement_correction`]) — the same scale the renderer draws it
+    /// at. Consumers size world-space motion from it (fly-camera base speed,
+    /// initial 3D framing). Returns `1.0` when no volume is loaded so speed
+    /// seeding always has a sane basis.
+    pub fn volume_diagonal(&self) -> f64 {
+        let member = self.derived.values().next().and_then(|d| d.members.first());
+        let Some(m) = member else {
+            return 1.0;
+        };
+        let t = &m.volume_transform;
+        let correction = self.placement_correction(t).correction;
+        let sx = t.model[0] as f64 * correction;
+        let sy = t.model[5] as f64 * correction;
+        let sz = t.model[10] as f64 * correction;
+        (sx * sx + sy * sy + sz * sz).sqrt()
     }
 
     /// Switch to 2D mode, preserving the current viewport.
@@ -318,8 +375,10 @@ impl Scene {
     ///
     /// Returns `true` if it framed something, `false` if the dataset has no bounds
     /// in the active space (unknown id / no members) — in which case the camera is
-    /// left untouched. The borrow is resolved by computing the bounds *before*
-    /// mutating the camera.
+    /// left untouched (and no epoch bumps). The borrow is resolved by computing
+    /// the bounds *before* mutating the camera. On success it bumps `epochs.view`
+    /// (exactly as pan/zoom/rotate do) so viewport consumers re-read the camera
+    /// and redraw with the new framing.
     pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
         if let Camera::Slice(_) = self.camera {
             // 2D: the Slice camera lives in voxel space — frame the voxel AABB.
@@ -329,15 +388,15 @@ impl Scene {
             if let Camera::Slice(s) = &mut self.camera {
                 s.fit_to_bounds(min, max, crate::framing::FIT_MARGIN_2D);
             }
-            true
         } else {
             // 3D (Arcball/Fly): the camera lives in normalized world space.
             let Some((min, max)) = self.dataset_world_bounds(dataset_id) else {
                 return false;
             };
             self.camera.fit_to_bounds(min, max);
-            true
         }
+        self.epochs.view += 1;
+        true
     }
 
     /// Return aggregate bounds for all visible image members in scene XY space.
@@ -532,6 +591,34 @@ impl Scene {
         Some(plans)
     }
 
+    /// The scene-global placement correction for one volume: the multi-dataset
+    /// scale normalization (`max_physical_extent / global_max_physical_extent`)
+    /// and the 3D top-alignment translation
+    /// (`(global_max_physical_y - phys_y) / global_max`).
+    ///
+    /// This is the **single owner** of that arithmetic. Every consumer of
+    /// placement — [`Self::rendering_transform`] (and through it
+    /// [`Self::member_world_matrix`] / `dataset_world_bounds`), the
+    /// dataset-level [`Self::dataset_model_matrix`] /
+    /// [`Self::dataset_inv_model_matrix`], and [`Self::volume_diagonal`] —
+    /// derives its correction from here, so a policy change propagates to the
+    /// renderer, the minimap, picking, and framing together.
+    fn placement_correction(&self, t: &VolumeTransform) -> PlacementCorrection {
+        let max_phys = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
+        let global_max = self.global_max_physical_extent();
+        let phys_y = t.model[5] as f64 * max_phys;
+        let global_max_y = self.global_max_physical_y();
+        PlacementCorrection {
+            correction: max_phys / global_max,
+            inv_correction: global_max / max_phys,
+            top_align: (global_max_y - phys_y) / global_max,
+        }
+    }
+
     /// Build the rendering model matrix for a member — the same transform
     /// the GPU uses, including Y-flip, global normalization, and top-alignment.
     ///
@@ -597,29 +684,10 @@ impl Scene {
         );
 
         // Global correction for multi-dataset scenes
-        let global_max = self.global_max_physical_extent();
-        let correction = (max_phys / global_max) as f32;
-        let inv_correction = (global_max / max_phys) as f32;
-
-        let phys_y = t.model[5] as f64 * max_phys;
-        let global_max_y = self.global_max_physical_y();
-        let top_align = ((global_max_y - phys_y) / global_max) as f32;
-
-        // Forward model
         let mut model = mt.model;
-        model[0] *= correction;
-        model[5] *= correction;
-        model[10] *= correction;
-        model[12] *= correction;
-        model[13] *= correction;
-        model[13] += top_align;
-
-        // Inverse model
         let mut inv_model = mt.inv_model;
-        inv_model[0] *= inv_correction;
-        inv_model[5] *= inv_correction;
-        inv_model[10] *= inv_correction;
-        inv_model[13] -= top_align * inv_model[5];
+        self.placement_correction(t)
+            .apply(&mut model, &mut inv_model);
 
         let fwd = VolumeTransform {
             model,
@@ -632,6 +700,53 @@ impl Scene {
             max_physical_extent: max_phys,
         };
         (fwd, inv)
+    }
+
+    /// The **dataset-level** model matrix (column-major `[f32; 16]`): the first
+    /// member's unit-cube volume transform with the same global correction and
+    /// top-alignment as [`Self::rendering_transform`], but **without** the
+    /// member's layout position offset — the dataset's volume treated as if it
+    /// sat at the scene origin. The minimap projects orbit rays through this
+    /// (and its inverse) to relate whole-dataset unit space to world space, and
+    /// `ray_hit_local` uses the inverse to express hits in `[0,1]³`.
+    ///
+    /// For a dataset whose first member has layout position `[0, 0]` this
+    /// equals [`Self::member_world_matrix`]; for an offset member (e.g. a plate
+    /// well) the two differ only by the corrected XY translation.
+    ///
+    /// Returns the identity for an unknown dataset or one with no members, so
+    /// consumers degrade to an uncorrected unit cube rather than a special
+    /// case.
+    pub fn dataset_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
+        self.dataset_placement_matrices(dataset_id).0
+    }
+
+    /// Inverse of [`Self::dataset_model_matrix`] (world space → the first
+    /// member's `[0,1]³` unit space), built from the same
+    /// [`Self::placement_correction`] so the pair composes to the identity.
+    /// Returns the identity for an unknown dataset or one with no members.
+    pub fn dataset_inv_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
+        self.dataset_placement_matrices(dataset_id).1
+    }
+
+    /// Shared body of [`Self::dataset_model_matrix`] /
+    /// [`Self::dataset_inv_model_matrix`]: resolve the first member and fold
+    /// the placement correction into its volume transform pair.
+    fn dataset_placement_matrices(&self, dataset_id: &str) -> ([f32; 16], [f32; 16]) {
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let ds_id = DatasetId(dataset_id.to_string());
+        let member = self.derived.get(&ds_id).and_then(|d| d.members.first());
+        let Some(m) = member else {
+            return (identity, identity);
+        };
+        let t = &m.volume_transform;
+        let mut model = t.model;
+        let mut inv_model = t.inv_model;
+        self.placement_correction(t)
+            .apply(&mut model, &mut inv_model);
+        (model, inv_model)
     }
 
     /// Pick the closest entity hit by a ray cast from screen coordinates.
@@ -834,6 +949,107 @@ impl Scene {
         let vy = (1.0 - unit[1]) * shape[1];
         let vz = unit[2] * shape[2];
         Some([vx, vy, vz])
+    }
+
+    /// Replace the document portion (content graphs) wholesale, preserving the
+    /// local camera/view/display, then make every document-derived piece of
+    /// state consistent with it:
+    ///
+    /// - `derived` is rebuilt for all manifests (via [`Self::rebuild_derived`]).
+    /// - `dataset_order` gains any restored dataset it didn't already list and
+    ///   drops ids no longer in the document.
+    /// - `dataset_settings` is seeded for each restored manifest with the
+    ///   COMPLETE per-channel + per-label settings (the same
+    ///   [`DatasetDisplaySettings::seeded_for`] the `DatasetOpened` apply path
+    ///   uses) rather than a bare `Default` — the empty default has NO
+    ///   channel/label entries, which would leave the layer panel's per-channel
+    ///   and per-label controls unable to render on a document restore. Entries
+    ///   that already exist (locally adjusted settings) are kept untouched;
+    ///   entries for removed datasets are pruned.
+    ///
+    /// A document load can change any document-scoped state, so it bumps every
+    /// document-scoped epoch (`content`, `layout`, `asset`, `annotation`) plus
+    /// `selection` (dataset order/settings may have changed) — consumers must
+    /// re-read rather than render from a stale plan. `view` is deliberately NOT
+    /// bumped: the local camera is untouched by design.
+    pub fn load_document(&mut self, doc: DocumentState) {
+        self.document = doc;
+        self.rebuild_derived();
+
+        for id in self.document.manifests.keys().cloned().collect::<Vec<_>>() {
+            if !self.dataset_order.contains(&id) {
+                self.dataset_order.push(id.clone());
+            }
+            if !self.dataset_settings.contains_key(&id) {
+                let seeded = self
+                    .document
+                    .manifests
+                    .get(&id)
+                    .map(DatasetDisplaySettings::seeded_for)
+                    .unwrap_or_default();
+                self.dataset_settings.insert(id, seeded);
+            }
+        }
+        let dataset_ids: std::collections::HashSet<&DatasetId> =
+            self.document.manifests.keys().collect();
+        self.dataset_order.retain(|id| dataset_ids.contains(id));
+        self.dataset_settings
+            .retain(|id, _| dataset_ids.contains(id));
+
+        self.epochs.content += 1;
+        self.epochs.layout += 1;
+        self.epochs.asset += 1;
+        self.epochs.annotation += 1;
+        self.epochs.selection += 1;
+    }
+
+    /// Adopt another client's camera + view + display (follow mode / saved-view
+    /// restore), preserving the local viewport size — the follower's canvas
+    /// dimensions are its own.
+    ///
+    /// Epoch semantics match [`Scene::apply`]'s viewport policy: `epochs.view`
+    /// bumps iff the (viewport-preserving) camera actually changed, and
+    /// `epochs.selection` bumps iff view or display changed. The change checks
+    /// keep an unchanged presence heartbeat from invalidating consumers' caches
+    /// every message, while a real remote camera move reliably invalidates the
+    /// chunk plan instead of leaving the renderer on a stale one.
+    pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
+        let viewport = self.camera.viewport();
+        let mut camera = camera;
+        camera.set_viewport(viewport[0], viewport[1]);
+        // A peer's camera is clamped into the same ranges the local mutators
+        // enforce (`Camera::sanitize`): a follow target must not be able to
+        // hand this scene state its own mutation paths could never produce —
+        // e.g. a finite `zoom: 0.0` that would NaN-poison the next pan.
+        // Sanitize is bit-preserving for in-range cameras, so the equality
+        // check below still sees an unchanged re-import as unchanged.
+        camera.sanitize();
+        if self.camera != camera {
+            self.camera = camera;
+            self.epochs.view += 1;
+        }
+        if self.view != view || self.display != display {
+            self.view = view;
+            self.display = display;
+            self.epochs.selection += 1;
+        }
+    }
+
+    /// Adopt another client's dataset ordering + per-dataset display settings
+    /// (the layer-panel half of follow mode). Bumps `epochs.selection` iff
+    /// something actually changed — the epoch the per-dataset display commands
+    /// bump — so consumers re-read settings without an unchanged rebroadcast
+    /// forcing a replan.
+    pub fn import_dataset_presence(
+        &mut self,
+        dataset_order: Vec<DatasetId>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    ) {
+        if self.dataset_order != dataset_order || self.dataset_settings != dataset_settings {
+            self.dataset_order = dataset_order;
+            self.dataset_settings = dataset_settings;
+            self.epochs.selection += 1;
+        }
     }
 
     /// Rebuild derived state from the document's dataset manifests.
@@ -2355,6 +2571,253 @@ mod tests {
         }
     }
 
+    /// Open a 512-voxel-cube dataset ("big") next to a two-well plate whose
+    /// wells are 256 voxels across ("plate", first well at the layout origin,
+    /// second offset). With isotropic unit spacing the plate's global
+    /// correction is a real 0.5 and its top-align term is (512-200)/512 —
+    /// non-trivial placement on every axis this module corrects.
+    fn scene_with_big_and_plate() -> Scene {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "big",
+                "big",
+                1,
+                [1, 1, 10, 512, 512],
+                [1, 1, 1, 128, 128],
+                1,
+            ))
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "plate",
+                "plate",
+                vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 1, 128, 128],
+            ))
+            .into(),
+        );
+        scene
+    }
+
+    /// The dataset-level model matrix must carry the SAME global correction
+    /// and top-alignment as the render path: for a first member at the layout
+    /// origin it equals `rendering_transform`'s forward model
+    /// element-for-element (the dataset-level matrix omits layout offsets, and
+    /// an origin member has none). Checked for a single-image dataset and a
+    /// plate whose correction is a real 0.5 — so a policy change in
+    /// `rendering_transform`'s placement would be caught here, not silently
+    /// desync the minimap.
+    #[test]
+    fn dataset_model_matrix_matches_rendering_transform_for_origin_member() {
+        let scene = scene_with_big_and_plate();
+
+        for ds in ["big", "plate"] {
+            let derived = scene
+                .derived
+                .get(&DatasetId(ds.into()))
+                .expect("derived state");
+            let first = derived.members.first().expect("first member");
+            assert_eq!(
+                first.position,
+                [0.0, 0.0],
+                "fixture invariant: first member sits at the layout origin"
+            );
+            let canonical = scene.rendering_transform(first).0.model;
+            let dataset = scene.dataset_model_matrix(ds);
+            for i in 0..16 {
+                assert!(
+                    (dataset[i] - canonical[i]).abs() < 1e-6,
+                    "dataset_model_matrix drifted from rendering_transform at \
+                     element {i}: {} vs {} (dataset {ds})",
+                    dataset[i],
+                    canonical[i],
+                );
+            }
+        }
+
+        // The plate is half the physical size of "big": its correction is a
+        // real 0.5 (halved scales) and it is top-aligned below the taller
+        // dataset's rim — this is NOT an identity or uncorrected transform.
+        let plate = scene.dataset_model_matrix("plate");
+        assert!(
+            (plate[0] - 0.5).abs() < 1e-6,
+            "global correction should halve the plate's X scale, got {}",
+            plate[0]
+        );
+        assert!(
+            (plate[5] - 0.5 * 200.0 / 256.0).abs() < 1e-6,
+            "corrected Y scale wrong: {}",
+            plate[5]
+        );
+        assert!(
+            (plate[13] - (512.0 - 200.0) / 512.0).abs() < 1e-6,
+            "top-align term missing or wrong: {}",
+            plate[13]
+        );
+        // "big" attains the global max: correction 1, no top-align shift.
+        let big = scene.dataset_model_matrix("big");
+        assert!((big[0] - 1.0).abs() < 1e-6, "big X scale: {}", big[0]);
+        assert!(
+            big[13].abs() < 1e-6,
+            "big top-align should be 0: {}",
+            big[13]
+        );
+    }
+
+    /// The dataset-level inverse must be the render path's inverse (for an
+    /// origin member) and must compose with the forward matrix to the
+    /// identity — the minimap runs rays through both halves, so a one-sided
+    /// change would scramble picking.
+    #[test]
+    fn dataset_inv_model_matrix_matches_render_inverse_and_round_trips() {
+        let scene = scene_with_big_and_plate();
+
+        // Multiply two column-major 4x4 matrices: returns a*b.
+        let mul = |a: &[f32; 16], b: &[f32; 16]| -> [f32; 16] {
+            let mut out = [0.0f32; 16];
+            for col in 0..4 {
+                for row in 0..4 {
+                    let mut sum = 0.0f32;
+                    for k in 0..4 {
+                        sum += a[k * 4 + row] * b[col * 4 + k];
+                    }
+                    out[col * 4 + row] = sum;
+                }
+            }
+            out
+        };
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+
+        for ds in ["big", "plate"] {
+            let derived = scene
+                .derived
+                .get(&DatasetId(ds.into()))
+                .expect("derived state");
+            let first = derived.members.first().expect("first member");
+            let canonical_inv = scene.rendering_transform(first).1.inv_model;
+            let inv = scene.dataset_inv_model_matrix(ds);
+            for i in 0..16 {
+                assert!(
+                    (inv[i] - canonical_inv[i]).abs() < 1e-6,
+                    "dataset_inv_model_matrix drifted from rendering_transform \
+                     at element {i}: {} vs {} (dataset {ds})",
+                    inv[i],
+                    canonical_inv[i],
+                );
+            }
+
+            let fwd = scene.dataset_model_matrix(ds);
+            let composed = mul(&inv, &fwd);
+            for i in 0..16 {
+                assert!(
+                    (composed[i] - identity[i]).abs() < 1e-5,
+                    "inverse · forward not identity at element {i}: {} \
+                     (dataset {ds})",
+                    composed[i],
+                );
+            }
+        }
+    }
+
+    /// `volume_diagonal` must be the diagonal of the CORRECTED render scale —
+    /// the world-space size the volume is actually drawn at (fly base speed
+    /// and framing are seeded from it), not the uncorrected unit-cube size.
+    #[test]
+    fn volume_diagonal_is_the_corrected_scale_diagonal() {
+        // Alone in the scene, the plate needs no correction: the diagonal is
+        // its anisotropic normalized-cube diagonal.
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+                "plate",
+                "plate",
+                vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
+                [1, 1, 4, 200, 256],
+                [1, 1, 1, 128, 128],
+            ))
+            .into(),
+        );
+        let plate_alone: f64 =
+            (1.0f64 + (200.0f64 / 256.0).powi(2) + (4.0f64 / 256.0).powi(2)).sqrt();
+        assert!(
+            (scene.volume_diagonal() - plate_alone).abs() < 1e-6,
+            "uncorrected diagonal wrong: {}",
+            scene.volume_diagonal()
+        );
+
+        // Opening a physically larger dataset re-normalizes the scene.
+        // Whichever dataset happens to be first, the diagonal must equal the
+        // diagonal of ITS corrected render scale (the diagonal terms of
+        // rendering_transform's forward model).
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "big",
+                "big",
+                1,
+                [1, 1, 10, 512, 512],
+                [1, 1, 1, 128, 128],
+                1,
+            ))
+            .into(),
+        );
+        let first = scene
+            .derived
+            .values()
+            .next()
+            .and_then(|d| d.members.first())
+            .expect("first member");
+        let rt = scene.rendering_transform(first).0.model;
+        let expected =
+            ((rt[0] as f64).powi(2) + (rt[5] as f64).powi(2) + (rt[10] as f64).powi(2)).sqrt();
+        assert!(
+            (scene.volume_diagonal() - expected).abs() < 1e-6,
+            "corrected diagonal drifted from render scale: {} vs {}",
+            scene.volume_diagonal(),
+            expected
+        );
+
+        // Deterministic correction!=1 coverage (independent of map order):
+        // through the dataset-level matrix, the plate's corrected diagonal is
+        // exactly half its standalone diagonal.
+        let m = scene.dataset_model_matrix("plate");
+        let plate_diag =
+            ((m[0] as f64).powi(2) + (m[5] as f64).powi(2) + (m[10] as f64).powi(2)).sqrt();
+        assert!(
+            (plate_diag - 0.5 * plate_alone).abs() < 1e-6,
+            "plate's corrected diagonal should be half its standalone one: {plate_diag}"
+        );
+    }
+
+    /// Absent-dataset fallbacks: identity matrices and a 1.0 diagonal, both on
+    /// an empty scene and for an unknown id in a populated one — consumers
+    /// degrade to an uncorrected unit cube instead of panicking.
+    #[test]
+    fn dataset_matrix_and_diagonal_fallbacks() {
+        let identity = [
+            1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut scene = Scene::new([800, 600]);
+        assert_eq!(scene.volume_diagonal(), 1.0);
+        assert_eq!(scene.dataset_model_matrix("nope"), identity);
+        assert_eq!(scene.dataset_inv_model_matrix("nope"), identity);
+
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "ds1", 1))
+                .into(),
+        );
+        assert_eq!(scene.dataset_model_matrix("nope"), identity);
+        assert_eq!(scene.dataset_inv_model_matrix("nope"), identity);
+        assert!(
+            scene.volume_diagonal().is_finite() && scene.volume_diagonal() > 0.0,
+            "diagonal must stay finite once data is loaded"
+        );
+    }
+
     /// `dataset_world_bounds` is folded directly from
     /// `rendering_transform(member).0.world_corners()`. Assert it returns finite,
     /// sensible bounds that match recomputing that exact fold — the same AABB the
@@ -2635,5 +3098,234 @@ mod tests {
             }
             other => panic!("expected an Arcball camera, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fit_camera_to_dataset_bumps_view_epoch_on_success_only() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let baseline = scene.epochs.clone();
+
+        // Unknown id: camera untouched, no bump — the caller can ignore the
+        // failure without side effects.
+        assert!(!scene.fit_camera_to_dataset("ghost"));
+        assert_eq!(scene.epochs, baseline);
+
+        // Success: exactly one view bump (like pan/zoom/rotate), nothing else.
+        assert!(scene.fit_camera_to_dataset("ds1"));
+        assert_eq!(scene.epochs.view, baseline.view + 1);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+    }
+
+    // --- load_document ---
+
+    #[test]
+    fn load_document_restores_state_and_advances_epochs() {
+        // Donor: a live document with one 2-channel dataset.
+        let mut donor = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 2);
+        donor.apply(DocumentCommand::DatasetOpened(reg).into());
+        let doc = donor.document.clone();
+
+        // Restore into a fresh scene with a distinctive local camera.
+        let mut scene = Scene::new([640, 480]);
+        scene.apply(crate::command::ViewportCommand::SetCenter { x: 42.0, y: 7.0 }.into());
+        let baseline = scene.epochs.clone();
+        let camera_before = scene.camera.clone();
+
+        scene.load_document(doc);
+
+        let ds_id = DatasetId("ds1".into());
+        assert!(scene.document.manifests.contains_key(&ds_id));
+        assert!(
+            scene.derived.contains_key(&ds_id),
+            "derived must be rebuilt"
+        );
+        assert!(scene.dataset_order.contains(&ds_id));
+        // Settings must be seeded COMPLETE (per-channel entries present), not a
+        // bare Default with an empty channel list.
+        let settings = scene
+            .dataset_settings
+            .get(&ds_id)
+            .expect("settings seeded for restored dataset");
+        assert!(
+            settings.channel_settings.len() >= 2,
+            "expected per-channel settings seeded from the manifest, got {}",
+            settings.channel_settings.len()
+        );
+
+        // Every document-scoped epoch advances so consumers re-read...
+        assert!(scene.epochs.content > baseline.content);
+        assert!(scene.epochs.layout > baseline.layout);
+        assert!(scene.epochs.asset > baseline.asset);
+        assert!(scene.epochs.annotation > baseline.annotation);
+        assert!(scene.epochs.selection > baseline.selection);
+        // ...but the local camera is untouched, so view does not.
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.camera, camera_before);
+    }
+
+    #[test]
+    fn load_document_keeps_local_settings_and_prunes_removed_datasets() {
+        let mut donor = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        donor.apply(DocumentCommand::DatasetOpened(reg).into());
+        let doc = donor.document.clone();
+
+        // The receiving scene already has ds1 (locally hidden) plus a stale
+        // entry for a dataset the incoming document no longer contains.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(
+            crate::command::ViewportCommand::SetDatasetVisible {
+                dataset_id: "ds1".into(),
+                visible: false,
+            }
+            .into(),
+        );
+        let stale = DatasetId("gone".into());
+        scene.dataset_order.push(stale.clone());
+        scene
+            .dataset_settings
+            .insert(stale.clone(), DatasetDisplaySettings::default());
+
+        scene.load_document(doc);
+
+        let ds_id = DatasetId("ds1".into());
+        assert!(
+            !scene.dataset_settings[&ds_id].visible,
+            "locally adjusted settings must survive a re-load"
+        );
+        assert!(!scene.dataset_order.contains(&stale));
+        assert!(!scene.dataset_settings.contains_key(&stale));
+    }
+
+    // --- import_presence / import_dataset_presence ---
+
+    #[test]
+    fn import_presence_preserves_viewport_and_bumps_iff_changed() {
+        let mut scene = Scene::new([800, 600]);
+        let baseline = scene.epochs.clone();
+
+        // A peer's presence: different camera center, T selector, and gamma,
+        // captured at a different canvas size.
+        let mut remote_camera = Camera::new_2d([1920, 1080]);
+        if let Camera::Slice(v) = &mut remote_camera {
+            v.center = [100.0, 200.0];
+        }
+        let mut remote_view = ViewState::new();
+        remote_view.t = 3;
+        let remote_display = DisplayState {
+            gamma: 2.0,
+            ..DisplayState::default()
+        };
+
+        scene.import_presence(
+            remote_camera.clone(),
+            remote_view.clone(),
+            remote_display.clone(),
+        );
+
+        // Local viewport size wins; everything else is the peer's.
+        assert_eq!(scene.camera.viewport(), [800, 600]);
+        if let Camera::Slice(v) = &scene.camera {
+            assert_eq!(v.center, [100.0, 200.0]);
+        } else {
+            panic!("expected Slice camera");
+        }
+        assert_eq!(scene.view.t, 3);
+        assert_eq!(scene.display.gamma, 2.0);
+        assert_eq!(scene.epochs.view, baseline.view + 1);
+        assert_eq!(scene.epochs.selection, baseline.selection + 1);
+
+        // Re-importing the identical presence (an unchanged heartbeat) must
+        // not invalidate consumers' epoch-keyed caches.
+        let after_first = scene.epochs.clone();
+        scene.import_presence(remote_camera, remote_view, remote_display);
+        assert_eq!(scene.epochs, after_first);
+    }
+
+    #[test]
+    fn imported_presence_camera_is_clamped_to_mutator_ranges() {
+        use crate::camera::{Arcball, SLICE_ZOOM_MIN, Slice};
+        use crate::scene::DisplayState;
+
+        // A peer's slice camera with zoom 0.0 is finite, serializes fine, and
+        // — unclamped — would turn the next pan into a 0/0 = NaN center. The
+        // import must clamp it into the range local mutators enforce.
+        let mut scene = Scene::new([800, 600]);
+        let zero_zoom = Camera::Slice(Slice {
+            center: [10.0, 20.0],
+            zoom: 0.0,
+            viewport: [64, 64],
+        });
+        scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
+        match &scene.camera {
+            Camera::Slice(v) => {
+                assert_eq!(v.zoom, SLICE_ZOOM_MIN, "imported zoom must be clamped");
+                assert_eq!(v.viewport, [800, 600], "local viewport wins");
+            }
+            other => panic!("expected Slice camera, got {other:?}"),
+        }
+
+        // Sanitizing is idempotent: re-importing the identical (still
+        // out-of-range) presence clamps to the same camera → epoch-silent.
+        let epochs = scene.epochs.clone();
+        scene.import_presence(zero_zoom, ViewState::new(), DisplayState::default());
+        assert_eq!(scene.epochs, epochs);
+
+        // Pan after the clamp stays finite.
+        scene.apply(crate::command::ViewportCommand::Pan { dx: 3.0, dy: 0.0 }.into());
+        match &scene.camera {
+            Camera::Slice(v) => {
+                assert!(v.center[0].is_finite() && v.center[1].is_finite());
+            }
+            other => panic!("expected Slice camera, got {other:?}"),
+        }
+
+        // Same rule for a 3D peer: a zero orbit distance clamps to >= near
+        // (what the arcball's own zoom mutator enforces).
+        let bad_arcball = Camera::Arcball(Arcball {
+            distance: 0.0,
+            ..Arcball::new([32, 32])
+        });
+        scene.import_presence(bad_arcball, ViewState::new(), DisplayState::default());
+        match &scene.camera {
+            Camera::Arcball(v) => {
+                assert!(
+                    v.distance.is_finite() && v.distance >= v.near && v.near > 0.0,
+                    "imported distance {} must be clamped to >= near {}",
+                    v.distance,
+                    v.near
+                );
+            }
+            other => panic!("expected Arcball camera, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_dataset_presence_bumps_selection_iff_changed() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let baseline = scene.epochs.clone();
+
+        let ds_id = DatasetId("ds1".into());
+        let order = vec![ds_id.clone()];
+        let mut settings = scene.dataset_settings.clone();
+        settings.get_mut(&ds_id).unwrap().opacity = 0.25;
+
+        scene.import_dataset_presence(order.clone(), settings.clone());
+        assert_eq!(scene.dataset_settings[&ds_id].opacity, 0.25);
+        assert_eq!(scene.epochs.selection, baseline.selection + 1);
+        assert_eq!(scene.epochs.view, baseline.view);
+
+        // Identical rebroadcast: no further bump.
+        scene.import_dataset_presence(order, settings);
+        assert_eq!(scene.epochs.selection, baseline.selection + 1);
     }
 }

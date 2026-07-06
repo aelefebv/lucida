@@ -1,0 +1,25 @@
+{
+  "Direct": {
+    "images": [
+      {
+        "image_id": "multiscale-0",
+        "wire_format": {
+          "Zstd": {
+            "data_type": "Uint16"
+          }
+        },
+        "levels": [
+          {
+            "level_index": 0,
+            "path": "kidney-multiplex.zarr/0"
+          },
+          {
+            "level_index": 1,
+            "path": "kidney-multiplex.zarr/1"
+          }
+        ],
+        "store_prefix": "gs://lucida-fixtures"
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "type": "open_remote_dataset",
+  "request_id": "web-7d2f45aa",
+  "url": "gs://lucida-fixtures/kidney-multiplex.zarr"
+}

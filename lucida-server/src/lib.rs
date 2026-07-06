@@ -7,15 +7,20 @@
 pub mod admin;
 pub mod auth;
 pub mod binding;
+pub mod binding_restore;
 pub mod bookmarks;
 pub mod browse;
+pub mod dataset_open;
 pub mod decode;
 pub mod generated;
 pub mod handler;
 pub mod health;
+pub mod open_diagnostics;
 pub mod proxy;
 pub mod session;
 pub mod static_serve;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod workspace;
 
 use std::collections::HashMap;

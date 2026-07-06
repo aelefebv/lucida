@@ -1,0 +1,13 @@
+{
+  "type": "open_dataset_failed",
+  "request_id": "web-81c09b",
+  "url": "gs://lucida-fixtures/missing.zarr",
+  "error": "object not found",
+  "diagnostic": {
+    "stage": "backend_open",
+    "kind": "missing_object",
+    "retryable": true,
+    "message": "object not found",
+    "detail": "gs://lucida-fixtures/missing.zarr/.zattrs returned 404"
+  }
+}

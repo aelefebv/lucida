@@ -1241,6 +1241,10 @@ function App({
             minWidth: 0,
           }} onClick={handleDebugClick}>
             <canvas
+              // Keyed per RenderClient generation: `transferControlToOffscreen`
+              // is one-shot per element, so after a client teardown (dev
+              // StrictMode remount) the next client needs a fresh element.
+              key={render.canvasKey}
               ref={render.canvasRef}
               tabIndex={0}
               style={{

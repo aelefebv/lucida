@@ -1,0 +1,128 @@
+{
+  "colormaps": [
+    "gray",
+    "magenta",
+    "green",
+    "cyan",
+    "red",
+    "blue",
+    "yellow",
+    "viridis",
+    "inferno",
+    "plasma",
+    "magma",
+    "turbo",
+    "hot",
+    "cool",
+    "jet"
+  ],
+  "blend_modes": [
+    "alpha",
+    "additive",
+    "max"
+  ],
+  "render_modes": [
+    "translucent",
+    "max_intensity"
+  ],
+  "clip_modes": [
+    "plane",
+    "sphere"
+  ],
+  "annotation_kinds": [
+    "point",
+    "line",
+    "box"
+  ],
+  "axis_kinds": [
+    "Time",
+    "Channel",
+    "Space"
+  ],
+  "entity_kinds": [
+    "Image",
+    "Well",
+    "Field"
+  ],
+  "data_types": [
+    "Uint8",
+    "Uint16",
+    "Uint32",
+    "Float32",
+    "Float64"
+  ],
+  "positioning_modes": [
+    "Stage",
+    "Grid"
+  ],
+  "proxy_kinds": [
+    "WellProxy3D",
+    "FieldProxy3D"
+  ],
+  "dataset_open_stages": [
+    "request_received",
+    "authorization",
+    "source_lookup",
+    "backend_open",
+    "metadata_import",
+    "binding_build",
+    "generated_coarse_planning",
+    "workspace_persist",
+    "broadcast",
+    "complete"
+  ],
+  "dataset_open_failure_kinds": [
+    "authorization",
+    "session_closed",
+    "workspace_lookup",
+    "unsupported_scheme",
+    "local_path",
+    "missing_object",
+    "permission",
+    "cloud_configuration",
+    "http",
+    "storage_backend",
+    "unsupported_codec",
+    "unsupported_layout",
+    "malformed_metadata",
+    "missing_metadata",
+    "import",
+    "persistence",
+    "internal"
+  ],
+  "dataset_health_statuses": [
+    "healthy",
+    "degraded",
+    "unavailable"
+  ],
+  "generated_chunk_statuses": [
+    "pending",
+    "unavailable",
+    "failed_transient",
+    "failed_permanent",
+    "ready"
+  ],
+  "generated_level_roles": [
+    "coarse"
+  ],
+  "bookmark_actions": [
+    "created",
+    "updated",
+    "deleted"
+  ],
+  "viewer_interest_modes": [
+    "slice",
+    "volume"
+  ],
+  "viewer_interaction_modes": [
+    "idle",
+    "panning",
+    "zooming",
+    "scrubbing"
+  ],
+  "viewer_interest_lanes": [
+    "visible",
+    "predicted",
+    "background"
+  ]
+}

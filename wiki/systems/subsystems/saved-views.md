@@ -5,7 +5,7 @@ description: "Cross-cutting subsystem spanning lucida-core (the SavedView schema
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/saved-views.md
 created: 2026-05-08
-modified: 2026-06-25
+modified: 2026-07-03
 ---
 
 # Saved Views
@@ -57,7 +57,7 @@ Bookmarks are the second persistent state added to [lucida-server](../crates/luc
 
 ## Server side: workspace saved views
 
-Workspace saved views live in `lucida-server/src/workspace.rs` alongside workspace authorization and dataset membership. The `workspace_saved_views` table stores `view_json` plus name/creator timestamps and a `visibility` TEXT column (migration `...0011`; a partial index on proposed rows in `...0013`), keyed by `workspace_id`; there is no dataset URL side table because source identity belongs to `workspace_datasets`.
+Workspace saved views live in `lucida-server/src/workspace/` alongside workspace authorization and dataset membership. The `workspace_saved_views` table stores `view_json` plus name/creator timestamps and a `visibility` TEXT column (migration `...0011`; a partial index on proposed rows in `...0013`), keyed by `workspace_id`; there is no dataset URL side table because source identity belongs to `workspace_datasets`.
 
 All routes are workspace-scoped:
 
@@ -73,7 +73,7 @@ The manager enforces viewer-or-better for list/get and editor-or-better for crea
 
 ### Visibility model (`Shared` / `Personal` / `Proposed`, #702)
 
-`SavedViewVisibility` (in `workspace.rs`) governs who can see each workspace saved view:
+`SavedViewVisibility` (in `workspace/types.rs`) governs who can see each workspace saved view:
 
 - **`Shared`** — the collaborative surface (the historical default); visible to every member, editable by editors.
 - **`Personal`** — belongs to exactly one member, never disclosed to anyone else (not even owners).

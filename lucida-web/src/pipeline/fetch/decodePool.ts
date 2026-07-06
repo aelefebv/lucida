@@ -57,6 +57,9 @@ export class DecodePool {
 
   /** Decode raw wire-format bytes. Returns data in its native format (uint8 stays uint8). */
   decode(bytes: ArrayBuffer, wireFormat: WireFormat): Promise<ArrayBuffer> {
+    if (this.pool.length === 0) {
+      return Promise.reject(new Error("DecodePool terminated"));
+    }
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       let best = this.pool[0];
@@ -79,8 +82,21 @@ export class DecodePool {
     return this.pool.length;
   }
 
+  /**
+   * Kill every worker and settle its outstanding decodes with a rejection so
+   * awaiting fetch chains complete instead of hanging on promises whose
+   * worker can no longer reply. Idempotent; `decode` calls made after
+   * termination reject immediately.
+   */
   terminate(): void {
-    for (const w of this.pool) w.worker.terminate();
+    for (const w of this.pool) {
+      w.worker.terminate();
+      for (const entry of w.pending.values()) {
+        entry.reject(new Error("DecodePool terminated"));
+      }
+      w.pending.clear();
+      w.activeCount = 0;
+    }
     this.pool = [];
   }
 }
