@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use futures_util::stream::StreamExt;
 use object_store::ObjectStore;
 use object_store::path::Path;
 
@@ -146,6 +147,158 @@ async fn import_single_image(
         manifest,
         fetch,
         binding_seed,
+        warnings: Vec::new(),
+    })
+}
+
+/// Maximum number of metadata object-store GETs kept in flight while importing
+/// a plate. Bounds fan-out so a wide plate opens quickly without self-throttling
+/// the backing store.
+const METADATA_FETCH_CONCURRENCY: usize = 32;
+
+/// One well's parsed metadata: its plate path, grid coordinates, and the fields
+/// it declares. Produced concurrently, then assembled in declared order.
+struct WellParsed {
+    path: String,
+    row_index: u32,
+    column_index: u32,
+    fovs: Vec<FovParsed>,
+}
+
+/// One field-of-view within a well: its store prefix and any stage translation.
+struct FovParsed {
+    store_prefix: String,
+    translation: Option<Vec<f64>>,
+}
+
+/// The plate path used to name a well in warnings and diagnostics. Prefers the
+/// declared `path`; falls back to the row/column labels (then indices) when the
+/// entry omits it, so a skipped well is still identifiable.
+fn well_plate_path(
+    path: Option<&str>,
+    row_index: u32,
+    column_index: u32,
+    rows: &[String],
+    columns: &[String],
+) -> String {
+    if let Some(path) = path {
+        return path.to_string();
+    }
+    let row = rows
+        .get(row_index as usize)
+        .cloned()
+        .unwrap_or_else(|| row_index.to_string());
+    let column = columns
+        .get(column_index as usize)
+        .cloned()
+        .unwrap_or_else(|| column_index.to_string());
+    format!("{row}/{column}")
+}
+
+fn skipped_well_warning(target: &str, reason: String) -> ImportWarning {
+    ImportWarning {
+        kind: ImportWarningKind::SkippedWell,
+        target: target.to_string(),
+        message: format!("skipped well {target:?}: {reason}"),
+    }
+}
+
+/// Fetch and parse a single well's `zarr.json`, extracting its fields.
+///
+/// Tolerant by design: a missing plate `path`, an unreadable or malformed
+/// `zarr.json`, or a missing `ome.well.images` list yields a [`ImportWarning`]
+/// the caller records and skips, rather than aborting the whole plate. Only the
+/// object-store GET is awaited here so callers can fan many wells out at once.
+/// `target` is the well's plate path used in any warning, computed by the caller
+/// so this future owns all of its inputs.
+async fn parse_one_well(
+    store: Arc<dyn ObjectStore>,
+    path: Option<String>,
+    row_index: u32,
+    column_index: u32,
+    target: String,
+) -> Result<WellParsed, ImportWarning> {
+    let Some(well_path) = path else {
+        return Err(skipped_well_warning(
+            &target,
+            "plate entry is missing 'path'".to_string(),
+        ));
+    };
+
+    let well_meta_path = Path::from(format!("{well_path}/zarr.json"));
+    let well_bytes = match store.get(&well_meta_path).await {
+        Ok(response) => match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(skipped_well_warning(
+                    &target,
+                    format!("well metadata is unreadable: {e}"),
+                ));
+            }
+        },
+        Err(e) => {
+            return Err(skipped_well_warning(
+                &target,
+                format!("well metadata is unreadable: {e}"),
+            ));
+        }
+    };
+
+    let well_json: serde_json::Value = match serde_json::from_slice(&well_bytes) {
+        Ok(value) => value,
+        Err(e) => {
+            return Err(skipped_well_warning(
+                &target,
+                format!("well metadata is not valid JSON: {e}"),
+            ));
+        }
+    };
+
+    let Some(images) = well_json
+        .pointer("/attributes/ome/well/images")
+        .and_then(|v| v.as_array())
+    else {
+        return Err(skipped_well_warning(
+            &target,
+            "well metadata has no ome.well.images list".to_string(),
+        ));
+    };
+
+    let mut fovs: Vec<FovParsed> = Vec::new();
+    for image_entry in images {
+        let fov_path = image_entry
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0")
+            .to_string();
+        let store_prefix = format!("{well_path}/{fov_path}");
+
+        let translation = image_entry
+            .get("coordinateTransformations")
+            .and_then(|v| v.as_array())
+            .and_then(|transforms| {
+                transforms.iter().find_map(|ct| {
+                    if ct.get("type").and_then(|v| v.as_str()) == Some("translation") {
+                        ct.get("translation")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        fovs.push(FovParsed {
+            store_prefix,
+            translation,
+        });
+    }
+
+    Ok(WellParsed {
+        path: well_path,
+        row_index,
+        column_index,
+        fovs,
     })
 }
 
@@ -185,91 +338,99 @@ async fn import_plate(
         .and_then(|v| v.as_array())
         .ok_or_else(|| StoreError::Metadata("plate has no wells array".into()))?;
 
-    // Parse wells and FOVs.
-    struct WellParsed {
-        path: String,
-        row_index: u32,
-        column_index: u32,
-        fovs: Vec<FovParsed>,
-    }
+    // Fetch every well's `zarr.json` with bounded concurrency, keyed by its
+    // declared position, then re-order the results so downstream assembly runs
+    // in declared well order regardless of completion order.
+    let well_outcomes: Vec<Result<WellParsed, ImportWarning>> = {
+        // Extract each well's declared fields (owned) up front so the concurrent
+        // futures borrow nothing from the plate JSON, rows, or columns.
+        struct WellRequest {
+            path: Option<String>,
+            row_index: u32,
+            column_index: u32,
+            target: String,
+        }
+        let requests: Vec<WellRequest> = wells_json
+            .iter()
+            .map(|well_entry| {
+                let path = well_entry
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let row_index = well_entry
+                    .get("rowIndex")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let column_index = well_entry
+                    .get("columnIndex")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                let target =
+                    well_plate_path(path.as_deref(), row_index, column_index, &rows, &columns);
+                WellRequest {
+                    path,
+                    row_index,
+                    column_index,
+                    target,
+                }
+            })
+            .collect();
 
-    struct FovParsed {
-        store_prefix: String,
-        translation: Option<Vec<f64>>,
-    }
+        let mut slots: Vec<Option<Result<WellParsed, ImportWarning>>> =
+            (0..requests.len()).map(|_| None).collect();
+        let mut stream =
+            futures_util::stream::iter(requests.into_iter().enumerate().map(|(index, req)| {
+                let store = store.clone();
+                async move {
+                    let outcome = parse_one_well(
+                        store,
+                        req.path,
+                        req.row_index,
+                        req.column_index,
+                        req.target,
+                    )
+                    .await;
+                    (index, outcome)
+                }
+            }))
+            .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+        while let Some((index, outcome)) = stream.next().await {
+            slots[index] = Some(outcome);
+        }
+        slots
+            .into_iter()
+            .map(|slot| slot.expect("every well index is filled by the fetch loop"))
+            .collect()
+    };
 
+    // Assemble in declared order: survivors keep their declared sequence and
+    // skipped wells become warnings (never a hard failure while any well
+    // parses), so representative-FOV selection and ordering are computed over
+    // the survivors exactly as the sequential importer would.
     let mut parsed_wells: Vec<WellParsed> = Vec::new();
+    let mut warnings: Vec<ImportWarning> = Vec::new();
+    for outcome in well_outcomes {
+        match outcome {
+            Ok(well) => parsed_wells.push(well),
+            Err(warning) => warnings.push(warning),
+        }
+    }
+
+    if parsed_wells.is_empty() {
+        return Err(StoreError::Metadata("plate has no readable wells".into()));
+    }
+
     let mut representative_fov_path: Option<String> = None;
     let mut has_stage_positions = false;
-
-    for well_entry in wells_json {
-        let well_path = well_entry
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| StoreError::Metadata("well entry missing path".into()))?;
-        let row_index = well_entry
-            .get("rowIndex")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let column_index = well_entry
-            .get("columnIndex")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-
-        let well_meta_path = Path::from(format!("{well_path}/zarr.json"));
-        let well_bytes = store.get(&well_meta_path).await?.bytes().await?;
-        let well_json: serde_json::Value = serde_json::from_slice(&well_bytes)
-            .map_err(|e| StoreError::Metadata(format!("{well_path}: {e}")))?;
-
-        let images = well_json
-            .pointer("/attributes/ome/well/images")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| StoreError::Metadata(format!("{well_path}: no ome.well.images")))?;
-
-        let mut fovs: Vec<FovParsed> = Vec::new();
-        for image_entry in images {
-            let fov_path = image_entry
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("0")
-                .to_string();
-            let store_prefix = format!("{well_path}/{fov_path}");
-
-            let translation = image_entry
-                .get("coordinateTransformations")
-                .and_then(|v| v.as_array())
-                .and_then(|transforms| {
-                    transforms.iter().find_map(|ct| {
-                        if ct.get("type").and_then(|v| v.as_str()) == Some("translation") {
-                            ct.get("translation")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-            if translation.is_some() {
+    for well in &parsed_wells {
+        for fov in &well.fovs {
+            if fov.translation.is_some() {
                 has_stage_positions = true;
             }
-
             if representative_fov_path.is_none() {
-                representative_fov_path = Some(store_prefix.clone());
+                representative_fov_path = Some(fov.store_prefix.clone());
             }
-
-            fovs.push(FovParsed {
-                store_prefix,
-                translation,
-            });
         }
-
-        parsed_wells.push(WellParsed {
-            path: well_path.to_string(),
-            row_index,
-            column_index,
-            fovs,
-        });
     }
 
     // Read representative FOV multiscales.
@@ -353,6 +514,49 @@ async fn import_plate(
     // bounded no matter how many fields carry labels.
     let mut label_specs: Vec<LabelSpec> = Vec::new();
     let mut label_budget = LabelBudget::new();
+
+    // Probe every field's `labels/` group index with bounded concurrency — the
+    // only per-field label I/O safe to fan out, since it reads one small index
+    // object and holds only names, never built specs — keyed by declared field
+    // order.
+    let field_prefixes: Vec<String> = parsed_wells
+        .iter()
+        .flat_map(|well| well.fovs.iter().map(|fov| fov.store_prefix.clone()))
+        .collect();
+    let mut probed_labels: Vec<Option<ProbedLabels>> =
+        (0..field_prefixes.len()).map(|_| None).collect();
+    let mut probe_stream =
+        futures_util::stream::iter(field_prefixes.iter().cloned().enumerate().map(
+            |(index, prefix)| {
+                let store = store.clone();
+                async move {
+                    let probed = probe_labels_for_image(&store, &prefix).await;
+                    (index, probed)
+                }
+            },
+        ))
+        .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+    while let Some((index, probed)) = probe_stream.next().await {
+        probed_labels[index] = Some(probed);
+    }
+
+    // Build the probed labels serially, in declared field order, gated by the
+    // shared running budget: `build_label`'s expensive per-label reads and
+    // allocations only run while the budget has room and stop the instant it is
+    // exhausted. This keeps peak label memory/IO O(budget) and reproduces the
+    // sequential importer's retention exactly — the same labels and colors are
+    // kept, and the same ones dropped, in the same order.
+    let mut field_labels = Vec::with_capacity(field_prefixes.len());
+    for (prefix, probed) in field_prefixes.iter().zip(probed_labels) {
+        let probed = probed.expect("every field index is filled by the probe loop");
+        let image_id = ImageId(format!("{id}:image:{prefix}"));
+        let owner = EntityId(format!("{id}:field:{prefix}"));
+        let imported =
+            build_labels_within_budget(&mut label_budget, store, id, &image_id, &owner, probed)
+                .await;
+        field_labels.push(imported);
+    }
+    let mut field_labels = field_labels.into_iter();
 
     for well in &parsed_wells {
         let well_entity_id = EntityId(format!("{id}:well:{}", well.path));
@@ -450,18 +654,13 @@ async fn import_plate(
             }
             // Grid transforms are built after all entities are created.
 
-            // Read this field's `labels/` group before its ids are moved into
-            // the image/binding vecs. Nested per-field, mirroring how the FOV
-            // metadata itself is read.
-            let fov_labels = import_labels_for_image(
-                &mut label_budget,
-                store,
-                id,
-                &fov.store_prefix,
-                &image_id,
-                &field_entity_id,
-            )
-            .await;
+            // This field's `labels/` group was probed concurrently above and
+            // its budget charged in declared order; take the prepared overlays
+            // so they interleave after the field's own image entries exactly as
+            // a sequential probe would place them.
+            let fov_labels = field_labels
+                .next()
+                .expect("one prepared label set per field, in declared order");
 
             images.push(ImageSpec {
                 image_id: image_id.clone(),
@@ -560,6 +759,7 @@ async fn import_plate(
         manifest,
         fetch,
         binding_seed,
+        warnings,
     })
 }
 
@@ -728,8 +928,19 @@ struct ImportedLabels {
     bindings: Vec<ImageBindingSeed>,
 }
 
+/// One source image's `labels/` group after its index has been read but before
+/// any label is built. Holds the group prefix (for the per-label reads and
+/// diagnostics) and the declared label names in order — never the built
+/// multiscale specs, so holding one of these for every field of a wide plate at
+/// once costs no per-label memory.
+#[derive(Default)]
+struct ProbedLabels {
+    labels_prefix: String,
+    names: Vec<String>,
+}
+
 /// Detect an OME-NGFF `labels/` child group on a source image group and import
-/// every well-formed label it lists.
+/// every well-formed label it lists, up to the shared dataset budget.
 ///
 /// `base_prefix` is the source image group's store prefix (`""` for a
 /// standalone image, `"{well}/{fov}"` for a plate field); labels live under
@@ -738,7 +949,8 @@ struct ImportedLabels {
 /// an ordinary image and attached to `source_image_id`; a label that fails to
 /// parse is skipped with a warning so one bad label never fails the import.
 /// `budget` is shared across all calls for a dataset and bounds the aggregate
-/// number of retained labels and colors.
+/// number of retained labels and colors: once it is exhausted, no further label
+/// is read or built.
 async fn import_labels_for_image(
     budget: &mut LabelBudget,
     store: &Arc<dyn ObjectStore>,
@@ -747,6 +959,27 @@ async fn import_labels_for_image(
     source_image_id: &ImageId,
     source_owner: &EntityId,
 ) -> ImportedLabels {
+    let probed = probe_labels_for_image(store, base_prefix).await;
+    build_labels_within_budget(
+        budget,
+        store,
+        dataset_id,
+        source_image_id,
+        source_owner,
+        probed,
+    )
+    .await
+}
+
+/// Read a source image's `labels/` group index and return the label names it
+/// declares, in order, without building any of them. A missing `labels/` group —
+/// the common case — yields an empty list.
+///
+/// This reads exactly one small index object and holds only names, so it is the
+/// only per-field label I/O safe to fan out concurrently: probing every field of
+/// a wide plate at once costs no per-label memory. The expensive per-label reads
+/// happen later in [`build_labels_within_budget`], gated by the shared budget.
+async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str) -> ProbedLabels {
     let labels_prefix = if base_prefix.is_empty() {
         "labels".to_string()
     } else {
@@ -756,10 +989,42 @@ async fn import_labels_for_image(
     let Some(labels_json) =
         parse::read_optional_zarr_json(store, &format!("{labels_prefix}/zarr.json")).await
     else {
-        return ImportedLabels::default();
+        return ProbedLabels {
+            labels_prefix,
+            names: Vec::new(),
+        };
     };
 
     let names = parse::parse_labels_names(&labels_json);
+    ProbedLabels {
+        labels_prefix,
+        names,
+    }
+}
+
+/// Build a source image's probed labels in declared order, charging the shared
+/// dataset budget as it goes and stopping the instant the budget is exhausted.
+///
+/// The budget gate wraps `build_label` itself, so the per-label multiscale and
+/// color-table reads and allocations only ever run for labels that are actually
+/// retained: peak label memory and build I/O stay O(budget), never O(total
+/// declared), even for an adversarial dataset that lists far more labels than
+/// the budget allows. Malformed labels and budget exhaustion are logged exactly
+/// as a purely sequential importer would, so the retained set — and which labels
+/// and colors are dropped once the budget is exceeded — is identical no matter
+/// how the probe that produced `probed` was scheduled.
+async fn build_labels_within_budget(
+    budget: &mut LabelBudget,
+    store: &Arc<dyn ObjectStore>,
+    dataset_id: &str,
+    source_image_id: &ImageId,
+    source_owner: &EntityId,
+    probed: ProbedLabels,
+) -> ImportedLabels {
+    let ProbedLabels {
+        labels_prefix,
+        names,
+    } = probed;
     let mut imported = ImportedLabels::default();
     for name in names {
         if budget.labels_remaining == 0 {
@@ -770,17 +1035,17 @@ async fn import_labels_for_image(
             break;
         }
         match build_label(store, &labels_prefix, &name, source_image_id, source_owner).await {
-            Ok(mut built) => {
+            Ok(mut label) => {
                 // Clamp this label's colors to the remaining dataset-wide budget
                 // before retaining them, then charge both budgets.
-                if built.spec.colors.len() > budget.colors_remaining {
-                    built.spec.colors.truncate(budget.colors_remaining);
+                if label.spec.colors.len() > budget.colors_remaining {
+                    label.spec.colors.truncate(budget.colors_remaining);
                 }
-                budget.colors_remaining -= built.spec.colors.len();
+                budget.colors_remaining -= label.spec.colors.len();
                 budget.labels_remaining -= 1;
-                imported.specs.push(built.spec);
-                imported.fetch.push(built.fetch);
-                imported.bindings.push(built.binding);
+                imported.specs.push(label.spec);
+                imported.fetch.push(label.fetch);
+                imported.bindings.push(label.binding);
             }
             Err(e) => {
                 eprintln!(
@@ -1268,8 +1533,102 @@ mod tests {
             _ => panic!("expected Plate kind"),
         }
 
+        // A fully valid plate records no warnings.
+        assert!(
+            result.warnings.is_empty(),
+            "valid plate should have no warnings, got {:?}",
+            result.warnings,
+        );
+
         // Pretty-print for visual inspection.
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A single hollow/unreadable well is skipped with a recorded warning while
+    /// the rest of the plate imports. The representative FOV is drawn from the
+    /// first surviving well in declared order.
+    #[tokio::test]
+    async fn skipped_well_does_not_fail_plate_import() {
+        let dir = temp_dir("skipped_well");
+        create_plate_fixture(
+            &dir,
+            "skip_plate",
+            &["A", "B"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 1),
+                ("A", "2", 0, 1, 1),
+                ("B", "1", 1, 0, 1),
+            ],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 128, 128],
+            1,
+        );
+
+        // Corrupt one well's metadata so it cannot be parsed.
+        fs::write(dir.join("A").join("2").join("zarr.json"), b"{ not json").unwrap();
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "skip-id", "Skip Plate")
+            .await
+            .unwrap();
+
+        // Exactly one warning, naming the skipped well by its plate path.
+        assert_eq!(
+            result.warnings.len(),
+            1,
+            "expected one skipped-well warning"
+        );
+        let warning = &result.warnings[0];
+        assert_eq!(warning.kind, ImportWarningKind::SkippedWell);
+        assert_eq!(warning.target, "A/2");
+        assert!(
+            warning.message.contains("A/2"),
+            "message should name the well, got {:?}",
+            warning.message,
+        );
+
+        // Two wells survive; the plate still opens.
+        let wells: Vec<_> = result
+            .manifest
+            .entities()
+            .iter()
+            .filter(|e| e.kind == EntityKind::Well)
+            .collect();
+        assert_eq!(wells.len(), 2, "expected 2 surviving wells");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A plate where no well parses is a genuinely broken dataset and still
+    /// fails the import loudly.
+    #[tokio::test]
+    async fn plate_with_no_readable_wells_fails() {
+        let dir = temp_dir("all_bad_wells");
+        create_plate_fixture(
+            &dir,
+            "broken_plate",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 1), ("A", "2", 0, 1, 1)],
+            [1, 1, 1, 128, 128],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+
+        fs::write(dir.join("A").join("1").join("zarr.json"), b"nonsense").unwrap();
+        fs::write(dir.join("A").join("2").join("zarr.json"), b"nonsense").unwrap();
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "broken-id", "Broken Plate")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Metadata(_)),
+            "expected a metadata error, got {err:?}",
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2939,6 +3298,161 @@ mod tests {
             err.to_string().contains("zero"),
             "error should name the zero dimension: {err}",
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An [`ObjectStore`] decorator that records the location of every GET it
+    /// serves and delegates all work to an inner store. Lets a test observe
+    /// exactly which objects the importer reads.
+    #[derive(Debug)]
+    struct RecordingStore {
+        inner: Arc<dyn ObjectStore>,
+        gets: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl std::fmt::Display for RecordingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "RecordingStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for RecordingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.gets.lock().unwrap().push(location.to_string());
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &Path) -> object_store::Result<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    /// The shared dataset budget gates `build_label` itself: once it is
+    /// exhausted, labels beyond the budget are neither built nor read. A group
+    /// declaring three well-formed labels, imported under a budget of two,
+    /// retains the first two in declared order and performs no I/O whatsoever
+    /// against the third — so peak label memory and build I/O track the budget,
+    /// never the number of labels a dataset declares.
+    #[tokio::test]
+    async fn label_budget_stops_building_once_exhausted() {
+        let dir = temp_dir("label_budget_stop");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["keep0", "keep1", "over"]);
+        for name in ["keep0", "keep1", "over"] {
+            write_label_multiscale(
+                &dir,
+                name,
+                &["t", "z", "y", "x"],
+                &[1, 1, 16, 16],
+                &[1, 1, 16, 16],
+                &[1.0, 1.0, 1.0, 1.0],
+                "uint16",
+                serde_json::json!({
+                    "colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}],
+                    "source": {"image": "../../"}
+                }),
+            );
+        }
+
+        let gets = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
+            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+            gets: gets.clone(),
+        });
+
+        // A budget of exactly two labels, with ample color headroom.
+        let mut budget = LabelBudget {
+            labels_remaining: 2,
+            colors_remaining: MAX_LABEL_COLORS_PER_DATASET,
+        };
+
+        let source_image_id = ImageId("img".to_string());
+        let source_owner = EntityId("owner".to_string());
+
+        // The probe discovers all declared names — cheap, and expected.
+        let probed = probe_labels_for_image(&store, "").await;
+        assert_eq!(probed.names, vec!["keep0", "keep1", "over"]);
+
+        let imported = build_labels_within_budget(
+            &mut budget,
+            &store,
+            "ds",
+            &source_image_id,
+            &source_owner,
+            probed,
+        )
+        .await;
+
+        // Exactly the first two labels are retained, in declared order.
+        let kept: Vec<&str> = imported.specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(kept, vec!["keep0", "keep1"]);
+        assert_eq!(imported.fetch.len(), 2);
+        assert_eq!(imported.bindings.len(), 2);
+        // The budget is fully consumed.
+        assert_eq!(budget.labels_remaining, 0);
+
+        // Decisive: the third label's group is never read. Building it would
+        // require reading its `zarr.json`; the budget gate stops the loop first.
+        let reads = gets.lock().unwrap();
+        assert!(
+            reads.iter().any(|p| p.contains("labels/keep0/")),
+            "the first in-budget label must be built (read): {reads:?}",
+        );
+        assert!(
+            reads.iter().any(|p| p.contains("labels/keep1/")),
+            "the second in-budget label must be built (read): {reads:?}",
+        );
+        assert!(
+            reads.iter().all(|p| !p.contains("labels/over")),
+            "no I/O may touch the over-budget label: {reads:?}",
+        );
+        drop(reads);
 
         let _ = fs::remove_dir_all(&dir);
     }

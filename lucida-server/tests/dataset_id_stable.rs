@@ -283,6 +283,7 @@ fn make_binding(
         legacy_proxy_enabled: false,
         proxy_cache,
         proxy_generator,
+        import_warnings: Vec::new(),
     }
 }
 

@@ -465,6 +465,29 @@ pub async fn open_dataset(
         ),
     );
 
+    // Surface non-fatal import problems (e.g. skipped plate wells) on the open
+    // trail so both the CLI and the web's latest-message view see them, and
+    // retain them for the durable Health tab below.
+    let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
+    for warning in &result.warnings {
+        tracing::warn!(
+            id = %dataset_id,
+            target = %warning.target,
+            "dataset import warning: {}",
+            warning.message,
+        );
+        emit(
+            progress,
+            open_progress(
+                DatasetOpenStage::MetadataImport,
+                warning.message.clone(),
+                Some(dataset_id_key.clone()),
+                Some(dataset_source_id.clone()),
+                Some(format!("target: {}", warning.target)),
+            ),
+        );
+    }
+
     // Build operational binding.
     emit(
         progress,
@@ -608,6 +631,7 @@ pub async fn open_dataset(
         legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
         proxy_cache,
         proxy_generator,
+        import_warnings,
     };
 
     // Build DatasetOpened command (manifest + fetch, no server-private state).
@@ -949,6 +973,7 @@ mod tests {
             legacy_proxy_enabled: false,
             proxy_cache,
             proxy_generator,
+            import_warnings: Vec::new(),
         }
     }
 

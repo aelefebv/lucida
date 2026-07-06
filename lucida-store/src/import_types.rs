@@ -11,6 +11,31 @@ pub struct ImportResult {
     pub manifest: DatasetManifest,
     pub fetch: FetchSource,
     pub binding_seed: ServerBindingSeed,
+    /// Non-fatal problems encountered while importing, in the order they were
+    /// discovered. Empty for a fully valid dataset. A plate whose individual
+    /// wells fail to parse records one entry per skipped well here rather than
+    /// aborting the whole import.
+    pub warnings: Vec<ImportWarning>,
+}
+
+/// A non-fatal problem surfaced by the importer so it can reach the user
+/// instead of being silently dropped or aborting the open.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportWarning {
+    pub kind: ImportWarningKind,
+    /// The store-relative identifier of what the warning is about, e.g. a
+    /// well's plate path `"B/2"`.
+    pub target: String,
+    /// Human-readable description naming the affected target and the reason.
+    pub message: String,
+}
+
+/// The category of an [`ImportWarning`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportWarningKind {
+    /// A plate well was dropped from the import because its metadata was
+    /// missing, unreadable, or malformed. The rest of the plate still opens.
+    SkippedWell,
 }
 
 /// Everything the server needs to build its operational binding.

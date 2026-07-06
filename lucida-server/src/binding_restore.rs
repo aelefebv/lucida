@@ -108,6 +108,16 @@ async fn restore_one_workspace_binding(
         .await
         .map_err(|e| import_failure(&e))?;
 
+    let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
+    for warning in &result.warnings {
+        tracing::warn!(
+            dataset_id = %dataset_id,
+            target = %warning.target,
+            "workspace.binding_restore.import_warning: {}",
+            warning.message,
+        );
+    }
+
     let catalog_entries =
         proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
     let dataset_opened = DatasetOpened {
@@ -196,6 +206,7 @@ async fn restore_one_workspace_binding(
         legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
         proxy_cache,
         proxy_generator,
+        import_warnings,
     };
 
     {

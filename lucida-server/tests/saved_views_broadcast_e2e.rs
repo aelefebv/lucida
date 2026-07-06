@@ -223,6 +223,7 @@ fn make_binding(url: &str) -> ServerBinding {
         legacy_proxy_enabled: false,
         proxy_cache,
         proxy_generator,
+        import_warnings: Vec::new(),
     }
 }
 

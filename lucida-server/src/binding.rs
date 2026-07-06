@@ -33,6 +33,10 @@ pub struct ServerBinding {
     pub legacy_proxy_enabled: bool,
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
+    /// Human-readable non-fatal messages from importing this dataset (e.g.
+    /// skipped plate wells). Retained so the Health tab can surface them
+    /// durably after the transient open-progress trail has scrolled past.
+    pub import_warnings: Vec<String>,
 }
 
 /// Compiled key-to-path mapper. Built once at import from per-image binding seeds.

@@ -882,6 +882,9 @@ fn dataset_health_for_manifest(sess: &Session, manifest: &DatasetManifest) -> Da
         .or_else(|| runtime.map(|state| state.source_url.clone()));
     let backend = source_url.as_deref().map(backend_kind_for_url);
     let mut messages = Vec::new();
+    if let Some(binding) = binding {
+        messages.extend(binding.import_warnings.iter().cloned());
+    }
     if binding.is_none() {
         messages.push(
             "dataset exists in the workspace document but has no runtime binding; retry dataset restore"
