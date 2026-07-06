@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
-import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { invalidateDisplaySettings } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
@@ -148,8 +148,7 @@ export function useDimensions({
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
-      bumpSettingsGeneration();
-      loopRef.current?.markInteractiveDirty();
+      invalidateDisplaySettings(loopRef.current, "multi_channel_toggle");
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);

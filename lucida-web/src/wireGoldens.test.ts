@@ -95,7 +95,7 @@ import {
   type ViewState as WireViewState,
 } from "./savedView/types.ts";
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
-import type { Annotation } from "./components/AnnotationOverlay.tsx";
+import type { Annotation } from "./components/annotationDocument.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture loading
@@ -903,7 +903,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(onCommand).toHaveBeenCalledTimes(1);
     const [seq, commandJson] = onCommand.mock.calls[0];
     expect(seq).toBe(43);
-    // The same fields useBridge's dataset_opened arm reads (typed, no `as`).
+    // The same fields sessionController's dataset_opened arm reads (typed, no `as`).
     const command: { type: string } & WireDatasetOpened = JSON.parse(commandJson);
     expect(command.type).toBe("dataset_opened");
     expect(command.manifest).toStrictEqual(expectedManifestSingle);
@@ -1261,8 +1261,8 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   [
     "move_annotation (reshape)",
     "session/client_command_move_annotation.json",
-    // AnnotationOverlay.tsx / AnnotationOverlay3D.tsx handle-drag reshape
-    // (carries both vertices).
+    // annotationInteraction.ts emitMoveAnnotation — the one construction site
+    // for every overlay move/reshape; a reshape carries both vertices.
     {
       type: "move_annotation",
       dataset_id: "wds-0f3a",
@@ -1455,6 +1455,31 @@ describe("wire goldens: client messages through Bridge senders", () => {
       request_id: string;
     };
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
+  });
+
+  it("a persistent seq gap in the broadcast stream emits the request_snapshot envelope", () => {
+    // Producer-level lock through the real production trigger: the Bridge
+    // itself sends `request_snapshot` when a `command_broadcast` arrives
+    // with a seq past the last applied one and the hole outlives the
+    // reorder-grace window (i.e. real server-side broadcast loss, not
+    // benign out-of-order delivery).
+    const { ws } = openBridge();
+    deliver(
+      ws,
+      JSON.stringify({ type: "snapshot", seq: 42, document: {}, peers: [], your_id: 7 }),
+    );
+    deliver(
+      ws,
+      JSON.stringify({
+        type: "command_broadcast",
+        seq: 45,
+        command: { type: "remove_dataset", id: "wds-0f3a" },
+      }),
+    );
+    vi.advanceTimersByTime(250); // past the reorder-grace window
+    expect(lastSent(ws)).toStrictEqual(
+      coveredFixture("session/client_request_snapshot.json"),
+    );
   });
 
   it("sendViewerInterest wraps the tick coordinator's hint verbatim", () => {

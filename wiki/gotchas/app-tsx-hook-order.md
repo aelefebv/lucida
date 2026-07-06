@@ -5,7 +5,7 @@ description: "lucida-web/src/App.tsx calls ~10 React hooks in a deliberate order
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/app-tsx-hook-order.md
 created: 2026-04-18
-modified: 2026-05-26
+modified: 2026-07-04
 ---
 
 # App.tsx Hook Order and Callback Refs
@@ -22,6 +22,8 @@ The pattern uses **callback refs** (`bridgeCallbacksRef`, `datasetCallbacksRef`)
 - `useDatasetSettings` needs the bridge to send commands.
 - `useBridge` defined before `useDatasetSettings` would mean `useDatasetSettings` doesn't exist yet when `useBridge` is created.
 - `useDatasetSettings` defined before `useBridge` would mean the bridge's send-command callback doesn't exist yet.
+
+`useBridge` is a thin adapter over the non-React `sessionController.ts`, but that doesn't dissolve the constraint: the hook forwards the callback refs (`datasetCallbacksRef`, `savedViewHooksRef`) into the controller as live getters, so the refs still have to be declared before the domain hooks and populated after them.
 
 Resolution: define **callback refs at the top**, populated with no-op stubs initially. Hooks read from the refs (always current at call time) rather than from closures (frozen at hook-creation time). After all hooks return, populate the refs with the real callbacks.
 

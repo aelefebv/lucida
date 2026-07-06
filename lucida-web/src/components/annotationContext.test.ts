@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 import { isOffContext, offContextLabel } from "./annotationContext.ts";
 
 /** A point pin at the given z/t/c (other fields irrelevant to the context calc). */

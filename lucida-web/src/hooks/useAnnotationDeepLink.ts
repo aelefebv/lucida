@@ -31,7 +31,7 @@ import {
   type AnnotationDocScene,
 } from "../savedView/annotationDeepLink.ts";
 import { parseAnnotationHash } from "../savedView/urlSync.ts";
-import type { Annotation } from "../components/AnnotationOverlay.tsx";
+import type { Annotation } from "../components/annotationDocument.ts";
 
 export interface UseAnnotationDeepLinkParams {
   /** The live scene (annotations are read from it), or null before it exists. */

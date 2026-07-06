@@ -19,6 +19,7 @@
  */
 
 import type { LayoutSpec } from "../manifestTypes.ts";
+import type { DocumentCommand } from "../commands.ts";
 
 export interface LayoutInfo {
   id: string;
@@ -56,7 +57,7 @@ export class LayoutRegistry {
    * mirror updates so the latest spec content wins.
    */
   register(datasetId: string, spec: LayoutSpec, sendCommand: (json: string) => void): void {
-    const cmd = { type: "register_layout", dataset_id: datasetId, layout: spec };
+    const cmd: DocumentCommand = { type: "register_layout", dataset_id: datasetId, layout: spec };
     const json = JSON.stringify(cmd);
     this.wasmScene.apply_command(json);
     sendCommand(json);
@@ -74,7 +75,7 @@ export class LayoutRegistry {
 
   /** Set the active layout for a dataset and broadcast. */
   setActive(datasetId: string, layoutId: string, sendCommand: (json: string) => void): void {
-    const cmd = { type: "set_active_layout", dataset_id: datasetId, layout_id: layoutId };
+    const cmd: DocumentCommand = { type: "set_active_layout", dataset_id: datasetId, layout_id: layoutId };
     const json = JSON.stringify(cmd);
     this.wasmScene.apply_command(json);
     sendCommand(json);

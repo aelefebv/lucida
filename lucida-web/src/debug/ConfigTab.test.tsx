@@ -205,6 +205,77 @@ describe("ConfigTab — cross-constraint warnings", () => {
   });
 });
 
+describe("ConfigTab — read-only mode (production builds)", () => {
+  it("shows live values with disabled inputs, no per-field resets, and the note", () => {
+    act(() => {
+      configStore.set("farThresholdPx", 120);
+    });
+    render(<ConfigTab editable={false} />);
+
+    const slider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
+    expect(slider.disabled).toBe(true);
+    expect(Number(slider.value)).toBe(120);
+
+    const number = screen.getByLabelText(/FAR threshold.*value/i) as HTMLInputElement;
+    expect(number.disabled).toBe(true);
+
+    // Dirty value, but no per-field reset in read-only mode.
+    expect(screen.queryByRole("button", { name: /Reset FAR threshold/i })).toBeNull();
+
+    expect(screen.getByText(/read-only in this build/i)).toBeTruthy();
+  });
+
+  it("keeps Reset all enabled and working — the recovery path for persisted knobs", async () => {
+    // A previous session persisted non-default knobs; they still apply in
+    // this build, so the user must be able to clear them from the UI.
+    const user = userEvent.setup();
+    act(() => {
+      configStore.set("farThresholdPx", 120);
+      configStore.set("importanceWeight", 1500);
+    });
+    render(<ConfigTab editable={false} />);
+
+    const resetAll = screen.getByRole("button", { name: /reset all to defaults/i }) as HTMLButtonElement;
+    expect(resetAll.disabled).toBe(false);
+
+    await user.click(resetAll);
+    expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
+    // Persisted envelope cleared too — nothing stale left for next load.
+    expect(localStorage.getItem("lucida.planning.config")).toBeNull();
+  });
+
+  it("disables Reset all when nothing differs from defaults", () => {
+    render(<ConfigTab editable={false} />);
+    const resetAll = screen.getByRole("button", { name: /reset all to defaults/i }) as HTMLButtonElement;
+    expect(resetAll.disabled).toBe(true);
+  });
+
+  it("ignores change events on sliders and number inputs", () => {
+    render(<ConfigTab editable={false} />);
+    fireEvent.change(
+      screen.getByLabelText(/FAR threshold.*slider/i),
+      { target: { value: "120" } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(/FAR threshold.*value/i),
+      { target: { value: "55" } },
+    );
+    expect(configStore.get().farThresholdPx).toBe(
+      DEFAULT_PLANNING_CONFIG.farThresholdPx,
+    );
+  });
+
+  it("renders the coarse/detail toggle disabled and inert", () => {
+    render(<ConfigTab editable={false} />);
+    const toggle = screen.getByLabelText(/Coarse\/detail path/i) as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    fireEvent.click(toggle);
+    expect(configStore.get().coarseDetailEnabled).toBe(
+      DEFAULT_PLANNING_CONFIG.coarseDetailEnabled,
+    );
+  });
+});
+
 describe("ConfigTab — store subscription", () => {
   it("re-renders when configStore changes externally", async () => {
     render(<ConfigTab />);

@@ -5,7 +5,7 @@ description: "Snapshot of what's active."
 tags: [lucida, status]
 source_path: wiki/now.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # Now — Lucida Current State
@@ -14,7 +14,7 @@ Snapshot of what's active. Refresh via the `/repo-wiki` now pass after significa
 
 ## In flight
 
-No major refactor in flight. The four-PRD chunk-pipeline structural-cleanup arc (plan / fetch-decode / upload / render) is fully landed, and the dataset ingestion/store reliability PRD (#762) has shipped — see [Flow: Dataset Diagnostics](flows/dataset-diagnostics.md). Recent work is feature- and hardening-sized rather than structural.
+An architecture-debt arc is in flight, worked as small beads-tracked corrections (`bd` issue ids like `lucida-dah` in commit subjects): the first batch landed as PR #857, and a second batch is in review — item lists under Recently shipped. The four-PRD chunk-pipeline structural-cleanup arc (plan / fetch-decode / upload / render) is fully landed, and the dataset ingestion/store reliability PRD (#762) has shipped — see [Flow: Dataset Diagnostics](flows/dataset-diagnostics.md).
 
 ## Designed, on hold
 
@@ -22,6 +22,8 @@ No major refactor in flight. The four-PRD chunk-pipeline structural-cleanup arc 
 
 ## Recently shipped
 
+- **Architecture-debt arc, batch 1 (PR #857, landed):** committed workspace `Cargo.lock` + `--locked` shipped builds; workspace-unmount session teardown (lucida-pke); `wasm.rs` setters collapsed onto `Scene::apply` with a diff-based epoch policy (lucida-i31); golden-fixture wire-protocol lock, Rust-generated and TS-consumed (lucida-wz5); always-compiled placement-correction source with wasm delegates (lucida-q0x); `lucida-server` `workspace.rs` split into a layered `workspace/` module (lucida-mi7); headless dataset-open service + single-layer command authorization (lucida-ce7).
+- **Architecture-debt arc, batch 2 (in review):** seq-gap detection and snapshot resync for the collaborative document protocol (lucida-dah); ADR-0043 sunset dispositions accepted (lucida-771); typed TS command vocabulary locked against the real wasm `apply_command` (lucida-8ci); one shared home for annotation overlay logic across 2D/3D (lucida-4ne).
 - **Workspaces:** create a workspace directly from a dataset (#697), duplicate without transferring permissions (#698), and editable dataset display names via a collaborative rename command (#701).
 - **Annotation author-view arc (#830):** annotations capture the author's view on creation, restore it on navigate, and are shareable by deep-link (never-leak). Mentions/threads surface in the web client (`MentionsOfMe`).
 - **Minimap fixes:** render the overview with the active channel's contrast (#835), frame to visible datasets only (#836), and 2D colormap + live annotation draw + 3D annotation context (#837). Testable logic lives in `minimap.rs` (the `wasm.rs` path is wasm32-gated).
@@ -45,7 +47,7 @@ No major refactor in flight. The four-PRD chunk-pipeline structural-cleanup arc 
 
 ## Open questions
 
-See [Queue — Open Questions](queue.md). Key ones: PRDs to fold into `wiki/inputs/`, planning threshold rationale, proxy-generation priority, [GPU-Side Temporal Lookahead — Won't Implement](decisions/0010-temporal-runway-not-implemented.md) still holding, Windows CI, and whether delivery-state ownership should become a broader pipeline principle.
+See [Queue — Open Questions](queue.md). Key ones: PRDs to fold into `wiki/inputs/`, planning threshold rationale, [GPU-Side Temporal Lookahead — Won't Implement](decisions/0010-temporal-runway-not-implemented.md) still holding, Windows CI, and whether delivery-state ownership should become a broader pipeline principle. The proxy-generation-priority and disabled-mode-bookmark questions closed against [Sunset dispositions for the three superseded server surfaces](decisions/0043-superseded-server-surfaces-sunset.md), which fixes end-states for the global `/ws` session, the bookmarks store, and the proxy fallback protocol.
 
 ## Source material
 

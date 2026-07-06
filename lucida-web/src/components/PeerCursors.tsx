@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
+import { makeWorldToScreen } from "./cameraProjection.ts";
 
 const PEER_COLORS = [
   "#FF6B6B",
@@ -128,11 +129,8 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
-        const dpr = devicePixelRatio;
         const canvasW = canvas.clientWidth;
         const canvasH = canvas.clientHeight;
-        const physW = Math.round(canvasW * dpr);
-        const physH = Math.round(canvasH * dpr);
         const localIs3d = viewModeRef.current === "3d";
 
         // Build a lookup from client_id → label data from WASM
@@ -141,16 +139,14 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
           labelMap.set(lbl.id, lbl);
         }
 
-        // Pre-compute camera data once per frame
+        // Pre-compute camera data once per frame: the VP matrix in 3D, or the
+        // shared 2D world→screen projector (one camera snapshot per frame).
         let vpMatrix: Float32Array | null = null;
-        let zoom = 0, centerX = 0, centerY = 0;
+        let projectWorld: ((v: [number, number]) => [number, number]) | null = null;
         if (localIs3d) {
           vpMatrix = new Float32Array(scene.view_proj());
         } else {
-          zoom = scene.zoom();
-          const centerArr = scene.center();
-          centerX = centerArr[0];
-          centerY = centerArr[1];
+          projectWorld = makeWorldToScreen(scene, canvas);
         }
 
         for (const [clientId, el] of labelRefs.current) {
@@ -188,16 +184,13 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
           } else {
             if (lbl.voxel) {
               // 3D→2D: recompute from voxel coords for smooth camera tracking
-              // zoom/center are in physical-pixel space; divide by DPR for CSS positioning
-              screenX = ((lbl.voxel[0] - centerX) * zoom + physW / 2) / dpr;
-              screenY = ((lbl.voxel[1] - centerY) * zoom + physH / 2) / dpr;
+              [screenX, screenY] = projectWorld!([lbl.voxel[0], lbl.voxel[1]]);
             } else {
               // 2D→2D: recompute from peer cursor or camera center
               const [worldX, worldY] = isDefaulted
                 ? (peer.camera as { center?: [number, number] })?.center ?? [0, 0]
                 : peer.cursor!;
-              screenX = ((worldX - centerX) * zoom + physW / 2) / dpr;
-              screenY = ((worldY - centerY) * zoom + physH / 2) / dpr;
+              [screenX, screenY] = projectWorld!([worldX, worldY]);
             }
           }
 

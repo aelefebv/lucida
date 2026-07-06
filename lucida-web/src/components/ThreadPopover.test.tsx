@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { ThreadPopover } from "./ThreadPopover.tsx";
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
 
 const MY_ID = "7";

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
@@ -11,16 +11,15 @@ use lucida_protocol::{
     DatasetSourceHealth,
 };
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::{Request as WsRequest, StatusCode as WsStatusCode};
-use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::http::{api_url, send_json};
+use crate::session::{
+    IncomingSessionMessage, SessionWait, connect_workspace_socket, incoming_messages,
+    observe_until, send_client_message, wait_for_workspace_snapshot,
+};
 use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
 
 #[derive(Debug, Serialize)]
@@ -65,23 +64,12 @@ impl DatasetHttpClient {
     }
 
     pub async fn browse(&self, path: Option<&str>) -> Result<DatasetBrowseResult, CliError> {
-        let mut request = self
-            .http
-            .get(dataset_api_url(&self.base_url, &["api", "browse"])?)
-            .header(reqwest::header::ACCEPT, "application/json");
+        let mut request = self.http.get(api_url(&self.base_url, &["api", "browse"])?);
         if let Some(path) = path {
             request = request.query(&[("path", path)]);
         }
-        if let Some(token) = self.token.as_deref() {
-            request = request.bearer_auth(token);
-        }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(map_browse_error(status, &body));
-        }
+        let response = send_json(request, self.token.as_deref(), map_browse_error).await?;
         let body = response.json::<BrowseResponse>().await?;
         Ok(DatasetBrowseResult {
             path: body.path,
@@ -190,11 +178,6 @@ pub struct DatasetImageSummary {
     pub channel_count: Option<u64>,
 }
 
-struct WorkspaceDatasetSnapshot {
-    seq: u64,
-    document: DocumentState,
-}
-
 pub struct DatasetOpenClient {
     ws_url: String,
     token: Option<String>,
@@ -214,48 +197,16 @@ impl DatasetOpenClient {
         workspace_id: &str,
         wait: Duration,
     ) -> Result<DatasetOpenSummary, CliError> {
-        let mut request = self
-            .ws_url
-            .as_str()
-            .into_client_request()
-            .map_err(|error| {
-                CliError::new(
-                    ErrorKind::InvalidServer,
-                    format!("invalid workspace WebSocket URL: {error}"),
-                )
-            })?;
-        if let Some(token) = self.token.as_deref() {
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                format!("Bearer {token}").parse().map_err(|error| {
-                    CliError::new(
-                        ErrorKind::Config,
-                        format!("failed to build bearer authorization header: {error}"),
-                    )
-                })?,
-            );
-        }
-
-        let (socket, _response) = connect_async(request).await.map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let request_id = dataset_open_request_id();
         let message = ClientMessage::OpenRemoteDataset {
             request_id: request_id.clone(),
             url: source.to_string(),
         };
-        let json = serde_json::to_string(&message)?;
-        write
-            .send(Message::Text(json.into()))
-            .await
-            .map_err(map_websocket_error)?;
+        send_client_message(&mut write, &message).await?;
 
-        let incoming = read.map(|message| match message {
-            Ok(Message::Text(text)) => Ok(IncomingDatasetMessage::Text(text.to_string())),
-            Ok(Message::Close(_)) => Ok(IncomingDatasetMessage::Close),
-            Ok(_) => Ok(IncomingDatasetMessage::Ignore),
-            Err(error) => Err(map_websocket_error(error)),
-        });
-
+        let incoming = incoming_messages(read);
         wait_for_dataset_open_result(incoming, &request_id, source, workspace_id, wait).await
     }
 }
@@ -274,10 +225,7 @@ impl DatasetWorkspaceClient {
     }
 
     pub async fn list(&self, wait: Duration) -> Result<(u64, Vec<DatasetSummary>), CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -292,10 +240,7 @@ impl DatasetWorkspaceClient {
         selector: &str,
         wait: Duration,
     ) -> Result<(u64, DatasetInfo), CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -308,10 +253,7 @@ impl DatasetWorkspaceClient {
         selector: Option<&str>,
         wait: Duration,
     ) -> Result<(u64, Vec<DatasetSourceHealth>), CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -329,10 +271,7 @@ impl DatasetWorkspaceClient {
             request_id: request_id.clone(),
             dataset_id,
         };
-        write
-            .send(Message::Text(serde_json::to_string(&message)?.into()))
-            .await
-            .map_err(map_websocket_error)?;
+        send_client_message(&mut write, &message).await?;
         let health = wait_for_dataset_health_result(&mut incoming, &request_id, wait).await?;
         Ok((snapshot.seq, health))
     }
@@ -343,10 +282,7 @@ impl DatasetWorkspaceClient {
         workspace_id: &str,
         wait: Duration,
     ) -> Result<DatasetOpenSummary, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -357,10 +293,7 @@ impl DatasetWorkspaceClient {
             request_id: request_id.clone(),
             dataset_id: DatasetId(dataset.workspace_dataset_id.clone()),
         };
-        write
-            .send(Message::Text(serde_json::to_string(&message)?.into()))
-            .await
-            .map_err(map_websocket_error)?;
+        send_client_message(&mut write, &message).await?;
         wait_for_dataset_open_result(incoming, &request_id, &dataset.name, workspace_id, wait).await
     }
 
@@ -377,21 +310,14 @@ impl DatasetWorkspaceClient {
             ));
         }
 
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
         let datasets = dataset_summaries_from_document(&snapshot.document);
         let removed = resolve_dataset_summary(selector, &datasets)?;
         let message = remove_dataset_message(&removed.workspace_dataset_id);
-        let json = serde_json::to_string(&message)?;
-        write
-            .send(Message::Text(json.into()))
-            .await
-            .map_err(map_websocket_error)?;
+        send_client_message(&mut write, &message).await?;
         let seq = wait_for_remove_ack(&mut incoming, &removed.workspace_dataset_id, wait).await?;
         Ok((seq, removed))
     }
@@ -693,138 +619,29 @@ pub fn format_dataset_remove_human(output: &DatasetRemoveOutput) -> String {
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IncomingDatasetMessage {
-    Text(String),
-    Close,
-    Ignore,
-}
-
-fn incoming_messages<S>(read: S) -> impl Stream<Item = Result<IncomingDatasetMessage, CliError>>
-where
-    S: Stream<Item = Result<Message, WebSocketError>>,
-{
-    read.map(|message| match message {
-        Ok(Message::Text(text)) => Ok(IncomingDatasetMessage::Text(text.to_string())),
-        Ok(Message::Close(_)) => Ok(IncomingDatasetMessage::Close),
-        Ok(_) => Ok(IncomingDatasetMessage::Ignore),
-        Err(error) => Err(map_websocket_error(error)),
-    })
-}
-
-async fn wait_for_workspace_snapshot<S>(
-    messages: &mut S,
-    wait: Duration,
-) -> Result<WorkspaceDatasetSnapshot, CliError>
-where
-    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
-{
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingDatasetMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Snapshot { seq, document, .. } => {
-                            return Ok(WorkspaceDatasetSnapshot { seq, document });
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before snapshot",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingDatasetMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before snapshot",
-                    ));
-                }
-                IncomingDatasetMessage::Ignore => {}
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before snapshot",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for workspace snapshot after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
 async fn wait_for_remove_ack<S>(
     messages: &mut S,
     dataset_id: &str,
     wait: Duration,
 ) -> Result<u64, CliError>
 where
-    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingDatasetMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Ack { seq } => return Ok(seq),
-                        ServerMessage::CommandBroadcast {
-                            seq,
-                            command: DocumentCommand::RemoveDataset { id },
-                        } if id.0 == dataset_id => return Ok(seq),
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before the dataset was removed",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingDatasetMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before remove confirmation",
-                    ));
-                }
-                IncomingDatasetMessage::Ignore => {}
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before remove confirmation",
-        ))
+    const REMOVE_WAIT: SessionWait = SessionWait {
+        expectation: "remove confirmation",
+        archived_outcome: "the dataset was removed",
+        timeout_subject: "dataset remove confirmation",
+        timeout_kind: ErrorKind::RejectedCommand,
+    };
+    observe_until(messages, wait, &REMOVE_WAIT, |message| match message {
+        ServerMessage::Ack { seq } => Ok(Some(seq)),
+        ServerMessage::CommandBroadcast {
+            seq,
+            command: DocumentCommand::RemoveDataset { id },
+        } if id.0 == dataset_id => Ok(Some(seq)),
+        _ => Ok(None),
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::RejectedCommand,
-            format!(
-                "timed out waiting for dataset remove confirmation after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
 }
 
 fn dataset_summaries_from_document(document: &DocumentState) -> Vec<DatasetSummary> {
@@ -976,69 +793,32 @@ fn format_dimensions(shape: [u64; 5]) -> String {
 async fn wait_for_dataset_open_result<S>(
     mut messages: S,
     request_id: &str,
-    source: &str,
+    _source: &str,
     workspace_id: &str,
     wait: Duration,
 ) -> Result<DatasetOpenSummary, CliError>
 where
-    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    tokio::time::timeout(wait, async {
-        let mut progress = Vec::new();
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingDatasetMessage::Text(text) => {
-                    if let Some(result) = observe_dataset_message(
-                        &text,
-                        request_id,
-                        source,
-                        workspace_id,
-                        &mut progress,
-                    )? {
-                        return Ok(result);
-                    }
-                }
-                IncomingDatasetMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before the dataset opened",
-                    ));
-                }
-                IncomingDatasetMessage::Ignore => {}
-            }
-        }
-
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before the dataset opened",
-        ))
+    const OPEN_WAIT: SessionWait = SessionWait {
+        expectation: "the dataset opened",
+        archived_outcome: "the dataset opened",
+        timeout_subject: "dataset open",
+        timeout_kind: ErrorKind::DatasetOpenFailure,
+    };
+    let mut progress = Vec::new();
+    observe_until(&mut messages, wait, &OPEN_WAIT, |message| {
+        observe_dataset_message(message, request_id, workspace_id, &mut progress)
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::DatasetOpenFailure,
-            format!(
-                "timed out waiting for dataset open after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
 }
 
 fn observe_dataset_message(
-    text: &str,
+    message: ServerMessage,
     request_id: &str,
-    _source: &str,
     workspace_id: &str,
     progress: &mut Vec<DatasetOpenProgressDiagnostic>,
 ) -> Result<Option<DatasetOpenSummary>, CliError> {
-    let message: ServerMessage = serde_json::from_str(text).map_err(|error| {
-        CliError::new(
-            ErrorKind::Protocol,
-            format!("invalid workspace server message: {error}"),
-        )
-    })?;
-
     match message {
         ServerMessage::DatasetOpenProgress {
             request_id: message_request_id,
@@ -1085,10 +865,6 @@ fn observe_dataset_message(
             }
             Err(open_dataset_failure(&url, &error, diagnostic.as_ref()))
         }
-        ServerMessage::WorkspaceArchived { .. } => Err(CliError::new(
-            ErrorKind::ArchivedWorkspace,
-            "workspace was archived before the dataset opened",
-        )),
         _ => Ok(None),
     }
 }
@@ -1123,56 +899,22 @@ async fn wait_for_dataset_health_result<S>(
     wait: Duration,
 ) -> Result<Vec<DatasetSourceHealth>, CliError>
 where
-    S: Stream<Item = Result<IncomingDatasetMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingDatasetMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::DatasetHealth {
-                            request_id: message_request_id,
-                            datasets,
-                        } if message_request_id == request_id => return Ok(datasets),
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before dataset health returned",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingDatasetMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before dataset health returned",
-                    ));
-                }
-                IncomingDatasetMessage::Ignore => {}
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before dataset health returned",
-        ))
+    const HEALTH_WAIT: SessionWait = SessionWait {
+        expectation: "dataset health returned",
+        archived_outcome: "dataset health returned",
+        timeout_subject: "dataset health",
+        timeout_kind: ErrorKind::RejectedCommand,
+    };
+    observe_until(messages, wait, &HEALTH_WAIT, |message| match message {
+        ServerMessage::DatasetHealth {
+            request_id: message_request_id,
+            datasets,
+        } if message_request_id == request_id => Ok(Some(datasets)),
+        _ => Ok(None),
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::RejectedCommand,
-            format!(
-                "timed out waiting for dataset health after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
 }
 
 fn open_dataset_failure(
@@ -1226,23 +968,6 @@ fn error_kind_for_open_failure(kind: DatasetOpenFailureKind) -> ErrorKind {
     }
 }
 
-fn dataset_api_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
-    let mut url = reqwest::Url::parse(server_url)
-        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| CliError::invalid_server("server URL cannot be used as a base URL"))?;
-        path.clear();
-        for segment in segments {
-            path.push(segment);
-        }
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
 fn map_browse_error(status: reqwest::StatusCode, body: &str) -> CliError {
     let body = body.trim();
     match status {
@@ -1272,68 +997,6 @@ fn map_browse_error(status: reqwest::StatusCode, body: &str) -> CliError {
                     status.as_u16()
                 )
             },
-        ),
-    }
-}
-
-fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsRequest<()>, CliError> {
-    let mut request = ws_url.into_client_request().map_err(|error| {
-        CliError::new(
-            ErrorKind::InvalidServer,
-            format!("invalid workspace WebSocket URL: {error}"),
-        )
-    })?;
-    if let Some(token) = token {
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|error| {
-                CliError::new(
-                    ErrorKind::Config,
-                    format!("failed to build bearer authorization header: {error}"),
-                )
-            })?,
-        );
-    }
-    Ok(request)
-}
-
-fn map_websocket_error(error: WebSocketError) -> CliError {
-    match error {
-        WebSocketError::Http(response) => match response.status() {
-            WsStatusCode::UNAUTHORIZED => CliError::new(
-                ErrorKind::Unauthenticated,
-                "not authenticated; run `lucida auth login`",
-            ),
-            WsStatusCode::FORBIDDEN => CliError::new(
-                ErrorKind::Unauthorized,
-                "workspace WebSocket request was forbidden",
-            ),
-            WsStatusCode::NOT_FOUND => CliError::new(
-                ErrorKind::MissingResource,
-                "workspace WebSocket target was not found",
-            ),
-            WsStatusCode::GONE | WsStatusCode::CONFLICT => {
-                CliError::new(ErrorKind::ArchivedWorkspace, "workspace is archived")
-            }
-            status => CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "workspace WebSocket upgrade failed with HTTP {}",
-                    status.as_u16()
-                ),
-            ),
-        },
-        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected",
-        ),
-        WebSocketError::Io(error) => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket I/O failed: {error}"),
-        ),
-        other => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket failed: {other}"),
         ),
     }
 }
@@ -1482,8 +1145,8 @@ mod tests {
 
     fn text_messages(
         texts: Vec<String>,
-    ) -> impl Stream<Item = Result<IncomingDatasetMessage, CliError>> {
-        stream::iter(texts.into_iter().map(IncomingDatasetMessage::Text).map(Ok))
+    ) -> impl Stream<Item = Result<IncomingSessionMessage, CliError>> {
+        stream::iter(texts.into_iter().map(IncomingSessionMessage::Text).map(Ok))
     }
 
     #[tokio::test]
@@ -1594,7 +1257,7 @@ mod tests {
     #[tokio::test]
     async fn reports_timeout() {
         let error = wait_for_dataset_open_result(
-            stream::pending::<Result<IncomingDatasetMessage, CliError>>(),
+            stream::pending::<Result<IncomingSessionMessage, CliError>>(),
             "req-1",
             "/data/demo.zarr",
             "workspace-1",
@@ -1610,7 +1273,7 @@ mod tests {
     #[tokio::test]
     async fn reports_disconnect() {
         let error = wait_for_dataset_open_result(
-            stream::empty::<Result<IncomingDatasetMessage, CliError>>(),
+            stream::empty::<Result<IncomingSessionMessage, CliError>>(),
             "req-1",
             "/data/demo.zarr",
             "workspace-1",
@@ -1858,8 +1521,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remove_wait_completes_across_unsolicited_snapshot() {
+        // A resync snapshot pushed between the command and its ack (broadcast
+        // lag or an answered request_snapshot) is skipped, not mistaken for
+        // the reply.
+        let mut messages = text_messages(vec![
+            snapshot_message(24),
+            serde_json::json!({
+                "type": "ack",
+                "seq": 25
+            })
+            .to_string(),
+        ]);
+
+        let seq = wait_for_remove_ack(&mut messages, "wds-test", Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(seq, 25);
+    }
+
+    #[tokio::test]
     async fn remove_wait_timeout_is_rejected_command() {
-        let mut messages = stream::pending::<Result<IncomingDatasetMessage, CliError>>();
+        let mut messages = stream::pending::<Result<IncomingSessionMessage, CliError>>();
 
         let error = wait_for_remove_ack(&mut messages, "wds-test", Duration::from_millis(1))
             .await

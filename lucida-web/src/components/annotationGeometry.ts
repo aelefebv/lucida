@@ -11,7 +11,7 @@
  * the Rust source of truth — means a line/box renders identically in both views
  * and a future kind only extends this file plus its Rust twin.
  */
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 /** A screen-space point in CSS pixels. */
 export type ScreenPoint = [number, number];

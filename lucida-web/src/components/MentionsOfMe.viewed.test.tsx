@@ -18,7 +18,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { MentionsOfMe } from "./MentionsOfMe.tsx";
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 
 afterEach(() => cleanup());

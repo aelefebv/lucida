@@ -1,22 +1,20 @@
 use std::time::Duration;
 
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use lucida_content::LayoutId;
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_core::scene::DocumentState;
 use serde::Serialize;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::{Request as WsRequest, StatusCode as WsStatusCode};
-use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::session::{
+    IncomingSessionMessage, SessionWait, WorkspaceSnapshot, connect_workspace_socket,
+    incoming_messages, observe_until, send_client_message, wait_for_workspace_snapshot,
+};
 use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
 
 #[derive(Debug, Serialize)]
@@ -80,19 +78,6 @@ pub enum LayoutSource {
     Registered,
 }
 
-#[derive(Debug, Clone)]
-struct WorkspaceLayoutSnapshot {
-    seq: u64,
-    document: DocumentState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IncomingLayoutMessage {
-    Text(String),
-    Close,
-    Ignore,
-}
-
 pub struct LayoutWorkspaceClient {
     ws_url: String,
     token: Option<String>,
@@ -135,21 +120,14 @@ impl LayoutWorkspaceClient {
     ) -> Result<(u64, String, Option<String>, DatasetLayoutState), CliError> {
         ensure_layout_mutation_allowed(workspace)?;
 
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
         let dataset_id = resolve_dataset_id(&snapshot.document, dataset_selector)?;
         let layout_id = resolve_layout_id(&snapshot.document, &dataset_id, layout_selector)?;
         let message = set_active_layout_message(&dataset_id, &layout_id);
-        let json = serde_json::to_string(&message)?;
-        write
-            .send(Message::Text(json.into()))
-            .await
-            .map_err(map_websocket_error)?;
+        send_client_message(&mut write, &message).await?;
         let seq = wait_for_layout_set_ack(&mut incoming, &dataset_id, &layout_id, wait).await?;
 
         let mut document = snapshot.document;
@@ -161,11 +139,8 @@ impl LayoutWorkspaceClient {
         Ok((seq, layout_id.0, warning, dataset))
     }
 
-    async fn snapshot(&self, wait: Duration) -> Result<WorkspaceLayoutSnapshot, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+    async fn snapshot(&self, wait: Duration) -> Result<WorkspaceSnapshot, CliError> {
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         wait_for_workspace_snapshot(&mut incoming, wait).await
@@ -469,74 +444,6 @@ fn set_active_layout_message(dataset_id: &DatasetId, layout_id: &LayoutId) -> Cl
     }
 }
 
-fn incoming_messages<S>(read: S) -> impl Stream<Item = Result<IncomingLayoutMessage, CliError>>
-where
-    S: Stream<Item = Result<Message, WebSocketError>>,
-{
-    read.map(|message| match message {
-        Ok(Message::Text(text)) => Ok(IncomingLayoutMessage::Text(text.to_string())),
-        Ok(Message::Close(_)) => Ok(IncomingLayoutMessage::Close),
-        Ok(_) => Ok(IncomingLayoutMessage::Ignore),
-        Err(error) => Err(map_websocket_error(error)),
-    })
-}
-
-async fn wait_for_workspace_snapshot<S>(
-    messages: &mut S,
-    wait: Duration,
-) -> Result<WorkspaceLayoutSnapshot, CliError>
-where
-    S: Stream<Item = Result<IncomingLayoutMessage, CliError>> + Unpin,
-{
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingLayoutMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Snapshot { seq, document, .. } => {
-                            return Ok(WorkspaceLayoutSnapshot { seq, document });
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before snapshot",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingLayoutMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before snapshot",
-                    ));
-                }
-                IncomingLayoutMessage::Ignore => {}
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before snapshot",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for workspace snapshot after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
 async fn wait_for_layout_set_ack<S>(
     messages: &mut S,
     dataset_id: &DatasetId,
@@ -544,127 +451,29 @@ async fn wait_for_layout_set_ack<S>(
     wait: Duration,
 ) -> Result<u64, CliError>
 where
-    S: Stream<Item = Result<IncomingLayoutMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingLayoutMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Ack { seq } => return Ok(seq),
-                        ServerMessage::CommandBroadcast {
-                            seq,
-                            command:
-                                DocumentCommand::SetActiveLayout {
-                                    dataset_id: observed_dataset_id,
-                                    layout_id: observed_layout_id,
-                                },
-                        } if &observed_dataset_id == dataset_id
-                            && &observed_layout_id == layout_id =>
-                        {
-                            return Ok(seq);
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before the active layout changed",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingLayoutMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before layout confirmation",
-                    ));
-                }
-                IncomingLayoutMessage::Ignore => {}
-            }
+    const LAYOUT_SET_WAIT: SessionWait = SessionWait {
+        expectation: "layout confirmation",
+        archived_outcome: "the active layout changed",
+        timeout_subject: "active layout confirmation",
+        timeout_kind: ErrorKind::RejectedCommand,
+    };
+    observe_until(messages, wait, &LAYOUT_SET_WAIT, |message| match message {
+        ServerMessage::Ack { seq } => Ok(Some(seq)),
+        ServerMessage::CommandBroadcast {
+            seq,
+            command:
+                DocumentCommand::SetActiveLayout {
+                    dataset_id: observed_dataset_id,
+                    layout_id: observed_layout_id,
+                },
+        } if &observed_dataset_id == dataset_id && &observed_layout_id == layout_id => {
+            Ok(Some(seq))
         }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before layout confirmation",
-        ))
+        _ => Ok(None),
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::RejectedCommand,
-            format!(
-                "timed out waiting for active layout confirmation after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
-fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsRequest<()>, CliError> {
-    let mut request = ws_url.into_client_request().map_err(|error| {
-        CliError::new(
-            ErrorKind::InvalidServer,
-            format!("invalid workspace WebSocket URL: {error}"),
-        )
-    })?;
-    if let Some(token) = token {
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|error| {
-                CliError::new(
-                    ErrorKind::Config,
-                    format!("failed to build bearer authorization header: {error}"),
-                )
-            })?,
-        );
-    }
-    Ok(request)
-}
-
-fn map_websocket_error(error: WebSocketError) -> CliError {
-    match error {
-        WebSocketError::Http(response) => match response.status() {
-            WsStatusCode::UNAUTHORIZED => CliError::new(
-                ErrorKind::Unauthenticated,
-                "not authenticated; run `lucida auth login`",
-            ),
-            WsStatusCode::FORBIDDEN => CliError::new(
-                ErrorKind::Unauthorized,
-                "workspace WebSocket request was forbidden",
-            ),
-            WsStatusCode::NOT_FOUND => CliError::new(
-                ErrorKind::MissingResource,
-                "workspace WebSocket target was not found",
-            ),
-            WsStatusCode::GONE | WsStatusCode::CONFLICT => {
-                CliError::new(ErrorKind::ArchivedWorkspace, "workspace is archived")
-            }
-            status => CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "workspace WebSocket upgrade failed with HTTP {}",
-                    status.as_u16()
-                ),
-            ),
-        },
-        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected",
-        ),
-        WebSocketError::Io(error) => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket I/O failed: {error}"),
-        ),
-        other => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket failed: {other}"),
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -726,11 +535,11 @@ mod tests {
 
     fn text_messages(
         values: Vec<String>,
-    ) -> impl Stream<Item = Result<IncomingLayoutMessage, CliError>> {
+    ) -> impl Stream<Item = Result<IncomingSessionMessage, CliError>> {
         stream::iter(
             values
                 .into_iter()
-                .map(IncomingLayoutMessage::Text)
+                .map(IncomingSessionMessage::Text)
                 .map(Ok::<_, Infallible>)
                 .map(|result| result.map_err(|never| match never {})),
         )
@@ -868,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn layout_set_wait_timeout_is_rejected_command() {
-        let mut messages = stream::pending::<Result<IncomingLayoutMessage, CliError>>();
+        let mut messages = stream::pending::<Result<IncomingSessionMessage, CliError>>();
 
         let error = wait_for_layout_set_ack(
             &mut messages,

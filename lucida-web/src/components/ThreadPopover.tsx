@@ -35,7 +35,7 @@
 import { useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
-import type { Annotation, Comment } from "./AnnotationOverlay.tsx";
+import type { Annotation, Comment } from "./annotationDocument.ts";
 import {
   splitMentionTokens,
   type MentionCandidate,

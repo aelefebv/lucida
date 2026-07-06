@@ -141,6 +141,15 @@ pub enum ClientMessage {
     /// This is session/runtime state only; it is not a document command and
     /// must not be persisted in saved views.
     ViewerInterest { interest: ViewerInterestHint },
+    /// Request a fresh authoritative [`ServerMessage::Snapshot`] for this
+    /// session. Sent when the client detects a gap in the sequenced
+    /// `CommandBroadcast`/`Ack` stream (the server's per-client broadcast
+    /// queue overflowed and dropped messages). The server answers on the
+    /// requester's connection with the same snapshot a (re)connect
+    /// receives, and the client resumes seq tracking from the snapshot's
+    /// `seq`. Carries no fields: the snapshot is self-describing, and the
+    /// client's seq discipline makes a redundant snapshot harmless.
+    RequestSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -485,6 +494,26 @@ mod tests {
             }
             _ => panic!("expected ViewerInterest"),
         }
+    }
+
+    #[test]
+    fn request_snapshot_round_trips() {
+        let msg = ClientMessage::RequestSnapshot;
+        let json = serde_json::to_string(&msg).unwrap();
+        // Wire-stability assertion: the resync request is exactly this
+        // envelope — the web client emits it as a literal.
+        assert_eq!(json, r#"{"type":"request_snapshot"}"#);
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::RequestSnapshot));
+    }
+
+    #[test]
+    fn client_message_request_snapshot_matches_wire_envelope() {
+        // The exact client->server envelope the web sends on a detected
+        // seq gap.
+        let json = r#"{"type":"request_snapshot"}"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(parsed, ClientMessage::RequestSnapshot));
     }
 
     #[test]

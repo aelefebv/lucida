@@ -6,7 +6,7 @@
  * CURRENT dataset's annotations. "Current" is normally the user's selected
  * dataset — but `selectedDatasetId` is `null` until a dataset is actually
  * selected, and the auto-select only fires when exactly one dataset is open
- * (see `setupFetchPipeline` in useBridge). That leaves a real window — a
+ * (see `setupFetchPipeline` in sessionController.ts). That leaves a real window — a
  * peer-opened dataset, or a multi-/zero-dataset snapshot — where a peer's
  * annotations have ALREADY landed in the scene while nothing is selected.
  *
@@ -23,7 +23,7 @@
  * a selection. A truthy `selectedDatasetId` always wins, so a user who has a
  * dataset selected sees exactly the previous behavior (their dataset, scoped).
  */
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 /** The minimal slice of `WasmScene` this resolver reads — kept structural so it
  * needn't depend on the WASM type and is trivial to drive in a test (the real

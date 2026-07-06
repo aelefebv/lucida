@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use futures_util::{Sink, Stream, StreamExt};
 use lucida_content::LayoutId;
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
@@ -9,16 +9,17 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{DatasetDisplaySettings, DocumentState};
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::{Request as WsRequest, StatusCode as WsStatusCode};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::http::{api_url, response_detail, send_json};
+use crate::session::{
+    IncomingSessionMessage, SessionWait, WorkspaceSnapshot, connect_workspace_socket,
+    incoming_messages, observe_until, send_client_message, wait_for_workspace_snapshot,
+};
 use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,21 +187,6 @@ struct UpdateWorkspaceSavedViewBody<'a> {
 #[derive(Debug, Serialize)]
 struct UpdateWorkspaceDefaultSavedViewBody<'a> {
     saved_view_id: Option<&'a str>,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceSavedViewSnapshot {
-    seq: u64,
-    document: DocumentState,
-    peers: Vec<PresenceState>,
-    your_id: ClientId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IncomingSavedViewMessage {
-    Text(String),
-    Close,
-    Ignore,
 }
 
 pub struct WorkspaceSavedViewClient {
@@ -407,10 +393,7 @@ impl WorkspaceSavedViewClient {
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<(SavedViewPresenceSource, SavedView), CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (_write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -423,10 +406,7 @@ impl WorkspaceSavedViewClient {
         view: &SavedView,
         wait: Duration,
     ) -> Result<SavedViewApplyResult, CliError> {
-        let (socket, _response) =
-            connect_async(workspace_ws_request(&self.ws_url, self.token.as_deref())?)
-                .await
-                .map_err(map_websocket_error)?;
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
@@ -455,23 +435,8 @@ impl WorkspaceSavedViewClient {
         .map_err(CliError::from)
     }
 
-    async fn send(
-        &self,
-        mut request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, CliError> {
-        if let Some(token) = self.token.as_deref() {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        let body = response.text().await.unwrap_or_default();
-        Err(map_saved_view_http_error(status, &body))
+    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, CliError> {
+        send_json(request, self.token.as_deref(), map_saved_view_http_error).await
     }
 }
 
@@ -671,7 +636,7 @@ fn ensure_saved_view_mutation_allowed(workspace: &WorkspaceRecord) -> Result<(),
 }
 
 fn capture_saved_view_from_snapshot(
-    snapshot: &WorkspaceSavedViewSnapshot,
+    snapshot: &WorkspaceSnapshot,
     from_peer: Option<ClientId>,
 ) -> Result<(SavedViewPresenceSource, SavedView), CliError> {
     let source_client_id = from_peer.unwrap_or(snapshot.your_id);
@@ -717,14 +682,14 @@ fn capture_saved_view_from_snapshot(
 async fn apply_saved_view_to_workspace<W, S>(
     write: &mut W,
     incoming: &mut S,
-    snapshot: &WorkspaceSavedViewSnapshot,
+    snapshot: &WorkspaceSnapshot,
     workspace: &WorkspaceRecord,
     view: &SavedView,
     wait: Duration,
 ) -> Result<SavedViewApplyResult, CliError>
 where
     W: Sink<Message, Error = WebSocketError> + Unpin,
-    S: Stream<Item = Result<IncomingSavedViewMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
     let own_presence = snapshot
         .peers
@@ -932,17 +897,6 @@ fn layout_exists(document: &DocumentState, dataset_id: &DatasetId, layout_id: &L
             .unwrap_or(false)
 }
 
-async fn send_client_message<W>(write: &mut W, message: &ClientMessage) -> Result<(), CliError>
-where
-    W: Sink<Message, Error = WebSocketError> + Unpin,
-{
-    let json = serde_json::to_string(message)?;
-    write
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(map_websocket_error)
-}
-
 async fn wait_for_document_ack<S>(
     messages: &mut S,
     dataset_id: &DatasetId,
@@ -950,165 +904,29 @@ async fn wait_for_document_ack<S>(
     wait: Duration,
 ) -> Result<u64, CliError>
 where
-    S: Stream<Item = Result<IncomingSavedViewMessage, CliError>> + Unpin,
+    S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingSavedViewMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Ack { seq } => return Ok(seq),
-                        ServerMessage::CommandBroadcast {
-                            seq,
-                            command:
-                                DocumentCommand::SetActiveLayout {
-                                    dataset_id: observed_dataset_id,
-                                    layout_id: observed_layout_id,
-                                },
-                        } if &observed_dataset_id == dataset_id
-                            && &observed_layout_id == layout_id =>
-                        {
-                            return Ok(seq);
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before saved-view apply completed",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingSavedViewMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before saved-view apply confirmation",
-                    ));
-                }
-                IncomingSavedViewMessage::Ignore => {}
-            }
+    const APPLY_WAIT: SessionWait = SessionWait {
+        expectation: "saved-view apply confirmation",
+        archived_outcome: "saved-view apply completed",
+        timeout_subject: "saved-view layout confirmation",
+        timeout_kind: ErrorKind::RejectedCommand,
+    };
+    observe_until(messages, wait, &APPLY_WAIT, |message| match message {
+        ServerMessage::Ack { seq } => Ok(Some(seq)),
+        ServerMessage::CommandBroadcast {
+            seq,
+            command:
+                DocumentCommand::SetActiveLayout {
+                    dataset_id: observed_dataset_id,
+                    layout_id: observed_layout_id,
+                },
+        } if &observed_dataset_id == dataset_id && &observed_layout_id == layout_id => {
+            Ok(Some(seq))
         }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before saved-view apply confirmation",
-        ))
+        _ => Ok(None),
     })
     .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::RejectedCommand,
-            format!(
-                "timed out waiting for saved-view layout confirmation after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
-fn incoming_messages<S>(read: S) -> impl Stream<Item = Result<IncomingSavedViewMessage, CliError>>
-where
-    S: Stream<Item = Result<Message, WebSocketError>>,
-{
-    read.map(|message| match message {
-        Ok(Message::Text(text)) => Ok(IncomingSavedViewMessage::Text(text.to_string())),
-        Ok(Message::Close(_)) => Ok(IncomingSavedViewMessage::Close),
-        Ok(_) => Ok(IncomingSavedViewMessage::Ignore),
-        Err(error) => Err(map_websocket_error(error)),
-    })
-}
-
-async fn wait_for_workspace_snapshot<S>(
-    messages: &mut S,
-    wait: Duration,
-) -> Result<WorkspaceSavedViewSnapshot, CliError>
-where
-    S: Stream<Item = Result<IncomingSavedViewMessage, CliError>> + Unpin,
-{
-    tokio::time::timeout(wait, async {
-        while let Some(message) = messages.next().await {
-            match message? {
-                IncomingSavedViewMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
-                    match message {
-                        ServerMessage::Snapshot {
-                            seq,
-                            document,
-                            peers,
-                            your_id,
-                            ..
-                        } => {
-                            return Ok(WorkspaceSavedViewSnapshot {
-                                seq,
-                                document,
-                                peers,
-                                your_id,
-                            });
-                        }
-                        ServerMessage::WorkspaceArchived { .. } => {
-                            return Err(CliError::new(
-                                ErrorKind::ArchivedWorkspace,
-                                "workspace was archived before snapshot",
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                IncomingSavedViewMessage::Close => {
-                    return Err(CliError::new(
-                        ErrorKind::SessionDisconnect,
-                        "workspace WebSocket closed before snapshot",
-                    ));
-                }
-                IncomingSavedViewMessage::Ignore => {}
-            }
-        }
-        Err(CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected before snapshot",
-        ))
-    })
-    .await
-    .map_err(|_| {
-        CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!(
-                "timed out waiting for workspace snapshot after {}s",
-                wait.as_secs()
-            ),
-        )
-    })?
-}
-
-fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsRequest<()>, CliError> {
-    let mut request = ws_url.into_client_request().map_err(|error| {
-        CliError::new(
-            ErrorKind::InvalidServer,
-            format!("invalid workspace WebSocket URL: {error}"),
-        )
-    })?;
-    if let Some(token) = token {
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            format!("Bearer {token}").parse().map_err(|error| {
-                CliError::new(
-                    ErrorKind::Config,
-                    format!("failed to build bearer authorization header: {error}"),
-                )
-            })?,
-        );
-    }
-    Ok(request)
 }
 
 fn saved_view_collection_url(
@@ -1199,23 +1017,6 @@ fn saved_view_reject_url(
     )
 }
 
-fn api_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
-    let mut url = reqwest::Url::parse(server_url)
-        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| CliError::invalid_server("server URL cannot be used as a base URL"))?;
-        path.clear();
-        for segment in segments {
-            path.push(segment);
-        }
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
 fn map_saved_view_http_error(status: reqwest::StatusCode, body: &str) -> CliError {
     let detail = response_detail(body);
     match status {
@@ -1244,56 +1045,6 @@ fn map_saved_view_http_error(status: reqwest::StatusCode, body: &str) -> CliErro
             detail.unwrap_or_else(|| {
                 format!("unexpected saved-view response: HTTP {}", status.as_u16())
             }),
-        ),
-    }
-}
-
-fn response_detail(body: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
-    value
-        .get("detail")
-        .or_else(|| value.get("error"))
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-}
-
-fn map_websocket_error(error: WebSocketError) -> CliError {
-    match error {
-        WebSocketError::Http(response) => match response.status() {
-            WsStatusCode::UNAUTHORIZED => CliError::new(
-                ErrorKind::Unauthenticated,
-                "not authenticated; run `lucida auth login`",
-            ),
-            WsStatusCode::FORBIDDEN => CliError::new(
-                ErrorKind::Unauthorized,
-                "workspace WebSocket request was forbidden",
-            ),
-            WsStatusCode::NOT_FOUND => CliError::new(
-                ErrorKind::MissingResource,
-                "workspace WebSocket target was not found",
-            ),
-            WsStatusCode::GONE | WsStatusCode::CONFLICT => {
-                CliError::new(ErrorKind::ArchivedWorkspace, "workspace is archived")
-            }
-            status => CliError::new(
-                ErrorKind::SessionDisconnect,
-                format!(
-                    "workspace WebSocket upgrade failed with HTTP {}",
-                    status.as_u16()
-                ),
-            ),
-        },
-        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => CliError::new(
-            ErrorKind::SessionDisconnect,
-            "workspace WebSocket disconnected",
-        ),
-        WebSocketError::Io(error) => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket I/O failed: {error}"),
-        ),
-        other => CliError::new(
-            ErrorKind::SessionDisconnect,
-            format!("workspace WebSocket failed: {other}"),
         ),
     }
 }
@@ -1371,12 +1122,13 @@ mod tests {
         .unwrap()
     }
 
-    fn snapshot() -> WorkspaceSavedViewSnapshot {
-        WorkspaceSavedViewSnapshot {
+    fn snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
             seq: 12,
             document: document_with_layouts(),
             peers: vec![presence(7)],
             your_id: 7,
+            generated_availability: HashMap::new(),
         }
     }
 
@@ -1424,11 +1176,11 @@ mod tests {
 
     fn text_messages(
         values: Vec<String>,
-    ) -> impl Stream<Item = Result<IncomingSavedViewMessage, CliError>> {
+    ) -> impl Stream<Item = Result<IncomingSessionMessage, CliError>> {
         stream::iter(
             values
                 .into_iter()
-                .map(IncomingSavedViewMessage::Text)
+                .map(IncomingSessionMessage::Text)
                 .map(Ok::<_, Infallible>)
                 .map(|result| result.map_err(|never| match never {})),
         )
@@ -1572,7 +1324,7 @@ mod tests {
 
     #[tokio::test]
     async fn document_ack_wait_timeout_is_rejected() {
-        let mut messages = stream::pending::<Result<IncomingSavedViewMessage, CliError>>();
+        let mut messages = stream::pending::<Result<IncomingSessionMessage, CliError>>();
 
         let error = wait_for_document_ack(
             &mut messages,

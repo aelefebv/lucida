@@ -332,6 +332,7 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
         ClientMessage::DatasetHealth { .. } => &["session/client_dataset_health.json"],
         ClientMessage::DatasetRetry { .. } => &["session/client_dataset_retry.json"],
         ClientMessage::ViewerInterest { .. } => &["session/client_viewer_interest.json"],
+        ClientMessage::RequestSnapshot => &["session/client_request_snapshot.json"],
     }
 }
 
@@ -1900,6 +1901,11 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
                 dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
             },
             req("", &["/type", "/request_id", "/dataset_id"]),
+        ),
+        (
+            "session/client_request_snapshot.json",
+            ClientMessage::RequestSnapshot,
+            req("", &["/type"]),
         ),
         (
             "session/client_viewer_interest.json",

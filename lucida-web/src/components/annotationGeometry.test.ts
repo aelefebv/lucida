@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { annotationVertices, isClosedShape } from "./annotationGeometry.ts";
-import type { Annotation } from "./AnnotationOverlay.tsx";
+import type { Annotation } from "./annotationDocument.ts";
 
 // Parity tests for the TS geometry mirror. These assert the SAME contract the
 // Rust unit tests (`vertices_point_is_single_anchor`,

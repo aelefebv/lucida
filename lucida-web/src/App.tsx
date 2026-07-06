@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
@@ -6,7 +6,8 @@ import { FocalDepthControl } from "./components/FocalDepthControl.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
-import { AnnotationOverlay, type Annotation, type AnnotationOverlayHandle } from "./components/AnnotationOverlay.tsx";
+import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
+import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
@@ -25,14 +26,17 @@ import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
-import { bumpSettingsGeneration } from "./tickCommon.ts";
+import {
+  invalidateDisplaySettings,
+  invalidateAfterViewRestore,
+  requestRender,
+} from "./invalidation.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
-import { DebugPanel } from "./debug/DebugPanel.tsx";
-import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
+import { DEBUG_OVERLAYS, isOverlayEnabled, onOverlaysChanged } from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -58,6 +62,20 @@ import {
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
 import "./App.css";
+
+// The debug UI (side panel + on-canvas overlay layer) is code-split into
+// its own on-demand chunk: the panel loads on the first Debug-button
+// click, the overlay layer only when an overlay toggle is persisted on
+// (or the panel is open). A session that never opens either never
+// downloads the code — the main bundle keeps only the tiny gate/stat
+// modules (debug/logging.ts, debug/debugStats.ts) that production code
+// paths already share.
+const DebugPanel = lazy(() =>
+  import("./debug/DebugPanel.tsx").then((m) => ({ default: m.DebugPanel })),
+);
+const DebugOverlays = lazy(() =>
+  import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
+);
 
 interface AppProps {
   workspaceId: string;
@@ -652,9 +670,7 @@ function App({
     }
     bridge.breakFollow();
     emitPresenceWithUrl();
-    bumpSettingsGeneration();
-    render.loopRef.current?.markInteractiveDirty("annotation_view_restore");
-    render.loopRef.current?.markResidencyDirty("annotation_view_restore");
+    invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
 
     // Surface the graceful-degrade notice (auto-clears below).
     setRestoreNotice(result.notice);
@@ -792,8 +808,14 @@ function App({
   // Expose the tickCoordinator + cpuCache on `window.__orch` (also
   // aliased as `__lucidaOrch`) so the dev console can call
   // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to
-  // verify the proxy fetch wire flow.
+  // verify the proxy fetch wire flow. Dev builds only: requestTestProxy
+  // issues real fetches, so production gets no such hook. (The
+  // load-bearing capture globals — `__lucidaCaptureReady` published by
+  // renderLoop.ts, `__lucidaAutoContrast` by useIntensityBatcher.ts —
+  // are a separate contract and stay present in every build; the CLI
+  // capture path and the tryout harness read them.)
   useEffect(() => {
+    if (!import.meta.env.DEV) return;
     const loop = render.activeLoop;
     const cache = bridge.sessionRef.current?.cpuCache;
     if (!loop || !cache) return;
@@ -884,7 +906,7 @@ function App({
     }
 
     setCursorLabels(result.labels);
-    render.loopRef.current?.markInteractiveDirty();
+    requestRender(render.loopRef.current, "peer_cursors");
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
 
   // Auto-clear the light-restore graceful-degrade notice a few seconds after it
@@ -925,7 +947,7 @@ function App({
     setCameraMode(newMode);
     bridge.breakFollow();
     emitPresenceWithUrl();
-    render.loopRef.current?.markInteractiveDirty();
+    requestRender(render.loopRef.current, "camera_mode_toggle");
     render.canvasRef.current?.focus();
   }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
 
@@ -940,6 +962,17 @@ function App({
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  // Whether any on-canvas debug overlay is toggled on (persisted in
+  // localStorage `debug.overlays`, independent of the panel). Drives the
+  // mount of the code-split DebugOverlays layer: with every overlay off
+  // and the panel closed there is nothing it could draw, so the chunk
+  // isn't fetched. The panel being open also mounts it — the Config
+  // tab's radius-slider drag previews render through the overlay layer.
+  const anyOverlayEnabled = useSyncExternalStore(
+    onOverlaysChanged,
+    () => DEBUG_OVERLAYS.some((o) => isOverlayEnabled(o)),
+    () => false,
+  );
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
   // Default the Explore panel OPEN on a fresh dataset open so a first-timer finds
   // the guided-exploration affordance — but stay CLOSED when the page loads into a
@@ -1044,7 +1077,7 @@ function App({
       debugStats.enabled = !prev;
       return !prev;
     });
-    render.loopRef.current?.markInteractiveDirty();
+    requestRender(render.loopRef.current, "debug_toggle");
   }, [render.loopRef]);
   const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!showDebug) return;
@@ -1157,9 +1190,16 @@ function App({
         layoutRegistry={layoutRegistry}
         sendCommand={bridge.sendCommand}
         onLayoutChange={() => {
-          render.loopRef.current?.markInteractiveDirty();
+          // The switcher already applied `set_active_layout` to the scene
+          // (LayoutRegistry.setActive). Match the inbound-peer arm in
+          // sessionController.ts, which bumps the settings generation after
+          // every applied command and marks interactive — so the planner
+          // re-reads and the canvas replans/renders without waiting for a
+          // pan/zoom (the #780 class: a missed signal here leaves plate
+          // members drawn at their pre-switch positions).
+          invalidateDisplaySettings(render.loopRef.current, "layout_switch");
           // A local layout switch re-anchors plate annotations in core (issue
-          // #780), but — unlike an inbound peer switch (see useBridge) — it
+          // #780), but — unlike an inbound peer switch (see sessionController.ts) — it
           // doesn't bump the remote document version on its own, so the overlay
           // would keep showing pins at their pre-switch positions for the
           // switcher. Bump it here so the overlay re-reads the re-anchored pins,
@@ -1294,7 +1334,7 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
+                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
@@ -1322,7 +1362,7 @@ function App({
                     if (!ws) return;
                     applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
                     emitPresenceWithUrl();
-                    render.loopRef.current?.markInteractiveDirty();
+                    requestRender(render.loopRef.current, "plate_well_click");
                   }}
                 />
               );
@@ -1365,7 +1405,7 @@ function App({
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => render.loopRef.current?.markInteractiveDirty()}
+                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
@@ -1388,14 +1428,18 @@ function App({
             {render.clientReady && render.clientRef.current && (
               <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
             )}
-            <DebugOverlays
-              wasmSceneRef={scene.wasmSceneRef}
-              canvasRef={render.canvasRef}
-              datasets={datasetsRef.current}
-              renderLoopRef={render.loopRef}
-              cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
-              viewMode={dims.viewMode}
-            />
+            {(showDebug || anyOverlayEnabled) && (
+              <Suspense fallback={null}>
+                <DebugOverlays
+                  wasmSceneRef={scene.wasmSceneRef}
+                  canvasRef={render.canvasRef}
+                  datasets={datasetsRef.current}
+                  renderLoopRef={render.loopRef}
+                  cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
+                  viewMode={dims.viewMode}
+                />
+              </Suspense>
+            )}
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
             {/* Non-blocking graceful-degrade notice from the LIGHT annotation
@@ -1479,15 +1523,17 @@ function App({
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
           </div>
           {showDebug && (
-            <DebugPanel
-              wasmSceneRef={scene.wasmSceneRef}
-              datasetId={selectedDatasetId}
-              lastClickScreen={lastClickScreen}
-              datasets={datasetsRef.current}
-              sessionRef={bridge.sessionRef}
-              renderLoopRef={render.loopRef}
-              style={{ height: layout.canvasHeight }}
-            />
+            <Suspense fallback={null}>
+              <DebugPanel
+                wasmSceneRef={scene.wasmSceneRef}
+                datasetId={selectedDatasetId}
+                lastClickScreen={lastClickScreen}
+                datasets={datasetsRef.current}
+                sessionRef={bridge.sessionRef}
+                renderLoopRef={render.loopRef}
+                style={{ height: layout.canvasHeight }}
+              />
+            </Suspense>
           )}
         </div>
         {datasetsVersion > 0 && (

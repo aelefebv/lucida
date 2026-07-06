@@ -1,8 +1,9 @@
 import { COLORMAP_NAMES } from "../colormaps.ts";
+import type { Colormap } from "../savedView/types.ts";
 
 interface Props {
   value: string;
-  onChange: (colormap: string) => void;
+  onChange: (colormap: Colormap) => void;
   label?: string;
 }
 
@@ -11,7 +12,7 @@ export function ColormapSelector({ value, onChange, label = "Colormap" }: Props)
     <select
       value={value}
       aria-label={label}
-      onChange={(e) => onChange(e.target.value)}
+      onChange={(e) => onChange(e.target.value as Colormap)}
     >
       {COLORMAP_NAMES.map((name) => (
         <option key={name} value={name}>

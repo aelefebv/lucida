@@ -25,7 +25,7 @@
 // because by construction this code only ever sees the doc the recipient is
 // already authorized to read.
 
-import type { Annotation } from "../components/AnnotationOverlay.tsx";
+import type { Annotation } from "../components/annotationDocument.ts";
 
 /** The minimal slice of `WasmScene` the resolver reads. Structural so it needn't
  *  depend on the WASM type and is trivial to drive in a test (the real

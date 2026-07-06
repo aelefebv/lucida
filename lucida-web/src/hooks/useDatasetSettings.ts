@@ -5,14 +5,22 @@ import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetState } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
-import { bumpSettingsGeneration } from "../tickCommon.ts";
+import type { ViewportCommand } from "../commands.ts";
+import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
+import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos } from "../pipeline/planning/labelRequests.ts";
 
-/** Apply a settings command and invalidate the settings cache. */
-function applySettingsCommand(scene: WasmScene, cmd: Record<string, unknown>): void {
+/** Apply a display-settings command and signal the change: the planner's
+ *  settings cache is invalidated and the render loop (when mounted) is asked
+ *  for a frame, in one composed intent so neither tap can be forgotten. */
+function applySettingsCommand(
+  scene: WasmScene,
+  cmd: ViewportCommand,
+  loop: RenderLoop | null,
+): void {
   scene.apply_command(JSON.stringify(cmd));
-  bumpSettingsGeneration();
+  invalidateDisplaySettings(loop);
 }
 
 function detailLevelOptions(ds: DatasetState | undefined): { level: number; label: string }[] {
@@ -215,8 +223,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_visible", dataset_id: id, visible });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_dataset_visible", dataset_id: id, visible }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -226,8 +233,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_opacity", dataset_id: id, opacity });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_dataset_opacity", dataset_id: id, opacity }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -238,8 +244,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
@@ -250,20 +255,18 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetColormap = useCallback((id: string, colormap: string) => {
+  const handleLayerSetColormap = useCallback((id: string, colormap: Colormap) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -274,19 +277,17 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_visible", dataset_id: id, channel, visible });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_visible", dataset_id: id, channel, visible }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: string) => {
+  const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: Colormap) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel, colormap });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel, colormap }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -302,8 +303,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_name", dataset_id: id, channel, name });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_name", dataset_id: id, channel, name }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -313,8 +313,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel, min, max });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel, min, max }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -324,19 +323,17 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel, gamma });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel, gamma }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleChannelSetBlendMode = useCallback((id: string, blendMode: string) => {
+  const handleChannelSetBlendMode = useCallback((id: string, blendMode: BlendMode) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_channel_blend_mode", dataset_id: id, blend_mode: blendMode });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_channel_blend_mode", dataset_id: id, blend_mode: blendMode }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -351,8 +348,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_label_visible", dataset_id: id, label, visible });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_label_visible", dataset_id: id, label, visible }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -362,30 +358,27 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_label_opacity", dataset_id: id, label, opacity });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_label_opacity", dataset_id: id, label, opacity }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetBlendMode = useCallback((id: string, mode: string) => {
+  const handleLayerSetBlendMode = useCallback((id: string, mode: BlendMode) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetRenderMode = useCallback((id: string, mode: string) => {
+  const handleLayerSetRenderMode = useCallback((id: string, mode: RenderMode) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_render_mode", dataset_id: id, render_mode: mode });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_dataset_render_mode", dataset_id: id, render_mode: mode }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -395,8 +388,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_detail_level_override", dataset_id: id, level });
-      loopRef.current?.markInteractiveDirty();
+      applySettingsCommand(scene, { type: "set_dataset_detail_level_override", dataset_id: id, level }, loopRef.current);
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -409,8 +401,7 @@ export function useDatasetSettings({
       if (scene) {
         bridgeCallbacksRef.current.breakFollow();
         const c = scene.c();
-        applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
-        loopRef.current?.markInteractiveDirty();
+        applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
     }
@@ -429,8 +420,7 @@ export function useDatasetSettings({
           if (scene) {
             bridgeCallbacksRef.current.breakFollow();
             const c = scene.c();
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
-            loopRef.current?.markInteractiveDirty();
+            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
             bridgeCallbacksRef.current.emitDatasetPresence();
           }
         }
@@ -451,16 +441,20 @@ export function useDatasetSettings({
         if (!wasFull) {
           const ds = datasetsRef.current.get(id);
           const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
-          applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax });
+          applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax }, loopRef.current);
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
         } else {
           const dr = dataRangeMap.get(id);
           if (dr) {
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
+            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
+          } else {
+            // No recorded data range to return to: the scene is unchanged,
+            // but keep the frame this toggle has always requested so the
+            // panel state flip is reflected promptly.
+            requestRender(loopRef.current);
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
-        loopRef.current?.markInteractiveDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
       return next;
@@ -477,8 +471,7 @@ export function useDatasetSettings({
     const swapIdx = direction === "up" ? idx + 1 : idx - 1;
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
-    applySettingsCommand(scene, { type: "set_dataset_order", order });
-    loopRef.current?.markInteractiveDirty();
+    applySettingsCommand(scene, { type: "set_dataset_order", order }, loopRef.current);
     bridgeCallbacksRef.current.emitDatasetPresence();
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);

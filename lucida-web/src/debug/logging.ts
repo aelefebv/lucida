@@ -1,7 +1,18 @@
 /**
  * Debug logging registry. Single source of truth for enabled categories,
  * persisted in `localStorage.debug` as a comma-separated list (or `*` for
- * all). See `wiki/decisions/logging-conventions.md`.
+ * all). See `wiki/decisions/0012-logging-conventions.md`.
+ *
+ * The persisted set is read ONCE at module init and cached in
+ * `enabledCategories`; the per-call gate (`isDebugEnabled`) sits on hot
+ * paths — every `bridgeLog`, cache/upload telemetry event, and render-loop
+ * dirty log routes through it — so it must never do a synchronous
+ * `localStorage` read per call. The cache stays current through:
+ *   - `setDebugEnabled` (the DebugPanel Logging-tab path), and
+ *   - the window `storage` event (writes from other tabs).
+ * A same-tab write that bypasses `setDebugEnabled` (DevTools console)
+ * doesn't fire `storage` in the writing tab; call
+ * `refreshDebugCategories()` afterwards, or reload.
  */
 
 export const DEBUG_CATEGORIES = ["bridge", "wasm", "render", "cache", "orch"] as const;
@@ -15,13 +26,15 @@ function readEnabled(): Set<string> {
   return new Set(raw.split(",").map(s => s.trim()).filter(Boolean));
 }
 
+let enabledCategories: Set<string> = readEnabled();
+
 export function isDebugEnabled(category: DebugCategory): boolean {
-  return readEnabled().has(category);
+  return enabledCategories.has(category);
 }
 
 export function setDebugEnabled(category: DebugCategory, enabled: boolean): void {
   if (typeof localStorage === "undefined") return;
-  const current = readEnabled();
+  const current = new Set(enabledCategories);
   if (enabled) current.add(category);
   else current.delete(category);
   if (current.size === 0) {
@@ -29,12 +42,23 @@ export function setDebugEnabled(category: DebugCategory, enabled: boolean): void
   } else {
     localStorage.setItem("debug", Array.from(current).join(","));
   }
+  enabledCategories = current;
+  notifyListeners();
+}
+
+/**
+ * Re-read `localStorage.debug` into the cached set and notify listeners
+ * (the WASM logger holds its own copy and needs the push). Wired to the
+ * cross-tab `storage` event below; also the explicit refresh path after
+ * an out-of-band same-tab write.
+ */
+export function refreshDebugCategories(): void {
+  enabledCategories = readEnabled();
   notifyListeners();
 }
 
 export function getEnabledCategories(): DebugCategory[] {
-  const enabled = readEnabled();
-  return DEBUG_CATEGORIES.filter(c => enabled.has(c));
+  return DEBUG_CATEGORIES.filter(c => enabledCategories.has(c));
 }
 
 type ChangeListener = (enabled: DebugCategory[]) => void;
@@ -84,13 +108,18 @@ function readOverlays(): Set<string> {
   return new Set(raw.split(",").map(s => s.trim()).filter(Boolean));
 }
 
+// Same init-once + write-through caching as the category set above:
+// `isOverlayEnabled` is polled from render (App decides whether to mount
+// the overlay layer), so it must stay a pure in-memory read.
+let enabledOverlays: Set<string> = readOverlays();
+
 export function isOverlayEnabled(name: DebugOverlay): boolean {
-  return readOverlays().has(name);
+  return enabledOverlays.has(name);
 }
 
 export function setOverlayEnabled(name: DebugOverlay, enabled: boolean): void {
   if (typeof localStorage === "undefined") return;
-  const current = readOverlays();
+  const current = new Set(enabledOverlays);
   if (enabled) current.add(name);
   else current.delete(name);
   if (current.size === 0) {
@@ -98,6 +127,12 @@ export function setOverlayEnabled(name: DebugOverlay, enabled: boolean): void {
   } else {
     localStorage.setItem(OVERLAY_LS_KEY, Array.from(current).join(","));
   }
+  enabledOverlays = current;
+  for (const fn of overlayListeners) fn();
+}
+
+function refreshOverlays(): void {
+  enabledOverlays = readOverlays();
   for (const fn of overlayListeners) fn();
 }
 
@@ -130,4 +165,15 @@ export function onRenderRadiusPreviewChanged(fn: () => void): () => void {
   return () => {
     renderRadiusPreviewListeners.delete(fn);
   };
+}
+
+// Cross-tab refresh: `storage` fires in every OTHER tab when one tab
+// writes localStorage, so a toggle flipped in tab A reaches tab B's
+// cached gates (and, via the listeners, the WASM logger's copy) without
+// reintroducing per-call reads. `key === null` is a full-storage clear.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e: StorageEvent) => {
+    if (e.key === "debug" || e.key === null) refreshDebugCategories();
+    if (e.key === OVERLAY_LS_KEY || e.key === null) refreshOverlays();
+  });
 }

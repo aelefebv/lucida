@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::http::api_url;
 use crate::workspace::WorkspaceRole;
 
 pub const REMOTE_ADMIN_SCOPE: &str = "remote_admin";
@@ -131,7 +132,7 @@ impl AdminClient {
         workspace_id: &str,
     ) -> Result<WorkspaceAdminDetails, CliError> {
         self.send_json(
-            self.http.get(admin_url(
+            self.http.get(api_url(
                 &self.base_url,
                 &["admin", "workspaces", workspace_id],
             )?),
@@ -145,7 +146,7 @@ impl AdminClient {
         workspace_id: &str,
     ) -> Result<WorkspaceAdminDetails, CliError> {
         self.send_json(
-            self.http.post(admin_url(
+            self.http.post(api_url(
                 &self.base_url,
                 &["admin", "workspaces", workspace_id, "archive"],
             )?),
@@ -159,7 +160,7 @@ impl AdminClient {
         workspace_id: &str,
     ) -> Result<WorkspaceAdminDetails, CliError> {
         self.send_json(
-            self.http.post(admin_url(
+            self.http.post(api_url(
                 &self.base_url,
                 &["admin", "workspaces", workspace_id, "restore"],
             )?),
@@ -198,7 +199,7 @@ impl AdminClient {
         include_archived: bool,
         limit: usize,
     ) -> Result<reqwest::RequestBuilder, CliError> {
-        let mut url = admin_url(&self.base_url, &["admin", "workspaces"])?;
+        let mut url = api_url(&self.base_url, &["admin", "workspaces"])?;
         {
             let mut pairs = url.query_pairs_mut();
             if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
@@ -225,7 +226,7 @@ impl AdminClient {
         });
         Ok(self
             .http
-            .post(admin_url(
+            .post(api_url(
                 &self.base_url,
                 &["admin", "workspaces", workspace_id, "owners"],
             )?)
@@ -236,7 +237,7 @@ impl AdminClient {
         &self,
         dataset: Option<&str>,
     ) -> Result<reqwest::RequestBuilder, CliError> {
-        let mut url = admin_url(&self.base_url, &["admin", "clear-proxy-cache"])?;
+        let mut url = api_url(&self.base_url, &["admin", "clear-proxy-cache"])?;
         if let Some(dataset) = dataset {
             url.query_pairs_mut().append_pair("dataset", dataset);
         }
@@ -270,23 +271,6 @@ impl AdminClient {
         }
         request.header(reqwest::header::ACCEPT, "application/json")
     }
-}
-
-fn admin_url(server_url: &str, segments: &[&str]) -> Result<reqwest::Url, CliError> {
-    let mut url = reqwest::Url::parse(server_url)
-        .map_err(|error| CliError::invalid_server(format!("invalid server URL: {error}")))?;
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| CliError::invalid_server("server URL cannot be used as a base URL"))?;
-        path.clear();
-        for segment in segments {
-            path.push(segment);
-        }
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
 }
 
 #[derive(Debug, Deserialize)]

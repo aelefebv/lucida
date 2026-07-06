@@ -5,7 +5,7 @@ description: "The Rust crate that builds Lucida's product CLI binary, lucida."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-cli.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # lucida-cli
@@ -23,6 +23,15 @@ Three concrete uses:
 3. **Multi-user testing** — start a CLI session alongside browser tabs and verify workspace/session behavior end-to-end.
 
 The CLI should remain a reference client for the HTTP control plane and WebSocket session plane, but the product contract is the noun-based command tree.
+
+## Module map
+
+One `src/` module per noun plus shared foundations; `main.rs` holds the clap derive tree and dispatch.
+
+- **Foundations**: `config.rs` (server/workspace config file), `credentials.rs` (token sourcing), `error.rs` (`CliError` + stable categories), `output.rs` (`--json`/human/quiet), `http.rs` (API URL building + authed JSON requests; each noun keeps its own status→error vocabulary), `session.rs` (workspace WebSocket plumbing: connect/auth, the snapshot handshake, `send_client_message`, and the `observe_until` reply loop), `workspace.rs` (workspace client plus target resolution and the `workspace_ws_url`/`workspace_web_url` builders every session-based command derives URLs from).
+- **Nouns**: `status.rs`, `auth.rs`, `workspace.rs`, `dataset.rs`, `view.rs` (also camera/layer/channel/viewer/peer/plan/debug), `layout.rs`, `saved_view.rs`, `montage.rs`, `admin.rs`.
+
+`session.rs` also owns the unsolicited-snapshot contract: the server pushes fresh `Snapshot`s outside the request/reply rhythm (after broadcast lag, and in answer to `request_snapshot` — see [document-command-application](../../flows/document-command-application.md)). The shared reply loop consumes a mid-exchange snapshot as a state refresh instead of handing it to the reply observer, so one-shot commands cannot misread a resync push as their ack.
 
 ## Subcommands
 
@@ -65,7 +74,7 @@ Smoke scripts live in `scripts/` and run against an already-running `lucida-serv
 - Bearer credentials are sourced from `LUCIDA_TOKEN` first, then macOS Keychain when available, then the server-scoped local config fallback. The file fallback is written with `0600` permissions on Unix.
 - HTTP status checks call the same public/protected server endpoints the web app uses: `/healthz`, `/readyz`, `/version`, and `/auth/whoami`.
 - Remote admin commands call `/admin/*` APIs with bearer auth and label JSON/human output as `remote_admin`, keeping them distinct from local `lucida-server` process operations.
-- Future noun commands should reuse the same config, output, error, target-resolution, HTTP, and WebSocket modules instead of adding one-off flag parsing.
+- Noun commands reuse the shared foundations — `config.rs`, `output.rs`, `error.rs`, `workspace.rs` target resolution, `http.rs`, and `session.rs` — instead of adding one-off flag parsing or hand-rolling their own request/session loops; new nouns must too.
 
 ## Invariants
 

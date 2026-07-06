@@ -26,6 +26,7 @@
 // users see "loading 2 of 4 datasets…".
 
 import type { WasmScene } from "lucida-core";
+import type { DocumentCommand, ViewportCommand } from "../commands.ts";
 import type {
   Camera,
   DatasetDisplaySettings,
@@ -538,14 +539,14 @@ export class SavedViewApplier {
     }
   }
 
-  private applyDocument(cmd: Record<string, unknown>): void {
+  private applyDocument(cmd: DocumentCommand): void {
     const json = JSON.stringify(cmd);
     const scene = this.getScene();
     scene?.apply_command(json);
     this.bridge.sendCommand(json);
   }
 
-  private applyViewport(scene: WasmScene, cmd: Record<string, unknown>): void {
+  private applyViewport(scene: WasmScene, cmd: ViewportCommand): void {
     scene.apply_command(JSON.stringify(cmd));
   }
 
@@ -623,7 +624,7 @@ export function channelDisplayCommands(
   datasetId: string,
   channel: number,
   c: ChannelSettings,
-): Array<Record<string, unknown>> {
+): ViewportCommand[] {
   return [
     { type: "set_channel_visible", dataset_id: datasetId, channel, visible: c.visible },
     { type: "set_channel_colormap", dataset_id: datasetId, channel, colormap: c.colormap },
@@ -645,7 +646,7 @@ export function labelDisplayCommands(
   datasetId: string,
   label: number,
   ls: LabelSettings,
-): Array<Record<string, unknown>> {
+): ViewportCommand[] {
   return [
     { type: "set_label_visible", dataset_id: datasetId, label, visible: ls.visible },
     { type: "set_label_opacity", dataset_id: datasetId, label, opacity: ls.opacity },
@@ -660,8 +661,8 @@ export function labelDisplayCommands(
 export function datasetDisplayCommands(
   id: string,
   s: DatasetDisplaySettings,
-): Array<Record<string, unknown>> {
-  const cmds: Array<Record<string, unknown>> = [
+): ViewportCommand[] {
+  const cmds: ViewportCommand[] = [
     { type: "set_dataset_contrast", dataset_id: id, min: s.contrast_min, max: s.contrast_max },
     { type: "set_dataset_gamma", dataset_id: id, gamma: s.gamma },
     { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: s.blend_mode },

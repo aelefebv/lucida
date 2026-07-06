@@ -19,7 +19,7 @@ import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
 import type { DatasetReferenceMode, SavedView, ViewState } from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { invalidateAfterViewRestore } from "../invalidation.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
 
 interface Params {
@@ -335,7 +335,7 @@ export function useSavedViewSync({
   // C/T/Z/viewMode/multiChannel back to React state (Bug #3). The applier writes to
   // WASM only; without this the RAF loop sits idle until the next user
   // input and the slider mirrors stay stale. Mirrors the bridge's
-  // follow/presence-update flow (useBridge.ts onPresenceUpdate / onFollowChanged).
+  // follow/presence-update flow (sessionController.ts onPresenceUpdate / onFollowChanged).
   useEffect(() => {
     return bundle.applier.subscribeApplyComplete((view) => {
       const scene = getScene();
@@ -363,9 +363,7 @@ export function useSavedViewSync({
           return changed ? next : prev;
         });
       }
-      bumpSettingsGeneration();
-      loopRef.current?.markInteractiveDirty("savedview_apply");
-      loopRef.current?.markResidencyDirty("savedview_apply");
+      invalidateAfterViewRestore(loopRef.current, "savedview_apply");
     });
   }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setMultiChannel, setAutoContrastMap]);
 

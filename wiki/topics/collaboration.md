@@ -5,7 +5,7 @@ description: "Multi-client coordination — what gets shared, what stays local, 
 tags: [lucida, topic]
 source_path: wiki/topics/collaboration.md
 created: 2026-05-07
-modified: 2026-06-25
+modified: 2026-07-04
 ---
 
 # Topic: Collaboration
@@ -20,6 +20,7 @@ This page is a curated index. Articles live in their canonical homes; follow the
 - [Document vs Viewport Command Split](../decisions/0001-document-vs-viewport-split.md) — the foundational split that everything else in collaboration is downstream of
 - [Presence and Follow Mode](../systems/subsystems/presence-and-follow-mode.md) — peer-to-peer presence model, transitive follow chains, throttling
 - [Saved Views](../systems/subsystems/saved-views.md) — discrete-snapshot counterpart to live follow: `#view=…` URL hashes + server-stored `#b=<id>` bookmarks, surfaced through the `WorkspaceSavedViewsSidebar` component with live cross-peer updates
+- [Annotations, comments, and mentions](../systems/subsystems/annotations.md) — point/line/box pins with per-pin comment threads and inline `@mention`s, shared through the sequenced document like any other collaborative state; overlays in 2D and 3D, a mentions inbox, and captured author views
 
 ## Crate ownership
 
@@ -36,7 +37,7 @@ This page is a curated index. Articles live in their canonical homes; follow the
 
 ## Cross-cutting flows
 
-- [Flow: Document Command Application](../flows/document-command-application.md) — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
+- [Flow: Document Command Application](../flows/document-command-application.md) — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client; includes the loss-recovery path (seq-gap detection → `RequestSnapshot` / server-pushed snapshot on broadcast overflow)
 - [Flow: Presence Propagation](../flows/presence-propagation.md) — local viewport change → throttled wire emit → server fan-out (self-filtered) → peer apply (or follow-mirror)
 - [Flow: Follow Chain Resolution](../flows/follow-chain-resolution.md) — `set_follow` validation, transitive flatten into stars, disconnect-driven reset
 - [Flow: Saved-View Recipient Apply](../flows/saved-view-recipient-apply.md) — `#view=…` or `#b=<id>` → bootstrap parse → diff datasets → open missing → apply layouts/settings/camera in fixed order
