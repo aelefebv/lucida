@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildPlateGridLayout,
+  buildCollectionGridLayout,
   buildDenseSquareLayout,
   derivedBuildersFor,
 } from "./layoutBuilders.ts";
@@ -50,8 +50,8 @@ function singleImageGraph(): DatasetManifest {
   };
 }
 
-/** 2x2 plate, all 4 wells populated (each entity gets its own corner). */
-function plate2x2Graph(): DatasetManifest {
+/** 2x2 collection, all 4 wells populated (each entity gets its own corner). */
+function collection2x2Graph(): DatasetManifest {
   const W = 256;
   const H = 256;
   const placements: LayoutSpec["placements"] = [
@@ -61,9 +61,9 @@ function plate2x2Graph(): DatasetManifest {
     { entity_id: "e3", position: [W, H] },
   ];
   return {
-    dataset_id: "plate-2x2",
-    name: "plate",
-    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
+    dataset_id: "collection-2x2",
+    name: "collection",
+    kind: { Collection: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities: ["e0", "e1", "e2", "e3"].map((id) => ({ id, kind: "Image", parent: null, labels: {} })),
     transforms: [],
     images: ["e0", "e1", "e2", "e3"].map((id) => makeImage(`img-${id}`, id, H, W)),
@@ -72,8 +72,8 @@ function plate2x2Graph(): DatasetManifest {
   };
 }
 
-/** Sparse plate: 3 entities placed (one well empty). */
-function plateSparseGraph(): DatasetManifest {
+/** Sparse collection: 3 entities placed (one well empty). */
+function collectionSparseGraph(): DatasetManifest {
   const W = 256;
   const H = 256;
   const placements: LayoutSpec["placements"] = [
@@ -82,9 +82,9 @@ function plateSparseGraph(): DatasetManifest {
     { entity_id: "e2", position: [0, H] },
   ];
   return {
-    dataset_id: "plate-sparse",
-    name: "plate-sparse",
-    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
+    dataset_id: "collection-sparse",
+    name: "collection-sparse",
+    kind: { Collection: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities: ["e0", "e1", "e2"].map((id) => ({ id, kind: "Image", parent: null, labels: {} })),
     transforms: [],
     images: ["e0", "e1", "e2"].map((id) => makeImage(`img-${id}`, id, H, W)),
@@ -97,16 +97,16 @@ function plateSparseGraph(): DatasetManifest {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("buildPlateGridLayout", () => {
+describe("buildCollectionGridLayout", () => {
   it("returns null for single-image dataset (no source layout)", () => {
-    expect(buildPlateGridLayout(singleImageGraph())).toBeNull();
+    expect(buildCollectionGridLayout(singleImageGraph())).toBeNull();
   });
 
   it("mirrors the source default layout's placements verbatim", () => {
-    const spec = buildPlateGridLayout(plate2x2Graph());
+    const spec = buildCollectionGridLayout(collection2x2Graph());
     expect(spec).not.toBeNull();
-    expect(spec!.id).toBe("derived:plate-grid");
-    expect(spec!.name).toBe("Plate grid");
+    expect(spec!.id).toBe("derived:collection-grid");
+    expect(spec!.name).toBe("Collection grid");
     expect(spec!.placements).toEqual([
       { entity_id: "e0", position: [0, 0] },
       { entity_id: "e1", position: [256, 0] },
@@ -122,7 +122,7 @@ describe("buildDenseSquareLayout", () => {
   });
 
   it("packs 4 image-level entities into a 2x2 square with one-field gap", () => {
-    const spec = buildDenseSquareLayout(plate2x2Graph());
+    const spec = buildDenseSquareLayout(collection2x2Graph());
     expect(spec).not.toBeNull();
     expect(spec!.id).toBe("derived:dense-square");
     expect(spec!.name).toBe("Dense (square)");
@@ -137,7 +137,7 @@ describe("buildDenseSquareLayout", () => {
   });
 
   it("packs 3 entities into the first 3 cells of a 2x2 (sparse)", () => {
-    const spec = buildDenseSquareLayout(plateSparseGraph());
+    const spec = buildDenseSquareLayout(collectionSparseGraph());
     expect(spec).not.toBeNull();
     // cols = ceil(sqrt(3)) = 2; stride = 512 (256 footprint + 256 gap).
     expect(spec!.placements).toEqual([
@@ -157,10 +157,10 @@ describe("buildDenseSquareLayout", () => {
   });
 });
 
-/** Plate with 2 wells, each containing a 2x2 grid of 256x256 fields.
+/** Collection with 2 wells, each containing a 2x2 grid of 256x256 fields.
  *  Source layout places wells at (0,0) and (1000,0). Field offsets within
  *  each well are (0,0), (256,0), (0,256), (256,256) → well bbox is 512x512. */
-function plateWithFieldsGraph(): DatasetManifest {
+function collectionWithFieldsGraph(): DatasetManifest {
   const wells = ["W1", "W2"];
   const wellPositions: Record<string, [number, number]> = {
     W1: [0, 0],
@@ -193,9 +193,9 @@ function plateWithFieldsGraph(): DatasetManifest {
   }
 
   return {
-    dataset_id: "plate-with-fields",
-    name: "plate-with-fields",
-    kind: { Plate: { rows: ["A"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
+    dataset_id: "collection-with-fields",
+    name: "collection-with-fields",
+    kind: { Collection: { rows: ["A"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities,
     transforms,
     images,
@@ -212,7 +212,7 @@ function plateWithFieldsGraph(): DatasetManifest {
 
 describe("buildDenseSquareLayout — well/field hierarchy", () => {
   it("uses well bbox + one-field gap as packing stride", () => {
-    const spec = buildDenseSquareLayout(plateWithFieldsGraph());
+    const spec = buildDenseSquareLayout(collectionWithFieldsGraph());
     expect(spec).not.toBeNull();
     // 2 wells, cols=ceil(sqrt(2))=2, single-row layout.
     // Well bbox = 512x512; field FOV = 256; stride = 512 + 256 = 768.
@@ -228,18 +228,18 @@ describe("derivedBuildersFor", () => {
     expect(derivedBuildersFor(singleImageGraph())).toEqual([]);
   });
 
-  it("returns both derived layouts for a 2x2 plate", () => {
-    const out = derivedBuildersFor(plate2x2Graph());
-    expect(out.map((s) => s.id)).toEqual(["derived:plate-grid", "derived:dense-square"]);
+  it("returns both derived layouts for a 2x2 collection", () => {
+    const out = derivedBuildersFor(collection2x2Graph());
+    expect(out.map((s) => s.id)).toEqual(["derived:collection-grid", "derived:dense-square"]);
   });
 
-  it("returns only plate-grid when dense is filtered out (1-entity dataset with source layout)", () => {
+  it("returns only collection-grid when dense is filtered out (1-entity dataset with source layout)", () => {
     const g: DatasetManifest = {
       ...singleImageGraph(),
       source_layouts: [{ id: "default", name: "Default", placements: [{ entity_id: "e0", position: [0, 0] }] }],
       default_layout_id: "default",
     };
     const out = derivedBuildersFor(g);
-    expect(out.map((s) => s.id)).toEqual(["derived:plate-grid"]);
+    expect(out.map((s) => s.id)).toEqual(["derived:collection-grid"]);
   });
 });

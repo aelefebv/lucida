@@ -450,7 +450,7 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
   state.overviewUploaded.delete(dsId);
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
-  // Clear any member-keyed entries (plate case, e.g. "dsId:A/1/0").
+  // Clear any member-keyed entries (collection case, e.g. "dsId:A/1/0").
   const prefix = dsId + ":";
   for (const key of [...state.overviewKey.keys()]) {
     if (key.startsWith(prefix)) {

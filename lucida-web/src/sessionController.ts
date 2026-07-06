@@ -421,7 +421,7 @@ export class SessionController {
     const fetchVariant = Object.keys(fetchDesc as object)[0] ?? "unknown";
 
     // Shape summary — mirrors the WASM-side `analyze_manifest_shape`
-    // counts so a JS-only debugger can spot Plate vs. Single anomalies
+    // counts so a JS-only debugger can spot Collection vs. Single anomalies
     // without enabling the wasm category.
     const entityIds = new Set(manifest.entities.map(e => e.id));
     let nWells = 0;

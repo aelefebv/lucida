@@ -204,8 +204,8 @@ export class RenderLoop {
     this.datasets.delete(id);
 
     // Collect member IDs that were keyed under this dataset.
-    // For single datasets image_id === dataset_id, but for plates
-    // member IDs may differ (e.g. "plateId:A/1/0").
+    // For single datasets image_id === dataset_id, but for collections
+    // member IDs may differ (e.g. "collectionId:A/1/0").
     const memberIds = this.collectMemberIds(id);
 
     this.session.cpuCache.cancelDataset(id, memberIds);

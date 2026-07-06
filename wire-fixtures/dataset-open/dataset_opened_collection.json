@@ -1,9 +1,9 @@
 {
   "manifest": {
-    "dataset_id": "wds-plate-77",
-    "name": "screening-plate-01.zarr",
+    "dataset_id": "wds-collection-77",
+    "name": "screening-collection-01.zarr",
     "kind": {
-      "Plate": {
+      "Collection": {
         "rows": [
           "A",
           "B"

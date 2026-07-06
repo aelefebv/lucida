@@ -138,7 +138,7 @@ describe("checkUniqueImageIds", () => {
 
   it("passes when multiple wells share the conventional empty imageId", () => {
     // Wells use imageId === "" as the placeholder for "this entity has
-    // no image to key against". Multi-well plates legitimately carry
+    // no image to key against". Multi-well collections legitimately carry
     // multiple wells with imageId === "".
     const snap = makeValidSnapshot();
     snap.entities.push(

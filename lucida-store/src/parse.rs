@@ -67,7 +67,7 @@ pub(crate) struct ParsedMultiscales {
 }
 
 /// Parse OME multiscales from a root zarr.json value.
-/// `error_prefix` is prepended to error messages (e.g., "A/1/0: " for plates).
+/// `error_prefix` is prepended to error messages (e.g., "A/1/0: " for collections).
 pub(crate) fn parse_multiscales(
     root_json: &serde_json::Value,
     error_prefix: &str,
@@ -374,7 +374,7 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 }
 
 /// Read ArrayMeta for each level in the multiscale pyramid.
-/// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for plate FOVs).
+/// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection FOVs).
 pub(crate) async fn read_level_metas(
     store: &Arc<dyn ObjectStore>,
     base_prefix: &str,

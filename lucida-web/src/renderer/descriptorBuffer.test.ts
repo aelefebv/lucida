@@ -886,7 +886,7 @@ describe("buildDescriptorBuffer GPU write", () => {
   it("each entity's lods[i].indirectionOffset comes from entityMetasByMember (shared-pool absolute offsets, not per-entity-local)", () => {
     // Regression: descriptor used to compute per-entity-local offsets
     // starting at 0, so every entity addressed offset 0 in the shared
-    // pool indirection buffer = entity 0's data. Symptom in plate mode:
+    // pool indirection buffer = entity 0's data. Symptom in collection mode:
     // all fields rendered the same image, panning changed which.
     const cold = makeCold([
       makeEntry({ entityId: "e1", imageId: "img-0", mode: "fields-with-detail" }),

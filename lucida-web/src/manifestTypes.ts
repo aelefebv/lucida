@@ -2,7 +2,7 @@
 
 export type DatasetKind =
   | "Single"
-  | { Plate: { rows: string[]; columns: string[]; positioning_mode: string; has_explicit_positions: boolean } };
+  | { Collection: { rows: string[]; columns: string[]; positioning_mode: string; has_explicit_positions: boolean } };
 
 export interface Entity {
   id: string;

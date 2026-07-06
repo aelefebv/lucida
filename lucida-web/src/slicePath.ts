@@ -49,9 +49,9 @@ export function pushLabelLayers(
     const sourceLevel0 = source.multiscale.levels[0];
     const labelLevel0 = label.image.multiscale.levels[0];
     const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
-    // Fields can be offset within a plate/layout; place the overlay at the
+    // Fields can be offset within a collection/layout; place the overlay at the
     // source member's position so it lands on the image it annotates. The
-    // source field is frequently ABSENT from the active-set roster — in a plate
+    // source field is frequently ABSENT from the active-set roster — in a collection
     // a whole well renders as a single proxy, and off-view fields aren't active
     // at all — so fall back to the scene's authoritative per-member layout
     // position (keyed by the source ENTITY id, the same space as the roster's
@@ -192,7 +192,7 @@ function uploadAndRenderSlice(
     // Categorical label overlays, composited on top of this dataset's
     // intensity layers. Honors the per-label visible set + opacity; never
     // affects camera/bounds. A label's source field is often not in the active
-    // roster (plate wells proxy; off-view fields), so hand the scene's full
+    // roster (collection wells proxy; off-view fields), so hand the scene's full
     // per-member position map (entity id -> [x, y]) as the placement fallback.
     let labelMemberPositions: Record<string, [number, number]> | undefined;
     if (ds.manifest.labels && ds.manifest.labels.length > 0) {

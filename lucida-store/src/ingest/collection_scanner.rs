@@ -1,7 +1,7 @@
-//! Scan a directory of HCS TIFF files and discover plate structure.
+//! Scan a directory of tiled TIFF files and discover collection structure.
 //!
 //! Parses filenames matching `r{row}c{col}f{field}p{plane}-ch{channel}t{timepoint}.tiff`
-//! and builds a `PlateLayout` describing wells, FOVs, channels, timepoints, and Z planes.
+//! and builds a `CollectionLayout` describing wells, FOVs, channels, timepoints, and Z planes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -14,9 +14,9 @@ use tiff::tags::Tag;
 
 use super::pyramid::VoxelSize;
 
-/// Complete plate layout discovered from scanning a directory.
+/// Complete collection layout discovered from scanning a directory.
 #[derive(Debug)]
-pub struct PlateLayout {
+pub struct CollectionLayout {
     pub name: String,
     pub rows: Vec<String>,
     pub columns: Vec<String>,
@@ -29,7 +29,7 @@ pub struct PlateLayout {
     pub voxel_size: VoxelSize,
 }
 
-/// A single well in the plate layout.
+/// A single well in the collection layout.
 #[derive(Debug)]
 pub struct WellLayout {
     pub row_name: String,
@@ -67,15 +67,15 @@ pub fn row_number_to_letter(n: u32) -> String {
     char::from(b'A' + (n - 1) as u8).to_string()
 }
 
-/// Scan a directory for HCS TIFF files and build a PlateLayout.
+/// Scan a directory for tiled TIFF files and build a CollectionLayout.
 ///
 /// Recursively searches for files matching the `rXXcXXfXXpXX-chXXtXX.tiff` pattern.
 /// Voxel size is extracted from the first TIFF's resolution tag; `voxel_overrides`
 /// take precedence if provided.
-pub fn scan_plate_directory(
+pub fn scan_collection_directory(
     dir: &Path,
     voxel_overrides: Option<VoxelSize>,
-) -> Result<PlateLayout, String> {
+) -> Result<CollectionLayout, String> {
     let re = Regex::new(r"(?i)r(\d+)c(\d+)f(\d+)p(\d+)-ch(\d+)t(\d+)\.tiff?$")
         .map_err(|e| format!("regex error: {e}"))?;
 
@@ -85,12 +85,12 @@ pub fn scan_plate_directory(
 
     if parsed_files.is_empty() {
         return Err(format!(
-            "no HCS TIFF files found in {}. Expected filenames like r01c01f01p01-ch01t01.tiff",
+            "no tiled TIFF files found in {}. Expected filenames like r01c01f01p01-ch01t01.tiff",
             dir.display()
         ));
     }
 
-    eprintln!("Found {} HCS TIFF files", parsed_files.len());
+    eprintln!("Found {} tiled TIFF files", parsed_files.len());
 
     // Discover unique values for each dimension.
     let mut all_rows = BTreeSet::new();
@@ -204,14 +204,14 @@ pub fn scan_plate_directory(
         None => tiff_voxel,
     };
 
-    // Derive plate name from directory.
+    // Derive collection name from directory.
     let name = dir
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("plate")
+        .unwrap_or("collection")
         .to_string();
 
-    Ok(PlateLayout {
+    Ok(CollectionLayout {
         name,
         rows,
         columns,
@@ -225,7 +225,7 @@ pub fn scan_plate_directory(
     })
 }
 
-/// Recursively scan a directory for files matching the HCS pattern.
+/// Recursively scan a directory for files matching the tiled pattern.
 fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> Result<(), String> {
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
@@ -316,7 +316,7 @@ fn read_tiff_info(path: &Path) -> Result<(u32, u32, VoxelSize), String> {
         }
     }
 
-    // Z defaults to 1.0 for plate data (no Z resolution in individual TIFFs).
+    // Z defaults to 1.0 for collection data (no Z resolution in individual TIFFs).
 
     // Seek back to start for potential reuse.
     let _ = reader.seek(SeekFrom::Start(0));
@@ -363,14 +363,14 @@ mod tests {
     #[test]
     fn scan_empty_directory() {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_scan_{}", std::process::id()))
+            .join(format!("lucida_collection_scan_{}", std::process::id()))
             .join("empty");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let result = scan_plate_directory(&dir, None);
+        let result = scan_collection_directory(&dir, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("no HCS TIFF files found"));
+        assert!(result.unwrap_err().contains("no tiled TIFF files found"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

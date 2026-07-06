@@ -2132,7 +2132,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let full_x = dims[4];
                 let full_y = dims[3];
                 // MVP samples the Z / T / single axis with a whole-image fit.
-                // Per-field plate montage (which needs member positions) is a
+                // Per-field collection montage (which needs member positions) is a
                 // follow-up slice, so plan as a single image here.
                 let plan = montage::plan_montage(dims, 1, *cells, *cols);
                 let viewport = [*cell_px, *cell_px];

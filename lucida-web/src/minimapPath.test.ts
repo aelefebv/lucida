@@ -103,7 +103,7 @@ describe("intersectSliceViewWithMember", () => {
     const viewport = intersectSliceViewWithMember(
       { minX: 100, minY: 120, maxX: 300, maxY: 320 },
       {
-        datasetId: "plate",
+        datasetId: "collection",
         memberId: "field-0-image",
         modelMatrix,
         position: [0, 0],
@@ -121,7 +121,7 @@ describe("intersectSliceViewWithMember", () => {
     const viewport = intersectSliceViewWithMember(
       { minX: 1100, minY: 2100, maxX: 1300, maxY: 2300 },
       {
-        datasetId: "plate",
+        datasetId: "collection",
         memberId: "field-1-image",
         modelMatrix,
         position: [1000, 2000],
@@ -138,7 +138,7 @@ describe("intersectSliceViewWithMember", () => {
     const viewport = intersectSliceViewWithMember(
       { minX: 900, minY: 1900, maxX: 1100, maxY: 2100 },
       {
-        datasetId: "plate",
+        datasetId: "collection",
         memberId: "field-1-image",
         modelMatrix,
         position: [1000, 2000],
@@ -155,7 +155,7 @@ describe("intersectSliceViewWithMember", () => {
     const viewport = intersectSliceViewWithMember(
       { minX: 0, minY: 0, maxX: 100, maxY: 100 },
       {
-        datasetId: "plate",
+        datasetId: "collection",
         memberId: "field-1-image",
         modelMatrix,
         position: [1000, 2000],

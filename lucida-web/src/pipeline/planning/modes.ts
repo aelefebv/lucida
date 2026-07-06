@@ -135,7 +135,7 @@ export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
     }
 
     // kind === "Image": treat as singleton group (its own "well") so
-    // non-plate datasets keep working transparently.
+    // non-collection datasets keep working transparently.
     const wellId = `__image__${entity.entityId}`;
     groups.set(wellId, {
       wellId,

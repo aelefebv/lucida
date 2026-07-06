@@ -53,7 +53,7 @@ export interface BaseEntitySnapshot {
 }
 
 /**
- * A standalone image entity (non-plate datasets). Treated as its own
+ * A standalone image entity (non-collection datasets). Treated as its own
  * one-entry "well" by `groupByWell` so the rest of the planner is
  * uniform. No `parentId` field — top-level entity by construction.
  */
@@ -62,7 +62,7 @@ export interface ImageSnapshot extends BaseEntitySnapshot {
 }
 
 /**
- * A well entity on a plate. Top-level — no `parentId`. `groupByWell`
+ * A well entity on a collection. Top-level — no `parentId`. `groupByWell`
  * pairs it with its constituent {@link FieldSnapshot}s by id; promotion
  * may downgrade the well to `well-as-proxy` (rendered as one synthetic
  * cube) or leave it at field-mode (each field rendered separately).
@@ -72,7 +72,7 @@ export interface WellSnapshot extends BaseEntitySnapshot {
 }
 
 /**
- * A field entity belonging to a well on a plate. `parentId` is required
+ * A field entity belonging to a well on a collection. `parentId` is required
  * and non-null by contract: a field without a parent is a producer
  * invariant violation worth surfacing rather than silently coercing.
  *

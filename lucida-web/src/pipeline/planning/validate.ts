@@ -84,7 +84,7 @@ export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
  *
  * Empty-string `imageId` is the conventional placeholder for `Well`
  * entities (the well IS the proxy — there is no image to key against);
- * a multi-well plate snapshot legitimately carries multiple
+ * a multi-well collection snapshot legitimately carries multiple
  * `imageId: ""` entries. The check only flags duplicates among the
  * non-empty image ids that actually drive image-keyed downstream
  * lookups.
@@ -201,8 +201,8 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
  *   - `kind: "field"`         ⇒ entity must be `kind: "Field"` OR
  *     `kind: "Image"`. The planner's `groupByWell` synthesizes an
  *     `__image__${entityId}` group for `Image` entities (singletons,
- *     non-plate datasets) so they go through the same field-mode
- *     code path as plate fields. The active-set entry it produces is
+ *     non-collection datasets) so they go through the same field-mode
+ *     code path as collection fields. The active-set entry it produces is
  *     therefore a `FieldEntry` even though the entity itself is an
  *     `ImageSnapshot`. See `pipeline/planning/modes.ts::groupByWell`.
  *   - `kind: "invisible"`     ⇒ NOT validated against entity kind. An

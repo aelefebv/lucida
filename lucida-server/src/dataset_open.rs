@@ -465,7 +465,7 @@ pub async fn open_dataset(
         ),
     );
 
-    // Surface non-fatal import problems (e.g. skipped plate wells) on the open
+    // Surface non-fatal import problems (e.g. skipped collection wells) on the open
     // trail so both the CLI and the web's latest-message view see them, and
     // retain them for the durable Health tab below.
     let import_warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();

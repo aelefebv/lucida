@@ -674,8 +674,8 @@ impl Scene {
                             "n_layouts": shape.n_layouts,
                             "channel_count": channel_count,
                             "kind": kind_label(&event.manifest.kind),
-                            "plate_rows": shape.plate_rows,
-                            "plate_columns": shape.plate_columns,
+                            "collection_rows": shape.collection_rows,
+                            "collection_columns": shape.collection_columns,
                             "has_explicit_positions": shape.has_explicit_positions,
                             "default_layout_id": event.manifest.default_layout_id.as_ref().map(|id| id.0.clone()),
                             "epochs": {
@@ -1146,18 +1146,18 @@ impl Scene {
     }
 }
 
-/// Aggregated counts and plate metadata used by both the
+/// Aggregated counts and collection metadata used by both the
 /// `scene.dataset_opened.applied` log enrichment and the
 /// `manifest.shape_anomaly` check. Single pass over `entities()` so the
-/// extra accounting is cheap even for plates with many fields.
+/// extra accounting is cheap even for collections with many fields.
 struct ManifestShape {
     n_wells: usize,
     n_fields: usize,
     n_orphans: usize,
     n_layouts: usize,
     n_fields_without_image: usize,
-    plate_rows: Option<usize>,
-    plate_columns: Option<usize>,
+    collection_rows: Option<usize>,
+    collection_columns: Option<usize>,
     has_explicit_positions: Option<bool>,
 }
 
@@ -1166,8 +1166,8 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
     let entity_ids: HashSet<&EntityId> = entities.iter().map(|e| &e.id).collect();
     let image_owners: HashSet<&EntityId> = manifest.images().iter().map(|i| &i.owner).collect();
 
-    let (plate_rows, plate_columns, has_explicit_positions) = match &manifest.kind {
-        DatasetKind::Plate {
+    let (collection_rows, collection_columns, has_explicit_positions) = match &manifest.kind {
+        DatasetKind::Collection {
             rows,
             columns,
             has_explicit_positions,
@@ -1186,8 +1186,8 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
         n_orphans: 0,
         n_layouts: manifest.source_layouts().len(),
         n_fields_without_image: 0,
-        plate_rows,
-        plate_columns,
+        collection_rows,
+        collection_columns,
         has_explicit_positions,
     };
 
@@ -1215,15 +1215,15 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
 fn manifest_anomalies(manifest: &DatasetManifest, shape: &ManifestShape) -> Vec<String> {
     let mut issues = Vec::new();
 
-    if matches!(manifest.kind, DatasetKind::Plate { .. }) {
-        if shape.plate_rows == Some(0) {
-            issues.push("plate has zero rows".into());
+    if matches!(manifest.kind, DatasetKind::Collection { .. }) {
+        if shape.collection_rows == Some(0) {
+            issues.push("collection has zero rows".into());
         }
-        if shape.plate_columns == Some(0) {
-            issues.push("plate has zero columns".into());
+        if shape.collection_columns == Some(0) {
+            issues.push("collection has zero columns".into());
         }
         if shape.n_fields == 0 {
-            issues.push("plate has wells but no fields".into());
+            issues.push("collection has wells but no fields".into());
         }
     }
 
@@ -1254,12 +1254,12 @@ fn manifest_anomalies(manifest: &DatasetManifest, shape: &ManifestShape) -> Vec<
     issues
 }
 
-/// Short, stable label for the dataset kind (e.g. `"Single"`, `"Plate"`).
+/// Short, stable label for the dataset kind (e.g. `"Single"`, `"Collection"`).
 /// Avoids leaking the full Debug output (which includes row/column lists).
 fn kind_label(kind: &DatasetKind) -> &'static str {
     match kind {
         DatasetKind::Single => "Single",
-        DatasetKind::Plate { .. } => "Plate",
+        DatasetKind::Collection { .. } => "Collection",
     }
 }
 
@@ -3651,17 +3651,17 @@ mod tests {
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
 
-        // Register a plate dataset with two members
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        // Register a collection dataset with two members
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let ds_id = DatasetId("plate".into());
+        let ds_id = DatasetId("collection".into());
         // Verify initial positions
         let derived = &scene.derived[&ds_id];
         assert_eq!(derived.members[0].position, [0.0, 0.0]);
@@ -4156,26 +4156,26 @@ mod tests {
         assert_eq!(line.end, Some([12.0, 13.0]));
     }
 
-    // --- Plate annotation anchoring (issue #780) ---
+    // --- Collection annotation anchoring (issue #780) ---
 
-    /// A two-well plate driven entirely through `DocumentState::apply` (the
+    /// A two-well collection driven entirely through `DocumentState::apply` (the
     /// server's canonical, persisted path), plus a second registered layout
     /// "moved" in which well `w1` shifts by `+[0, 50]` and well `w2` stays put.
-    /// The base/source layout is "default" (from `make_plate_dataset_opened`),
+    /// The base/source layout is "default" (from `make_collection_dataset_opened`),
     /// placing `w1` at `[0, 0]` and `w2` at `[100, 0]`. Returns the populated
     /// document and the dataset id.
-    fn plate_with_two_layouts() -> (crate::scene::DocumentState, DatasetId) {
+    fn collection_with_two_layouts() -> (crate::scene::DocumentState, DatasetId) {
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut doc = crate::scene::DocumentState::default();
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("w1", [0.0, 0.0]), ("w2", [100.0, 0.0])],
             [1, 1, 1, 64, 64],
             [1, 1, 1, 64, 64],
         );
         doc.apply(DocumentCommand::DatasetOpened(reg));
-        let ds = DatasetId("plate".into());
+        let ds = DatasetId("collection".into());
 
         // A second layout: w1 slides by +[0, 50]; w2 unchanged at [100, 0].
         let moved = LayoutSpec {
@@ -4216,14 +4216,19 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_on_plate_anchors_to_nearest_well() {
+    fn add_annotation_on_collection_anchors_to_nearest_well() {
         // A pin dropped near w1's active-layout position is glued to w1; one near
         // w2 is glued to w2. The anchor is derived inside apply from synced state.
         use lucida_content::EntityId;
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "near-w1", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd(
-            "plate",
+            "collection",
+            "near-w1",
+            [5.0, 5.0],
+            "alice",
+        ));
+        doc.apply(add_annotation_cmd(
+            "collection",
             "near-w2",
             [102.0, 1.0],
             "alice",
@@ -4239,7 +4244,7 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_on_non_plate_leaves_anchor_none() {
+    fn add_annotation_on_non_collection_leaves_anchor_none() {
         // A single-image dataset has nothing to anchor to: the pin stays
         // unanchored and a (hypothetical) layout switch would never move it.
         let mut doc = crate::scene::DocumentState::default();
@@ -4255,8 +4260,8 @@ mod tests {
         // The crux (critical): a point glued to the MOVING well rides the well's
         // +[0,50] delta on switch, and switching back restores the original
         // position exactly.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 5.0]);
 
         switch_to(&mut doc, &ds, "moved");
@@ -4278,9 +4283,9 @@ mod tests {
     fn line_reanchors_both_vertices_by_the_well_delta() {
         // A line on the moving well: BOTH position and end shift by the same
         // delta (rigid whole-shape translate), length/angle preserved.
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
-            "plate",
+            "collection",
             "ln",
             [2.0, 2.0],
             [8.0, 6.0],
@@ -4303,9 +4308,9 @@ mod tests {
     fn box_reanchors_both_corners_by_the_well_delta() {
         // A box on the moving well: both opposite corners shift by the delta, so
         // the box keeps its size and slides with the well.
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
-            "plate",
+            "collection",
             "bx",
             [1.0, 1.0],
             [9.0, 5.0],
@@ -4321,8 +4326,13 @@ mod tests {
     fn pin_on_static_well_does_not_move_across_switch() {
         // Per-entity (critical): a pin glued to w2 (which doesn't move between the
         // two layouts) stays exactly where it was after the switch.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "static", [101.0, 2.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "static",
+            [101.0, 2.0],
+            "alice",
+        ));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "static").position, [101.0, 2.0]);
     }
@@ -4331,9 +4341,19 @@ mod tests {
     fn two_pins_each_follow_their_own_well() {
         // Per-entity (critical): in one switch, the w1 pin moves by the w1 delta
         // and the w2 pin doesn't move — each tracks its own anchor independently.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "on-w1", [5.0, 5.0], "alice"));
-        doc.apply(add_annotation_cmd("plate", "on-w2", [101.0, 2.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "on-w1",
+            [5.0, 5.0],
+            "alice",
+        ));
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "on-w2",
+            [101.0, 2.0],
+            "alice",
+        ));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "on-w1").position, [5.0, 55.0]);
         assert_eq!(pin(&doc, &ds, "on-w2").position, [101.0, 2.0]);
@@ -4343,7 +4363,7 @@ mod tests {
     fn pin_without_anchor_is_left_in_place_on_switch() {
         // Backward-compat (critical): an annotation inserted with NO anchor (as a
         // pre-slice pin would deserialize) is untouched by a layout switch.
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         // Insert a pin directly with anchor == None (bypasses the auto-anchor at
         // creation, mimicking a pin that predates this slice).
         doc.add_annotation(
@@ -4382,7 +4402,7 @@ mod tests {
             "missing anchor key deserializes as None"
         );
 
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.add_annotation(ds.clone(), legacy);
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "old").position, [5.0, 5.0]);
@@ -4393,8 +4413,8 @@ mod tests {
         // Critical: after serialize -> deserialize, the anchor is preserved and a
         // SetActiveLayout still re-anchors correctly on the restored document.
         use lucida_content::EntityId;
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
 
         let blob = serde_json::to_string(&doc).unwrap();
         let mut restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
@@ -4418,7 +4438,7 @@ mod tests {
         // different delta; the pin tracks w1 across default -> moved -> far ->
         // default, each hop applying the displacement between just those two.
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(DocumentCommand::RegisterLayout {
             dataset_id: ds.clone(),
             layout: LayoutSpec {
@@ -4436,7 +4456,7 @@ mod tests {
                 ],
             },
         });
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
 
         switch_to(&mut doc, &ds, "moved"); // w1 [0,0]->[0,50], delta [0,50]
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
@@ -4451,8 +4471,8 @@ mod tests {
         // Convergence/idempotency: a replayed or echoed `set_active_layout` to the
         // layout that's already active must not translate pins a second time. The
         // pin should sit where the first switch left it, not double-shifted.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
         // Re-apply the SAME switch (as a duplicate/echo would): no further move.
@@ -4464,8 +4484,14 @@ mod tests {
     fn reanchor_leaves_z_unchanged() {
         // Layouts are 2-D in-plane: the pin's depth must not be touched by a
         // re-anchor, only its in-plane position.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd_z("plate", "p", [5.0, 5.0], 7.5, "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd_z(
+            "collection",
+            "p",
+            [5.0, 5.0],
+            7.5,
+            "alice",
+        ));
         switch_to(&mut doc, &ds, "moved");
         let p = pin(&doc, &ds, "p");
         assert_eq!(p.position, [5.0, 55.0]);
@@ -4479,15 +4505,15 @@ mod tests {
         // document.apply) — same corrected position the server would persist.
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("w1", [0.0, 0.0]), ("w2", [100.0, 0.0])],
             [1, 1, 1, 64, 64],
             [1, 1, 1, 64, 64],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let ds = DatasetId("plate".into());
+        let ds = DatasetId("collection".into());
         scene.apply(
             DocumentCommand::RegisterLayout {
                 dataset_id: ds.clone(),
@@ -4508,7 +4534,7 @@ mod tests {
             }
             .into(),
         );
-        scene.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice").into());
+        scene.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice").into());
         assert_eq!(
             scene.document.annotations[&ds][0].anchor,
             Some(EntityId("w1".into()))
@@ -6366,17 +6392,17 @@ mod tests {
         use lucida_content::LayoutId;
         let mut scene = Scene::new([800, 600]);
 
-        // Register a plate dataset with a known default layout
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        // Register a collection dataset with a known default layout
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let ds_id = DatasetId("plate".into());
+        let ds_id = DatasetId("collection".into());
         let positions_before: Vec<[f64; 2]> = scene.derived[&ds_id]
             .members
             .iter()

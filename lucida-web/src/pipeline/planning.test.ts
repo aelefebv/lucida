@@ -323,8 +323,8 @@ describe("chooseEntityMode", () => {
 // assignModes() with a populated catalog (three-tier behaviour)
 // ---------------------------------------------------------------------------
 
-/** Build a 1-well-3-fields plate group at the given diagonal. */
-function makePlateEntities(
+/** Build a 1-well-3-fields collection group at the given diagonal. */
+function makeCollectionEntities(
   wellId: string,
   fields: { id: string; image: string; px: number }[],
 ): EntitySnapshot[] {
@@ -356,7 +356,7 @@ function makePlateEntities(
 
 describe("assignModes — three-tier with catalog", () => {
   it("far well (50px) with full catalog → single well-as-proxy entry", () => {
-    const entities = makePlateEntities("wellA", [
+    const entities = makeCollectionEntities("wellA", [
       { id: "fA1", image: "imgA1", px: 40 },
       { id: "fA2", image: "imgA2", px: 50 },
     ]);
@@ -377,7 +377,7 @@ describe("assignModes — three-tier with catalog", () => {
   });
 
   it("mid well (100px) with catalog → one fields-with-proxy-fallback per field", () => {
-    const entities = makePlateEntities("wellB", [
+    const entities = makeCollectionEntities("wellB", [
       { id: "fB1", image: "imgB1", px: 100 },
       { id: "fB2", image: "imgB2", px: 100 },
     ]);
@@ -399,7 +399,7 @@ describe("assignModes — three-tier with catalog", () => {
   });
 
   it("near well (200px) → fields-with-detail per field; well proxy still flagged available", () => {
-    const entities = makePlateEntities("wellC", [
+    const entities = makeCollectionEntities("wellC", [
       { id: "fC1", image: "imgC1", px: 200 },
       { id: "fC2", image: "imgC2", px: 220 },
     ]);
@@ -422,8 +422,8 @@ describe("assignModes — three-tier with catalog", () => {
 
   it("mixed scene: two wells at different zooms get different modes", () => {
     const entities = [
-      ...makePlateEntities("wellA", [{ id: "fA1", image: "imgA1", px: 40 }]),
-      ...makePlateEntities("wellB", [{ id: "fB1", image: "imgB1", px: 200 }]),
+      ...makeCollectionEntities("wellA", [{ id: "fA1", image: "imgA1", px: 40 }]),
+      ...makeCollectionEntities("wellB", [{ id: "fB1", image: "imgB1", px: 200 }]),
     ];
     const catalog = makeCatalog([
       ["wellA", ["WellProxy3D"]],
@@ -446,7 +446,7 @@ describe("assignModes — three-tier with catalog", () => {
   });
 
   it("catalog miss for WellProxy3D → far well degrades to fields-with-proxy-fallback", () => {
-    const entities = makePlateEntities("wellD", [
+    const entities = makeCollectionEntities("wellD", [
       { id: "fD1", image: "imgD1", px: 50 },
     ]);
     // Field proxy advertised but well proxy is NOT.
@@ -463,7 +463,7 @@ describe("assignModes — three-tier with catalog", () => {
   });
 
   it("catalog miss for both proxies → far well degrades all the way to fields-with-detail", () => {
-    const entities = makePlateEntities("wellE", [
+    const entities = makeCollectionEntities("wellE", [
       { id: "fE1", image: "imgE1", px: 50 },
     ]);
     const catalog = makeCatalog([]); // empty catalog
@@ -477,7 +477,7 @@ describe("assignModes — three-tier with catalog", () => {
   });
 
   it("catalog miss in mid range: no FieldProxy3D for any field but well has WellProxy3D → keeps proxy-fallback", () => {
-    const entities = makePlateEntities("wellF", [
+    const entities = makeCollectionEntities("wellF", [
       { id: "fF1", image: "imgF1", px: 100 },
     ]);
     const catalog = makeCatalog([["wellF", ["WellProxy3D"]]]);
@@ -492,7 +492,7 @@ describe("assignModes — three-tier with catalog", () => {
   });
 
   it("hysteresis: previous well-as-proxy holds at 84px when catalog still supports it", () => {
-    const entities = makePlateEntities("wellG", [
+    const entities = makeCollectionEntities("wellG", [
       { id: "fG1", image: "imgG1", px: 84 },
     ]);
     const catalog = makeCatalog([
@@ -517,15 +517,15 @@ describe("assignModes — three-tier with catalog", () => {
       ["fH1", ["FieldProxy3D"]],
     ]);
 
-    const r1 = assignModes(makePlateEntities("wellH", fields), [], catalog);
+    const r1 = assignModes(makeCollectionEntities("wellH", fields), [], catalog);
     expect(r1[0].kind).toBe("well-as-proxy");
 
     fields[0].px = 100;
-    const r2 = assignModes(makePlateEntities("wellH", fields), r1, catalog);
+    const r2 = assignModes(makeCollectionEntities("wellH", fields), r1, catalog);
     expect(asField(r2[0]).mode).toBe("fields-with-proxy-fallback");
 
     fields[0].px = 50;
-    const r3 = assignModes(makePlateEntities("wellH", fields), r2, catalog);
+    const r3 = assignModes(makeCollectionEntities("wellH", fields), r2, catalog);
     expect(r3[0].kind).toBe("well-as-proxy");
   });
 });
@@ -1545,7 +1545,7 @@ describe("plan() — coarse/detail bridge", () => {
 
 describe("plan() — proxy request emission", () => {
   /**
-   * Build a minimal plate snapshot with one well + N fields. All fields
+   * Build a minimal collection snapshot with one well + N fields. All fields
    * share the same image-level geometry (single LOD, 256x256, 1 chunk).
    *
    * Prev-active-set carry-over lives on {@link PlanningState}, not on
@@ -1553,7 +1553,7 @@ describe("plan() — proxy request emission", () => {
    * a `PlanningState` (or thread `result.nextState` from the previous
    * tick) and pass it as the second argument to `plan()`.
    */
-  function makePlateSnapshot(opts: {
+  function makeCollectionSnapshot(opts: {
     wellId: string;
     fields: { id: string; image: string; px: number }[];
     catalog: AssetCatalogSnapshot | null;
@@ -1604,7 +1604,7 @@ describe("plan() — proxy request emission", () => {
 
   it("well-as-proxy emits one ProxyRequest and no detail chunk requests for that well", () => {
     const catalog = makeCatalog([["wellA", ["WellProxy3D"]]]);
-    const snap = makePlateSnapshot({
+    const snap = makeCollectionSnapshot({
       wellId: "wellA",
       fields: [
         { id: "fA1", image: "imgA1", px: 50 },
@@ -1641,7 +1641,7 @@ describe("plan() — proxy request emission", () => {
       ["fB1", ["FieldProxy3D"]],
       ["fB2", ["FieldProxy3D"]],
     ]);
-    const snap = makePlateSnapshot({
+    const snap = makeCollectionSnapshot({
       wellId: "wellB",
       fields: [
         { id: "fB1", image: "imgB1", px: 100 },
@@ -1683,7 +1683,7 @@ describe("plan() — proxy request emission", () => {
       ["wellC", ["WellProxy3D"]],
       ["fC1", ["FieldProxy3D"]],
     ]);
-    const snap = makePlateSnapshot({
+    const snap = makeCollectionSnapshot({
       wellId: "wellC",
       fields: [{ id: "fC1", image: "imgC1", px: 200 }],
       catalog,
@@ -1705,7 +1705,7 @@ describe("plan() — proxy request emission", () => {
 
   it("multi-channel emits one proxy request per visible channel", () => {
     const catalog = makeCatalog([["wellM", ["WellProxy3D"]]]);
-    const snap = makePlateSnapshot({
+    const snap = makeCollectionSnapshot({
       wellId: "wellM",
       fields: [{ id: "fM1", image: "imgM1", px: 50 }],
       catalog,
@@ -1736,7 +1736,7 @@ describe("plan() — proxy request emission", () => {
       ["wellL", ["WellProxy3D"]],
       ["fL1", ["FieldProxy3D"]],
     ]);
-    const snap = makePlateSnapshot({
+    const snap = makeCollectionSnapshot({
       wellId: "wellL",
       fields: [{ id: "fL1", image: "imgL1", px: 100 }],
       catalog,
@@ -1762,7 +1762,7 @@ describe("plan() — proxy request emission", () => {
     ]);
 
     // Settle on well-as-proxy at 50px.
-    let snap = makePlateSnapshot({
+    let snap = makeCollectionSnapshot({
       wellId: "wellH",
       fields: [{ id: "fH1", image: "imgH1", px: 50 }],
       catalog,
@@ -1774,7 +1774,7 @@ describe("plan() — proxy request emission", () => {
     // threads the previous tick's `nextState` back as this tick's
     // state, exercising the PlanningState round-trip.
     for (const px of [75, 82, 78, 84, 80]) {
-      snap = makePlateSnapshot({
+      snap = makeCollectionSnapshot({
         wellId: "wellH",
         fields: [{ id: "fH1", image: "imgH1", px }],
         catalog,
@@ -1784,7 +1784,7 @@ describe("plan() — proxy request emission", () => {
     }
 
     // Cross 85 → flip to proxy-fallback.
-    snap = makePlateSnapshot({
+    snap = makeCollectionSnapshot({
       wellId: "wellH",
       fields: [{ id: "fH1", image: "imgH1", px: 86 }],
       catalog,
@@ -1800,7 +1800,7 @@ describe("plan() — proxy request emission", () => {
     ]);
 
     // Settle on fields-with-detail at 200px.
-    let snap = makePlateSnapshot({
+    let snap = makeCollectionSnapshot({
       wellId: "wellJ",
       fields: [{ id: "fJ1", image: "imgJ1", px: 200 }],
       catalog,
@@ -1809,7 +1809,7 @@ describe("plan() — proxy request emission", () => {
     expect(asField(result.activeSet[0]).mode).toBe("fields-with-detail");
 
     for (const px of [148, 152, 146, 154, 150]) {
-      snap = makePlateSnapshot({
+      snap = makeCollectionSnapshot({
         wellId: "wellJ",
         fields: [{ id: "fJ1", image: "imgJ1", px }],
         catalog,
@@ -1819,7 +1819,7 @@ describe("plan() — proxy request emission", () => {
     }
 
     // Cross 145 → flip down.
-    snap = makePlateSnapshot({
+    snap = makeCollectionSnapshot({
       wellId: "wellJ",
       fields: [{ id: "fJ1", image: "imgJ1", px: 144 }],
       catalog,
@@ -1840,7 +1840,7 @@ describe("plan() — proxy request emission", () => {
     ]);
 
     // Tick 1: settle on well-as-proxy at 50px.
-    const tick1Snap = makePlateSnapshot({
+    const tick1Snap = makeCollectionSnapshot({
       wellId: "wellR",
       fields: [{ id: "fR1", image: "imgR1", px: 50 }],
       catalog,
@@ -1852,7 +1852,7 @@ describe("plan() — proxy request emission", () => {
     // Two state constructions that should produce identical plans:
     //   (a) feeding the planner-returned `nextState` back unchanged,
     //   (b) hand-constructing `{ previousActiveSet: tick1.activeSet }`.
-    const tick2Snap = makePlateSnapshot({
+    const tick2Snap = makeCollectionSnapshot({
       wellId: "wellR",
       fields: [{ id: "fR1", image: "imgR1", px: 82 }],
       catalog,
@@ -2399,11 +2399,11 @@ describe("PlanningConfig", () => {
 
 describe("plan() honors config tunables", () => {
   /**
-   * Single-channel single-LOD plate snapshot at a configurable
+   * Single-channel single-LOD collection snapshot at a configurable
    * projected diagonal. Field has its own catalog entries so it can
    * promote to any of the three modes.
    */
-  function makeTunablePlate(opts: {
+  function makeTunableCollection(opts: {
     px: number;
     catalog?: AssetCatalogSnapshot | null;
     importance?: number;
@@ -2458,7 +2458,7 @@ describe("plan() honors config tunables", () => {
   }
 
   it("farThresholdPx: raising to 200 promotes a 100px entity to well-as-proxy", () => {
-    const snap = makeTunablePlate({ px: 100 });
+    const snap = makeTunableCollection({ px: 100 });
 
     // Default thresholds: 100px → fields-with-proxy-fallback.
     const defaultResult = plan(snap, createSyntheticState(), LEGACY_PROXY_CONFIG);
@@ -2475,7 +2475,7 @@ describe("plan() honors config tunables", () => {
   });
 
   it("detailThresholdPx: lowering to 50 demotes a 100px entity to fields-with-detail", () => {
-    const snap = makeTunablePlate({ px: 100 });
+    const snap = makeTunableCollection({ px: 100 });
 
     const defaultResult = plan(snap, createSyntheticState(), LEGACY_PROXY_CONFIG);
     expect(asField(defaultResult.activeSet[0]).mode).toBe("fields-with-proxy-fallback");
@@ -2492,13 +2492,13 @@ describe("plan() honors config tunables", () => {
   it("hysteresisPx: a wider band lets the previous mode win in a wider range", () => {
     // Settle at 50px in well-as-proxy, then read 100px.
     const settle = plan(
-      makeTunablePlate({ px: 50 }),
+      makeTunableCollection({ px: 50 }),
       createSyntheticState(),
       LEGACY_PROXY_CONFIG,
     );
     expect(settle.activeSet[0].kind).toBe("well-as-proxy");
 
-    const followup = makeTunablePlate({ px: 100 });
+    const followup = makeTunableCollection({ px: 100 });
     // Prev active set carries via PlanningState.
     const followupState = settle.nextState;
 
@@ -2660,7 +2660,7 @@ describe("plan() honors config tunables", () => {
   });
 
   it("wellProxyPriorityBump: changing it shifts the parent-well proxy priority", () => {
-    const snap = makeTunablePlate({ px: 100 });
+    const snap = makeTunableCollection({ px: 100 });
 
     const defaultResult = plan(snap, createSyntheticState(), LEGACY_PROXY_CONFIG);
     const defaultWellProxy = defaultResult.proxyRequests.find(
@@ -2731,7 +2731,7 @@ describe("plan() honors config tunables", () => {
   });
 
   it("proxyLaneOffset: changing it shifts every proxy-request priority", () => {
-    const snap = makeTunablePlate({ px: 50 }); // → well-as-proxy
+    const snap = makeTunableCollection({ px: 50 }); // → well-as-proxy
 
     const before = plan(snap, createSyntheticState(), LEGACY_PROXY_CONFIG);
     const beforeWellProxy = before.proxyRequests.find(
@@ -3017,7 +3017,7 @@ describe("ActiveSetEntry variants", () => {
   it("well-as-proxy variant: only `kind` + `entityId`, no LOD/imageId/proxy fields", () => {
     // 50px well + advertised WellProxy3D → assignModes returns one
     // WellAsProxyEntry. Keys() pin the surface.
-    const entities = makePlateEntities("wellWP", [
+    const entities = makeCollectionEntities("wellWP", [
       { id: "fWP", image: "imgWP", px: 50 },
     ]);
     const catalog = makeCatalog([
@@ -3042,7 +3042,7 @@ describe("ActiveSetEntry variants", () => {
   });
 
   it("field variant: `kind: \"field\"` + LOD bookkeeping + proxy availability flags", () => {
-    const entities = makePlateEntities("wellF", [
+    const entities = makeCollectionEntities("wellF", [
       { id: "fF", image: "imgF", px: 200 },
     ]);
     const catalog = makeCatalog([
@@ -3100,10 +3100,10 @@ describe("ActiveSetEntry variants", () => {
     // fields-with-detail mode, plus an invisible image. The plan
     // must contain entries of all three kinds; iterating with kind
     // discrimination pulls per-variant fields out cleanly.
-    const wellWP = makePlateEntities("wellWP", [
+    const wellWP = makeCollectionEntities("wellWP", [
       { id: "fWP", image: "imgWP", px: 50 },
     ]);
-    const wellFD = makePlateEntities("wellFD", [
+    const wellFD = makeCollectionEntities("wellFD", [
       { id: "fFD", image: "imgFD", px: 200 },
     ]);
     const invisible = createSyntheticEntity({

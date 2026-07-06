@@ -18,7 +18,7 @@ describe("labelColor", () => {
   });
 
   it("normalizes a declared SEMI-TRANSPARENT color (alpha<255) to opaque", () => {
-    // Regression: the ISR plate declares cells 1..10 with alpha=128, which
+    // Regression: the ISR collection declares cells 1..10 with alpha=128, which
     // rendered them at ~50% while glasbey-fallback cells stayed opaque — a
     // patchwork the opacity slider couldn't correct. Alpha is now uniform;
     // the per-label opacity is the sole transparency control.

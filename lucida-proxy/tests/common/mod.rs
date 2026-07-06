@@ -105,7 +105,7 @@ pub fn standard_axes() -> Vec<Axis> {
     ]
 }
 
-/// Build a single-image content graph (no plate). `levels` is the
+/// Build a single-image content graph (no collection). `levels` is the
 /// pyramid; the entity owns one ImageSpec.
 pub fn single_image_graph(
     entity_id: &str,
@@ -210,7 +210,7 @@ pub fn well_graph_with_fields(
 
     DatasetManifest::new(
         DatasetId("ds-test".into()),
-        "test plate".into(),
+        "test collection".into(),
         DatasetKind::Single,
         entities,
         transforms,

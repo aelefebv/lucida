@@ -89,7 +89,7 @@ impl DatasetManifest {
         &self.labels
     }
 
-    /// Every label attached to any image in this dataset (standalone or plate),
+    /// Every label attached to any image in this dataset (standalone or collection),
     /// projected into the lean [`LabelAttachment`] read-view.
     pub fn labels(&self) -> Vec<LabelAttachment> {
         self.labels.iter().map(LabelAttachment::from_spec).collect()

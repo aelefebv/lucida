@@ -107,10 +107,10 @@ describe("LayoutRegistry", () => {
     it("stores the spec so getSpec() returns it", () => {
       const wasm = createMockWasm();
       const reg = new LayoutRegistry(wasm);
-      const spec = makeSpec("derived:plate-grid", "Plate grid");
-      wasm.setAvailable("ds1", [{ id: "derived:plate-grid", name: "Plate grid" }]);
+      const spec = makeSpec("derived:collection-grid", "Collection grid");
+      wasm.setAvailable("ds1", [{ id: "derived:collection-grid", name: "Collection grid" }]);
       reg.register("ds1", spec, noopSend);
-      expect(reg.getSpec("ds1", "derived:plate-grid")).toEqual(spec);
+      expect(reg.getSpec("ds1", "derived:collection-grid")).toEqual(spec);
     });
 
     it("notifies subscribers", () => {

@@ -22,7 +22,7 @@ use crate::parse;
 
 /// Import a dataset from an OME-Zarr store.
 ///
-/// Detects whether the root describes a plate or a single image and
+/// Detects whether the root describes a collection or a single image and
 /// produces the appropriate [`ImportResult`].
 pub async fn import_dataset(
     store: &Arc<dyn ObjectStore>,
@@ -32,7 +32,7 @@ pub async fn import_dataset(
     let root_json = parse::read_zarr_json(store, "zarr.json").await?;
 
     if root_json.pointer("/attributes/ome/plate").is_some() {
-        import_plate(store, id, name, &root_json).await
+        import_collection(store, id, name, &root_json).await
     } else {
         import_single_image(store, id, name, &root_json).await
     }
@@ -152,11 +152,11 @@ async fn import_single_image(
 }
 
 /// Maximum number of metadata object-store GETs kept in flight while importing
-/// a plate. Bounds fan-out so a wide plate opens quickly without self-throttling
+/// a collection. Bounds fan-out so a wide collection opens quickly without self-throttling
 /// the backing store.
 const METADATA_FETCH_CONCURRENCY: usize = 32;
 
-/// One well's parsed metadata: its plate path, grid coordinates, and the fields
+/// One well's parsed metadata: its collection path, grid coordinates, and the fields
 /// it declares. Produced concurrently, then assembled in declared order.
 struct WellParsed {
     path: String,
@@ -171,10 +171,10 @@ struct FovParsed {
     translation: Option<Vec<f64>>,
 }
 
-/// The plate path used to name a well in warnings and diagnostics. Prefers the
+/// The collection path used to name a well in warnings and diagnostics. Prefers the
 /// declared `path`; falls back to the row/column labels (then indices) when the
 /// entry omits it, so a skipped well is still identifiable.
-fn well_plate_path(
+fn well_collection_path(
     path: Option<&str>,
     row_index: u32,
     column_index: u32,
@@ -205,11 +205,11 @@ fn skipped_well_warning(target: &str, reason: String) -> ImportWarning {
 
 /// Fetch and parse a single well's `zarr.json`, extracting its fields.
 ///
-/// Tolerant by design: a missing plate `path`, an unreadable or malformed
+/// Tolerant by design: a missing collection `path`, an unreadable or malformed
 /// `zarr.json`, or a missing `ome.well.images` list yields a [`ImportWarning`]
-/// the caller records and skips, rather than aborting the whole plate. Only the
+/// the caller records and skips, rather than aborting the whole collection. Only the
 /// object-store GET is awaited here so callers can fan many wells out at once.
-/// `target` is the well's plate path used in any warning, computed by the caller
+/// `target` is the well's collection path used in any warning, computed by the caller
 /// so this future owns all of its inputs.
 async fn parse_one_well(
     store: Arc<dyn ObjectStore>,
@@ -221,7 +221,7 @@ async fn parse_one_well(
     let Some(well_path) = path else {
         return Err(skipped_well_warning(
             &target,
-            "plate entry is missing 'path'".to_string(),
+            "collection entry is missing 'path'".to_string(),
         ));
     };
 
@@ -302,18 +302,18 @@ async fn parse_one_well(
     })
 }
 
-async fn import_plate(
+async fn import_collection(
     store: &Arc<dyn ObjectStore>,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
 ) -> Result<ImportResult, StoreError> {
-    let plate_json = root_json
+    let collection_json = root_json
         .pointer("/attributes/ome/plate")
         .ok_or_else(|| StoreError::Metadata("no ome.plate in root zarr.json".into()))?;
 
     // Parse rows and columns.
-    let rows: Vec<String> = plate_json
+    let rows: Vec<String> = collection_json
         .get("rows")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -323,7 +323,7 @@ async fn import_plate(
         })
         .unwrap_or_default();
 
-    let columns: Vec<String> = plate_json
+    let columns: Vec<String> = collection_json
         .get("columns")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -333,17 +333,17 @@ async fn import_plate(
         })
         .unwrap_or_default();
 
-    let wells_json = plate_json
+    let wells_json = collection_json
         .get("wells")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| StoreError::Metadata("plate has no wells array".into()))?;
+        .ok_or_else(|| StoreError::Metadata("collection has no wells array".into()))?;
 
     // Fetch every well's `zarr.json` with bounded concurrency, keyed by its
     // declared position, then re-order the results so downstream assembly runs
     // in declared well order regardless of completion order.
     let well_outcomes: Vec<Result<WellParsed, ImportWarning>> = {
         // Extract each well's declared fields (owned) up front so the concurrent
-        // futures borrow nothing from the plate JSON, rows, or columns.
+        // futures borrow nothing from the collection JSON, rows, or columns.
         struct WellRequest {
             path: Option<String>,
             row_index: u32,
@@ -366,7 +366,7 @@ async fn import_plate(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
                 let target =
-                    well_plate_path(path.as_deref(), row_index, column_index, &rows, &columns);
+                    well_collection_path(path.as_deref(), row_index, column_index, &rows, &columns);
                 WellRequest {
                     path,
                     row_index,
@@ -417,7 +417,9 @@ async fn import_plate(
     }
 
     if parsed_wells.is_empty() {
-        return Err(StoreError::Metadata("plate has no readable wells".into()));
+        return Err(StoreError::Metadata(
+            "collection has no readable wells".into(),
+        ));
     }
 
     let mut representative_fov_path: Option<String> = None;
@@ -434,8 +436,8 @@ async fn import_plate(
     }
 
     // Read representative FOV multiscales.
-    let rep_path =
-        representative_fov_path.ok_or_else(|| StoreError::Metadata("plate has no FOVs".into()))?;
+    let rep_path = representative_fov_path
+        .ok_or_else(|| StoreError::Metadata("collection has no FOVs".into()))?;
 
     let rep_json = parse::read_zarr_json(store, &format!("{rep_path}/zarr.json")).await?;
     let rep_parsed = parse::parse_multiscales(&rep_json, &format!("{rep_path}: "))?;
@@ -443,7 +445,7 @@ async fn import_plate(
     let level_entries = rep_parsed.level_entries;
 
     // Channel display names from the representative FOV's omero block. OME-Zarr
-    // plates require all FOVs to share one multiscale, so the representative
+    // collections require all FOVs to share one multiscale, so the representative
     // FOV's channels apply to every field (generic; optional).
     let channel_infos = parse::parse_omero_channels(&rep_json);
 
@@ -469,7 +471,7 @@ async fn import_plate(
         PositioningMode::Derived
     };
 
-    // For stage-positioned plates, OME-Zarr translations are in physical units
+    // For stage-positioned collections, OME-Zarr translations are in physical units
     // (e.g., microns), but the rest of lucida composes them with voxel-unit
     // well placements. Convert translations to voxel units here using the
     // level-0 scale. Defensive: a missing or invalid scale falls back to 1.0
@@ -509,7 +511,7 @@ async fn import_plate(
     let mut transforms: Vec<TransformEdge> = Vec::new();
     let mut fetch_images: Vec<ProxiedImageSpec> = Vec::new();
     let mut binding_images: Vec<ImageBindingSeed> = Vec::new();
-    // Label overlays discovered per-field, flattened across the whole plate.
+    // Label overlays discovered per-field, flattened across the whole collection.
     // The budget is shared across fields so aggregate label/color memory is
     // bounded no matter how many fields carry labels.
     let mut label_specs: Vec<LabelSpec> = Vec::new();
@@ -582,7 +584,7 @@ async fn import_plate(
         // Collect stage translations for this well's FOVs to normalize them.
         // Translations are stored in OME-Zarr in physical units (e.g. microns);
         // convert to voxel units here so downstream consumers see consistent
-        // units across grid- and stage-positioned plates.
+        // units across grid- and stage-positioned collections.
         let stage_positions: Vec<Option<[f64; 2]>> = if has_explicit_positions {
             well.fovs
                 .iter()
@@ -711,7 +713,7 @@ async fn import_plate(
             .cloned()
             .collect();
 
-        let grid_transforms = lucida_content::plate::build_grid_field_transforms(
+        let grid_transforms = lucida_content::collection::build_grid_field_transforms(
             &well_entities
                 .iter()
                 .map(|e| (*e).clone())
@@ -724,16 +726,20 @@ async fn import_plate(
         transforms = grid_transforms;
     }
 
-    // Build plate layout (places wells, not fields).
-    let source_layout =
-        lucida_content::plate::build_plate_layout(&entities, &rows, &columns, full_shape_5d);
+    // Build collection layout (places wells, not fields).
+    let source_layout = lucida_content::collection::build_collection_layout(
+        &entities,
+        &rows,
+        &columns,
+        full_shape_5d,
+    );
 
     let default_layout_id = source_layout.id.clone();
 
     let manifest = DatasetManifest::new(
         DatasetId(id.to_string()),
         name.to_string(),
-        DatasetKind::Plate {
+        DatasetKind::Collection {
             rows,
             columns,
             positioning_mode,
@@ -786,7 +792,7 @@ fn data_type_size(dt: DataType) -> u8 {
 }
 
 /// Build per-level [`LevelBindingInfo`] for a single image (or for the
-/// representative FOV of a plate, since OME-Zarr plates require all FOVs to
+/// representative FOV of a collection, since OME-Zarr collections require all FOVs to
 /// share the same multiscale shape and codec chain).
 ///
 /// Each level is validated independently with [`parse_codec_chain`] and
@@ -893,17 +899,17 @@ fn build_level_geometries(
 }
 
 /// Dataset-wide ceiling on retained labels. The per-group name cap bounds one
-/// `labels` list; this bounds the total kept across every field of a plate so
+/// `labels` list; this bounds the total kept across every field of a collection so
 /// an adversarial dataset can't accumulate unbounded label specs in memory.
 const MAX_LABELS_PER_DATASET: usize = 1 << 16;
 
 /// Dataset-wide ceiling on retained color-table entries, summed across all
 /// labels. Complements the per-label color cap in `parse` so the total color
-/// memory across a whole plate stays bounded.
+/// memory across a whole collection stays bounded.
 const MAX_LABEL_COLORS_PER_DATASET: usize = 1 << 20;
 
 /// Remaining dataset-wide budget for retained labels and color entries, carried
-/// across every source image / plate field so aggregate memory is bounded even
+/// across every source image / collection field so aggregate memory is bounded even
 /// when per-label caps are individually satisfied.
 struct LabelBudget {
     labels_remaining: usize,
@@ -931,7 +937,7 @@ struct ImportedLabels {
 /// One source image's `labels/` group after its index has been read but before
 /// any label is built. Holds the group prefix (for the per-label reads and
 /// diagnostics) and the declared label names in order — never the built
-/// multiscale specs, so holding one of these for every field of a wide plate at
+/// multiscale specs, so holding one of these for every field of a wide collection at
 /// once costs no per-label memory.
 #[derive(Default)]
 struct ProbedLabels {
@@ -943,7 +949,7 @@ struct ProbedLabels {
 /// every well-formed label it lists, up to the shared dataset budget.
 ///
 /// `base_prefix` is the source image group's store prefix (`""` for a
-/// standalone image, `"{well}/{fov}"` for a plate field); labels live under
+/// standalone image, `"{well}/{fov}"` for a collection field); labels live under
 /// `{base_prefix}/labels`. A missing `labels/` group — the common case —
 /// returns empty. Each label is built through the same multiscale pipeline as
 /// an ordinary image and attached to `source_image_id`; a label that fails to
@@ -977,7 +983,7 @@ async fn import_labels_for_image(
 ///
 /// This reads exactly one small index object and holds only names, so it is the
 /// only per-field label I/O safe to fan out concurrently: probing every field of
-/// a wide plate at once costs no per-label memory. The expensive per-label reads
+/// a wide collection at once costs no per-label memory. The expensive per-label reads
 /// happen later in [`build_labels_within_budget`], gated by the shared budget.
 async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str) -> ProbedLabels {
     let labels_prefix = if base_prefix.is_empty() {
@@ -1167,12 +1173,12 @@ mod tests {
         dir
     }
 
-    /// Create a minimal OME-Zarr plate fixture.
-    // Test helper; args mirror plate-layout shape parameters.
+    /// Create a minimal OME-Zarr collection fixture.
+    // Test helper; args mirror collection-layout shape parameters.
     #[allow(clippy::too_many_arguments)]
-    fn create_plate_fixture(
+    fn create_collection_fixture(
         dir: &std::path::Path,
-        plate_name: &str,
+        collection_name: &str,
         rows: &[&str],
         columns: &[&str],
         wells: &[(
@@ -1215,7 +1221,7 @@ mod tests {
                     "version": "0.5",
                     "plate": {
                         "version": "0.5",
-                        "name": plate_name,
+                        "name": collection_name,
                         "rows": rows_json,
                         "columns": cols_json,
                         "wells": wells_json,
@@ -1426,11 +1432,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_plate() {
-        let dir = temp_dir("import_plate");
-        create_plate_fixture(
+    async fn import_collection() {
+        let dir = temp_dir("import_collection");
+        create_collection_fixture(
             &dir,
-            "test_plate",
+            "test_collection",
             &["A", "B"],
             &["1", "2"],
             &[
@@ -1444,12 +1450,15 @@ mod tests {
         );
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "plate-id", "Test Plate")
+        let result = import_dataset(&store, "collection-id", "Test Collection")
             .await
             .unwrap();
 
         // Verify content graph.
-        assert!(matches!(result.manifest.kind, DatasetKind::Plate { .. }));
+        assert!(matches!(
+            result.manifest.kind,
+            DatasetKind::Collection { .. }
+        ));
 
         // Should have well entities and field entities.
         let wells: Vec<_> = result
@@ -1517,9 +1526,9 @@ mod tests {
             }
         }
 
-        // DatasetKind::Plate should carry correct metadata.
+        // DatasetKind::Collection should carry correct metadata.
         match &result.manifest.kind {
-            DatasetKind::Plate {
+            DatasetKind::Collection {
                 rows,
                 columns,
                 positioning_mode,
@@ -1530,13 +1539,13 @@ mod tests {
                 assert_eq!(*positioning_mode, PositioningMode::Derived);
                 assert!(!has_explicit_positions);
             }
-            _ => panic!("expected Plate kind"),
+            _ => panic!("expected Collection kind"),
         }
 
-        // A fully valid plate records no warnings.
+        // A fully valid collection records no warnings.
         assert!(
             result.warnings.is_empty(),
-            "valid plate should have no warnings, got {:?}",
+            "valid collection should have no warnings, got {:?}",
             result.warnings,
         );
 
@@ -1547,14 +1556,14 @@ mod tests {
     }
 
     /// A single hollow/unreadable well is skipped with a recorded warning while
-    /// the rest of the plate imports. The representative FOV is drawn from the
+    /// the rest of the collection imports. The representative FOV is drawn from the
     /// first surviving well in declared order.
     #[tokio::test]
-    async fn skipped_well_does_not_fail_plate_import() {
+    async fn skipped_well_does_not_fail_collection_import() {
         let dir = temp_dir("skipped_well");
-        create_plate_fixture(
+        create_collection_fixture(
             &dir,
-            "skip_plate",
+            "skip_collection",
             &["A", "B"],
             &["1", "2"],
             &[
@@ -1571,11 +1580,11 @@ mod tests {
         fs::write(dir.join("A").join("2").join("zarr.json"), b"{ not json").unwrap();
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "skip-id", "Skip Plate")
+        let result = import_dataset(&store, "skip-id", "Skip Collection")
             .await
             .unwrap();
 
-        // Exactly one warning, naming the skipped well by its plate path.
+        // Exactly one warning, naming the skipped well by its collection path.
         assert_eq!(
             result.warnings.len(),
             1,
@@ -1590,7 +1599,7 @@ mod tests {
             warning.message,
         );
 
-        // Two wells survive; the plate still opens.
+        // Two wells survive; the collection still opens.
         let wells: Vec<_> = result
             .manifest
             .entities()
@@ -1602,14 +1611,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A plate where no well parses is a genuinely broken dataset and still
+    /// A collection where no well parses is a genuinely broken dataset and still
     /// fails the import loudly.
     #[tokio::test]
-    async fn plate_with_no_readable_wells_fails() {
+    async fn collection_with_no_readable_wells_fails() {
         let dir = temp_dir("all_bad_wells");
-        create_plate_fixture(
+        create_collection_fixture(
             &dir,
-            "broken_plate",
+            "broken_collection",
             &["A"],
             &["1", "2"],
             &[("A", "1", 0, 0, 1), ("A", "2", 0, 1, 1)],
@@ -1622,7 +1631,7 @@ mod tests {
         fs::write(dir.join("A").join("2").join("zarr.json"), b"nonsense").unwrap();
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let err = import_dataset(&store, "broken-id", "Broken Plate")
+        let err = import_dataset(&store, "broken-id", "Broken Collection")
             .await
             .unwrap_err();
         assert!(
@@ -1634,11 +1643,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_plate_with_stage_positions() {
-        let dir = temp_dir("import_plate_stage");
+    async fn import_collection_with_stage_positions() {
+        let dir = temp_dir("import_collection_stage");
         fs::create_dir_all(&dir).unwrap();
 
-        // Build plate root with stage translations on the FOVs.
+        // Build collection root with stage translations on the FOVs.
         let root = serde_json::json!({
             "zarr_format": 3,
             "node_type": "group",
@@ -1647,7 +1656,7 @@ mod tests {
                     "version": "0.5",
                     "plate": {
                         "version": "0.5",
-                        "name": "stage_plate",
+                        "name": "stage_collection",
                         "rows": [{"name": "A"}],
                         "columns": [{"name": "1"}],
                         "wells": [{"path": "A/1", "rowIndex": 0, "columnIndex": 0}]
@@ -1756,12 +1765,12 @@ mod tests {
         }
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "stage-id", "Stage Plate")
+        let result = import_dataset(&store, "stage-id", "Stage Collection")
             .await
             .unwrap();
 
-        // Should be an explicitly-positioned plate.
-        if let DatasetKind::Plate {
+        // Should be an explicitly-positioned collection.
+        if let DatasetKind::Collection {
             positioning_mode,
             has_explicit_positions,
             ..
@@ -1770,7 +1779,7 @@ mod tests {
             assert_eq!(*positioning_mode, PositioningMode::Explicit);
             assert!(*has_explicit_positions);
         } else {
-            panic!("expected Plate kind");
+            panic!("expected Collection kind");
         }
 
         // Transforms should reflect normalized stage positions.
@@ -1802,14 +1811,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Build a single-well stage-positioned plate fixture.
+    /// Build a single-well stage-positioned collection fixture.
     ///
     /// `translations[i]` is written verbatim as the FOV's
     /// `coordinateTransformations.translation` (5-element TCZYX). Pass `None`
     /// to omit the entry, producing a grid-positioned well.
     /// `scale` is the level-0 [T, C, Z, Y, X] scale; pass `None` to omit the
     /// `scale` coordinate transform entirely (so default scale of 1.0 applies).
-    fn create_stage_plate_fixture(
+    fn create_stage_collection_fixture(
         dir: &std::path::Path,
         translations: &[Option<[f64; 5]>],
         scale: Option<[f64; 5]>,
@@ -1824,7 +1833,7 @@ mod tests {
                     "version": "0.5",
                     "plate": {
                         "version": "0.5",
-                        "name": "test_plate",
+                        "name": "test_collection",
                         "rows": [{"name": "A"}],
                         "columns": [{"name": "1"}],
                         "wells": [{"path": "A/1", "rowIndex": 0, "columnIndex": 0}]
@@ -1981,7 +1990,7 @@ mod tests {
             Some([0.0, 0.0, 0.0, 200.0, 100.0]),
         ];
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
-        create_stage_plate_fixture(&dir, &translations, scale);
+        create_stage_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "stage-vox", "Stage Voxel")
@@ -1989,7 +1998,7 @@ mod tests {
             .unwrap();
 
         // Sanity: should be Explicit-positioned.
-        if let DatasetKind::Plate {
+        if let DatasetKind::Collection {
             positioning_mode,
             has_explicit_positions,
             ..
@@ -1998,7 +2007,7 @@ mod tests {
             assert_eq!(*positioning_mode, PositioningMode::Explicit);
             assert!(*has_explicit_positions);
         } else {
-            panic!("expected Plate kind");
+            panic!("expected Collection kind");
         }
 
         // FOV 0 is the per-well origin.
@@ -2028,24 +2037,24 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Grid-positioned plates (no translations) must be unaffected by the
+    /// Grid-positioned collections (no translations) must be unaffected by the
     /// scale-conversion code path.
     #[tokio::test]
-    async fn grid_plates_unaffected() {
-        let dir = temp_dir("grid_plates_unaffected");
-        // Two FOVs, neither with a translation -> grid-positioned plate.
+    async fn grid_collections_unaffected() {
+        let dir = temp_dir("grid_collections_unaffected");
+        // Two FOVs, neither with a translation -> grid-positioned collection.
         let translations = vec![None, None];
         // Choose a non-trivial scale so the wrong code path would be visible.
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
-        create_stage_plate_fixture(&dir, &translations, scale);
+        create_stage_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "grid-plate", "Grid Plate")
+        let result = import_dataset(&store, "grid-collection", "Grid Collection")
             .await
             .unwrap();
 
         // Sanity: should be Derived-positioned.
-        if let DatasetKind::Plate {
+        if let DatasetKind::Collection {
             positioning_mode,
             has_explicit_positions,
             ..
@@ -2054,7 +2063,7 @@ mod tests {
             assert_eq!(*positioning_mode, PositioningMode::Derived);
             assert!(!*has_explicit_positions);
         } else {
-            panic!("expected Plate kind");
+            panic!("expected Collection kind");
         }
 
         // The grid formula: for n=2 fields, cols = ceil(sqrt(2)) = 2,
@@ -2063,11 +2072,11 @@ mod tests {
         let fov_x = 128.0_f64;
         let gap_x = 0.08 * fov_x;
 
-        let t0 = find_field_transform(&result, "grid-plate", 0);
+        let t0 = find_field_transform(&result, "grid-collection", 0);
         assert!((t0.transform.matrix()[12]).abs() < 1e-9, "field 0 tx");
         assert!((t0.transform.matrix()[13]).abs() < 1e-9, "field 0 ty");
 
-        let t1 = find_field_transform(&result, "grid-plate", 1);
+        let t1 = find_field_transform(&result, "grid-collection", 1);
         assert!(
             (t1.transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9,
             "field 1 tx should be {} voxels, got {}",
@@ -2093,7 +2102,7 @@ mod tests {
             Some([0.0, 0.0, 0.0, 200.0, 100.0]),
         ];
         // No explicit scale entry -> default of 1.0 in parse.rs.
-        create_stage_plate_fixture(&dir, &translations, None);
+        create_stage_collection_fixture(&dir, &translations, None);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "missing-scale", "Missing Scale")
@@ -2133,7 +2142,7 @@ mod tests {
         ];
         // X scale (last value) is zero — invalid. Y scale is fine.
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.0]);
-        create_stage_plate_fixture(&dir, &translations, scale);
+        create_stage_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "zero-scale", "Zero Scale")
@@ -3078,13 +3087,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Labels nested under a single plate field attach to that field's image,
+    /// Labels nested under a single collection field attach to that field's image,
     /// with a field-nested store prefix, and leave DatasetKind and the field
     /// image set unchanged.
     #[tokio::test]
-    async fn import_plate_with_labels_on_field() {
-        let dir = temp_dir("import_plate_labels");
-        create_plate_fixture(
+    async fn import_collection_with_labels_on_field() {
+        let dir = temp_dir("import_collection_labels");
+        create_collection_fixture(
             &dir,
             "p",
             &["A", "B"],
@@ -3117,12 +3126,15 @@ mod tests {
         );
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "plate-lbl", "Plate Labeled")
+        let result = import_dataset(&store, "collection-lbl", "Collection Labeled")
             .await
             .unwrap();
 
         // DatasetKind and field image set are unchanged (4 fields: 2+1+1).
-        assert!(matches!(result.manifest.kind, DatasetKind::Plate { .. }));
+        assert!(matches!(
+            result.manifest.kind,
+            DatasetKind::Collection { .. }
+        ));
         assert_eq!(result.manifest.images().len(), 4);
 
         let labels = result.manifest.labels();
@@ -3132,7 +3144,7 @@ mod tests {
         assert_eq!(label.data_type, DataType::Uint32);
         assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
         // Attached to the A/1/0 field image specifically.
-        let expected_source = ImageId("plate-lbl:image:A/1/0".to_string());
+        let expected_source = ImageId("collection-lbl:image:A/1/0".to_string());
         assert_eq!(label.source_image_id, expected_source);
         // That source image really exists in the manifest.
         assert!(
@@ -3273,12 +3285,12 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The same guard applies on the plate path: a zero chunk dimension in the
+    /// The same guard applies on the collection path: a zero chunk dimension in the
     /// representative field's array fails loudly rather than panicking.
     #[tokio::test]
-    async fn plate_source_with_zero_chunk_fails_without_panic() {
-        let dir = temp_dir("import_plate_zero_chunk");
-        create_plate_fixture(
+    async fn collection_source_with_zero_chunk_fails_without_panic() {
+        let dir = temp_dir("import_collection_zero_chunk");
+        create_collection_fixture(
             &dir,
             "p",
             &["A"],
@@ -3290,9 +3302,9 @@ mod tests {
         );
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let err = import_dataset(&store, "pzc", "Plate Zero Chunk")
+        let err = import_dataset(&store, "pzc", "Collection Zero Chunk")
             .await
-            .expect_err("a zero-chunk plate field array must fail the import");
+            .expect_err("a zero-chunk collection field array must fail the import");
         assert!(matches!(err, StoreError::Metadata(_)));
         assert!(
             err.to_string().contains("zero"),

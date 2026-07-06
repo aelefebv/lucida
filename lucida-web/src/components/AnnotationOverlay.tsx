@@ -389,7 +389,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // OUTSIDE the overlay (e.g. a "mentions of me" item) even though `openPinId` is
   // internal state. `focusPin` opens the pin's thread AND recenters the view on
   // the pin's in-plane world point via the SAME `set_center` viewport command the
-  // plate selector uses (apply-locally only — recentering is viewport state, not
+  // collection selector uses (apply-locally only — recentering is viewport state, not
   // a document mutation, so peers are untouched). Reads the live pin set through
   // a ref so a stale `focusPin` capture never matters; tolerates a missing pin /
   // unready scene by simply doing nothing (it never throws). The RAF tick then
@@ -408,7 +408,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             x: pin.position[0],
             y: pin.position[1],
           });
-          // Repaint under the recentered camera, mirroring the plate selector /
+          // Repaint under the recentered camera, mirroring the collection selector /
           // pin-pan paths. No-op when unwired (e.g. a test harness).
           onViewportChanged?.();
         }

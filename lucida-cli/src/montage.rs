@@ -18,7 +18,7 @@ use lucida_core::scene::{ChannelSettings, Colormap, DatasetDisplaySettings};
 use lucida_core::view::ViewState;
 
 /// Which dataset axis the montage sweeps. Picked from the dataset's shape: a
-/// multi-field plate samples fields; otherwise a depth stack samples Z, a
+/// multi-field collection samples fields; otherwise a depth stack samples Z, a
 /// timeseries samples T, and a flat single image yields one cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MontageAxis {
@@ -76,7 +76,7 @@ fn grid_cols(n: usize, max_cols: u32) -> u32 {
 /// Plan a montage for a dataset of shape `dims = [T, C, Z, Y, X]` with
 /// `image_count` members (fields), sampling at most `max_cells` positions.
 ///
-/// Axis priority: a multi-field plate samples fields; else a Z>1 stack samples
+/// Axis priority: a multi-field collection samples fields; else a Z>1 stack samples
 /// Z; else a T>1 series samples T; else a single cell. The mid Z (and t=0,
 /// c=0) anchor the non-Z axes. `max_cols` caps the grid width.
 pub fn plan_montage(
@@ -90,7 +90,7 @@ pub fn plan_montage(
     let mid_z = (z_n.saturating_sub(1) / 2) as u32;
 
     let (axis, cells) = if image_count > 1 {
-        // Plate / multi-field: one cell per field (capped), at mid-Z.
+        // Collection / multi-field: one cell per field (capped), at mid-Z.
         let n = image_count.min(max_cells);
         let cells = (0..n)
             .map(|f| MontageCell {
@@ -469,14 +469,14 @@ mod tests {
     }
 
     #[test]
-    fn samples_fields_for_a_plate() {
-        // 64-field plate (image_count 64); fields win over Z.
+    fn samples_fields_for_a_collection() {
+        // 64-field collection (image_count 64); fields win over Z.
         let plan = plan_montage([1, 4, 9, 256, 256], 64, 16, 4);
         assert_eq!(plan.axis, MontageAxis::Field);
         assert_eq!(plan.cells.len(), 16);
         assert_eq!(plan.cells[0].field, 0);
         assert_eq!(plan.cells[15].field, 15);
-        // Plate cells anchor at mid-Z.
+        // Collection cells anchor at mid-Z.
         assert_eq!(plan.cells[0].z, 4);
     }
 

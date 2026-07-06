@@ -363,7 +363,7 @@ export class CpuCache {
     this.deliveryState.clearProxySentForDataset(datasetId);
 
     // Failure keys are `${entityId}/${chunkKey}`; entityIds may
-    // contain slashes (plate naming, e.g. "plateId:A/1/0"), so
+    // contain slashes (collection naming, e.g. "collectionId:A/1/0"), so
     // prefix-match on `entityId + "/"` rather than splitting.
     for (const entityId of entityIds) {
       const prefix = `${entityId}/`;

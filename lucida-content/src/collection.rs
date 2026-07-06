@@ -1,6 +1,6 @@
-//! Plate layout construction functions.
+//! Collection layout construction functions.
 //!
-//! Builds [`LayoutSpec`] placements and [`TransformEdge`]s for plate-based
+//! Builds [`LayoutSpec`] placements and [`TransformEdge`]s for collection-based
 //! datasets, replacing the old mutate-in-place approach with declarative output.
 
 use std::collections::HashMap;
@@ -16,24 +16,24 @@ const FIELD_GAP_FRACTION: f64 = 0.08;
 /// Gap between wells, as a fraction of FOV width.
 const WELL_GAP_FRACTION: f64 = 0.20;
 
-/// Errors that can occur during plate layout construction.
+/// Errors that can occur during collection layout construction.
 #[derive(Debug, Clone)]
-pub enum PlateLayoutError {
+pub enum CollectionLayoutError {
     MissingFieldIndex { entity_id: EntityId },
     DuplicateFieldIndex { well_id: EntityId, field_index: u32 },
 }
 
-impl std::fmt::Display for PlateLayoutError {
+impl std::fmt::Display for CollectionLayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PlateLayoutError::MissingFieldIndex { entity_id } => {
+            CollectionLayoutError::MissingFieldIndex { entity_id } => {
                 write!(
                     f,
                     "field entity {:?} is missing field_index label",
                     entity_id.0
                 )
             }
-            PlateLayoutError::DuplicateFieldIndex {
+            CollectionLayoutError::DuplicateFieldIndex {
                 well_id,
                 field_index,
             } => {
@@ -47,17 +47,17 @@ impl std::fmt::Display for PlateLayoutError {
     }
 }
 
-impl std::error::Error for PlateLayoutError {}
+impl std::error::Error for CollectionLayoutError {}
 
 /// Build a source layout that places wells in a grid.
 /// Field positions within wells come from TransformEdges, not from this layout.
 ///
 /// Only [`EntityKind::Well`] entities receive placements. Field entities are
 /// used solely to derive per-well field counts for spacing calculations.
-pub fn build_plate_layout(
+pub fn build_collection_layout(
     entities: &[Entity],
-    _plate_rows: &[String],
-    _plate_columns: &[String],
+    _collection_rows: &[String],
+    _collection_columns: &[String],
     fov_shape: [u64; 5], // [T, C, Z, Y, X]
 ) -> LayoutSpec {
     let wells: Vec<&Entity> = entities
@@ -107,7 +107,7 @@ pub fn build_plate_layout(
     }
 }
 
-/// Build field->well [`TransformEdge`]s for grid-positioned plates.
+/// Build field->well [`TransformEdge`]s for grid-positioned collections.
 ///
 /// Returns an error if any field is missing `field_index` or has duplicate
 /// `field_index` within its well.
@@ -115,7 +115,7 @@ pub fn build_grid_field_transforms(
     _well_entities: &[Entity],
     field_entities: &[Entity],
     fov_shape: [u64; 5],
-) -> Result<Vec<TransformEdge>, PlateLayoutError> {
+) -> Result<Vec<TransformEdge>, CollectionLayoutError> {
     // Group fields by parent well.
     let mut fields_by_well: HashMap<&EntityId, Vec<&Entity>> = HashMap::new();
     for field in field_entities {
@@ -135,13 +135,11 @@ pub fn build_grid_field_transforms(
         // Validate: each field must have a field_index.
         let mut indexed: Vec<(u32, &Entity)> = Vec::with_capacity(well_fields.len());
         for field in well_fields {
-            let fi =
-                field
-                    .labels
-                    .field_index
-                    .ok_or_else(|| PlateLayoutError::MissingFieldIndex {
-                        entity_id: field.id.clone(),
-                    })?;
+            let fi = field.labels.field_index.ok_or_else(|| {
+                CollectionLayoutError::MissingFieldIndex {
+                    entity_id: field.id.clone(),
+                }
+            })?;
             indexed.push((fi, field));
         }
 
@@ -151,7 +149,7 @@ pub fn build_grid_field_transforms(
         // Check for duplicates.
         for window in indexed.windows(2) {
             if window[0].0 == window[1].0 {
-                return Err(PlateLayoutError::DuplicateFieldIndex {
+                return Err(CollectionLayoutError::DuplicateFieldIndex {
                     well_id: (*well_id).clone(),
                     field_index: window[0].0,
                 });
@@ -178,9 +176,9 @@ pub fn build_grid_field_transforms(
     Ok(transforms)
 }
 
-/// Compute the bounding box of a plate from well placements and
+/// Compute the bounding box of a collection from well placements and
 /// field extents within each well. Returns `[width, height]`.
-pub fn plate_extent(
+pub fn collection_extent(
     layout: &LayoutSpec,
     field_transforms: &[TransformEdge],
     fov_shape: [u64; 5],
@@ -247,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn two_by_three_plate_single_fov() {
+    fn two_by_three_collection_single_fov() {
         // 2 rows x 3 columns, 1 FOV per well.
         let wells = vec![
             make_well("w-00", 0, 0),
@@ -270,7 +268,7 @@ mod tests {
         let rows = vec!["A".into(), "B".into()];
         let cols = vec!["1".into(), "2".into(), "3".into()];
 
-        let layout = build_plate_layout(&entities, &rows, &cols, fov_shape);
+        let layout = build_collection_layout(&entities, &rows, &cols, fov_shape);
         assert_eq!(layout.placements.len(), 6);
 
         let fov_x = 512.0;
@@ -345,8 +343,8 @@ mod tests {
     }
 
     #[test]
-    fn two_by_two_plate_four_fovs() {
-        // 2x2 plate, 4 FOVs per well.
+    fn two_by_two_collection_four_fovs() {
+        // 2x2 collection, 4 FOVs per well.
         let wells = vec![
             make_well("w-00", 0, 0),
             make_well("w-01", 0, 1),
@@ -372,7 +370,7 @@ mod tests {
         let rows = vec!["A".into(), "B".into()];
         let cols = vec!["1".into(), "2".into()];
 
-        let layout = build_plate_layout(&entities, &rows, &cols, fov_shape);
+        let layout = build_collection_layout(&entities, &rows, &cols, fov_shape);
         assert_eq!(layout.placements.len(), 4);
 
         let fov_x = 256.0;
@@ -425,8 +423,8 @@ mod tests {
     }
 
     #[test]
-    fn plate_extent_two_by_three() {
-        // Same 2x3 plate from test 1.
+    fn collection_extent_two_by_three() {
+        // Same 2x3 collection from test 1.
         let wells = vec![
             make_well("w-00", 0, 0),
             make_well("w-01", 0, 1),
@@ -448,10 +446,10 @@ mod tests {
         let rows = vec!["A".into(), "B".into()];
         let cols = vec!["1".into(), "2".into(), "3".into()];
 
-        let layout = build_plate_layout(&entities, &rows, &cols, fov_shape);
+        let layout = build_collection_layout(&entities, &rows, &cols, fov_shape);
         let transforms = build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
 
-        let extent = plate_extent(&layout, &transforms, fov_shape);
+        let extent = collection_extent(&layout, &transforms, fov_shape);
 
         let fov_x = 512.0;
         let fov_y = 512.0;
@@ -485,7 +483,7 @@ mod tests {
         let result = build_grid_field_transforms(&wells, &fields, [1, 1, 1, 256, 256]);
         assert!(result.is_err());
         match result.unwrap_err() {
-            PlateLayoutError::MissingFieldIndex { entity_id } => {
+            CollectionLayoutError::MissingFieldIndex { entity_id } => {
                 assert_eq!(entity_id.0, "f-0");
             }
             other => panic!("expected MissingFieldIndex, got {:?}", other),
@@ -503,7 +501,7 @@ mod tests {
         let result = build_grid_field_transforms(&wells, &fields, [1, 1, 1, 256, 256]);
         assert!(result.is_err());
         match result.unwrap_err() {
-            PlateLayoutError::DuplicateFieldIndex {
+            CollectionLayoutError::DuplicateFieldIndex {
                 well_id,
                 field_index,
             } => {

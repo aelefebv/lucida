@@ -675,17 +675,17 @@ fn single_dataset_opened() -> DatasetOpened {
     }
 }
 
-/// A plate manifest: well/field entity hierarchy, explicit positioning, and a
+/// A collection manifest: well/field entity hierarchy, explicit positioning, and a
 /// field-owned image.
-fn plate_dataset_opened() -> DatasetOpened {
+fn collection_dataset_opened() -> DatasetOpened {
     let well_id = EntityId("well-A1".into());
     let field_id = EntityId("field-A1-f0".into());
     let image_id = ImageId("field-A1-f0-image".into());
 
     let manifest = DatasetManifest::new(
-        DatasetId("wds-plate-77".into()),
-        "screening-plate-01.zarr".into(),
-        DatasetKind::Plate {
+        DatasetId("wds-collection-77".into()),
+        "screening-collection-01.zarr".into(),
+        DatasetKind::Collection {
             rows: vec!["A".into(), "B".into()],
             columns: vec!["1".into(), "2".into(), "3".into()],
             positioning_mode: PositioningMode::Explicit,
@@ -1685,7 +1685,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 action: BookmarkAction::Updated,
                 dataset_urls: vec![
                     "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
-                    "gs://lucida-fixtures/screening-plate-01.zarr".into(),
+                    "gs://lucida-fixtures/screening-collection-01.zarr".into(),
                 ],
             },
             req("", &["/type", "/id", "/action", "/dataset_urls"]),
@@ -1973,7 +1973,7 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
 
 const DATASET_OPEN_FILES: &[&str] = &[
     "dataset-open/dataset_opened_single.json",
-    "dataset-open/dataset_opened_plate.json",
+    "dataset-open/dataset_opened_collection.json",
     "dataset-open/fetch_source_proxied.json",
     "dataset-open/fetch_source_direct.json",
     "dataset-open/fetch_source_local.json",
@@ -1998,7 +1998,7 @@ fn chunk_request_golden() -> ChunkMessage {
 
 fn asset_request_golden() -> AssetMessage {
     AssetMessage::AssetRequest {
-        dataset_id: DatasetId("wds-plate-77".into()),
+        dataset_id: DatasetId("wds-collection-77".into()),
         entity_id: EntityId("field-A1-f0".into()),
         kind: ProxyKind::FieldProxy3D,
         t: 0,
@@ -2082,17 +2082,17 @@ fn dataset_open_payloads_match_goldens() {
         &mut failures,
     );
     check(
-        "dataset-open/dataset_opened_plate.json",
-        &plate_dataset_opened(),
+        "dataset-open/dataset_opened_collection.json",
+        &collection_dataset_opened(),
         &req(
             "",
             &[
                 "/manifest",
                 "/fetch",
-                "/manifest/kind/Plate/rows",
-                "/manifest/kind/Plate/columns",
-                "/manifest/kind/Plate/positioning_mode",
-                "/manifest/kind/Plate/has_explicit_positions",
+                "/manifest/kind/Collection/rows",
+                "/manifest/kind/Collection/columns",
+                "/manifest/kind/Collection/positioning_mode",
+                "/manifest/kind/Collection/has_explicit_positions",
             ],
         ),
         &mut failures,

@@ -367,11 +367,11 @@ const expectedDatasetOpenedSingle: WireDatasetOpened = {
   opener_client_id: 7,
 };
 
-const expectedManifestPlate: DatasetManifest = {
-  dataset_id: "wds-plate-77",
-  name: "screening-plate-01.zarr",
+const expectedManifestCollection: DatasetManifest = {
+  dataset_id: "wds-collection-77",
+  name: "screening-collection-01.zarr",
   kind: {
-    Plate: {
+    Collection: {
       rows: ["A", "B"],
       columns: ["1", "2", "3"],
       positioning_mode: "Explicit",
@@ -450,8 +450,8 @@ const expectedManifestPlate: DatasetManifest = {
   default_layout_id: "layout-stage",
 };
 
-const expectedDatasetOpenedPlate: WireDatasetOpened = {
-  manifest: expectedManifestPlate,
+const expectedDatasetOpenedCollection: WireDatasetOpened = {
+  manifest: expectedManifestCollection,
   fetch: {
     Proxied: {
       images: [
@@ -1195,7 +1195,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       action: "updated",
       dataset_urls: [
         "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-plate-01.zarr",
+        "gs://lucida-fixtures/screening-collection-01.zarr",
       ],
     });
 
@@ -1209,7 +1209,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       "updated",
       [
         "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-plate-01.zarr",
+        "gs://lucida-fixtures/screening-collection-01.zarr",
       ],
     ];
     expect(onBookmarkChanged).toHaveBeenCalledWith(...expectedArgs);
@@ -1530,7 +1530,7 @@ describe("wire goldens: content-source request envelopes", () => {
     const controller = new AbortController();
     const pending = source.fetchProxy(
       {
-        datasetId: "wds-plate-77",
+        datasetId: "wds-collection-77",
         entityId: "field-A1-f0",
         kind: "FieldProxy3D",
         t: 0,
@@ -1568,19 +1568,19 @@ describe("wire goldens: dataset-open payloads", () => {
     expect(extractDataType(proxied!.images[1].wire_format)).toBe("Uint32");
   });
 
-  it("plate DatasetOpened matches the manifestTypes mirror", () => {
+  it("collection DatasetOpened matches the manifestTypes mirror", () => {
     const opened = coveredFixture(
-      "dataset-open/dataset_opened_plate.json",
+      "dataset-open/dataset_opened_collection.json",
     ) as WireDatasetOpened;
-    expect(opened).toStrictEqual(expectedDatasetOpenedPlate);
+    expect(opened).toStrictEqual(expectedDatasetOpenedCollection);
 
-    // Plate-kind discrimination as the web performs it.
+    // Collection-kind discrimination as the web performs it.
     expect(typeof opened.manifest.kind).not.toBe("string");
     if (typeof opened.manifest.kind !== "string") {
-      expect(opened.manifest.kind.Plate.rows).toStrictEqual(["A", "B"]);
-      expect(opened.manifest.kind.Plate.columns).toStrictEqual(["1", "2", "3"]);
-      expect(opened.manifest.kind.Plate.positioning_mode).toBe("Explicit");
-      expect(opened.manifest.kind.Plate.has_explicit_positions).toBe(true);
+      expect(opened.manifest.kind.Collection.rows).toStrictEqual(["A", "B"]);
+      expect(opened.manifest.kind.Collection.columns).toStrictEqual(["1", "2", "3"]);
+      expect(opened.manifest.kind.Collection.positioning_mode).toBe("Explicit");
+      expect(opened.manifest.kind.Collection.has_explicit_positions).toBe(true);
     }
     const proxied = "Proxied" in opened.fetch ? opened.fetch.Proxied : null;
     expect(extractDataType(proxied!.images[0].wire_format)).toBe("Uint8");

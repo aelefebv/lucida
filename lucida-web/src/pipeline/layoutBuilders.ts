@@ -4,8 +4,8 @@
  * derived layouts when a dataset is opened.
  *
  * Today's two builders:
- *   - `buildPlateGridLayout`  : a verbatim copy of the source default
- *     layout, registered under id `"derived:plate-grid"`.
+ *   - `buildCollectionGridLayout`  : a verbatim copy of the source default
+ *     layout, registered under id `"derived:collection-grid"`.
  *   - `buildDenseSquareLayout`: source placements packed into a tight
  *     ceil(sqrt(N)) x ceil(N/cols) grid, registered under id
  *     `"derived:dense-square"`.
@@ -114,14 +114,14 @@ function maxImageFovYX(manifest: DatasetManifest): [number, number] {
 
 /**
  * Mirror the source default layout's placements verbatim under id
- * `"derived:plate-grid"`. Returns null if no source default exists.
+ * `"derived:collection-grid"`. Returns null if no source default exists.
  */
-export function buildPlateGridLayout(manifest: DatasetManifest): LayoutSpec | null {
+export function buildCollectionGridLayout(manifest: DatasetManifest): LayoutSpec | null {
   const placements = sourceDefaultPlacements(manifest);
   if (!placements) return null;
   return {
-    id: "derived:plate-grid",
-    name: "Plate grid",
+    id: "derived:collection-grid",
+    name: "Collection grid",
     placements: placements.map((p) => ({
       entity_id: p.entity_id,
       position: [p.position[0], p.position[1]],
@@ -132,7 +132,7 @@ export function buildPlateGridLayout(manifest: DatasetManifest): LayoutSpec | nu
 /**
  * Pack source-default placements into a square-ish grid. Per-cell stride is
  * `entity_footprint + one_field_FOV` — the footprint guarantees no overlap
- * (well bbox for plate placements, image FOV for image-level placements),
+ * (well bbox for collection placements, image FOV for image-level placements),
  * and the extra field-FOV creates a visible inter-well gap that is always
  * larger than any intra-well field spacing. Returns null if fewer than 2
  * entities.
@@ -169,7 +169,7 @@ export function buildDenseSquareLayout(manifest: DatasetManifest): LayoutSpec | 
  */
 export function derivedBuildersFor(manifest: DatasetManifest): LayoutSpec[] {
   const out: LayoutSpec[] = [];
-  const grid = buildPlateGridLayout(manifest);
+  const grid = buildCollectionGridLayout(manifest);
   if (grid) out.push(grid);
   const dense = buildDenseSquareLayout(manifest);
   if (dense) out.push(dense);

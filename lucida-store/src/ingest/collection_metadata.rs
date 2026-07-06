@@ -1,6 +1,6 @@
-//! Write OME-Zarr v0.5 plate and well metadata files.
+//! Write OME-Zarr v0.5 collection and well metadata files.
 //!
-//! Generates the Zarr v3 group metadata for HCS plate hierarchy:
+//! Generates the Zarr v3 group metadata for the collection hierarchy:
 //! - Root `zarr.json` with `ome.plate` attributes
 //! - Per-row group `zarr.json`
 //! - Per-well `zarr.json` with `ome.well` attributes
@@ -10,13 +10,13 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::plate_scanner::{PlateLayout, WellLayout};
+use super::collection_scanner::{CollectionLayout, WellLayout};
 
-/// Write the root plate `zarr.json` metadata file.
+/// Write the root collection `zarr.json` metadata file.
 ///
-/// Creates the output directory and writes a Zarr v3 group with OME plate
+/// Creates the output directory and writes a Zarr v3 group with OME collection
 /// attributes describing rows, columns, wells, and field count.
-pub fn write_plate_metadata(output: &Path, layout: &PlateLayout) -> Result<(), String> {
+pub fn write_collection_metadata(output: &Path, layout: &CollectionLayout) -> Result<(), String> {
     fs::create_dir_all(output).map_err(|e| format!("failed to create output dir: {e}"))?;
 
     let rows: Vec<serde_json::Value> = layout.rows.iter().map(|r| json!({"name": r})).collect();
@@ -58,7 +58,7 @@ pub fn write_plate_metadata(output: &Path, layout: &PlateLayout) -> Result<(), S
     });
 
     let content = serde_json::to_string_pretty(&root_meta)
-        .map_err(|e| format!("failed to serialize plate metadata: {e}"))?;
+        .map_err(|e| format!("failed to serialize collection metadata: {e}"))?;
     let path = output.join("zarr.json");
     fs::write(&path, content).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
@@ -119,24 +119,27 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use crate::ingest::plate_scanner::FovLayout;
+    use crate::ingest::collection_scanner::FovLayout;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_meta_test_{}", std::process::id()))
+            .join(format!(
+                "lucida_collection_meta_test_{}",
+                std::process::id()
+            ))
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
-    /// Build a PlateLayout with given wells for testing.
+    /// Build a CollectionLayout with given wells for testing.
     fn make_layout(
         name: &str,
         rows: Vec<&str>,
         columns: Vec<&str>,
         wells: Vec<WellLayout>,
-    ) -> PlateLayout {
-        PlateLayout {
+    ) -> CollectionLayout {
+        CollectionLayout {
             name: name.to_string(),
             rows: rows.into_iter().map(String::from).collect(),
             columns: columns.into_iter().map(String::from).collect(),
@@ -168,16 +171,16 @@ mod tests {
     }
 
     #[test]
-    fn plate_metadata_json_structure() {
-        let dir = temp_dir("plate_json");
+    fn collection_metadata_json_structure() {
+        let dir = temp_dir("collection_json");
         let layout = make_layout(
-            "my_plate",
+            "my_collection",
             vec!["A", "B"],
             vec!["1", "3"],
             vec![make_well("A", "1", 0, 0, 2), make_well("B", "3", 1, 1, 2)],
         );
 
-        write_plate_metadata(&dir, &layout).unwrap();
+        write_collection_metadata(&dir, &layout).unwrap();
 
         let content = std::fs::read_to_string(dir.join("zarr.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -186,22 +189,22 @@ mod tests {
         assert_eq!(json["node_type"], "group");
         assert_eq!(json["attributes"]["ome"]["version"], "0.5");
 
-        let plate = &json["attributes"]["ome"]["plate"];
-        assert_eq!(plate["version"], "0.5");
-        assert_eq!(plate["name"], "my_plate");
-        assert_eq!(plate["field_count"], 2);
+        let collection = &json["attributes"]["ome"]["plate"];
+        assert_eq!(collection["version"], "0.5");
+        assert_eq!(collection["name"], "my_collection");
+        assert_eq!(collection["field_count"], 2);
 
-        let rows = plate["rows"].as_array().unwrap();
+        let rows = collection["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["name"], "A");
         assert_eq!(rows[1]["name"], "B");
 
-        let columns = plate["columns"].as_array().unwrap();
+        let columns = collection["columns"].as_array().unwrap();
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[0]["name"], "1");
         assert_eq!(columns[1]["name"], "3");
 
-        let wells = plate["wells"].as_array().unwrap();
+        let wells = collection["wells"].as_array().unwrap();
         assert_eq!(wells.len(), 2);
         assert_eq!(wells[0]["path"], "A/1");
         assert_eq!(wells[0]["rowIndex"], 0);
@@ -270,31 +273,31 @@ mod tests {
     }
 
     #[test]
-    fn sparse_plate_generates_correct_wells() {
+    fn sparse_collection_generates_correct_wells() {
         let dir = temp_dir("sparse");
-        // Plate with 3 rows and 3 columns but only 2 wells filled (sparse).
+        // Collection with 3 rows and 3 columns but only 2 wells filled (sparse).
         let layout = make_layout(
-            "sparse_plate",
+            "sparse_collection",
             vec!["A", "B", "C"],
             vec!["1", "2", "3"],
             vec![make_well("A", "3", 0, 2, 2), make_well("C", "1", 2, 0, 1)],
         );
 
-        write_plate_metadata(&dir, &layout).unwrap();
+        write_collection_metadata(&dir, &layout).unwrap();
 
         let content = std::fs::read_to_string(dir.join("zarr.json")).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-        let plate = &json["attributes"]["ome"]["plate"];
+        let collection = &json["attributes"]["ome"]["plate"];
 
         // All 3 rows and 3 columns should be listed.
-        let rows = plate["rows"].as_array().unwrap();
+        let rows = collection["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 3);
-        let columns = plate["columns"].as_array().unwrap();
+        let columns = collection["columns"].as_array().unwrap();
         assert_eq!(columns.len(), 3);
 
         // Only 2 wells should be listed.
-        let wells = plate["wells"].as_array().unwrap();
+        let wells = collection["wells"].as_array().unwrap();
         assert_eq!(wells.len(), 2);
         assert_eq!(wells[0]["path"], "A/3");
         assert_eq!(wells[0]["rowIndex"], 0);
@@ -306,9 +309,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Write a minimal FOV directory with multiscales metadata so read_plate_info
-    /// can parse it. Currently unused; preserved for future plate-metadata tests
-    /// that exercise read_plate_info against synthesized fixtures.
+    /// Write a minimal FOV directory with multiscales metadata so read_collection_info
+    /// can parse it. Currently unused; preserved for future collection-metadata tests
+    /// that exercise read_collection_info against synthesized fixtures.
     #[allow(dead_code)]
     fn write_fov_fixture(fov_dir: &std::path::Path) {
         use crate::ingest::ome_metadata;

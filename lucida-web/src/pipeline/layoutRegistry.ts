@@ -1,7 +1,7 @@
 /**
  * Layout Registry (web mirror) — tracks per-dataset available layouts and
  * the currently active layout id. Mirrors the WASM-side `registered_layouts`
- * + `active_layout_ids` so the UI (`<LayoutSwitcher>`, `PlateSelector`) can
+ * + `active_layout_ids` so the UI (`<LayoutSwitcher>`, `CollectionSelector`) can
  * read without paying a JSON round-trip per render.
  *
  * Authority for layout state is Rust/WASM. This class:
@@ -13,7 +13,7 @@
  *   2. Refreshes the available list from `wasmScene.available_layouts()`
  *      after every relevant mutation (and after inbound bridge events).
  *   3. Stores derived-layout `LayoutSpec` values locally so consumers like
- *      PlateSelector can read placements without a WASM round-trip
+ *      CollectionSelector can read placements without a WASM round-trip
  *      (`available_layouts` only returns id+name).
  *   4. Notifies subscribers on every change for `useSyncExternalStore`.
  */

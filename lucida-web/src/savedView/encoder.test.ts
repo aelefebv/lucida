@@ -57,7 +57,7 @@ describe("SavedView encoder", () => {
       const v = emptySliceView();
       v.datasets = ["gs://bucket/a.zarr"];
       v.dataset_order = ["ds-aaaa"];
-      v.active_layouts = { "ds-aaaa": "plate-3x3" };
+      v.active_layouts = { "ds-aaaa": "collection-3x3" };
       v.dataset_settings = { "ds-aaaa": defaultDatasetSettings(2) };
       v.view.t = 5;
       v.view.c = 1;
@@ -299,9 +299,9 @@ describe("SavedView encoder", () => {
 
   describe("size budget", () => {
     /**
-     * Synthesize a 384-well plate scenario:
+     * Synthesize a 384-well collection scenario:
      *   - 1 dataset (384 wells, but they're members not separate datasets)
-     *   - active layout pointing at a 24x16 plate spec
+     *   - active layout pointing at a 24x16 collection spec
      *   - default channel settings, default contrast/gamma
      *   - typical slice camera position
      *
@@ -309,11 +309,11 @@ describe("SavedView encoder", () => {
      * gzip+base64. The dataset side is one URL; the wire-cost driver
      * is the per-channel display defaults — which the encoder strips.
      */
-    it("384-well plate share link fits under 1 KB", async () => {
+    it("384-well collection share link fits under 1 KB", async () => {
       const v = emptySliceView([1280, 720]);
-      v.datasets = ["gs://bucket/big-plate-screen-2024.zarr"];
+      v.datasets = ["gs://bucket/big-collection-screen-2024.zarr"];
       v.dataset_order = ["ds-7777aaaabbbbcccc"];
-      v.active_layouts = { "ds-7777aaaabbbbcccc": "plate-24x16-grid" };
+      v.active_layouts = { "ds-7777aaaabbbbcccc": "collection-24x16-grid" };
       v.dataset_settings = {
         "ds-7777aaaabbbbcccc": defaultDatasetSettings(4),
       };

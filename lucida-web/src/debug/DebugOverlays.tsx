@@ -899,7 +899,7 @@ export function DebugOverlays({
 
             // Well-as-proxy: there's no chunk grid because the well is
             // served by a single proxy asset. Render one rect per well
-            // colored by proxy status, so plates at WP zoom still
+            // colored by proxy status, so collections at WP zoom still
             // surface load progress.
             if (entry.kind === "well-as-proxy") {
               const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "WellProxy3D", t, c);

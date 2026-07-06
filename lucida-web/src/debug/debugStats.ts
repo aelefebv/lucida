@@ -33,7 +33,7 @@ export interface OrchMemberDebug {
  * full plan() run; replayed onto cache-hit ticks so the panel doesn't
  * blink to zero between non-planning frames.
  *
- * Single datasets and plates use the same shape. For single, `wellsByMode`
+ * Single datasets and collections use the same shape. For single, `wellsByMode`
  * collapses to a single "fields-with-detail" count; the per-LOD breakdown
  * carries the heavy lifting (it's the dominant signal for "is my LOD
  * selection sane").

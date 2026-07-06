@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
 
-use super::plate_scanner::FovLayout;
+use super::collection_scanner::FovLayout;
 use super::pyramid::VoxelSize;
 use super::tiff_reader::Volume;
 
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn read_fov_single_plane() {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_reader_{}", std::process::id()))
+            .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("single");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn read_fov_multiple_planes() {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_reader_{}", std::process::id()))
+            .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("multi");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn read_fov_missing_slot_is_zero() {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_reader_{}", std::process::id()))
+            .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("missing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn read_fov_wrong_dimensions_errors() {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_reader_{}", std::process::id()))
+            .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("wrong_dims");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -776,8 +776,8 @@ fn remove_dataset_message(dataset_id: &str) -> ClientMessage {
 
 fn dataset_kind_label(kind: &impl std::fmt::Debug) -> String {
     let raw = format!("{kind:?}");
-    if raw.starts_with("Plate") {
-        "plate".to_string()
+    if raw.starts_with("Collection") {
+        "collection".to_string()
     } else {
         raw.to_ascii_lowercase()
     }
@@ -1417,7 +1417,7 @@ mod tests {
             path: "/data".into(),
             entries: vec![
                 BrowseEntry {
-                    name: "plate.zarr".into(),
+                    name: "collection.zarr".into(),
                     entry_type: "directory".into(),
                 },
                 BrowseEntry {
@@ -1430,7 +1430,7 @@ mod tests {
         let human = format_dataset_browse_human(&output);
 
         assert!(human.contains("/data"));
-        assert!(human.contains("directory plate.zarr/"));
+        assert!(human.contains("directory collection.zarr/"));
         assert!(human.contains("file      notes.txt"));
     }
 

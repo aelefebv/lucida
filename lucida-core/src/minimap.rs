@@ -22,7 +22,7 @@ use crate::framing::{Aabb, FIT_PADDING, orbit_overview_framing};
 /// currently shown.
 ///
 /// Frames the **visible** members so a single shown dataset isn't dwarfed by
-/// hidden ones (e.g. a large multi-field plate left in the workspace). If
+/// hidden ones (e.g. a large multi-field collection left in the workspace). If
 /// nothing is visible it falls back to framing all members rather than going
 /// blank; with no members it returns the neutral default.
 pub fn minimap_framing_boxes(members: &[([f32; 16], bool)]) -> ([f64; 3], f64) {
@@ -81,19 +81,19 @@ mod tests {
 
     #[test]
     fn frames_only_visible_members() {
-        // A huge hidden plate far from the origin + a small visible volume at the
+        // A huge hidden collection far from the origin + a small visible volume at the
         // origin. The minimap must frame the visible volume, not be pulled out to
-        // fit the hidden plate (the bug that made an isolated dataset a speck).
-        let plate = box_mat(100.0, 1000.0, 1000.0, 0.0);
+        // fit the hidden collection (the bug that made an isolated dataset a speck).
+        let collection = box_mat(100.0, 1000.0, 1000.0, 0.0);
         let volume = box_mat(2.0, 0.0, 0.0, 0.0);
-        let (center, distance) = minimap_framing_boxes(&[(plate, false), (volume, true)]);
+        let (center, distance) = minimap_framing_boxes(&[(collection, false), (volume, true)]);
         assert!(
             center[0] < 10.0 && center[1] < 10.0,
-            "center pulled toward hidden plate: {center:?}"
+            "center pulled toward hidden collection: {center:?}"
         );
         assert!(
             distance < 20.0,
-            "distance inflated by hidden plate: {distance}"
+            "distance inflated by hidden collection: {distance}"
         );
     }
 

@@ -6,7 +6,7 @@ use crate::layout::PositioningMode;
 pub enum DatasetKind {
     #[default]
     Single,
-    Plate {
+    Collection {
         rows: Vec<String>,
         columns: Vec<String>,
         positioning_mode: PositioningMode,

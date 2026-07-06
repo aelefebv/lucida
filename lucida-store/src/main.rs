@@ -60,9 +60,9 @@ enum Commands {
         voxel_z: Option<f64>,
     },
 
-    /// Convert an HCS TIFF directory to an OME-Zarr plate store.
-    Plate {
-        /// Input directory containing HCS TIFF files
+    /// Convert a tiled TIFF directory to an OME-Zarr store.
+    Collection {
+        /// Input directory containing tiled TIFF files
         /// (filenames like r01c01f01p01-ch01t01.tiff)
         input_dir: PathBuf,
 
@@ -135,7 +135,7 @@ fn main() {
             }
         }
 
-        Commands::Plate {
+        Commands::Collection {
             input_dir,
             output,
             chunk_xy,
@@ -156,7 +156,7 @@ fn main() {
                 None
             };
 
-            if let Err(e) = lucida_store::ingest::convert_plate_to_zarr(
+            if let Err(e) = lucida_store::ingest::convert_collection_to_zarr(
                 &input_dir,
                 &output,
                 chunk_size,
