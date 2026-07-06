@@ -5,7 +5,7 @@ description: "Lucida's fallback/residency model moves to two canonical chunk tie
 tags: [lucida, decision]
 source_path: wiki/decisions/0039-chunk-only-coarse-detail-residency.md
 created: 2026-05-18
-modified: 2026-05-18
+modified: 2026-07-06
 ---
 
 # Chunk-only coarse/detail residency
@@ -61,7 +61,7 @@ an explicit budget and eviction policy. It also honors
 because tier selection and priority remain planner-visible inputs/outputs rather
 than hidden worker state.
 
-The highest-resolution default is a product requirement. Microscopists expect
+The highest-resolution default is a product requirement. Users expect
 inspection to begin at the best available source resolution; lowering detail LOD
 is an explicit user choice, not an automatic memory-pressure response.
 

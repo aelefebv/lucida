@@ -5,7 +5,7 @@ description: "A layout is a named placement of entities in 2D world space."
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/layout-system.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Layout System
@@ -17,7 +17,7 @@ A **layout** is a named placement of entities in 2D world space. Datasets ship w
 Two reasons:
 
 1. **Plates and singles share the planning code path.** A single is one entity at the origin; a plate is many wells at well-grid positions, fields nested within. Both are encoded as a layout that the planner consumes — which means the planner doesn't know plate-vs-single, only "iterate this list of placements."
-2. **Different views of the same plate are useful.** "Source layout" follows the plate's microscope coordinates; alternative layouts (dense pack, aggregated, sorted by metric) re-arrange wells without re-importing. Layouts let the renderer answer "where do you want them?" without rebuilding the manifest.
+2. **Different views of the same plate are useful.** "Source layout" follows the plate's as-acquired coordinates; alternative layouts (dense pack, aggregated, sorted by metric) re-arrange wells without re-importing. Layouts let the renderer answer "where do you want them?" without rebuilding the manifest.
 
 ## Source vs registered
 

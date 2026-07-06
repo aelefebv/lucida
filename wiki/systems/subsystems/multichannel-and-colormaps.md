@@ -1,20 +1,20 @@
 ---
 type: Subsystem
 title: "Multi-Channel and Colormaps"
-description: "How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings."
+description: "How Lucida composes multiple channels into one image and applies per-channel display settings."
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/multichannel-and-colormaps.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Multi-Channel and Colormaps
 
-How Lucida composes multiple fluorescence channels into one image and applies per-channel display settings. The pipeline runs from `ChannelSettings` in [lucida-core](../crates/lucida-core.md) through per-name LUT textures in `colormaps.ts` through composite-key naming in [GPU Residency](gpu-residency.md) to `compositor.wgsl`.
+How Lucida composes multiple channels into one image and applies per-channel display settings. The pipeline runs from `ChannelSettings` in [lucida-core](../crates/lucida-core.md) through per-name LUT textures in `colormaps.ts` through composite-key naming in [GPU Residency](gpu-residency.md) to `compositor.wgsl`.
 
 ## Why multichannel is its own subsystem
 
-Microscopy datasets routinely have 3–6 channels representing different fluorophores. Each channel needs its own contrast, gamma, colormap, and visibility — and they composite together (additive blending by default) to produce the final image. Rolling that into the single-channel display path quickly became unmaintainable, so it lives as a dedicated layer in both the Rust state model and the GPU pipeline.
+Multi-channel datasets routinely have 3–6 channels representing different signals. Each channel needs its own contrast, gamma, colormap, and visibility — and they composite together (additive blending by default) to produce the final image. Rolling that into the single-channel display path quickly became unmaintainable, so it lives as a dedicated layer in both the Rust state model and the GPU pipeline.
 
 ## Per-channel state
 

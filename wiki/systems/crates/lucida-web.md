@@ -1,16 +1,16 @@
 ---
 type: Crate
 title: "lucida-web"
-description: "React 19 + Vite 7 + WebGPU frontend that consumes the lucida-core WASM build and renders multi-channel volumetric microscopy datasets."
+description: "React 19 + Vite 7 + WebGPU frontend that consumes the lucida-core WASM build and renders multi-channel volumetric image datasets."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-web.md
 created: 2026-04-18
-modified: 2026-07-04
+modified: 2026-07-06
 ---
 
 # lucida-web
 
-React 19 + Vite 7 + WebGPU frontend that consumes the [lucida-core](lucida-core.md) WASM build and renders multi-channel volumetric microscopy datasets. The web client is a thin orchestration layer over the WASM Scene — JS owns the network, the GPU, and the DOM; WASM owns the truth about what's visible and where.
+React 19 + Vite 7 + WebGPU frontend that consumes the [lucida-core](lucida-core.md) WASM build and renders multi-channel volumetric image datasets. The web client is a thin orchestration layer over the WASM Scene — JS owns the network, the GPU, and the DOM; WASM owns the truth about what's visible and where.
 
 This article is a roadmap. The substantive content for each subsystem lives in its own article.
 
