@@ -4,6 +4,8 @@ Use Conventional Commit subjects for all commits and squash-merge PR titles beca
 
 Pick a real fixture, not a toy one: lucida loads OME-Zarr lazily in chunks, so multi-GB 3D volumes and multi-channel timeseries open fast — dataset size is no reason to avoid them, and large/3D/timeseries data exercises far more of the viewer than a small 2D image.
 
+Keep everything domain-neutral. Do NOT use biology- or science-specific terms anywhere — code, identifiers, comments, docs, commits, PRs, beads/issues, or test fixtures. lucida is a general n-dimensional array/image viewer, and the vocabulary should stay generalized across domains. Prefer neutral wording (e.g. "channel", "dataset", "volume", "sample", "label") over domain-loaded jargon.
+
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
