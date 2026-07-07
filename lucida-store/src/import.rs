@@ -156,6 +156,56 @@ async fn import_single_image(
 /// the backing store.
 const METADATA_FETCH_CONCURRENCY: usize = 32;
 
+/// Collections with at most this many tiles probe every tile for a `labels/`
+/// child group. Larger collections sample each group's first and last tile
+/// and only probe a group's remaining tiles when a sampled tile carries
+/// labels, so label-discovery metadata traffic scales with the number of
+/// groups (plus labeled tiles) rather than with total tiles. Without this, a
+/// wide remote collection pays one round-trip per tile — nearly always a
+/// 404 — and that fan-out dominates the whole open.
+///
+/// Trade-off this heuristic accepts: above the limit, a group whose labels
+/// sit only on tiles that are neither first nor last is never expanded, so
+/// those labels go undiscovered. Whenever any tile goes unprobed the import
+/// records an [`ImportWarning`] naming [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`],
+/// which restores full per-tile probing.
+const EXHAUSTIVE_LABEL_PROBE_MAX_TILES: usize = 64;
+
+/// Environment variable that forces per-tile label probing on collections of
+/// every size (one metadata read per tile, full discovery). Any value other
+/// than empty or `"0"` enables it.
+const EXHAUSTIVE_LABEL_DISCOVERY_ENV: &str = "LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY";
+
+/// Whether [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`] requests exhaustive discovery.
+fn exhaustive_label_discovery_forced() -> bool {
+    std::env::var(EXHAUSTIVE_LABEL_DISCOVERY_ENV)
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
+/// Whether every tile of a collection should be probed for labels, given the
+/// total tile count and the operator override.
+fn use_exhaustive_label_probes(total_tiles: usize, force_exhaustive: bool) -> bool {
+    force_exhaustive || total_tiles <= EXHAUSTIVE_LABEL_PROBE_MAX_TILES
+}
+
+/// The tile indices sampled per group when label discovery is not exhaustive:
+/// each group's first and last tile. `group_spans` are per-group index ranges
+/// into the flattened tile list, in declared group order.
+fn sample_probe_indices(group_spans: &[std::ops::Range<usize>]) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(group_spans.len() * 2);
+    for span in group_spans {
+        if span.is_empty() {
+            continue;
+        }
+        indices.push(span.start);
+        if span.end - span.start > 1 {
+            indices.push(span.end - 1);
+        }
+    }
+    indices
+}
+
 /// One group's parsed metadata: its collection path, grid coordinates, and the tiles
 /// it declares. Produced concurrently, then assembled in declared order.
 struct GroupParsed {
@@ -522,29 +572,63 @@ async fn import_collection(
     let mut label_specs: Vec<LabelSpec> = Vec::new();
     let mut label_budget = LabelBudget::new();
 
-    // Probe every tile's `labels/` group index with bounded concurrency — the
-    // only per-tile label I/O safe to fan out, since it reads one small index
-    // object and holds only names, never built specs — keyed by declared tile
-    // order.
-    let tile_prefixes: Vec<String> = parsed_groups
-        .iter()
-        .flat_map(|group| group.tiles.iter().map(|tile| tile.store_prefix.clone()))
-        .collect();
+    // Discover per-tile `labels/` groups. This is the only remaining per-tile
+    // metadata I/O, so it must not fan out one read per tile on a wide
+    // collection: small collections probe every tile exhaustively, while
+    // collections above EXHAUSTIVE_LABEL_PROBE_MAX_TILES sample each group's
+    // first and last tile and expand to the whole group when a sample carries
+    // labels. Tiles left unprobed are treated as label-free and the import
+    // records a warning naming the exhaustive-discovery override.
+    let mut tile_prefixes: Vec<String> = Vec::new();
+    let mut group_spans: Vec<std::ops::Range<usize>> = Vec::with_capacity(parsed_groups.len());
+    for group in &parsed_groups {
+        let start = tile_prefixes.len();
+        tile_prefixes.extend(group.tiles.iter().map(|tile| tile.store_prefix.clone()));
+        group_spans.push(start..tile_prefixes.len());
+    }
     let mut probed_labels: Vec<Option<ProbedLabels>> =
         (0..tile_prefixes.len()).map(|_| None).collect();
-    let mut probe_stream =
-        futures_util::stream::iter(tile_prefixes.iter().cloned().enumerate().map(
-            |(index, prefix)| {
-                let store = store.clone();
-                async move {
-                    let probed = probe_labels_for_image(&store, &prefix).await;
-                    (index, probed)
-                }
-            },
-        ))
-        .buffer_unordered(METADATA_FETCH_CONCURRENCY);
-    while let Some((index, probed)) = probe_stream.next().await {
-        probed_labels[index] = Some(probed);
+    if use_exhaustive_label_probes(tile_prefixes.len(), exhaustive_label_discovery_forced()) {
+        let all: Vec<usize> = (0..tile_prefixes.len()).collect();
+        probe_labels_for_tiles(store, &tile_prefixes, all, &mut probed_labels).await;
+    } else {
+        let samples = sample_probe_indices(&group_spans);
+        probe_labels_for_tiles(store, &tile_prefixes, samples, &mut probed_labels).await;
+
+        // Expand to every tile of any group whose sampled tiles carry labels,
+        // so a labeled group's discovery stays complete (its cost scales with
+        // its own tile count, not the whole collection's).
+        let mut follow_up: Vec<usize> = Vec::new();
+        for span in &group_spans {
+            let sampled_hit = span.clone().any(|index| {
+                probed_labels[index]
+                    .as_ref()
+                    .is_some_and(|probed| !probed.names.is_empty())
+            });
+            if sampled_hit {
+                follow_up.extend(span.clone().filter(|index| probed_labels[*index].is_none()));
+            }
+        }
+        if !follow_up.is_empty() {
+            probe_labels_for_tiles(store, &tile_prefixes, follow_up, &mut probed_labels).await;
+        }
+
+        let unprobed = probed_labels.iter().filter(|slot| slot.is_none()).count();
+        if unprobed > 0 {
+            warnings.push(ImportWarning {
+                kind: ImportWarningKind::SampledLabelDiscovery,
+                target: id.to_string(),
+                message: format!(
+                    "label discovery was sampled: probed {probed} of {total} tiles \
+                     (each group's first and last tile, expanding to every tile of any \
+                     group where labels were found); labels present only on unsampled \
+                     tiles were not discovered. Set {EXHAUSTIVE_LABEL_DISCOVERY_ENV}=1 \
+                     to probe every tile.",
+                    probed = probed_labels.len() - unprobed,
+                    total = probed_labels.len(),
+                ),
+            });
+        }
     }
 
     // Build the probed labels serially, in declared tile order, gated by the
@@ -555,7 +639,12 @@ async fn import_collection(
     // kept, and the same ones dropped, in the same order.
     let mut tile_labels = Vec::with_capacity(tile_prefixes.len());
     for (prefix, probed) in tile_prefixes.iter().zip(probed_labels) {
-        let probed = probed.expect("every tile index is filled by the probe loop");
+        // A tile left unprobed by sampled discovery is treated as label-free
+        // (the sampling warning above covers the possibility it wasn't).
+        let probed = probed.unwrap_or_else(|| ProbedLabels {
+            labels_prefix: format!("{prefix}/labels"),
+            names: Vec::new(),
+        });
         let image_id = ImageId(format!("{id}:image:{prefix}"));
         let owner = EntityId(format!("{id}:tile:{prefix}"));
         let imported =
@@ -662,10 +751,11 @@ async fn import_collection(
             }
             // Grid transforms are built after all entities are created.
 
-            // This tile's `labels/` group was probed concurrently above and
-            // its budget charged in declared order; take the prepared overlays
-            // so they interleave after the tile's own image entries exactly as
-            // a sequential probe would place them.
+            // This tile's `labels/` group was probed (or deliberately skipped
+            // as label-free) above and its budget charged in declared order;
+            // take the prepared overlays so they interleave after the tile's
+            // own image entries exactly as a sequential probe would place
+            // them.
             let tile_labels = tile_labels
                 .next()
                 .expect("one prepared label set per tile, in declared order");
@@ -1011,6 +1101,30 @@ async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str)
     ProbedLabels {
         labels_prefix,
         names,
+    }
+}
+
+/// Probe the `labels/` group index of the given tiles (indices into
+/// `tile_prefixes`) with bounded concurrency, filling each probed slot of
+/// `probed_labels`. Slots not named in `indices` are left untouched, so
+/// callers can layer probe passes (sample first, then expand).
+async fn probe_labels_for_tiles(
+    store: &Arc<dyn ObjectStore>,
+    tile_prefixes: &[String],
+    indices: Vec<usize>,
+    probed_labels: &mut [Option<ProbedLabels>],
+) {
+    let mut probe_stream = futures_util::stream::iter(indices.into_iter().map(|index| {
+        let store = store.clone();
+        let prefix = tile_prefixes[index].clone();
+        async move {
+            let probed = probe_labels_for_image(&store, &prefix).await;
+            (index, probed)
+        }
+    }))
+    .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+    while let Some((index, probed)) = probe_stream.next().await {
+        probed_labels[index] = Some(probed);
     }
 }
 
@@ -3323,13 +3437,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// An [`ObjectStore`] decorator that records the location of every GET it
-    /// serves and delegates all work to an inner store. Lets a test observe
-    /// exactly which objects the importer reads.
+    /// An [`ObjectStore`] decorator that records the location of every read
+    /// operation it serves — GET (and HEAD, which routes through `get_opts`)
+    /// plus LIST — and delegates all work to an inner store. Lets a test
+    /// observe exactly which objects the importer reads and how many read
+    /// round-trips an import costs.
     #[derive(Debug)]
     struct RecordingStore {
         inner: Arc<dyn ObjectStore>,
-        gets: Arc<std::sync::Mutex<Vec<String>>>,
+        reads: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl std::fmt::Display for RecordingStore {
@@ -3362,7 +3478,7 @@ mod tests {
             location: &Path,
             options: object_store::GetOptions,
         ) -> object_store::Result<object_store::GetResult> {
-            self.gets.lock().unwrap().push(location.to_string());
+            self.reads.lock().unwrap().push(location.to_string());
             self.inner.get_opts(location, options).await
         }
 
@@ -3375,6 +3491,10 @@ mod tests {
             prefix: Option<&Path>,
         ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
         {
+            self.reads.lock().unwrap().push(format!(
+                "list:{}",
+                prefix.map(Path::to_string).unwrap_or_default()
+            ));
             self.inner.list(prefix)
         }
 
@@ -3382,6 +3502,10 @@ mod tests {
             &self,
             prefix: Option<&Path>,
         ) -> object_store::Result<object_store::ListResult> {
+            self.reads.lock().unwrap().push(format!(
+                "list:{}",
+                prefix.map(Path::to_string).unwrap_or_default()
+            ));
             self.inner.list_with_delimiter(prefix).await
         }
 
@@ -3421,10 +3545,10 @@ mod tests {
             );
         }
 
-        let gets = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
             inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
-            gets: gets.clone(),
+            reads: reads.clone(),
         });
 
         // A budget of exactly two labels, with ample color headroom.
@@ -3460,7 +3584,7 @@ mod tests {
 
         // Decisive: the third label's group is never read. Building it would
         // require reading its `zarr.json`; the budget gate stops the loop first.
-        let reads = gets.lock().unwrap();
+        let reads = reads.lock().unwrap();
         assert!(
             reads.iter().any(|p| p.contains("labels/keep0/")),
             "the first in-budget label must be built (read): {reads:?}",
@@ -3474,6 +3598,250 @@ mod tests {
             "no I/O may touch the over-budget label: {reads:?}",
         );
         drop(reads);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Wrap a local fixture directory in a [`RecordingStore`], returning the
+    /// store and the shared read log.
+    fn recording_store(
+        dir: &std::path::Path,
+    ) -> (Arc<dyn ObjectStore>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
+            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+            reads: reads.clone(),
+        });
+        (store, reads)
+    }
+
+    #[test]
+    fn exhaustive_probe_threshold_and_override() {
+        // At the limit: every tile is probed.
+        assert!(use_exhaustive_label_probes(
+            EXHAUSTIVE_LABEL_PROBE_MAX_TILES,
+            false
+        ));
+        // One past the limit: sampling kicks in.
+        assert!(!use_exhaustive_label_probes(
+            EXHAUSTIVE_LABEL_PROBE_MAX_TILES + 1,
+            false
+        ));
+        // The operator override restores exhaustive probing at any size.
+        assert!(use_exhaustive_label_probes(
+            EXHAUSTIVE_LABEL_PROBE_MAX_TILES + 1,
+            true
+        ));
+    }
+
+    #[test]
+    fn sample_indices_cover_each_groups_first_and_last_tile() {
+        // Groups of 1, 3, 0, and 5 tiles: single-tile groups contribute one
+        // index (no duplicate), empty groups contribute none.
+        let spans = vec![0..1, 1..4, 4..4, 4..9];
+        assert_eq!(sample_probe_indices(&spans), vec![0, 1, 3, 4, 8]);
+    }
+
+    /// A label-free collection wider than the exhaustive-probe limit imports
+    /// with metadata read traffic proportional to its GROUPS, never one read
+    /// per tile: 6 groups x 60 tiles = 360 tiles must cost on the order of
+    /// dozens of reads (root + one per group + the representative tile's
+    /// template + two label samples per group). The bounded discovery is
+    /// surfaced as a warning naming the exhaustive override.
+    #[tokio::test]
+    async fn label_free_wide_collection_reads_scale_with_groups() {
+        let dir = temp_dir("wide_label_free");
+        create_collection_fixture(
+            &dir,
+            "wide",
+            &["A", "B", "C"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 60),
+                ("A", "2", 0, 1, 60),
+                ("B", "1", 1, 0, 60),
+                ("B", "2", 1, 1, 60),
+                ("C", "1", 2, 0, 60),
+                ("C", "2", 2, 1, 60),
+            ],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset(&store, "wide-id", "Wide").await.unwrap();
+
+        assert_eq!(result.manifest.images().len(), 360, "one image per tile");
+        assert!(result.manifest.labels().is_empty());
+
+        let reads = reads.lock().unwrap();
+        // Label probes: exactly two per group (first + last tile), never one
+        // per tile.
+        let label_probes = reads
+            .iter()
+            .filter(|p| p.ends_with("labels/zarr.json"))
+            .count();
+        assert_eq!(
+            label_probes, 12,
+            "expected 2 label probes per group (6 groups), got {label_probes}",
+        );
+        // Total metadata reads track structure (root + 6 group metas + the
+        // representative tile and its level + 12 label samples ≈ 21), never
+        // the 360 tiles.
+        println!("metadata reads for 6x60 collection: {}", reads.len());
+        assert!(
+            reads.len() <= 40,
+            "expected dozens of metadata reads for a 360-tile collection, got {}",
+            reads.len(),
+        );
+        drop(reads);
+
+        // Bounded discovery is announced, with the escape hatch named.
+        let sampled: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::SampledLabelDiscovery)
+            .collect();
+        assert_eq!(sampled.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            sampled[0].message.contains(EXHAUSTIVE_LABEL_DISCOVERY_ENV),
+            "warning must name the override: {:?}",
+            sampled[0].message,
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Above the exhaustive-probe limit, a group whose sampled tile carries
+    /// labels is expanded to a full per-tile probe, so every labeled tile of
+    /// that group is discovered — including interior ones the sample missed —
+    /// while the label-free sibling group still costs only its two samples.
+    #[tokio::test]
+    async fn sampled_discovery_expands_labeled_group_and_finds_all_labels() {
+        let dir = temp_dir("sampled_labeled_group");
+        create_collection_fixture(
+            &dir,
+            "p",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 40), ("A", "2", 0, 1, 40)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        // Label three tiles of A/1: the sampled first tile plus an interior
+        // one and the last one.
+        for tile in ["0", "17", "39"] {
+            let tile_dir = dir.join("A").join("1").join(tile);
+            write_labels_index(&tile_dir, &["mask"]);
+            write_label_multiscale(
+                &tile_dir,
+                "mask",
+                &["t", "z", "y", "x"],
+                &[1, 1, 16, 16],
+                &[1, 1, 16, 16],
+                &[1.0, 1.0, 1.0, 1.0],
+                "uint32",
+                serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+            );
+        }
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset(&store, "pl", "Partially Labeled")
+            .await
+            .unwrap();
+
+        // All three labels found, attached to the right tile images.
+        let mut sources: Vec<String> = result
+            .manifest
+            .labels()
+            .iter()
+            .map(|l| l.source_image_id.0.clone())
+            .collect();
+        sources.sort();
+        assert_eq!(
+            sources,
+            vec![
+                "pl:image:A/1/0".to_string(),
+                "pl:image:A/1/17".to_string(),
+                "pl:image:A/1/39".to_string(),
+            ],
+        );
+
+        // Probe cost: the labeled group is probed in full (40), the
+        // label-free group costs only its two samples.
+        let reads = reads.lock().unwrap();
+        let a1 = reads
+            .iter()
+            .filter(|p| p.starts_with("A/1/") && p.ends_with("labels/zarr.json"))
+            .count();
+        let a2 = reads
+            .iter()
+            .filter(|p| p.starts_with("A/2/") && p.ends_with("labels/zarr.json"))
+            .count();
+        assert_eq!(a1, 40, "labeled group must be probed exhaustively");
+        assert_eq!(a2, 2, "label-free group must cost only its samples");
+        drop(reads);
+
+        // A/2's interior tiles went unprobed, so the discovery-bounded
+        // warning still stands.
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.kind == ImportWarningKind::SampledLabelDiscovery),
+            "warnings: {:?}",
+            result.warnings,
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Small collections keep exhaustive discovery: a label present only on an
+    /// interior tile (index 2 of 4 — neither a first- nor a last-tile sample
+    /// position) of a single-group collection is still discovered, with no
+    /// bounded-discovery warning.
+    #[tokio::test]
+    async fn small_collection_interior_label_is_discovered_exhaustively() {
+        let dir = temp_dir("small_sparse_label");
+        create_collection_fixture(
+            &dir,
+            "s",
+            &["A"],
+            &["1"],
+            &[("A", "1", 0, 0, 4)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        let tile_dir = dir.join("A").join("1").join("2");
+        write_labels_index(&tile_dir, &["mask"]);
+        write_label_multiscale(
+            &tile_dir,
+            "mask",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint16",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "small", "Small").await.unwrap();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1, "the interior tile's label must be found");
+        assert_eq!(
+            labels[0].source_image_id,
+            ImageId("small:image:A/1/2".to_string()),
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "exhaustive discovery must not warn: {:?}",
+            result.warnings,
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
