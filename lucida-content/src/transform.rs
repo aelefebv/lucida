@@ -109,11 +109,14 @@ impl VoxelTransform {
     /// tile-placement edges (grid or explicit 2D positions) as a two-number
     /// `translation` on the wire instead of 16 matrix elements, which is what
     /// keeps wide-collection manifests from repeating near-identity matrices
-    /// tens of thousands of times. Comparisons are exact (`==`, including
-    /// `tx`/`ty` sign-of-zero-insensitively via IEEE equality), so any scale,
+    /// tens of thousands of times. Comparisons are IEEE `==`, so any scale,
     /// rotation, z component, or non-affine bottom row falls back to the full
-    /// matrix form and the reconstruction
-    /// `from_voxel_translation_2d(tx, ty)` is bit-lossless.
+    /// matrix form. The reconstruction `from_voxel_translation_2d(tx, ty)`
+    /// carries `tx`/`ty` through bit-exactly (including a signed-zero
+    /// translation component); the *other* fourteen elements are rebuilt as
+    /// the canonical identity pattern, so a matrix that matched it only
+    /// IEEE-equally (e.g. `-0.0` where the pattern has `0.0`) round-trips to
+    /// the canonical bits, not the original ones.
     pub fn as_voxel_translation_2d(&self) -> Option<[f64; 2]> {
         let m = &self.inner.matrix;
         let reference = AffineTransform::translation_2d(m[12], m[13]).matrix;

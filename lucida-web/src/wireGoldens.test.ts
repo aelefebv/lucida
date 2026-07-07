@@ -406,9 +406,12 @@ const expectedCollectionSharedMultiscale = {
 };
 
 /** The collection manifest as it crosses the wire: shared-once multiscale
- *  table, per-image references, and compact `translation` placement edges.
- *  `resolveDatasetManifest` expands this into the in-memory shape below. */
+ *  table, per-image references, and compact `translation` placement edges —
+ *  announced by the leading `format_version` marker (absent on fully-inline
+ *  manifests, e.g. the single fixture). `resolveDatasetManifest` expands
+ *  this into the in-memory shape below. */
 const expectedManifestCollection: DatasetManifestWire = {
+  format_version: 2,
   dataset_id: "wds-collection-77",
   name: "screening-collection-01.zarr",
   kind: {
@@ -470,6 +473,7 @@ const expectedManifestCollection: DatasetManifestWire = {
 
 const expectedFetchCollection: FetchSourceWire = {
   Proxied: {
+    format_version: 2,
     images: [
       { image_id: "tile-A1-f0-image", wire_format_ref: 0 },
       { image_id: "tile-A1-f1-image", wire_format_ref: 0 },
@@ -1609,6 +1613,8 @@ describe("wire goldens: dataset-open payloads", () => {
     // shared multiscale table, wire-format table, and compact translation
     // edges expand into effective per-image/per-edge values.
     const manifest = resolveDatasetManifest(opened.manifest);
+    // The format_version marker is a wire-level detail; resolution drops it.
+    expect("format_version" in manifest).toBe(false);
     expect(manifest.images).toHaveLength(2);
     for (const image of manifest.images) {
       expect(image.multiscale).toStrictEqual(expectedCollectionSharedMultiscale);

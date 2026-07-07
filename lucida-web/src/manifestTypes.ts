@@ -184,13 +184,22 @@ export interface TransformEdgeWire {
 }
 
 export interface DatasetManifestWire {
+  /**
+   * Compact-format marker: present (value 2) whenever the manifest uses a
+   * compact construct (`multiscales` table or `translation` edge), absent on
+   * fully-inline documents. Ignored by the resolver — decoding is driven by
+   * which fields each entry carries — and dropped from the resolved
+   * in-memory manifest; it exists so future readers can recognize a
+   * document's format generation without probing for compact fields.
+   */
+  format_version?: number;
   dataset_id: string;
   name: string;
   kind: DatasetKind;
   entities: Entity[];
   transforms: TransformEdgeWire[];
   /** Multiscale values shared by two or more images; absent when nothing is
-   *  shared (single-image manifests, historical payloads). */
+   *  shared (single-image manifests, fully-inline payloads). */
   multiscales?: MultiscaleInfo[];
   images: ImageSpecWire[];
   source_layouts: LayoutSpec[];
@@ -205,6 +214,10 @@ export interface ProxiedImageSpecWire {
 }
 
 export interface ProxiedFetchDescriptorWire {
+  /** Compact-format marker, like `DatasetManifestWire.format_version`:
+   *  present (value 2) exactly when `wire_formats` is, ignored by the
+   *  resolver. */
+  format_version?: number;
   images: ProxiedImageSpecWire[];
   /** Wire formats shared by two or more images; absent when nothing is
    *  shared. */

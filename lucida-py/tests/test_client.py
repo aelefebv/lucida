@@ -589,6 +589,10 @@ def test_saved_views_approve_and_reject_post_without_body(tmp_path):
 def collection_manifest_with_shared_multiscale():
     shared = manifest()["images"][0]["multiscale"]
     return {
+        # Compact-format marker: emitted alongside any compact construct.
+        # The client must tolerate and ignore it (summaries read fields, not
+        # the marker).
+        "format_version": 2,
         "dataset_id": "wds-coll",
         "name": "collection.zarr",
         "kind": {

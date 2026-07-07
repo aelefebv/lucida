@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use lucida_content::{DataType, ImageId};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
@@ -21,16 +23,33 @@ pub enum FetchSource {
 /// scale with tile count. The JSON form therefore emits any format shared by
 /// two or more images once, in a top-level `wire_formats` table, with the
 /// sharing images carrying a `wire_format_ref` index; unique formats stay
-/// inline, so single-image payloads are byte-identical to the historical
-/// output. Decoding accepts both forms and resolves references back into the
+/// inline, so payloads with nothing shared (every single-image descriptor)
+/// are byte-identical to the fully-inline form this encoding replaced. When
+/// the table is present, the descriptor leads with a `format_version` marker
+/// ([`COMPACT_FETCH_FORMAT_VERSION`]) so future readers can recognize the
+/// format generation; decoders that predate the compact form hard-reject any
+/// descriptor that uses it (see
+/// `wiki/gotchas/compact-manifest-decoder-one-way-door.md`).
+///
+/// Decoding accepts both forms and resolves references back into the
 /// in-memory model — consumers always see a populated
-/// [`ProxiedImageSpec::wire_format`]. Re-encoding a decoded descriptor is
-/// stable. (`Direct`/`Local` descriptors keep the inline form: their entries
-/// are dominated by genuinely per-image paths.)
+/// [`ProxiedImageSpec::wire_format`]. The serialization fixed point is the
+/// canonical encoder output: `encode(decode(x)) == x` byte-for-byte when `x`
+/// came out of this encoder, while valid non-canonical inputs (duplicate or
+/// unreferenced table entries, inline duplicates) decode fine and re-encode
+/// canonically. (`Direct`/`Local` descriptors keep the inline form: their
+/// entries are dominated by genuinely per-image paths.)
 #[derive(Debug, Clone)]
 pub struct ProxiedFetchDescriptor {
     pub images: Vec<ProxiedImageSpec>,
 }
+
+/// Value of the `format_version` marker emitted whenever the descriptor uses
+/// the shared `wire_formats` table. Absence means the fully-inline form,
+/// which every decoder generation reads. Ignored by today's consumers and
+/// not involved in reference resolution; versioned separately from the
+/// manifest's marker because the two structures evolve independently.
+pub const COMPACT_FETCH_FORMAT_VERSION: u32 = 2;
 
 /// What the client needs to know about a proxied image's responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,21 +60,23 @@ pub struct ProxiedImageSpec {
 
 impl Serialize for ProxiedFetchDescriptor {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Formats shared by ≥ 2 images, in first-appearance order. The
-        // distinct count is tiny (usually one per dataset), so linear scans
-        // are fine.
+        // Formats shared by ≥ 2 images, in first-appearance order — the
+        // emitted table order, so it must depend only on the image sequence,
+        // never on map iteration. The index map keeps this O(images) even if
+        // every format were distinct; `WireFormat` derives `Hash`
+        // consistently with `Eq` (no floats), so no collision confirm is
+        // needed beyond the map's own.
         let mut distinct: Vec<(&WireFormat, usize)> = Vec::new();
+        let mut distinct_by_format: HashMap<&WireFormat, usize> = HashMap::new();
         let mut membership: Vec<usize> = Vec::with_capacity(self.images.len());
         for image in &self.images {
-            match distinct
-                .iter()
-                .position(|(format, _)| *format == &image.wire_format)
-            {
-                Some(index) => {
+            match distinct_by_format.get(&image.wire_format) {
+                Some(&index) => {
                     distinct[index].1 += 1;
                     membership.push(index);
                 }
                 None => {
+                    distinct_by_format.insert(&image.wire_format, distinct.len());
                     distinct.push((&image.wire_format, 1));
                     membership.push(distinct.len() - 1);
                 }
@@ -106,8 +127,14 @@ impl Serialize for ProxiedFetchDescriptor {
             .into_iter()
             .map(|distinct_index| table_index_by_distinct[distinct_index])
             .collect();
-        let field_count = 1 + usize::from(!table.is_empty());
+        let field_count = 1 + 2 * usize::from(!table.is_empty());
         let mut state = serializer.serialize_struct("ProxiedFetchDescriptor", field_count)?;
+        // Marker and table travel together: a marker-less descriptor is in
+        // the fully-inline form every decoder generation reads, so
+        // single-image descriptors stay byte-identical to it.
+        if !table.is_empty() {
+            state.serialize_field("format_version", &COMPACT_FETCH_FORMAT_VERSION)?;
+        }
         state.serialize_field(
             "images",
             &ImagesWire {
@@ -115,8 +142,6 @@ impl Serialize for ProxiedFetchDescriptor {
                 refs: &refs,
             },
         )?;
-        // Omitted when nothing is shared: single-image descriptors stay
-        // byte-identical to the historical wire form.
         if !table.is_empty() {
             state.serialize_field("wire_formats", &table)?;
         }
@@ -124,10 +149,21 @@ impl Serialize for ProxiedFetchDescriptor {
     }
 }
 
-/// Decode-side wire shape: inline `wire_format` (historical and unique
+/// Decode-side wire shape: inline `wire_format` (fully-inline and unique
 /// entries) or `wire_format_ref` into the descriptor's `wire_formats` table.
+///
+/// Resolving a reference clones a [`WireFormat`] — a fixed-size value — so
+/// expansion stays proportional to the image list the input already paid
+/// for, and no decode-side expansion cap is needed here (unlike the
+/// manifest's multiscale table, whose entries have unbounded interior).
 #[derive(Deserialize)]
 struct ProxiedFetchDescriptorWire {
+    /// Compact-format marker ([`COMPACT_FETCH_FORMAT_VERSION`]); absent on
+    /// fully-inline descriptors. Deliberately unread — decoding is driven by
+    /// which fields each entry carries, not by the marker.
+    #[serde(default)]
+    #[allow(dead_code)]
+    format_version: Option<u32>,
     images: Vec<ProxiedImageSpecWire>,
     #[serde(default)]
     wire_formats: Vec<WireFormat>,
@@ -224,7 +260,7 @@ pub struct LevelAddress {
 }
 
 /// What byte format the client should expect from chunk responses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WireFormat {
     Raw { data_type: DataType },
     Lz4 { data_type: DataType },
@@ -433,6 +469,33 @@ mod tests {
             json,
             r#"{"images":[{"image_id":"img1","wire_format":{"Raw":{"data_type":"Uint16"}}}]}"#,
         );
+    }
+
+    #[test]
+    fn format_version_marker_tracks_the_shared_table() {
+        // Shared table → marker leads the descriptor.
+        let value = serde_json::to_value(wide_proxied(3)).unwrap();
+        assert_eq!(
+            value["format_version"],
+            serde_json::json!(COMPACT_FETCH_FORMAT_VERSION),
+        );
+
+        // Nothing shared → no marker (locked byte-for-byte by
+        // `unique_formats_stay_inline_and_omit_the_table`).
+        let value = serde_json::to_value(wide_proxied(1)).unwrap();
+        assert!(value.get("format_version").is_none());
+    }
+
+    #[test]
+    fn format_version_marker_is_tolerated_and_ignored_on_decode() {
+        // The marker plays no role in resolution: a descriptor carrying an
+        // unrecognized future version still decodes from its fields.
+        let back: ProxiedFetchDescriptor = serde_json::from_value(serde_json::json!({
+            "format_version": 9,
+            "images": [{"image_id": "img1", "wire_format": {"Raw": {"data_type": "Uint16"}}}]
+        }))
+        .unwrap();
+        assert_eq!(back.images.len(), 1);
     }
 
     #[test]

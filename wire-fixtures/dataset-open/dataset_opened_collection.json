@@ -1,5 +1,6 @@
 {
   "manifest": {
+    "format_version": 2,
     "dataset_id": "wds-collection-77",
     "name": "screening-collection-01.zarr",
     "kind": {
@@ -200,6 +201,7 @@
   },
   "fetch": {
     "Proxied": {
+      "format_version": 2,
       "images": [
         {
           "image_id": "tile-A1-f0-image",

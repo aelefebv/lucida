@@ -43,17 +43,17 @@ pub struct MultiscaleInfo {
 }
 
 /// Display metadata for a single channel, sourced from the OME `omero.channels`
-/// block. Carries only what this slice renders — a human label and an optional
-/// color hint — leaving contrast/window and colormap to the mutable scene
-/// state (`ChannelSettings`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// block. Carries only a human label and an optional color hint, leaving
+/// contrast/window and colormap to the mutable scene state
+/// (`ChannelSettings`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelInfo {
     /// Non-empty channel label (e.g. `"Channel 0"`). The parse layer drops blank /
     /// whitespace-only labels, so any value present here is meaningful.
     pub label: String,
     /// Optional color hint, as the raw omero hex string without a leading `#`
-    /// (e.g. `"00FF00"`). Carried through verbatim for future use; this slice
-    /// does not apply it to colormaps.
+    /// (e.g. `"00FF00"`). Carried through verbatim for future use; it is not
+    /// applied to colormaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
@@ -74,7 +74,7 @@ impl MultiscaleInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GeneratedLevelInfo {
     pub level_index: u32,
     #[serde(default)]
@@ -83,7 +83,7 @@ pub struct GeneratedLevelInfo {
     pub provenance: GeneratedLevelProvenance,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum GeneratedLevelRole {
@@ -91,7 +91,7 @@ pub enum GeneratedLevelRole {
     Coarse,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct GeneratedLevelProvenance {
     #[serde(default)]
     pub generator: String,
@@ -101,7 +101,7 @@ pub struct GeneratedLevelProvenance {
     pub source_content_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Axis {
     pub name: String,
     pub kind: AxisKind,
@@ -113,14 +113,14 @@ pub struct Axis {
 /// outside the canonical `{t,c,z,y,x}` set. Lucida pins each such axis to
 /// `pinned_index` (always `0` today) and exposes the dropped metadata here so
 /// future UI work can surface it without revisiting the parse layer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PinnedAxis {
     pub name: String,
     pub size: u64,
     pub pinned_index: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AxisKind {
     Time,
     Channel,
@@ -136,7 +136,7 @@ pub struct LevelGeometry {
     pub scale: [f64; 5],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DataType {
     Uint8,
     Uint16,
