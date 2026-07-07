@@ -880,7 +880,12 @@ fn observe_dataset_message(
             if message_request_id != request_id {
                 return Ok(None);
             }
-            Err(open_dataset_failure(&url, &error, diagnostic.as_ref()))
+            Err(open_dataset_failure(
+                &url,
+                &error,
+                diagnostic.as_ref(),
+                progress,
+            ))
         }
         _ => Ok(None),
     }
@@ -934,7 +939,32 @@ where
     .await
 }
 
+/// Build the [`CliError`] for a failed dataset open. `progress` is every
+/// progress diagnostic collected before the failure: warnings that arrived
+/// while the open was still succeeding (e.g. curtailed label discovery)
+/// would otherwise vanish with the discarded success summary, so their
+/// `warning:` lines are appended to the human message and the flagged
+/// entries travel in the JSON error context alongside `diagnostic`.
 fn open_dataset_failure(
+    url: &str,
+    error: &str,
+    diagnostic: Option<&DatasetOpenFailureDiagnostic>,
+    progress: &[DatasetOpenProgressDiagnostic],
+) -> CliError {
+    let mut failure = classify_open_dataset_failure(url, error, diagnostic);
+    let warning_lines = format_dataset_open_warning_lines(progress);
+    if !warning_lines.is_empty() {
+        failure.message.push_str(&warning_lines);
+        let flagged: Vec<&DatasetOpenProgressDiagnostic> = progress
+            .iter()
+            .filter(|diagnostic| diagnostic.warning)
+            .collect();
+        failure = failure.with_context("warnings", flagged);
+    }
+    failure
+}
+
+fn classify_open_dataset_failure(
     url: &str,
     error: &str,
     diagnostic: Option<&DatasetOpenFailureDiagnostic>,
@@ -1384,6 +1414,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_open_reports_warnings_collected_before_failure() {
+        // A warning arrives during the open, then the open fails at a later
+        // stage. The warning must survive into the failure output instead of
+        // vanishing with the discarded success summary.
+        let error = wait_for_dataset_open_result(
+            text_messages(vec![
+                dataset_open_warning_message(
+                    "req-1",
+                    "label discovery was sampled: probed 12 of 360 tiles",
+                ),
+                serde_json::json!({
+                    "type": "open_dataset_failed",
+                    "request_id": "req-1",
+                    "url": "/data/demo.zarr",
+                    "error": "failed to persist workspace"
+                })
+                .to_string(),
+            ]),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::DatasetOpenFailure);
+        assert!(
+            error
+                .message
+                .contains("warning: label discovery was sampled: probed 12 of 360 tiles"),
+            "the collected warning must reach the human error output: {}",
+            error.message,
+        );
+        // The JSON error carries the warning-flagged progress entries next to
+        // the (also optional) diagnostic context.
+        let json = error.to_json();
+        let warnings = json["error"]["warnings"]
+            .as_array()
+            .expect("error JSON should carry a warnings array");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0]["message"],
+            "label discovery was sampled: probed 12 of 360 tiles"
+        );
+        assert_eq!(warnings[0]["warning"], true);
+    }
+
+    #[tokio::test]
     async fn reports_open_dataset_failed() {
         let error = wait_for_dataset_open_result(
             text_messages(vec![
@@ -1444,9 +1523,75 @@ mod tests {
             "/data/demo.zarr",
             "workspace role cannot add datasets",
             None,
+            &[],
         );
 
         assert_eq!(error.kind, ErrorKind::Unauthorized);
+    }
+
+    #[test]
+    fn failed_open_appends_collected_warning_lines() {
+        let progress = vec![
+            DatasetOpenProgressDiagnostic {
+                stage: DatasetOpenStage::MetadataImport,
+                message: "metadata import complete".into(),
+                workspace_dataset_id: None,
+                dataset_source_id: None,
+                detail: None,
+                warning: false,
+            },
+            DatasetOpenProgressDiagnostic {
+                stage: DatasetOpenStage::MetadataImport,
+                message: "label discovery was sampled: probed 12 of 360 tiles".into(),
+                workspace_dataset_id: None,
+                dataset_source_id: None,
+                detail: None,
+                warning: true,
+            },
+        ];
+
+        let error = open_dataset_failure(
+            "/data/demo.zarr",
+            "failed to persist workspace",
+            None,
+            &progress,
+        );
+
+        assert_eq!(error.kind, ErrorKind::DatasetOpenFailure);
+        // Only the flagged entry becomes a warning line; ordinary progress
+        // stays out of the error output.
+        assert!(
+            error
+                .message
+                .contains("\nwarning: label discovery was sampled: probed 12 of 360 tiles"),
+            "{}",
+            error.message,
+        );
+        assert_eq!(error.message.matches("\nwarning: ").count(), 1);
+        let json = error.to_json();
+        let warnings = json["error"]["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["warning"], true);
+    }
+
+    #[test]
+    fn failed_open_without_warnings_keeps_error_shape_unchanged() {
+        let progress = vec![DatasetOpenProgressDiagnostic {
+            stage: DatasetOpenStage::BackendOpen,
+            message: "backend open started".into(),
+            workspace_dataset_id: None,
+            dataset_source_id: None,
+            detail: None,
+            warning: false,
+        }];
+
+        let error = open_dataset_failure("/data/demo.zarr", "boom", None, &progress);
+
+        assert!(!error.message.contains("warning:"), "{}", error.message);
+        assert!(
+            error.to_json()["error"].get("warnings").is_none(),
+            "no warnings key without flagged entries",
+        );
     }
 
     #[test]
@@ -1462,6 +1607,7 @@ mod tests {
             "/data/missing.zarr",
             "object was not found",
             Some(&diagnostic),
+            &[],
         );
 
         assert_eq!(error.kind, ErrorKind::MissingResource);
