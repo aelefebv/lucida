@@ -5,7 +5,7 @@ description: "OME-Zarr datasets exported from CZI (and some other Bioformats sou
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/non-canonical-axes.md
 created: 2026-04-23
-modified: 2026-04-23
+modified: 2026-07-06
 ---
 
 # Non-canonical axes are pinned to index 0
@@ -69,7 +69,7 @@ The "drop axes with `chunk_size == 1`" relaxation matters: many real exports hav
 ## What this is not
 
 - **Not a scene picker.** There is no UI today to choose which `m` index to view. The pinned index is hard-coded to `0`.
-- **Not a fan-out.** Each `m` index is *not* surfaced as a sibling image (the way plate FOVs are). For CZI mosaics where each `m` is an independent physical scene, this means you only see the first scene; the other scenes are invisible.
+- **Not a fan-out.** Each `m` index is *not* surfaced as a sibling image (the way collection tiles are). For CZI mosaics where each `m` is an independent physical scene, this means you only see the first scene; the other scenes are invisible.
 - **Not a Lucida storage choice.** Lucida's own ingest writer (`lucida-store::ingest::ome_metadata`) always emits canonical 5D zarrs. The pin only matters when *reading* third-party non-canonical zarrs.
 
 ## Related

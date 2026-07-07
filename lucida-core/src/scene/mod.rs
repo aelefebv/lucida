@@ -29,6 +29,13 @@ pub struct DatasetDerivedState {
 }
 
 /// Precomputed per image-bearing entity.
+///
+/// A *member* is a placed image-bearing entity as the scene and renderer refer
+/// to it — an [`EntityKind::Tile`], or a single-image [`EntityKind::Image`].
+/// This is a separate vocabulary from the three that meet here: the generic
+/// "group" and "tile" used elsewhere as GPU pool and atlas units are pooling
+/// concepts, distinct from the [`EntityKind::Group`] / [`EntityKind::Tile`]
+/// content kinds a member is derived from.
 #[derive(Debug, Clone)]
 pub struct MemberState {
     pub entity_id: EntityId,

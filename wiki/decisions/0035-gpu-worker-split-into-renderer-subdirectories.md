@@ -5,7 +5,7 @@ description: "lucida-web/src/renderer/gpu.worker.ts (815 lines, 14 distinct resp
 tags: [lucida, decision]
 source_path: wiki/decisions/0035-gpu-worker-split-into-renderer-subdirectories.md
 created: 2026-05-16
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # `gpu.worker.ts` split into `renderer/` subdirectories
@@ -18,7 +18,7 @@ The destination layout (six new subdirectories): `coldState/` (`apply.ts`, `grou
 
 ## Why this shape
 
-The eight-pass dechaos analysis under `wiki/outputs/dechaos-render-2026-05-16/` makes the structural case: `gpu.worker.ts` owns 14 distinct responsibilities (cold-state ingestion, message dispatch, GPU bootstrap, devtools, lifecycle, LUT/offscreen-pool resources, proxy upload, descriptor rebuilds, member-registry routing, well→fields fan-out, render-loop ticks, eviction triggers, atlas state, transient descriptors) and `volumeHandlers.ts` (646 LOC) + `sliceHandlers.ts` (554 LOC) each own 8 responsibilities of their own. The orchestration code — the parts that wire pure algorithmic units together — has zero direct tests today and is the source of the file's reasoning load.
+The eight-pass dechaos analysis under `wiki/outputs/dechaos-render-2026-05-16/` makes the structural case: `gpu.worker.ts` owns 14 distinct responsibilities (cold-state ingestion, message dispatch, GPU bootstrap, devtools, lifecycle, LUT/offscreen-pool resources, proxy upload, descriptor rebuilds, member-registry routing, group→tiles fan-out, render-loop ticks, eviction triggers, atlas state, transient descriptors) and `volumeHandlers.ts` (646 LOC) + `sliceHandlers.ts` (554 LOC) each own 8 responsibilities of their own. The orchestration code — the parts that wire pure algorithmic units together — has zero direct tests today and is the source of the file's reasoning load.
 
 Pass 2 of the dechaos identified 15 seams ranked by severity; the top five (cold-state ingestion inside dispatch, atlas-state/driver fusion in handlers, member/pool registry as ambient state, proxy lifecycle, module-level mutable state across 4 files) map one-to-one onto the directory tree above. Pass 6 identified 14 extractable composability units; the top three (pool-grouping primitive, eviction distance + farthest-slot finder, indirection remap) collapse 2D/3D duplicate code that today exists in parallel in `volumeHandlers.ts` and `sliceHandlers.ts`. Pass 7 confirmed which test suites need to land before each extraction — and crucially, that ~60% of the test investment lands *post*-extraction because the orchestration must be extractable first.
 
@@ -32,16 +32,16 @@ The dechaos's Pass 8 sequencing (`wiki/outputs/dechaos-render-2026-05-16/08-refa
 
 - **Slice 0** — directory scaffold (empty placeholder files for the layout above).
 - **Slice 1** — renames (`chunksEvicted.datasetId` → `memberId`; same for `volumeChunkData.datasetId` / `sliceChunkData.datasetId`) + relocate `parseChunkKey` / `makeCompositeKey` / `derivePoolKey` to `chunkKeys.ts` + declare `chunkPoolKey(...)` in `poolKeys.ts`.
-- **Slice 2** — force every member-id construction through `memberIdForColdEntry`; Suite D (~80 LOC) locks the invariant and surfaces the well-as-proxy `imageId === ""` bug fix.
+- **Slice 2** — force every member-id construction through `memberIdForColdEntry`; Suite D (~80 LOC) locks the invariant and surfaces the group-as-proxy `imageId === ""` bug fix.
 - **Slice 3** — descriptor byte-layout SSoT in `descriptor/layout.ts` with named field offsets + a lock test (landed as `descriptor/layout.test.ts`) that asserts agreement with the WGSL `struct EntityDescriptor` declarations.
 - **Slice 4** — extract `applyColdState` (the centerpiece, analogue of upload's "extract `Uploader`"); Suite A (~250 LOC) pins behavior pre-extraction; gpu.worker.ts shrinks ~200 LOC.
-- **Slice 5** — extract proxy upload + well→fields propagation into `proxy/upload.ts` and `proxy/propagate.ts`; Suite B (~150 LOC).
+- **Slice 5** — extract proxy upload + group→tiles propagation into `proxy/upload.ts` and `proxy/propagate.ts`; Suite B (~150 LOC).
 - **Slice 6** — collapse 2D/3D duplicated primitives (`chunkDistSq`/`chunkDistSq2D`, `findFarthestSlot`/`findFarthestSlot2D`, `remapIndirection`/`remapSliceIndirection`); Suite C (~120 LOC).
 - **Slice 7** — split `volumeHandlers.ts` and `sliceHandlers.ts` into their respective `volume/` and `slice/` subdirectories.
 - **Slice 8** — de-globalize the 14 module-level Maps via a `RendererState` interface owned by `WorkerCtx`; fixes the `removeLayerResources` Map cleanup leak.
 - **Slice 9** — split `gpu.worker.ts` into `worker/` subdirectory; the surviving file becomes a ~30 LOC entry point.
 - **Slice 10** — centralize hardware-limit assumptions (`2048`/`8192`/`device.limits.maxTextureDimension3D`) via `getDeviceLimits(device)` in `gpuContext.ts` + a shared `computeAtlasGeometry(...)` helper.
-- **Slice 11** — `ColdStateActiveEntry` discriminated union (`kind: "field" | "well-as-proxy"`) replaces the `imageId === ""` sentinel; wire-protocol change touching both the upload-side builder and worker-side consumers.
+- **Slice 11** — `ColdStateActiveEntry` discriminated union (`kind: "tile" | "group-as-proxy"`) replaces the `imageId === ""` sentinel; wire-protocol change touching both the upload-side builder and worker-side consumers.
 
 Slices 12 (LayerDrawCall extraction) and 13 (WGSL struct codegen) are deferred — captured in dechaos Pass 8 — and land only when a concrete motivator surfaces. See section 8 of the dechaos for per-slice file diagrams, risk callouts, and the order-summary table.
 
@@ -49,7 +49,7 @@ Slices 12 (LayerDrawCall extraction) and 13 (WGSL struct codegen) are deferred �
 
 The dechaos surfaced two real bugs that fix cleanly inside the slices that surface them, following the same pattern as PRD #592 (`imageWireFormats` leak + transient/permanent misclass) and PRD #607 (`workerWantedSet` dead state + multi-dataset resend under-resend):
 
-1. **Well-as-proxy memberId silently wrong in pool registry** (Slice 2). The cold-state pool loop builds `memberId = isMultiCh ? \`${entry.imageId}:ch${channel}\` : entry.imageId` — when `imageId === ""` (well-as-proxy convention), the multi-channel branch produces `:ch5` instead of the canonical `${entityId}:ch5`. Today it's rescued only because well-as-proxy entries have empty `levels[]` and the loop short-circuits. The fix forces every site through `memberIdForColdEntry(entry, channel, multiCh)`.
+1. **Group-as-proxy memberId silently wrong in pool registry** (Slice 2). The cold-state pool loop builds `memberId = isMultiCh ? \`${entry.imageId}:ch${channel}\` : entry.imageId` — when `imageId === ""` (group-as-proxy convention), the multi-channel branch produces `:ch5` instead of the canonical `${entityId}:ch5`. Today it's rescued only because group-as-proxy entries have empty `levels[]` and the loop short-circuits. The fix forces every site through `memberIdForColdEntry(entry, channel, multiCh)`.
 2. **`removeLayerResources` leaks `memberToDataset` / `memberToPool` entries** (Slice 8). The handler clears atlas pools + descriptor buffers but never clears the routing Maps. Member IDs accumulate forever — minor memory leak, future risk if memberIds collide across datasets. Fixed when state ownership becomes explicit in Slice 8.
 
 Pulling either into a separate PR would either land it speculatively (before the structure that makes it obvious) or duplicate the structural work. They ride along.
@@ -58,7 +58,7 @@ Pulling either into a separate PR would either land it speculatively (before the
 
 Slice 1 renames `chunksEvicted.datasetId` → `memberId` (and the same for `volumeChunkData.datasetId` / `sliceChunkData.datasetId`). The field has carried a memberId since the upload pipeline started routing chunks per-member, but the name has lagged. Renaming as a pure mechanical change with no behavior delta is cheaper now than during a future change with semantic intent.
 
-Slice 11 promotes `ColdStateActiveEntry` to a `kind: "field" | "well-as-proxy"` discriminated union, replacing the `imageId === ""` sentinel. This surfaces every well-as-proxy special case to the type checker — Contract Issue 7 from Pass 5 — and matches the discrimination pattern that landed in [Discriminated Active-Set and Entity Types](0026-discriminated-active-set-and-entity-types.md) on the planning side.
+Slice 11 promotes `ColdStateActiveEntry` to a `kind: "tile" | "group-as-proxy"` discriminated union, replacing the `imageId === ""` sentinel. This surfaces every group-as-proxy special case to the type checker — Contract Issue 7 from Pass 5 — and matches the discrimination pattern that landed in [Discriminated Active-Set and Entity Types](0026-discriminated-active-set-and-entity-types.md) on the planning side.
 
 Both renames are explicit named exceptions to the otherwise behaviour-preserving guarantee of the refactor. Every other change is structural.
 
@@ -89,7 +89,7 @@ Pass 8 explicitly recommends **against** producing a `RenderClient` interface sp
 
 - Per-module cohesion: each file owns one responsibility (cold-state ingestion, proxy upload, volume eviction, etc.) rather than fourteen sharing a dispatch switch.
 - Testability of orchestration: the 200-line cold-state block, `handleProxyAssetData`, chunk-upload eviction, member-registry, and descriptor-rebuild trigger all gain direct tests (Suites A–E, ~800 LOC across the refactor) where today they have none.
-- Two named bug fixes (well-as-proxy memberId in pool loop, `removeLayerResources` Map cleanup leak) land cleanly inside the slices that surface them.
+- Two named bug fixes (group-as-proxy memberId in pool loop, `removeLayerResources` Map cleanup leak) land cleanly inside the slices that surface them.
 - Contract clarity: descriptor byte layout has a single source of truth (`descriptor/layout.ts`) instead of being mirrored across 4 sites; `ColdStateActiveEntry` is a discriminated union instead of an `imageId === ""` sentinel.
 - The pipeline reads as one consistent system once render mirrors the planning/fetch/upload shape.
 
@@ -101,7 +101,7 @@ Pass 8 explicitly recommends **against** producing a `RenderClient` interface sp
 
 **Neutral:**
 
-- Preserves all existing behavior except the three named exceptions: (1) the well-as-proxy memberId fix in Slice 2 silently changes registry behavior for any caller that was getting the buggy `:ch5` member-id with an empty imageId; (2) the `removeLayerResources` Map cleanup in Slice 8 stops a long-session leak; (3) the wire-protocol field renames `chunksEvicted.datasetId → memberId` (Slice 1) and `ColdStateActiveEntry` discriminated union (Slice 11) are mechanical breaks for any external consumer of the worker protocol.
+- Preserves all existing behavior except the three named exceptions: (1) the group-as-proxy memberId fix in Slice 2 silently changes registry behavior for any caller that was getting the buggy `:ch5` member-id with an empty imageId; (2) the `removeLayerResources` Map cleanup in Slice 8 stops a long-session leak; (3) the wire-protocol field renames `chunksEvicted.datasetId → memberId` (Slice 1) and `ColdStateActiveEntry` discriminated union (Slice 11) are mechanical breaks for any external consumer of the worker protocol.
 
 ## Related
 

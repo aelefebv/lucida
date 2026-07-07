@@ -16,8 +16,8 @@ A **layout** is a named placement of entities in 2D world space. Datasets ship w
 
 Two reasons:
 
-1. **Plates and singles share the planning code path.** A single is one entity at the origin; a plate is many wells at well-grid positions, fields nested within. Both are encoded as a layout that the planner consumes — which means the planner doesn't know plate-vs-single, only "iterate this list of placements."
-2. **Different views of the same plate are useful.** "Source layout" follows the plate's as-acquired coordinates; alternative layouts (dense pack, aggregated, sorted by metric) re-arrange wells without re-importing. Layouts let the renderer answer "where do you want them?" without rebuilding the manifest.
+1. **Collections and singles share the planning code path.** A single is one entity at the origin; a collection is many groups at group-grid positions, tiles nested within. Both are encoded as a layout that the planner consumes — which means the planner doesn't know collection-vs-single, only "iterate this list of placements."
+2. **Different views of the same collection are useful.** "Source layout" follows the collection's as-acquired coordinates; alternative layouts (dense pack, aggregated, sorted by metric) re-arrange groups without re-importing. Layouts let the renderer answer "where do you want them?" without rebuilding the manifest.
 
 ## Source vs registered
 
@@ -45,7 +45,7 @@ When `SetActiveLayout` references an unknown layout ID, derived state falls back
 ## Gotchas
 
 - **Layout `id` is the dedupe key**, not `name`. Two layouts with the same name and different IDs both register; same ID re-registers as a no-op. Builder code that generates layout IDs procedurally (e.g. `derived:dense`) needs to keep the ID stable across regenerations.
-- **For plates, `placements` only positions wells.** Field-within-well offsets come from `TransformEdge`s (built by `lucida_content::plate::build_grid_field_transforms` for grid plates, or from OME translation for stage-positioned plates). A reader looking at a plate's source layout will see N well placements and zero field placements — that's correct, not a bug.
+- **For collections, `placements` only positions groups.** Tile-within-group offsets come from `TransformEdge`s (built by `lucida_content::collection::build_grid_tile_transforms` for derived-positioned collections, or from OME translation for explicitly-positioned collections). A reader looking at a collection's source layout will see N group placements and zero tile placements — that's correct, not a bug.
 - **Position is `[x, y]` in world units**, not `[y, x]`. The same convention as the layout source, but easy to get wrong if you're translating from chunk-key conventions (which are TCZYX, with X last).
-- **Layout switches force a `derived` rebuild for that dataset only**, not all datasets. This is correct — but if you have 50 plates loaded and you switch each in sequence, expect 50 derived rebuilds in quick succession. The epoch bumps once per switch.
+- **Layout switches force a `derived` rebuild for that dataset only**, not all datasets. This is correct — but if you have 50 collections loaded and you switch each in sequence, expect 50 derived rebuilds in quick succession. The epoch bumps once per switch.
 - **The layout epoch (`epochs.layout`) bumps on `RegisterLayout` too**, not just `SetActiveLayout`. Consumers (e.g. the LayoutSwitcher dropdown populating) want this; the planner doesn't (the active layout didn't change). The tick coordinator's epoch fast-path treats them as a single bucket — a `RegisterLayout` will trigger one (cheap) plan re-run.

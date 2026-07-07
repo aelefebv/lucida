@@ -275,9 +275,9 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let entity = entityDescriptors[currentEntity.index.x];
 
-  // tile member border: a gray frame 1.5 px inside the member edge. Skip it
-  // for a label overlay (categorical) — an opaque frame around a sub-footprint
-  // mask would sit on top of the intensity image it annotates.
+  // member footprint border: a gray frame 1.5 px inside each member's footprint
+  // edge. Skip it for a label overlay (categorical) — an opaque frame around a
+  // sub-footprint mask would sit on top of the intensity image it annotates.
   if (entity.colormapMode != 1u) {
     let border_width = 1.5;
     let edge_x = min(texUV.x, 1.0 - texUV.x);

@@ -5,7 +5,7 @@ description: "PlanningState is a separate interface holding state that survives 
 tags: [lucida, decision]
 source_path: wiki/decisions/0027-planning-state-as-the-carry-forward-seam.md
 created: 2026-05-15
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # `PlanningState` as the Carry-Forward Seam
@@ -18,7 +18,7 @@ Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-p
 
 ## Why a one-field container today
 
-The win isn't avoiding future churn; it's sharpening the planning contract. `plan(snapshot, state, config)` reads as a three-way decomposition that matches principle 4's framing better than the previous "snapshot-with-an-embedded-state-field" encoding. Future additions (per-well stickiness counters, anticipation hints from gesture history, the planner's own internal state machine) drop in without touching `PlanningSnapshot`'s contract.
+The win isn't avoiding future churn; it's sharpening the planning contract. `plan(snapshot, state, config)` reads as a three-way decomposition that matches principle 4's framing better than the previous "snapshot-with-an-embedded-state-field" encoding. Future additions (per-group stickiness counters, anticipation hints from gesture history, the planner's own internal state machine) drop in without touching `PlanningSnapshot`'s contract.
 
 ## Why planner-returned `nextState` instead of caller-derived
 

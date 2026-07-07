@@ -165,7 +165,7 @@ struct GroupParsed {
     tiles: Vec<TileParsed>,
 }
 
-/// One tile within a group: its store prefix and any stage translation.
+/// One tile within a group: its store prefix and any explicit translation.
 struct TileParsed {
     store_prefix: String,
     translation: Option<Vec<f64>>,
@@ -476,8 +476,8 @@ async fn import_collection(
         PositioningMode::Derived
     };
 
-    // For stage-positioned collections, OME-Zarr translations are in physical units
-    // (e.g., microns), but the rest of lucida composes them with voxel-unit
+    // For explicitly-positioned collections, OME-Zarr translations are in physical
+    // units, but the rest of lucida composes them with voxel-unit
     // group placements. Convert translations to voxel units here using the
     // level-0 scale. Defensive: a missing or invalid scale falls back to 1.0
     // (pass-through) and emits a single warning per dataset.
@@ -586,10 +586,10 @@ async fn import_collection(
             },
         });
 
-        // Collect stage translations for this group's tiles to normalize them.
-        // Translations are stored in OME-Zarr in physical units (e.g. microns);
+        // Collect explicit translations for this group's tiles to normalize them.
+        // Translations are stored in OME-Zarr in physical units;
         // convert to voxel units here so downstream consumers see consistent
-        // units across grid- and stage-positioned collections.
+        // units across derived- and explicitly-positioned collections.
         let stage_positions: Vec<Option<[f64; 2]>> = if has_explicit_positions {
             group
                 .tiles
@@ -707,7 +707,7 @@ async fn import_collection(
         }
     }
 
-    // Build grid tile transforms if not stage-positioned.
+    // Build grid tile transforms if not explicitly-positioned.
     if !has_explicit_positions {
         let group_entities: Vec<&Entity> = entities
             .iter()
@@ -1653,7 +1653,7 @@ mod tests {
         let dir = temp_dir("import_collection_stage");
         fs::create_dir_all(&dir).unwrap();
 
-        // Build collection root with stage translations on the tiles.
+        // Build collection root with explicit translations on the tiles.
         let root = serde_json::json!({
             "zarr_format": 3,
             "node_type": "group",
@@ -1676,7 +1676,7 @@ mod tests {
         )
         .unwrap();
 
-        // Group with stage-positioned tiles.
+        // Group with explicitly-positioned tiles.
         let group_dir = dir.join("A").join("1");
         fs::create_dir_all(&group_dir).unwrap();
         let group_meta = serde_json::json!({
@@ -1788,7 +1788,7 @@ mod tests {
             panic!("expected Collection kind");
         }
 
-        // Transforms should reflect normalized stage positions.
+        // Transforms should reflect normalized explicit positions.
         assert_eq!(result.manifest.transforms().len(), 2);
         // tile 0 translation [y=100, x=200] => position [x=200, y=100], normalized min.
         // tile 1 translation [y=300, x=600] => position [x=600, y=300].
@@ -1817,11 +1817,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Build a single-group stage-positioned collection fixture.
+    /// Build a single-group explicitly-positioned collection fixture.
     ///
     /// `translations[i]` is written verbatim as the tile's
     /// `coordinateTransformations.translation` (5-element TCZYX). Pass `None`
-    /// to omit the entry, producing a grid-positioned group.
+    /// to omit the entry, producing a derived-positioned group.
     /// `scale` is the level-0 [T, C, Z, Y, X] scale; pass `None` to omit the
     /// `scale` coordinate transform entirely (so default scale of 1.0 applies).
     fn create_stage_collection_fixture(
@@ -1983,7 +1983,7 @@ mod tests {
             })
     }
 
-    /// Stage translations stored in microns must be converted to voxel
+    /// Explicit translations stored in physical units must be converted to voxel
     /// units before forming the tile->group transform.
     /// tile 0 at (0, 0); tile 1 at (100 µm, 200 µm). With Y/X scale of
     /// 0.5 µm/voxel the second tile ends up at (200, 400) voxels.
@@ -2043,12 +2043,12 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Grid-positioned collections (no translations) must be unaffected by the
+    /// Derived-positioned collections (no translations) must be unaffected by the
     /// scale-conversion code path.
     #[tokio::test]
     async fn grid_collections_unaffected() {
         let dir = temp_dir("grid_collections_unaffected");
-        // Two tiles, neither with a translation -> grid-positioned collection.
+        // Two tiles, neither with a translation -> derived-positioned collection.
         let translations = vec![None, None];
         // Choose a non-trivial scale so the wrong code path would be visible.
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
@@ -2095,7 +2095,7 @@ mod tests {
     }
 
     /// When the multiscales `scale` coordinate transform is omitted, the
-    /// default scale is 1.0 (per parse.rs), so stage translations should pass
+    /// default scale is 1.0 (per parse.rs), so explicit translations should pass
     /// through to voxel units unchanged.
     #[tokio::test]
     async fn missing_voxel_scale_falls_back_to_unit_scale() {

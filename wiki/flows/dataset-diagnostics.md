@@ -5,7 +5,7 @@ description: "How to diagnose dataset open, restore, source-cache, and generated
 tags: [lucida, flow]
 source_path: wiki/flows/dataset-diagnostics.md
 created: 2026-06-10
-modified: 2026-06-10
+modified: 2026-07-06
 ---
 
 # Flow: Dataset Diagnostics
@@ -130,7 +130,7 @@ uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
 The smoke opens every configured fixture present under
 `/Users/austin/local_data/lucida_test_zarrs`:
 
-- CPPX plate
+- CPPX collection
 - yeast 3D
 - LIF bundled channels
 - CZI non-canonical axes

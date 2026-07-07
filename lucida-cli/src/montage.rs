@@ -34,7 +34,7 @@ pub struct MontageCell {
     pub z: u32,
     pub t: u32,
     pub c: u32,
-    /// Member/tile index (0 for a single-image dataset).
+    /// Tile index (0 for a single-image dataset).
     pub tile: usize,
     pub label: String,
 }

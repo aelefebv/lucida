@@ -5,7 +5,7 @@ description: "The chunk pipeline cluster — everything from \"the planner decid
 tags: [lucida, topic]
 source_path: wiki/topics/rendering.md
 created: 2026-05-07
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Topic: Rendering
@@ -39,7 +39,7 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 ## Why decisions were made
 
 - [All GPU Work on a Dedicated Web Worker](../decisions/0003-gpu-on-dedicated-worker.md) — all WebGPU runs in `gpu.worker.ts` via `OffscreenCanvas` transfer
-- [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../decisions/0004-multi-pool-atlases.md) — opt-in proxy atlases keyed by `(dataset, kind, slotDims, channel)` for plate FPS
+- [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../decisions/0004-multi-pool-atlases.md) — opt-in proxy atlases keyed by `(dataset, kind, slotDims, channel)` for collection FPS
 - [WASM Scene as Source of Truth](../decisions/0007-wasm-scene-as-source-of-truth.md) — Scene state lives in WASM; JS is a thin orchestration layer
 - [CpuCache as Sole Fetch Path](../decisions/0008-cpu-cache-as-sole-fetch-path.md) — `SharedChunkQueue` deleted; `CpuCache` is the only path
 - [Pull-Based RAF Render Loop with Typed Dirty Flags](../decisions/0009-pull-based-raf-with-typed-dirty.md) — RAF loop with `interactiveDirty` (immediate) and `residencyDirty` (33ms throttle)

@@ -5,7 +5,7 @@ description: "From \"the planner decides this chunk is wanted\" to \"this chunk'
 tags: [lucida, flow]
 source_path: wiki/flows/chunk-lifecycle.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Flow: Chunk Lifecycle
@@ -16,7 +16,7 @@ From "the planner decides this chunk is wanted" to "this chunk's voxels become p
 
 ### 1. Planning decides "wanted"
 
-[Planning Domain](../systems/subsystems/planning-domain.md) resolves each visible field/image to an explicit `detail` level and optional `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest`. For the detail/proxy/prefetch/overview lanes the priority is `laneOffset + (1-importance)*500 + distance*10` (`computePriority` in `emit.ts`), so the lane offset separates lanes and importance/distance order within a lane. The minimap lane is the exception: it emits each request at bare `minimapLaneOffset` with no importance/distance terms, because minimap chunks are per-dataset rather than per-entity-importance.
+[Planning Domain](../systems/subsystems/planning-domain.md) resolves each visible tile/image to an explicit `detail` level and optional `coarse` level. For each visible entity in the active set, it iterates grid cells inside `xyBounds ∩ zRange ∩ frustumPlanes`. Each candidate becomes a tier-labeled `ChunkRequest`. For the detail/proxy/prefetch/overview lanes the priority is `laneOffset + (1-importance)*500 + distance*10` (`computePriority` in `emit.ts`), so the lane offset separates lanes and importance/distance order within a lane. The minimap lane is the exception: it emits each request at bare `minimapLaneOffset` with no importance/distance terms, because minimap chunks are per-dataset rather than per-entity-importance.
 
 ### 2. CPU cache submits + schedules
 
@@ -55,7 +55,7 @@ Slice or volume shader runs:
 2. Project fragment to entity-local voxel coords.
 3. Compute cell within the chosen LOD.
 4. `indirection[lod.indirectionOffset + cellIndex]` → atlas slot.
-5. **Fallback chain**: explicit detail tier → explicit coarse tier → legacy field/well proxy if bridge-enabled and resident → blank.
+5. **Fallback chain**: explicit detail tier → explicit coarse tier → legacy tile/group proxy if bridge-enabled and resident → blank.
 6. Apply contrast → gamma → LUT sample → opacity.
 
 ### 10. Composite

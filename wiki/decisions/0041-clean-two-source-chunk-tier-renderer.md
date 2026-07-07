@@ -5,7 +5,7 @@ description: "The new coarse/detail renderer path binds and represents detail an
 tags: [lucida, decision]
 source_path: wiki/decisions/0041-clean-two-source-chunk-tier-renderer.md
 created: 2026-05-18
-modified: 2026-05-18
+modified: 2026-07-06
 ---
 
 # Clean two-source chunk-tier renderer
@@ -22,7 +22,7 @@ two explicit chunk tier sources:
 
 The shader uses one draw path with simultaneous access to both sources. Sampling
 order is exactly selected detail, then coarse, then blank. There is no blending,
-no separate coarse compositing pass, no field-proxy or well-proxy fallback, and
+no separate coarse compositing pass, no tile-proxy or group-proxy fallback, and
 no implicit fallback to other source detail levels.
 
 The new path must not reuse proxy binding slots, proxy descriptor names, or

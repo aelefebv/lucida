@@ -5,7 +5,7 @@ description: "lucida-web/src/renderer/workerProtocol.ts — the discriminated-un
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/worker-protocol.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Worker Protocol
@@ -54,8 +54,8 @@ Render messages (`volumeRenderMultiPass` / `sliceRenderMultiPass`) carry `epochs
 
 A discriminated union on `kind`, NOT a flat field set:
 
-- `kind: "field"` — an image member with a real `imageId`; `mode` is `fields-with-detail` or `fields-with-proxy-fallback`, plus `parentWellId`.
-- `kind: "well-as-proxy"` — a synthesised well-level entry with no backing image (`imageId?: never`); the worker renders the well's proxy directly. A live fallback (still wired); coarse/detail is the default, so the planner usually emits `field` entries.
+- `kind: "tile"` — an image member with a real `imageId`; `mode` is `tiles-with-detail` or `tiles-with-proxy-fallback`, plus `parentGroupId`.
+- `kind: "group-as-proxy"` — a synthesised group-level entry with no backing image (`imageId?: never`); the worker renders the group's proxy directly. A live fallback (still wired); coarse/detail is the default, so the planner usually emits `tile` entries.
 
 Both share `ColdStateActiveEntryBase`: `entityId`, `targetLod`, `detailLevel`/`coarseLevel`, `wantedLodLevels`, per-`levels` geometry, `proxyKind`/`proxyAvailable`, `modelMatrix`/`invModelMatrix`, `displayStateByChannel`.
 

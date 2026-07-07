@@ -5,7 +5,7 @@ description: "The Rust crate that builds Lucida's product CLI binary, lucida."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-cli.md
 created: 2026-04-18
-modified: 2026-07-04
+modified: 2026-07-06
 ---
 
 # lucida-cli
@@ -53,7 +53,7 @@ Global flags: `--server`, `--workspace` (one-shot overrides), `--json` (stable m
 
 ### `dataset montage`
 
-`lucida dataset montage <dataset> --out <png> [--cells 16] [--cols 4] [--cell-px 320] [--json] [--timeout-seconds 30]` renders a labeled contact-sheet PNG that samples the dataset's primary axis (Z / T / field / single), filling cells row-major with a text label per cell. With `--json` it also writes a sidecar at `<out>.json` describing the grid (axis, cols/rows, `cell_px`, shared `contrast` window) and, per cell, its `z`/`t`/`c`/`field`/`label`/grid position plus a re-openable `#view=`-encoded saved-view URL for drilling into that exact cell. Implemented in `montage.rs` (the `Montage` variant + `mod montage` in `main.rs`).
+`lucida dataset montage <dataset> --out <png> [--cells 16] [--cols 4] [--cell-px 320] [--json] [--timeout-seconds 30]` renders a labeled contact-sheet PNG that samples the dataset's primary axis (Z / T / tile / single), filling cells row-major with a text label per cell. With `--json` it also writes a sidecar at `<out>.json` describing the grid (axis, cols/rows, `cell_px`, shared `contrast` window) and, per cell, its `z`/`t`/`c`/`tile`/`label`/grid position plus a re-openable `#view=`-encoded saved-view URL for drilling into that exact cell. Implemented in `montage.rs` (the `Montage` variant + `mod montage` in `main.rs`).
 
 ### Saved-view workflow
 

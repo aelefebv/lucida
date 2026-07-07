@@ -5,7 +5,7 @@ description: "How chunk bytes become atlas slots become indirection-buffer entri
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/gpu-residency.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # GPU Residency
@@ -48,11 +48,11 @@ The LRU eviction kernel (`eviction.ts` at the top of `renderer/`) and the indire
 - colormap LUT index (into the LUT texture)
 - per-LOD info (shape, indirection offset)
 - explicit chunk tier sources (`detail`, `coarse`) with level, grid/chunk dims, and indirection offsets
-- legacy proxy slot handles (`fieldProxyPoolIndex`, `fieldProxySlotIndex`, well-proxy equivalents) while the proxy bridge exists
+- legacy proxy slot handles (`tileProxyPoolIndex`, `tileProxySlotIndex`, and the group-proxy equivalents) while the proxy bridge exists
 
 Shaders use `entityIndex` to look up its descriptor. The tick coordinator and worker share an explicit ordered `(memberId → index)` map so indices match by construction — both sides iterate the same active set in the same order.
 
-The byte layout is owned by `renderer/descriptor/layout.ts` as named offset constants (`OFFSET_MODEL_MATRIX`, `OFFSET_FIELD_PROXY_DIMS`, `LOD_OFFSET_CHUNK_DIMS`, etc.). Both writers — the canonical `descriptorBuffer.serializeEntityDescriptor` and the transient `descriptor/transient.serializeTransientDescriptor` (minimap path) — read offsets from that file. `renderer/descriptor/layout.test.ts` parses the `EntityDescriptor` struct from both `slice.wgsl` and `volume.wgsl` and asserts agreement against the TS constants; if the WGSL struct changes without updating `layout.ts` (or vice versa) the lock test fails. See ADR 0035 for the design rationale.
+The byte layout is owned by `renderer/descriptor/layout.ts` as named offset constants (`OFFSET_MODEL_MATRIX`, `OFFSET_TILE_PROXY_DIMS`, `LOD_OFFSET_CHUNK_DIMS`, etc.). Both writers — the canonical `descriptorBuffer.serializeEntityDescriptor` and the transient `descriptor/transient.serializeTransientDescriptor` (minimap path) — read offsets from that file. `renderer/descriptor/layout.test.ts` parses the `EntityDescriptor` struct from both `slice.wgsl` and `volume.wgsl` and asserts agreement against the TS constants; if the WGSL struct changes without updating `layout.ts` (or vice versa) the lock test fails. See ADR 0035 for the design rationale.
 
 ## Semantic fallback chain
 
@@ -65,7 +65,7 @@ Per fragment in `slice.wgsl` / `volume.wgsl`:
 5. **Fallback chain**:
    - Try the explicit `detail` tier source.
    - Fallback to the explicit `coarse` tier source when detail is missing for the fragment.
-   - Legacy bridge only: fallback to field/well proxy textures if they are resident.
+   - Legacy bridge only: fallback to tile/group proxy textures if they are resident.
    - Last resort: blank.
 6. Apply contrast → gamma → LUT sample → opacity.
 
@@ -81,11 +81,11 @@ The chain runs **inside the volume ray-march loop** as well, so a ray that cross
 
 The proxy path is the fallback below the default coarse/detail tiers (still fully wired). `proxy/upload.ts` handles the `proxyAssetData` message: validates the asset, allocates a slot in the right `(datasetId, kind, slotDims, channel)` pool, writes the u16 voxel buffer, and updates the descriptor handle pair on `state.proxyDescriptorsByEntity`, keyed by `(entityId, t, c)` so multichannel/time scrubs cannot overwrite another channel's fallback.
 
-`proxy/propagate.ts` is the well→fields fan-out: when a `WellProxy3D` lands for a well, every child field whose descriptor references that well gets its `wellProxyPoolIndex` / `wellProxySlotIndex` updated. The fan-out reads `state.wellToFields` (built per cold state) so each upload is O(children) instead of O(all-entities).
+`proxy/propagate.ts` is the group→tiles fan-out: when a `GroupProxy3D` lands for a group, every child tile whose descriptor references that group gets its `groupProxyHandle` updated. The fan-out reads `state.groupToTiles` (built per cold state) so each upload is O(children) instead of O(all-entities).
 
 ## De-globalized session state
 
-Per-session state lives on a single `RendererState` interface owned by `WorkerCtx.state` and created in `worker/bootstrap.ts`. Every handler reads `ctx.state.<field>` rather than a module global. The state fields cluster into five groups: cold-state routing (`memberToDataset`, legacy `memberToPool`, tier-aware `memberTierToPool`, `wellToFields`, `wellsByDataset`, `currentEntityMetasByDataset`), legacy proxy + descriptor registries (`proxyPoolsByDataset`, `proxyDescriptorsByEntity`, `descriptorBuffersByDataset`), per-mode atlas registries (`volumeAtlases`, `sliceAtlases`), per-entity eviction reference points (`rayHitPerEntity`, `cameraUVPerEntity`), and cold-state/epoch tracking (`currentEpochs`, `currentColdState`). Explicit state ownership is also what makes `removeLayerResources` clear the routing Maps alongside the atlas pools and descriptor buffers — see ADR 0035.
+Per-session state lives on a single `RendererState` interface owned by `WorkerCtx.state` and created in `worker/bootstrap.ts`. Every handler reads `ctx.state.<field>` rather than a module global. The state fields cluster into five groups: cold-state routing (`memberToDataset`, legacy `memberToPool`, tier-aware `memberTierToPool`, `groupToTiles`, `groupsByDataset`, `currentEntityMetasByDataset`), legacy proxy + descriptor registries (`proxyPoolsByDataset`, `proxyDescriptorsByEntity`, `descriptorBuffersByDataset`), per-mode atlas registries (`volumeAtlases`, `sliceAtlases`), per-entity eviction reference points (`rayHitPerEntity`, `cameraUVPerEntity`), and cold-state/epoch tracking (`currentEpochs`, `currentColdState`). Explicit state ownership is also what makes `removeLayerResources` clear the routing Maps alongside the atlas pools and descriptor buffers — see ADR 0035.
 
 Renderer-class singletons (slice/volume/cursor/compositor) and persistent GPU resources (LUT cache, offscreen pool, dummy textures/buffers) intentionally stay at module scope in `worker/resources.ts` because they outlive any single session.
 
@@ -98,7 +98,7 @@ When worker residency changes or rejects an upload:
 3. Main thread reconciles through [CPU Cache](cpu-cache.md): missing/re-eligible chunks clear `DeliveryState` chunk sent state; true rejections enter `RejectionTracker`; legacy missing proxies clear proxy sent state.
 4. Next `getDeliverable()` pass re-uploads cached, wanted, not-rejected, not-sent assets without relying on a pan/zoom cold-state rebuild.
 
-This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../../decisions/0004-multi-pool-atlases.md).
+This is why **collection FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../../decisions/0004-multi-pool-atlases.md).
 
 ## Interactions
 
@@ -118,8 +118,8 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 ## Gotchas
 
 - **Worker eviction is asynchronous from the main thread's perspective.** Don't assume `client.volumeChunkData(...)` lands instantly; the worker may have evicted by the time the next tick reads back. The reconciliation path through `wantedSetDelta` is what keeps things correct.
-- **Pool keys include `channel` and `tier`** — `(datasetId, channel, slotDims, detail|coarse)`. Adding multi-channel or coarse/detail mode without re-keying pools regresses to channels or tiers fighting for one pool, which kills plate FPS and fallback reliability.
+- **Pool keys include `channel` and `tier`** — `(datasetId, channel, slotDims, detail|coarse)`. Adding multi-channel or coarse/detail mode without re-keying pools regresses to channels or tiers fighting for one pool, which kills collection FPS and fallback reliability.
 - **Cold state carries explicit `multiChannel`.** A multi-channel view can have one visible channel; member IDs and pool grouping still need the multi-channel `imageId:chN` shape.
 - **`memberTierKey(memberId, tier)` is the tier routing key.** Falling back to the old `memberToPool` map for coarse uploads routes them through the detail pool and breaks mismatched chunk-shape cases.
-- **Volume's per-entity scissor for plate fields** is computed by `computeScissorRect` in `pipeline/upload/scissor.ts`. Skips fragments outside the field's screen-space AABB. If a field is rendering visibly outside its footprint, this is the place to look.
+- **Volume's per-entity scissor for collection tiles** is computed by `computeScissorRect` in `pipeline/upload/scissor.ts`. Skips fragments outside the tile's screen-space AABB. If a tile is rendering visibly outside its footprint, this is the place to look.
 - **Compositor key naming is asymmetric**: `imageId:chN` for multichannel, bare `imageId` for single-channel. Mixing the two halves silently produces the wrong final composite.

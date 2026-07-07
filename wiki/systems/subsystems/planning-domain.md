@@ -5,7 +5,7 @@ description: "lucida-web/src/pipeline/planning/ — decides which chunks the ren
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/planning-domain.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Planning Domain
@@ -17,21 +17,21 @@ modified: 2026-06-25
 Planning is the only place where the renderer's "what should be on screen" intent meets reality (generated/source coarse availability, GPU residency, dataset shape). Pulling it out of the tick coordinator and the renderer made three things possible:
 
 1. **Pure-function tests** — `planning.test.ts` covers the threshold logic without standing up GPU or network.
-2. **Tier choice in one place** — the planner resolves explicit `detail` and `coarse` chunk levels per field/image; downstream layers receive tier-labeled chunk requests instead of inferring fallback from proxy catalogs.
+2. **Tier choice in one place** — the planner resolves explicit `detail` and `coarse` chunk levels per tile/image; downstream layers receive tier-labeled chunk requests instead of inferring fallback from proxy catalogs.
 3. **A single priority formula** that the CPU cache (fetch scheduling) and GPU worker (eviction distance) can both consume.
 
 ## Chunk Tiers
 
-The default residency model is chunk-only coarse/detail, for both plate datasets and single-image datasets.
+The default residency model is chunk-only coarse/detail, for both collection datasets and single-image datasets.
 
 | Tier | Level source | Default behavior |
 |---|---|---|
 | **detail** | Source pyramid only | Defaults to the finest selectable source level, usually level 0. Users must explicitly choose a lower detail LOD. |
 | **coarse** | Explicit source coarse level, or server-generated derived level | Used as the fallback/context tier. Generated coarse levels are advertised through generated availability metadata and fetched through normal chunk requests. |
 
-For plate datasets, each field can resolve its own detail/coarse levels while preserving its well-relative transform and placement. There is no requirement that all fields in a well share a tier or a level. For single-image datasets, the same code path applies with one image member.
+For collection datasets, each tile can resolve its own detail/coarse levels while preserving its group-relative transform and placement. There is no requirement that all tiles in a group share a tier or a level. For single-image datasets, the same code path applies with one image member.
 
-Proxy promotion modes (`well-as-proxy`, `fields-with-proxy-fallback`) are a fallback that stays wired: `coarseDetailEnabled` defaults `true`, so coarse/detail is the default and the proxy path runs only when the flag is set `false` (`plan.ts` branches on it).
+Proxy promotion modes (`group-as-proxy`, `tiles-with-proxy-fallback`) are a fallback that stays wired: `coarseDetailEnabled` defaults `true`, so coarse/detail is the default and the proxy path runs only when the flag is set `false` (`plan.ts` branches on it).
 
 ## LOD range
 
@@ -64,7 +64,7 @@ Lane offsets:
 | COARSE | 2400 | Coarse chunk tier fill |
 | OVERVIEW | 2500 | Historical overview lane; minimap now has a separate path |
 
-Minimap wins outright on dataset open (~0); centered, important detail follows (~500); a far prefetch chunk loses (~1500+); coarse fill loses to interactive detail but stays ahead of the historical overview lane. Minimap chunks emit at exactly `MINIMAP_LANE_OFFSET` — they bypass the importance and distance terms because they're per-dataset, not per-entity. The constants are tuned, not arbitrary — changing them noticeably affects perceived snappiness on plates.
+Minimap wins outright on dataset open (~0); centered, important detail follows (~500); a far prefetch chunk loses (~1500+); coarse fill loses to interactive detail but stays ahead of the historical overview lane. Minimap chunks emit at exactly `MINIMAP_LANE_OFFSET` — they bypass the importance and distance terms because they're per-dataset, not per-entity. The constants are tuned, not arbitrary — changing them noticeably affects perceived snappiness on collections.
 
 ## Interactions
 
@@ -74,9 +74,9 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
   - `scene.visible_region(dsId)` → `xyBoundsVox`, `zRangeVox`, `sortCenterVox`, `effectiveZoom`, `frustumPlanes`
 - **Inputs from JS state**: generated availability metadata, the active layout, the per-channel visibility settings, per-dataset detail-level overrides, the per-image `minimapPending` map, the live `PlanningConfig` (from `planning/configStore.ts`), and the per-dataset `PlanningState` carry-forward.
 - **Plan signature**: `plan(snapshot, state, config?)` — three-way decomposition. `snapshot` is the world this tick; `state: PlanningState` is what crossed from last tick (v1: `{ previousActiveSet }`); `config: PlanningConfig` is the tunables. The planner returns `RequestPlan & { nextState: PlanningState }`; callers store the opaque pointer. See [`PlanningState` as the Carry-Forward Seam](../../decisions/0027-planning-state-as-the-carry-forward-seam.md).
-- **Outputs**: a `RequestPlan` per dataset — list of tier-labeled `ChunkRequest` with priorities (each carrying its own `datasetId`, no post-stamp), field/image active-set metadata for cold-state assembly, plus the opaque `nextState` for the next tick.
+- **Outputs**: a `RequestPlan` per dataset — list of tier-labeled `ChunkRequest` with priorities (each carrying its own `datasetId`, no post-stamp), tile/image active-set metadata for cold-state assembly, plus the opaque `nextState` for the next tick.
 - **Consumers**: [CPU Cache](cpu-cache.md) (`submit(plan)`), [gpu.worker.ts](gpu-residency.md) (via the cold-state message — see [Worker Protocol](worker-protocol.md)).
-- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the tick coordinator calls each tick. Lets planning be tested with stub WASM scenes. Snapshot carries `datasetId` and constructs the matching discriminated `EntitySnapshot` variant (`ImageSnapshot | WellSnapshot | FieldSnapshot`) per WASM `kind()`.
+- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the tick coordinator calls each tick. Lets planning be tested with stub WASM scenes. Snapshot carries `datasetId` and constructs the matching discriminated `EntitySnapshot` variant (`ImageSnapshot | GroupSnapshot | TileSnapshot`) per WASM `kind()`.
 - **Debug panel data**: `planning/debug.ts` exports `buildPlanningDatasetDebug` and `modeReason` — pure derivations from the plan + entity list, consumed by the DebugPanel "Planning" tab. The debug surface reports selected detail/coarse levels and generated readiness instead of treating proxy promotion as the primary state.
 - **Live tuning**: `planning/configStore.ts` is a singleton with `get`/`set`/`reset`/`subscribe`, persisted to `localStorage["lucida.planning.config"]` with a schemaVersion envelope. The tick coordinator subscribes to clear its planning cache on config change; the render loop subscribes to fire an interactive-dirty frame.
 - **Cross-subsystem types**: `SceneEpochs` lives in `pipeline/epochs.ts` (only the `request` field is planning-owned; the others are scene-state change counters consumed by render and worker pipelines too). `VisibleRegion` lives in `pipeline/viewport.ts` (viewport concept, not planning concept). See [`SceneEpochs` Rename and Relocation](../../decisions/0028-scene-epochs-rename-and-relocation.md).
@@ -86,11 +86,11 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 
 ## Invariants
 
-- **Fields/images are the residency unit.** Wells still provide layout and grouping context, but chunk-tier residency is per field/image in the default path.
-- **Singles use the same tier model.** A single-image dataset emits the same detail/coarse tier requests as a plate field, with no well grouping special case.
+- **Tiles/images are the residency unit.** Groups still provide layout and grouping context, but chunk-tier residency is per tile/image in the default path.
+- **Singles use the same tier model.** A single-image dataset emits the same detail/coarse tier requests as a collection tile, with no group-level special case.
 - **Generated levels are coarse-only.** Detail overrides and detail option lists are source-backed only; generated levels are selected only for the coarse tier.
 - **The plan is fresh every tick.** No caching across ticks; the [epoch fast-path](scene-state-and-epochs.md) in the tick coordinator decides whether to re-run planning at all.
-- **Per-variant invariants are compile-time enforced.** `InvisibleEntry` is its own kind, never confused with a visible field/image entry. `FieldSnapshot` always has a `parentId: string`; `ImageSnapshot` and `WellSnapshot` don't have the field at all. Reads must narrow on `kind` first. See [Discriminated Active-Set and Entity Types](../../decisions/0026-discriminated-active-set-and-entity-types.md).
+- **Per-variant invariants are compile-time enforced.** `InvisibleEntry` is its own kind, never confused with a visible tile/image entry. `TileSnapshot` always has a `parentId: string`; `ImageSnapshot` and `GroupSnapshot` don't have the field at all. Reads must narrow on `kind` first. See [Discriminated Active-Set and Entity Types](../../decisions/0026-discriminated-active-set-and-entity-types.md).
 - **Carry-forward state is explicit.** Cross-tick state rides only through the `PlanningState` in/`nextState` out seam (see Plan signature above) — no globals, no module state, no implicit caches. See [Principles — Planning Domain](../../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit).
 - **`datasetId` is stamped at emit time, not post-hoc.** The snapshot carries `datasetId`; the planner stamps it on every `ChunkRequest` and `ProxyRequest` as it emits. The tick coordinator no longer mutates the result.
 - **What `validatePlanningInputs` checks** (the dev-mode boundary check described under Interactions): semantic invariants the type system can't express — referential integrity of `parentId`, uniqueness of `entityId` / non-empty `imageId`, valid bbox + level shape arity, prev-active-set duplicates, prev-active-set kind agreement when the entity is present. Two things are explicitly NOT violations: a prev-active-set entity that disappeared (entities come and go across ticks), and a minimap pending coordinate absent from the snapshot's entity set (it is populated at a producer scope wider than the per-tick view query).
@@ -98,7 +98,7 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 ## Gotchas
 
 - **`importance` is per-entity per frame and comes from WASM** — don't try to compute it client-side. The math involves projected area and centroid distance from the viewport center; the WASM impl is the canonical one.
-- **Projected size is advisory, not a proxy-mode switch.** The default coarse/detail path keeps chunk tiering explicit. Use `projected_diagonal_px` and importance for priority and debug reasoning, not to force an entire well into a proxy mode.
+- **Projected size is advisory, not a proxy-mode switch.** The default coarse/detail path keeps chunk tiering explicit. Use `projected_diagonal_px` and importance for priority and debug reasoning, not to force an entire group into a proxy mode.
 - **Generated coarse readiness is asynchronous.** Planning can request a generated coarse chunk before bytes exist. The server returns a generated chunk status (`pending`, `ready`, `failed_*`, `unavailable`); the CPU cache treats `pending` as non-failure and will re-request after later readiness.
-- **Hysteresis only matters on the proxy fallback path** (`coarseDetailEnabled: false`). The default coarse/detail path doesn't flap because fields/images keep stable detail/coarse tier identities.
-- **Visible field with absent parent is legitimate.** Production WASM `view_query` may surface a visible field whose parent well is invisible (and so absent from `entities`). The planner's `groupByWell` handles this gracefully via `wellEntity: null`. The validator's check 1 reflects this: it only enforces "if the parent IS in `entities`, it must be a `Well`," not "every field's parent must be present."
+- **Hysteresis only matters on the proxy fallback path** (`coarseDetailEnabled: false`). The default coarse/detail path doesn't flap because tiles/images keep stable detail/coarse tier identities.
+- **Visible tile with absent parent is legitimate.** Production WASM `view_query` may surface a visible tile whose parent group is invisible (and so absent from `entities`). The planner's `groupMembers` handles this gracefully via `groupEntity: null`. The validator's check 1 reflects this: it only enforces "if the parent IS in `entities`, it must be a `Group`," not "every tile's parent must be present."

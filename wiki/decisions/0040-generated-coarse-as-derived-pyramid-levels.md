@@ -5,7 +5,7 @@ description: "Coarse residency is represented as an explicit level pointer in im
 tags: [lucida, decision]
 source_path: wiki/decisions/0040-generated-coarse-as-derived-pyramid-levels.md
 created: 2026-05-18
-modified: 2026-05-18
+modified: 2026-07-06
 ---
 
 # Generated coarse as derived pyramid levels
@@ -44,7 +44,7 @@ PRD: #672.
 
 ## Why
 
-The viewer needs coarse fallback for every image/field, but datasets do not
+The viewer needs coarse fallback for every image/tile, but datasets do not
 always contain a source pyramid level that is small enough to be safe as a
 whole-dataset context representation. Generating a bounded coarse level gives
 Lucida a predictable fallback while preserving the user's source data.

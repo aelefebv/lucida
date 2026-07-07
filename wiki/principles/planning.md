@@ -5,7 +5,7 @@ description: "Planning is the subsystem that, each tick, decides which chunks th
 tags: [lucida, principle]
 source_path: wiki/principles/planning.md
 created: 2026-05-14
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Principles — Planning Domain
@@ -14,7 +14,7 @@ modified: 2026-06-25
 
 ## Scope
 
-Planning is the subsystem that, each tick, decides which chunks the renderer wants next. These principles say what that decision optimizes for, and why — the durable direction, not the current policy. They govern the trade-offs planning is allowed to make (how much to fetch ahead, what to hold in memory, how coherent a plate well must look) and the shape planning must keep (pure, snapshot-driven, deferring all view math to the one Rust implementation). They do not describe the shipped coarse/detail path; where a principle and today's default disagree, the principle is recorded as direction and the gap is called out.
+Planning is the subsystem that, each tick, decides which chunks the renderer wants next. These principles say what that decision optimizes for, and why — the durable direction, not the current policy. They govern the trade-offs planning is allowed to make (how much to fetch ahead, what to hold in memory, how coherent a group must look) and the shape planning must keep (pure, snapshot-driven, deferring all view math to the one Rust implementation). They do not describe the shipped coarse/detail path; where a principle and today's default disagree, the principle is recorded as direction and the gap is called out.
 
 ## 1. The smoother render wins over the cheaper fetch
 
@@ -32,15 +32,15 @@ Every policy must be bounded. No unbounded enumeration, no runaway fetch escalat
 
 **This is a constraint, not a preference.** No other principle may violate it; it is the one that wins every tie it's in.
 
-## 3. A well reads as one thing, so it should render as one thing
+## 3. A group reads as one thing, so it should render as one thing
 
-On a plate, all the fields of a single well are one visual unit. They should agree on representation and timing. Per-field divergence inside a well is not something to optimize toward — it's something to avoid.
+In a collection, all the tiles of a single group are one visual unit. They should agree on representation and timing. Per-tile divergence inside a group is not something to optimize toward — it's something to avoid.
 
-**Why.** The user reads "well B7," not "field 4 of well B7." Giving sibling fields different representations produces a visible patchwork that the eye reads as a rendering defect, not as meaningful variation.
+**Why.** The user reads "group B7," not "tile 4 of group B7." Giving sibling tiles different representations produces a visible patchwork that the eye reads as a rendering defect, not as meaningful variation.
 
-**When in tension.** Coherence can cost responsiveness: if one field could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right call.
+**When in tension.** Coherence can cost responsiveness: if one tile could load faster than its siblings, coherence makes everyone wait for the slowest. This principle says that's the right call.
 
-**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per field* (see [Planning Domain](../systems/subsystems/planning-domain.md)), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
+**Where today's default disagrees.** The shipped coarse/detail path resolves residency tiers *per tile* (see [Planning Domain](../systems/subsystems/planning-domain.md)), so this principle currently describes the direction we want, not the behavior we have. Kept as a guiding light, flagged as not-yet-true.
 
 ## 4. Planning is a pure function of a snapshot
 
@@ -68,7 +68,7 @@ These principles are not equally weighted, and most of the real decisions live i
 
 - **Memory (2) is the hard floor.** Nothing may cross it; it wins every tie.
 - **Smoothness (1) and anticipation (6) trade against each other** inside the bound — more lookahead is usually smoother but costs more memory and bandwidth.
-- **Well coherence (3) constrains what 1 and 6 may do** at the per-field level.
+- **Group coherence (3) constrains what 1 and 6 may do** at the per-tile level.
 - **Purity (4) and one-home view math (5) are about *how* planning is built**, not *what* it optimizes for — they shape the subsystem so the other four stay testable and consistent.
 
 When a change can't satisfy all six at once, don't soften a principle to fit the change. Write the ADR: name the principle being relaxed, the alternatives considered, and why the trade is worth making.

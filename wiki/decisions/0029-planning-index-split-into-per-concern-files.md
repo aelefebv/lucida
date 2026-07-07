@@ -5,7 +5,7 @@ description: "lucida-web/src/pipeline/planning/index.ts (1695 lines) is split in
 tags: [lucida, decision]
 source_path: wiki/decisions/0029-planning-index-split-into-per-concern-files.md
 created: 2026-05-15
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # `planning/index.ts` Split into Per-Concern Files
@@ -17,7 +17,7 @@ modified: 2026-06-25
 | File | Approx. lines | Contents |
 |---|---:|---|
 | `types.ts` | ~460 | Every interface and type alias the planner produces or consumes. |
-| `modes.ts` | ~355 | `chooseEntityMode`, `groupByWell`, `buildPrevModeByWell`, `degradeForCatalog`, `assignModes`. |
+| `modes.ts` | ~355 | `chooseEntityMode`, `groupMembers`, `buildPrevModeByGroup`, `degradeForCatalog`, `assignModes`. |
 | `chunks.ts` | ~390 | `chunkKey`, `chunkOutsideFrustum`, `chunkWorldDims`, `iterateChunks`, `iterateChunksAtLodRange`. |
 | `emit.ts` | ~285 | `computePriority` + four `emit*Lane` helpers + `chunkDistanceFromCenter`. |
 | `plan.ts` | ~105 | `plan()` itself. |

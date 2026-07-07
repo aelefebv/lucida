@@ -5,7 +5,7 @@ description: "Chunk-only coarse/detail residency."
 tags: [lucida, decision]
 source_path: wiki/decisions/0038-budgeted-proxy-gpu-residency.md
 created: 2026-05-18
-modified: 2026-05-18
+modified: 2026-07-06
 ---
 
 # Budgeted proxy GPU residency
@@ -19,7 +19,7 @@ behavior remains documented here.
 Proxy GPU residency is a budgeted, planning-owned desired set rather than an
 unbounded consequence of every advertised visible proxy.
 
-Planning ranks coherent well-level proxy bundles across the worker's visible
+Planning ranks coherent group-level proxy bundles across the worker's visible
 inputs, admits only the best bundles that fit the configured worker-global GPU
 proxy budget, and sends that budgeted desired proxy set to the GPU worker. The
 worker reconciles resident proxy atlases to the desired set: wanted-set feedback
@@ -35,9 +35,9 @@ budget.
 ## Why
 
 The previous model treated advertised visible proxies as implicitly wanted on
-the GPU. That breaks down in large plate views: a 384-well plate with multiple
-fields and channels can expose far more `FieldProxy3D` candidates than a proxy
-pool can hold. With the current X-only slot layout, `128x128x1` field proxies ask
+the GPU. That breaks down in large collection views: a 384-group collection with multiple
+tiles and channels can expose far more `TileProxy3D` candidates than a proxy
+pool can hold. With the current X-only slot layout, `128x128x1` tile proxies ask
 for 64 slots but clamp to 16 on common 3D texture dimension limits. When more
 than 16 still-wanted proxies are visible for a pool, pure LRU evicts proxies that
 the worker immediately reports as missing, and the main thread reuploads them
@@ -46,9 +46,9 @@ fetching is not the bottleneck.
 
 Memory is the binding constraint here, so the system needs a positive decision
 about which proxies deserve GPU residency, not a reactive eviction loop after
-everything has already been declared wanted. Whole-well bundles preserve the
-plate invariant from [Wells Are the Planning Unit on Plates](0025-wells-as-planning-unit.md): fields within a
-well should not diverge arbitrarily because of slot-level eviction.
+everything has already been declared wanted. Whole-group bundles preserve the
+collection invariant from [Groups Are the Planning Unit in Collections](0025-wells-as-planning-unit.md): tiles within a
+group should not diverge arbitrarily because of slot-level eviction.
 
 Keeping the policy in planning follows [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit):
 the ranking and budget decision can be tested from snapshots, catalog metadata,
@@ -75,7 +75,7 @@ updates, and stale upload rejection, but it no longer invents residency policy.
 ## How this decision should show up in code
 
 - `lucida-web/src/pipeline/planning/` — pure proxy budget/ranking module that
-  admits coherent well bundles and returns desired proxy keys.
+  admits coherent group bundles and returns desired proxy keys.
 - `lucida-web/src/pipeline/tickCoordinator.ts` — collects plan candidates, runs
   the worker-global proxy budget pass, and submits cold state/upload work from
   the filtered desired set.
@@ -94,9 +94,9 @@ updates, and stale upload rejection, but it no longer invents residency policy.
 
 - [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](0004-multi-pool-atlases.md)
 - [Catalog Degradation Steps One Tier at a Time](0024-catalog-degrade-one-tier-at-a-time.md)
-- [Wells Are the Planning Unit on Plates](0025-wells-as-planning-unit.md)
+- [Groups Are the Planning Unit in Collections](0025-wells-as-planning-unit.md)
 - [Delivery state as a CpuCache sidecar](0037-delivery-state-as-cpucache-sidecar.md)
 - [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
-- [Principles — Planning Domain](../principles/planning.md#3-wells-are-coherent-visual-units)
+- [Principles — Planning Domain](../principles/planning.md#3-groups-are-coherent-visual-units)
 - [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
 - PRD #664

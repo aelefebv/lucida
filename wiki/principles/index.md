@@ -21,4 +21,4 @@ Two altitudes. **Product principles** are cross-cutting north-stars about what L
 
 ### Subsystem
 
-- [Principles — Planning Domain](planning.md) — what the per-tick chunk planner optimizes for: the smoother render over the cheaper fetch, memory as the hard floor, well coherence, planner purity, one-home view math, anticipation.
+- [Principles — Planning Domain](planning.md) — what the per-tick chunk planner optimizes for: the smoother render over the cheaper fetch, memory as the hard floor, group coherence, planner purity, one-home view math, anticipation.

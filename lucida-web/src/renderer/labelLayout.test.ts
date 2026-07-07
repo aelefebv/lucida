@@ -40,7 +40,7 @@ describe("labelFootprint", () => {
     expect(dataH).toBeCloseTo(256, 6);
   });
 
-  it("accounts for a physically-scaled source (microns per pixel)", () => {
+  it("accounts for a physically-scaled source (physical units per pixel)", () => {
     // Source at 0.5 um/px, label at 2.0 um/px -> label covers 4x source px.
     const source: Level0 = { shape: [1, 1, 1, 1000, 1000], scale: [1, 1, 1, 0.5, 0.5] };
     const label: Level0 = { shape: [1, 1, 1, 250, 250], scale: [1, 1, 1, 2.0, 2.0] };

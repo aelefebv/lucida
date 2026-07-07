@@ -5,7 +5,7 @@ description: "Open architectural questions, areas to investigate, and decisions 
 tags: [lucida, queue]
 source_path: wiki/queue.md
 created: 2026-04-18
-modified: 2026-07-04
+modified: 2026-07-06
 ---
 
 # Queue — Open Questions
@@ -21,7 +21,7 @@ Each item is a short bullet. Add a date when raised. Link to an article or PR wh
 
 - **2026-04-18** — Many [Decision](decisions/index.md) articles were originally seeded by reading the code. Are there PRDs/RFCs that should be dropped into `wiki/inputs/` so a `/repo-wiki` compile pass can enrich them with authoritative context?
 - **2026-04-18** — Threshold constants in [Planning Domain](systems/subsystems/planning-domain.md) (FAR=80px, MEDIUM=150px, hysteresis=5px) are tuned but the rationale isn't documented. Worth an interview pass to capture *why* these values vs neighbors.
-- **2026-04-18** — [GPU-Side Temporal Lookahead — Won't Implement](decisions/0010-temporal-runway-not-implemented.md) is recorded as "won't implement" — but does that decision still hold? Worth a re-check after any plate-FPS or scrubbing UX feedback.
+- **2026-04-18** — [GPU-Side Temporal Lookahead — Won't Implement](decisions/0010-temporal-runway-not-implemented.md) is recorded as "won't implement" — but does that decision still hold? Worth a re-check after any collection-FPS or scrubbing UX feedback.
 - **2026-05-07** — `decisions/0012-logging-conventions.md` is ~127 lines with code blocks longer than 3 lines, violating the article guardrails. Decide whether to compress (most of the "How to apply" section is operational guide content) or split it into a flow/system article plus a short ADR.
 - **2026-05-07** — Undo/redo system (future scope, surfaced during saved-views grilling): proposed dedicated undo/redo for milestone events (dataset opened/removed, active layout changed) — *not* via browser back/forward + `pushState`. Saved-views feature deliberately uses `replaceState` only so back-button stays clean; an in-app undo/redo lives separately and would track milestone document/viewport mutations independently of URL state.
 - **2026-05-17** — Single source of truth for stateful pipeline phases. PRD #640 moved delivery sent state into [CPU Cache](systems/subsystems/cpu-cache.md); after the shape settles, run a follow-up INTERVIEW pass to decide whether this should become a general principle across planning/fetch/upload/render boundaries.
