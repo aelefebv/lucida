@@ -584,3 +584,59 @@ def test_saved_views_approve_and_reject_post_without_body(tmp_path):
     assert reject_request["url"].endswith("/api/workspaces/w1/saved-views/sv-1/reject")
     assert reject_request["body"] is None
     assert rejected["visibility"] == "personal"
+
+
+def collection_manifest_with_shared_multiscale():
+    shared = manifest()["images"][0]["multiscale"]
+    return {
+        "dataset_id": "wds-coll",
+        "name": "collection.zarr",
+        "kind": {
+            "Collection": {
+                "rows": ["A"],
+                "columns": ["1"],
+                "positioning_mode": "Derived",
+                "has_explicit_positions": False,
+            }
+        },
+        "entities": [
+            {"id": "group-1", "kind": "Group", "parent": None, "labels": {}},
+            {"id": "tile-1", "kind": "Tile", "parent": "group-1", "labels": {}},
+            {"id": "tile-2", "kind": "Tile", "parent": "group-1", "labels": {}},
+        ],
+        "transforms": [
+            {"from": "tile-1", "to": "group-1", "translation": [0.0, 0.0]},
+            {"from": "tile-2", "to": "group-1", "translation": [64.0, 0.0]},
+        ],
+        "multiscales": [shared],
+        "images": [
+            {"image_id": "image-1", "owner": "tile-1", "multiscale_ref": 0},
+            {"image_id": "image-2", "owner": "tile-2", "multiscale_ref": 0},
+        ],
+        "source_layouts": [],
+        "default_layout_id": None,
+    }
+
+
+def test_dataset_summary_resolves_shared_multiscale_table():
+    from lucida.client import dataset_info_from_document, dataset_summary
+
+    compact = collection_manifest_with_shared_multiscale()
+    document = {"manifests": {"wds-coll": compact}}
+
+    summary = dataset_summary(document, compact)
+    assert summary["image_count"] == 2
+    assert summary["dimensions"] == [1, 3, 5, 64, 32]
+    assert summary["channel_count"] == 3
+
+    info = dataset_info_from_document(document, "wds-coll")
+    assert [image["data_type"] for image in info["images"]] == ["Uint16", "Uint16"]
+    assert all(image["level_count"] == 1 for image in info["images"])
+
+
+def test_dataset_summary_keeps_reading_inline_multiscales():
+    from lucida.client import dataset_summary
+
+    inline = manifest()
+    summary = dataset_summary({"manifests": {"wds-test": inline}}, inline)
+    assert summary["dimensions"] == [1, 3, 5, 64, 32]

@@ -9,7 +9,14 @@ import {
 } from "./bridge.ts";
 import type { DatasetState } from "./types.ts";
 import { Axis } from "./axes.ts";
-import type { DatasetManifest, FetchSource } from "./manifestTypes.ts";
+import {
+  resolveDatasetManifest,
+  resolveFetchSource,
+  type DatasetManifest,
+  type DatasetManifestWire,
+  type FetchSource,
+  type FetchSourceWire,
+} from "./manifestTypes.ts";
 import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import type {
@@ -600,7 +607,11 @@ export class SessionController {
 
           const doc = JSON.parse(documentJson);
           if (doc.manifests) {
-            for (const [dsId, manifest] of Object.entries(doc.manifests as Record<string, DatasetManifest>)) {
+            for (const [dsId, manifestWire] of Object.entries(doc.manifests as Record<string, DatasetManifestWire>)) {
+              // Resolve the wire encoding (shared multiscale table etc.) up
+              // front so everything downstream sees effective per-image
+              // metadata.
+              const manifest = resolveDatasetManifest(manifestWire);
               // A snapshot carries no fetch source; synthesize a proxied one
               // from the manifest's images. Only consulted when the dataset
               // isn't registered yet — an existing registration keeps the
@@ -883,8 +894,8 @@ export class SessionController {
   private handleDatasetOpened(
     cmd: {
       type: string;
-      manifest: DatasetManifest;
-      fetch: FetchSource;
+      manifest: DatasetManifestWire;
+      fetch: FetchSourceWire;
       catalog?: WireAssetCatalog | null;
       opener_client_id?: number | null;
     },
@@ -909,10 +920,14 @@ export class SessionController {
       roundTripMs,
     });
     this.session.setScene(scene);
-    const datasetId = cmd.manifest.dataset_id;
+    // Resolve the wire encoding (shared multiscale/wire-format tables) up
+    // front so everything downstream sees effective per-image metadata.
+    const manifest = resolveDatasetManifest(cmd.manifest);
+    const fetch = resolveFetchSource(cmd.fetch);
+    const datasetId = manifest.dataset_id;
     this.ensureDatasetRegistered({
-      manifest: cmd.manifest,
-      fetch: cmd.fetch,
+      manifest,
+      fetch,
       catalog: cmd.catalog ?? { entries: [] },
       layoutActivation: { kind: "broadcast" },
     });

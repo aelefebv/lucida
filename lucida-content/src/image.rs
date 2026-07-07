@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{EntityId, ImageId};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageSpec {
     pub image_id: ImageId,
     pub owner: EntityId,
     pub multiscale: MultiscaleInfo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiscaleInfo {
     pub axes: Vec<Axis>,
     pub levels: Vec<LevelGeometry>,
@@ -101,7 +101,7 @@ pub struct GeneratedLevelProvenance {
     pub source_content_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Axis {
     pub name: String,
     pub kind: AxisKind,
@@ -127,7 +127,7 @@ pub enum AxisKind {
     Space,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LevelGeometry {
     pub level_index: u32,
     pub shape: [u64; 5],

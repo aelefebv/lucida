@@ -38,124 +38,133 @@
           "name": "A1/0",
           "tile_index": 0
         }
+      },
+      {
+        "id": "tile-A1-f1",
+        "kind": "Tile",
+        "parent": "group-A1",
+        "labels": {
+          "name": "A1/1",
+          "tile_index": 1
+        }
       }
     ],
     "transforms": [
       {
         "from": "tile-A1-f0",
         "to": "group-A1",
-        "transform": {
-          "matrix": [
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            2048.0,
-            1024.0,
-            0.0,
-            1.0
-          ]
-        }
+        "translation": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "from": "tile-A1-f1",
+        "to": "group-A1",
+        "translation": [
+          2048.0,
+          1024.0
+        ]
+      }
+    ],
+    "multiscales": [
+      {
+        "axes": [
+          {
+            "name": "c",
+            "kind": "Channel"
+          },
+          {
+            "name": "z",
+            "kind": "Space"
+          },
+          {
+            "name": "y",
+            "kind": "Space"
+          },
+          {
+            "name": "x",
+            "kind": "Space"
+          }
+        ],
+        "levels": [
+          {
+            "level_index": 0,
+            "shape": [
+              1,
+              4,
+              12,
+              1024,
+              1024
+            ],
+            "chunk_shape": [
+              1,
+              1,
+              1,
+              512,
+              512
+            ],
+            "grid_shape": [
+              1,
+              4,
+              12,
+              2,
+              2
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              5.0,
+              0.65,
+              0.65
+            ]
+          },
+          {
+            "level_index": 1,
+            "shape": [
+              1,
+              4,
+              12,
+              512,
+              512
+            ],
+            "chunk_shape": [
+              1,
+              1,
+              1,
+              512,
+              512
+            ],
+            "grid_shape": [
+              1,
+              4,
+              12,
+              1,
+              1
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              5.0,
+              1.3,
+              1.3
+            ]
+          }
+        ],
+        "data_type": "Uint8",
+        "pinned_axes": []
       }
     ],
     "images": [
       {
         "image_id": "tile-A1-f0-image",
         "owner": "tile-A1-f0",
-        "multiscale": {
-          "axes": [
-            {
-              "name": "c",
-              "kind": "Channel"
-            },
-            {
-              "name": "z",
-              "kind": "Space"
-            },
-            {
-              "name": "y",
-              "kind": "Space"
-            },
-            {
-              "name": "x",
-              "kind": "Space"
-            }
-          ],
-          "levels": [
-            {
-              "level_index": 0,
-              "shape": [
-                1,
-                4,
-                12,
-                1024,
-                1024
-              ],
-              "chunk_shape": [
-                1,
-                1,
-                1,
-                512,
-                512
-              ],
-              "grid_shape": [
-                1,
-                4,
-                12,
-                2,
-                2
-              ],
-              "scale": [
-                1.0,
-                1.0,
-                5.0,
-                0.65,
-                0.65
-              ]
-            },
-            {
-              "level_index": 1,
-              "shape": [
-                1,
-                4,
-                12,
-                512,
-                512
-              ],
-              "chunk_shape": [
-                1,
-                1,
-                1,
-                512,
-                512
-              ],
-              "grid_shape": [
-                1,
-                4,
-                12,
-                1,
-                1
-              ],
-              "scale": [
-                1.0,
-                1.0,
-                5.0,
-                1.3,
-                1.3
-              ]
-            }
-          ],
-          "data_type": "Uint8",
-          "pinned_axes": []
-        }
+        "multiscale_ref": 0
+      },
+      {
+        "image_id": "tile-A1-f1-image",
+        "owner": "tile-A1-f1",
+        "multiscale_ref": 0
       }
     ],
     "source_layouts": [
@@ -173,6 +182,13 @@
           {
             "entity_id": "tile-A1-f0",
             "position": [
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "entity_id": "tile-A1-f1",
+            "position": [
               2048.0,
               1024.0
             ]
@@ -187,10 +203,17 @@
       "images": [
         {
           "image_id": "tile-A1-f0-image",
-          "wire_format": {
-            "Lz4": {
-              "data_type": "Uint8"
-            }
+          "wire_format_ref": 0
+        },
+        {
+          "image_id": "tile-A1-f1-image",
+          "wire_format_ref": 0
+        }
+      ],
+      "wire_formats": [
+        {
+          "Lz4": {
+            "data_type": "Uint8"
           }
         }
       ]

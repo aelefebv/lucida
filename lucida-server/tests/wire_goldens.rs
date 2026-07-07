@@ -617,7 +617,12 @@ fn single_manifest() -> DatasetManifest {
         vec![TransformEdge {
             from: entity_id.clone(),
             to: entity_id.clone(),
-            transform: VoxelTransform::from_voxel_translation_2d(128.0, -64.0),
+            // Not a pure 2D translation (anisotropic z scale), so this locks
+            // the full-matrix `transform` wire form; pure translations are
+            // compacted to `translation` and locked by the collection fixture.
+            transform: VoxelTransform::from_voxel_matrix([
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 128.0, -64.0, 0.0, 1.0,
+            ]),
         }],
         vec![ImageSpec {
             image_id,
@@ -675,12 +680,112 @@ fn single_dataset_opened() -> DatasetOpened {
     }
 }
 
-/// A collection manifest: group/tile entity hierarchy, explicit positioning, and a
-/// tile-owned image.
+/// A collection manifest: group/tile entity hierarchy, explicit positioning,
+/// and TWO tile-owned images sharing one multiscale and one wire format —
+/// which locks the shared-once wire form (top-level `multiscales` /
+/// `wire_formats` tables, per-image `multiscale_ref` / `wire_format_ref`,
+/// and the compact `translation` transform edges).
 fn collection_dataset_opened() -> DatasetOpened {
     let group_id = EntityId("group-A1".into());
-    let tile_id = EntityId("tile-A1-f0".into());
-    let image_id = ImageId("tile-A1-f0-image".into());
+    let tile_ids = [EntityId("tile-A1-f0".into()), EntityId("tile-A1-f1".into())];
+    let image_ids = [
+        ImageId("tile-A1-f0-image".into()),
+        ImageId("tile-A1-f1-image".into()),
+    ];
+    let tile_positions = [[0.0, 0.0], [2048.0, 1024.0]];
+
+    // All tiles of a collection share one multiscale (the importer templates
+    // from a representative tile), which is exactly what the shared table
+    // deduplicates.
+    let shared_multiscale = MultiscaleInfo {
+        axes: vec![
+            Axis {
+                name: "c".into(),
+                kind: AxisKind::Channel,
+            },
+            Axis {
+                name: "z".into(),
+                kind: AxisKind::Space,
+            },
+            Axis {
+                name: "y".into(),
+                kind: AxisKind::Space,
+            },
+            Axis {
+                name: "x".into(),
+                kind: AxisKind::Space,
+            },
+        ],
+        levels: vec![
+            LevelGeometry {
+                level_index: 0,
+                shape: [1, 4, 12, 1024, 1024],
+                chunk_shape: [1, 1, 1, 512, 512],
+                grid_shape: [1, 4, 12, 2, 2],
+                scale: [1.0, 1.0, 5.0, 0.65, 0.65],
+            },
+            LevelGeometry {
+                level_index: 1,
+                shape: [1, 4, 12, 512, 512],
+                chunk_shape: [1, 1, 1, 512, 512],
+                grid_shape: [1, 4, 12, 1, 1],
+                scale: [1.0, 1.0, 5.0, 1.3, 1.3],
+            },
+        ],
+        coarse_level_index: None,
+        generated_levels: vec![],
+        data_type: DataType::Uint8,
+        pinned_axes: vec![],
+        channel_infos: vec![],
+    };
+
+    let mut entities = vec![Entity {
+        id: group_id.clone(),
+        kind: EntityKind::Group,
+        parent: None,
+        labels: EntityLabels {
+            name: Some("A1".into()),
+            group_row: Some("A".into()),
+            group_column: Some("1".into()),
+            row_index: Some(0),
+            column_index: Some(0),
+            tile_index: None,
+        },
+    }];
+    let mut transforms = Vec::new();
+    let mut images = Vec::new();
+    let mut fetch_images = Vec::new();
+    for (index, (tile_id, image_id)) in tile_ids.iter().zip(&image_ids).enumerate() {
+        entities.push(Entity {
+            id: tile_id.clone(),
+            kind: EntityKind::Tile,
+            parent: Some(group_id.clone()),
+            labels: EntityLabels {
+                name: Some(format!("A1/{index}")),
+                tile_index: Some(index as u32),
+                ..Default::default()
+            },
+        });
+        transforms.push(TransformEdge {
+            from: tile_id.clone(),
+            to: group_id.clone(),
+            transform: VoxelTransform::from_voxel_translation_2d(
+                tile_positions[index][0],
+                tile_positions[index][1],
+            ),
+        });
+        images.push(ImageSpec {
+            image_id: image_id.clone(),
+            owner: tile_id.clone(),
+            multiscale: shared_multiscale.clone(),
+        });
+        fetch_images.push(ProxiedImageSpec {
+            image_id: image_id.clone(),
+            wire_format: WireFormat::Lz4 {
+                data_type: DataType::Uint8,
+            },
+        });
+    }
 
     let manifest = DatasetManifest::new(
         DatasetId("wds-collection-77".into()),
@@ -691,81 +796,9 @@ fn collection_dataset_opened() -> DatasetOpened {
             positioning_mode: PositioningMode::Explicit,
             has_explicit_positions: true,
         },
-        vec![
-            Entity {
-                id: group_id.clone(),
-                kind: EntityKind::Group,
-                parent: None,
-                labels: EntityLabels {
-                    name: Some("A1".into()),
-                    group_row: Some("A".into()),
-                    group_column: Some("1".into()),
-                    row_index: Some(0),
-                    column_index: Some(0),
-                    tile_index: None,
-                },
-            },
-            Entity {
-                id: tile_id.clone(),
-                kind: EntityKind::Tile,
-                parent: Some(group_id.clone()),
-                labels: EntityLabels {
-                    name: Some("A1/0".into()),
-                    tile_index: Some(0),
-                    ..Default::default()
-                },
-            },
-        ],
-        vec![TransformEdge {
-            from: tile_id.clone(),
-            to: group_id.clone(),
-            transform: VoxelTransform::from_voxel_translation_2d(2048.0, 1024.0),
-        }],
-        vec![ImageSpec {
-            image_id: image_id.clone(),
-            owner: tile_id.clone(),
-            multiscale: MultiscaleInfo {
-                axes: vec![
-                    Axis {
-                        name: "c".into(),
-                        kind: AxisKind::Channel,
-                    },
-                    Axis {
-                        name: "z".into(),
-                        kind: AxisKind::Space,
-                    },
-                    Axis {
-                        name: "y".into(),
-                        kind: AxisKind::Space,
-                    },
-                    Axis {
-                        name: "x".into(),
-                        kind: AxisKind::Space,
-                    },
-                ],
-                levels: vec![
-                    LevelGeometry {
-                        level_index: 0,
-                        shape: [1, 4, 12, 1024, 1024],
-                        chunk_shape: [1, 1, 1, 512, 512],
-                        grid_shape: [1, 4, 12, 2, 2],
-                        scale: [1.0, 1.0, 5.0, 0.65, 0.65],
-                    },
-                    LevelGeometry {
-                        level_index: 1,
-                        shape: [1, 4, 12, 512, 512],
-                        chunk_shape: [1, 1, 1, 512, 512],
-                        grid_shape: [1, 4, 12, 1, 1],
-                        scale: [1.0, 1.0, 5.0, 1.3, 1.3],
-                    },
-                ],
-                coarse_level_index: None,
-                generated_levels: vec![],
-                data_type: DataType::Uint8,
-                pinned_axes: vec![],
-                channel_infos: vec![],
-            },
-        }],
+        entities,
+        transforms,
+        images,
         vec![LayoutSpec {
             id: LayoutId("layout-explicit".into()),
             name: "Explicit positions".into(),
@@ -775,7 +808,11 @@ fn collection_dataset_opened() -> DatasetOpened {
                     position: [0.0, 0.0],
                 },
                 EntityPlacement {
-                    entity_id: tile_id,
+                    entity_id: tile_ids[0].clone(),
+                    position: [0.0, 0.0],
+                },
+                EntityPlacement {
+                    entity_id: tile_ids[1].clone(),
                     position: [2048.0, 1024.0],
                 },
             ],
@@ -786,12 +823,7 @@ fn collection_dataset_opened() -> DatasetOpened {
     DatasetOpened {
         manifest,
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
-            images: vec![ProxiedImageSpec {
-                image_id,
-                wire_format: WireFormat::Lz4 {
-                    data_type: DataType::Uint8,
-                },
-            }],
+            images: fetch_images,
         }),
         catalog: AssetCatalog::default(),
         opener_client_id: None,
@@ -2094,6 +2126,14 @@ fn dataset_open_payloads_match_goldens() {
                 "/manifest/kind/Collection/columns",
                 "/manifest/kind/Collection/positioning_mode",
                 "/manifest/kind/Collection/has_explicit_positions",
+                // The shared-once encoding: deleting the table strands the
+                // per-image references, and deleting a reference leaves the
+                // entry with neither form — both must fail to deserialize.
+                "/manifest/multiscales",
+                "/manifest/images/0/multiscale_ref",
+                "/manifest/transforms/0/translation",
+                "/fetch/Proxied/wire_formats",
+                "/fetch/Proxied/images/0/wire_format_ref",
             ],
         ),
         &mut failures,
