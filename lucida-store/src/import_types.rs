@@ -40,6 +40,16 @@ pub enum ImportWarningKind {
     /// labels present only on unsampled tiles were not discovered. The message
     /// names the environment variable that forces exhaustive discovery.
     SampledLabelDiscovery,
+    /// One or more label index objects (`labels/zarr.json`) were probed but
+    /// could not be used — the read failed short of a clean NotFound, the
+    /// bytes were not valid JSON, or the index listed no usable names — so
+    /// label discovery may be incomplete. Always aggregated: one warning per
+    /// import summarizes every unusable index, because a store-wide condition
+    /// (throttling, or a permission configuration that answers missing keys
+    /// with an error instead of NotFound) makes every index unusable at once.
+    /// The message names the exhaustive-discovery override and the likely
+    /// store-side causes.
+    UnusableLabelIndex,
 }
 
 /// Everything the server needs to build its operational binding.
