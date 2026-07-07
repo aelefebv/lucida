@@ -2,22 +2,22 @@
 
 import type {
   EntitySnapshot,
-  FieldSnapshot,
+  TileSnapshot,
   ImageSnapshot,
   MinimapChunkCoord,
   PlanningSnapshot,
   PlanningState,
-  WellSnapshot,
+  GroupSnapshot,
 } from "./index.ts";
 
 /**
  * Overrides for {@link createSyntheticEntity}. `kind` selects the
  * {@link EntitySnapshot} variant; `parentId` defaults to
- * `"synthetic-well"` for `kind: "Field"` and is ignored otherwise.
+ * `"synthetic-group"` for `kind: "Tile"` and is ignored otherwise.
  */
 export interface CreateSyntheticEntityOverrides
-  extends Partial<Omit<FieldSnapshot, "kind" | "parentId">> {
-  kind?: "Image" | "Well" | "Field";
+  extends Partial<Omit<TileSnapshot, "kind" | "parentId">> {
+  kind?: "Image" | "Group" | "Tile";
   parentId?: string;
 }
 
@@ -40,17 +40,17 @@ export function createSyntheticEntity(
     layoutPositionVox: overrides?.layoutPositionVox ?? [0, 0],
     levels: overrides?.levels ?? [],
   };
-  if (kind === "Field") {
-    const field: FieldSnapshot = {
-      kind: "Field",
-      parentId: overrides?.parentId ?? "synthetic-well",
+  if (kind === "Tile") {
+    const tile: TileSnapshot = {
+      kind: "Tile",
+      parentId: overrides?.parentId ?? "synthetic-group",
       ...base,
     };
-    return field;
+    return tile;
   }
-  if (kind === "Well") {
-    const well: WellSnapshot = { kind: "Well", ...base };
-    return well;
+  if (kind === "Group") {
+    const group: GroupSnapshot = { kind: "Group", ...base };
+    return group;
   }
   const image: ImageSnapshot = { kind: "Image", ...base };
   return image;
@@ -100,7 +100,7 @@ export function createSyntheticSnapshot(
 
 /**
  * Construct a {@link PlanningState} for tests. v1 carries a single
- * field — `previousActiveSet` — so the helper is a thin defaults +
+ * tile — `previousActiveSet` — so the helper is a thin defaults +
  * spread. Use this when a test needs to feed a non-empty prev set
  * into `plan(snapshot, state)` (e.g. hysteresis carry-over).
  */

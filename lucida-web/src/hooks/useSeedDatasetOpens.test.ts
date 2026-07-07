@@ -9,13 +9,13 @@ describe("useSeedDatasetOpens", () => {
     const openDataset = vi.fn();
     renderHook(() =>
       useSeedDatasetOpens({
-        initialDatasetUrls: ["/data/embryo.ome.zarr"],
+        initialDatasetUrls: ["/data/sample.ome.zarr"],
         ready: true,
         openDataset,
       }),
     );
     expect(openDataset).toHaveBeenCalledTimes(1);
-    expect(openDataset).toHaveBeenCalledWith("/data/embryo.ome.zarr");
+    expect(openDataset).toHaveBeenCalledWith("/data/sample.ome.zarr");
   });
 
   it("opens ALL seed datasets for a multi-select create", () => {

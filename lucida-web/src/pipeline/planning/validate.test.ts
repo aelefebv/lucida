@@ -19,7 +19,7 @@ import type {
   PlanningState,
 } from "./types.ts";
 import {
-  checkFieldParentRefs,
+  checkTileParentRefs,
   checkLevelShapeArity,
   checkPrevActiveSetKindAgreement,
   checkPrevActiveSetUnique,
@@ -48,57 +48,57 @@ function makeLevel(
 }
 
 /**
- * Build a minimal valid snapshot with one well + one field. Shared
+ * Build a minimal valid snapshot with one group + one tile. Shared
  * baseline for the per-check tests; each test mutates the result to
  * inject the specific violation it wants to assert.
  */
 function makeValidSnapshot(): PlanningSnapshot {
-  const well = createSyntheticEntity({
-    entityId: "well-A",
-    imageId: "img-well-A",
-    kind: "Well",
+  const group = createSyntheticEntity({
+    entityId: "group-A",
+    imageId: "img-group-A",
+    kind: "Group",
     levels: [makeLevel([1, 1, 1, 1, 1], [1, 1, 1, 1, 1])],
   });
-  const field = createSyntheticEntity({
-    entityId: "field-A1",
-    imageId: "img-field-A1",
-    kind: "Field",
-    parentId: "well-A",
+  const tile = createSyntheticEntity({
+    entityId: "tile-A1",
+    imageId: "img-tile-A1",
+    kind: "Tile",
+    parentId: "group-A",
     levels: [makeLevel([1, 1, 1, 1, 1], [1, 1, 1, 1, 1])],
   });
-  return createSyntheticSnapshot({ entities: [well, field] });
+  return createSyntheticSnapshot({ entities: [group, tile] });
 }
 
 // ===========================================================================
-// Check 1 — checkFieldParentRefs
+// Check 1 — checkTileParentRefs
 // ===========================================================================
 
-describe("checkFieldParentRefs", () => {
-  it("passes when every field's parentId resolves to a Well in entities", () => {
-    expect(() => checkFieldParentRefs(makeValidSnapshot())).not.toThrow();
+describe("checkTileParentRefs", () => {
+  it("passes when every tile's parentId resolves to a Group in entities", () => {
+    expect(() => checkTileParentRefs(makeValidSnapshot())).not.toThrow();
   });
 
-  it("passes when a field's parentId is absent from entities (parent invisible / not in this tick)", () => {
-    // Production reality: WASM's view_query may surface a visible field
-    // whose parent well is not in the snapshot. The planner's
-    // groupByWell handles this gracefully; the validator must not flag it.
+  it("passes when a tile's parentId is absent from entities (parent invisible / not in this tick)", () => {
+    // Production reality: WASM's view_query may surface a visible tile
+    // whose parent group is not in the snapshot. The planner's
+    // groupMembers handles this gracefully; the validator must not flag it.
     const snap = makeValidSnapshot();
-    snap.entities = snap.entities.filter((e) => e.kind !== "Well");
-    expect(() => checkFieldParentRefs(snap)).not.toThrow();
+    snap.entities = snap.entities.filter((e) => e.kind !== "Group");
+    expect(() => checkTileParentRefs(snap)).not.toThrow();
   });
 
-  it("throws when a field's parentId resolves to a non-Well entity in entities", () => {
+  it("throws when a tile's parentId resolves to a non-Group entity in entities", () => {
     const snap = makeValidSnapshot();
-    // Replace the Well with an Image carrying the same id.
-    const wellIdx = snap.entities.findIndex((e) => e.kind === "Well");
+    // Replace the Group with an Image carrying the same id.
+    const groupIdx = snap.entities.findIndex((e) => e.kind === "Group");
     const replacement = createSyntheticEntity({
-      entityId: "well-A",
-      imageId: "img-well-A",
+      entityId: "group-A",
+      imageId: "img-group-A",
       kind: "Image",
     });
-    snap.entities[wellIdx] = replacement;
-    expect(() => checkFieldParentRefs(snap)).toThrow(
-      /parentId references non-Well entity/,
+    snap.entities[groupIdx] = replacement;
+    expect(() => checkTileParentRefs(snap)).toThrow(
+      /parentId references non-Group entity/,
     );
   });
 });
@@ -116,13 +116,13 @@ describe("checkUniqueEntityIds", () => {
     const snap = makeValidSnapshot();
     snap.entities.push(
       createSyntheticEntity({
-        entityId: "well-A", // duplicate
+        entityId: "group-A", // duplicate
         imageId: "img-dup",
         kind: "Image",
       }),
     );
     expect(() => checkUniqueEntityIds(snap)).toThrow(
-      /duplicate entityId well-A/,
+      /duplicate entityId group-A/,
     );
   });
 });
@@ -136,18 +136,18 @@ describe("checkUniqueImageIds", () => {
     expect(() => checkUniqueImageIds(makeValidSnapshot())).not.toThrow();
   });
 
-  it("passes when multiple wells share the conventional empty imageId", () => {
-    // Wells use imageId === "" as the placeholder for "this entity has
-    // no image to key against". Multi-well plates legitimately carry
-    // multiple wells with imageId === "".
+  it("passes when multiple groups share the conventional empty imageId", () => {
+    // Groups use imageId === "" as the placeholder for "this entity has
+    // no image to key against". Multi-group collections legitimately carry
+    // multiple groups with imageId === "".
     const snap = makeValidSnapshot();
     snap.entities.push(
-      createSyntheticEntity({ entityId: "well-B", imageId: "", kind: "Well" }),
-      createSyntheticEntity({ entityId: "well-C", imageId: "", kind: "Well" }),
+      createSyntheticEntity({ entityId: "group-B", imageId: "", kind: "Group" }),
+      createSyntheticEntity({ entityId: "group-C", imageId: "", kind: "Group" }),
     );
-    // Wipe well-A's image id too so all three wells share "".
-    const wellA = snap.entities.find((e) => e.entityId === "well-A");
-    if (wellA) wellA.imageId = "";
+    // Wipe group-A's image id too so all three groups share "".
+    const groupA = snap.entities.find((e) => e.entityId === "group-A");
+    if (groupA) groupA.imageId = "";
     expect(() => checkUniqueImageIds(snap)).not.toThrow();
   });
 
@@ -155,13 +155,13 @@ describe("checkUniqueImageIds", () => {
     const snap = makeValidSnapshot();
     snap.entities.push(
       createSyntheticEntity({
-        entityId: "well-B",
-        imageId: "img-well-A", // duplicate of well-A's
-        kind: "Well",
+        entityId: "group-B",
+        imageId: "img-group-A", // duplicate of group-A's
+        kind: "Group",
       }),
     );
     expect(() => checkUniqueImageIds(snap)).toThrow(
-      /duplicate imageId img-well-A/,
+      /duplicate imageId img-group-A/,
     );
   });
 });
@@ -278,8 +278,8 @@ describe("checkPrevActiveSetUnique", () => {
   it("passes when every entry has a unique entityId", () => {
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "well-as-proxy", entityId: "well-A" },
-        { kind: "well-as-proxy", entityId: "well-B" },
+        { kind: "group-as-proxy", entityId: "group-A" },
+        { kind: "group-as-proxy", entityId: "group-B" },
       ],
     };
     expect(() => checkPrevActiveSetUnique(state)).not.toThrow();
@@ -288,12 +288,12 @@ describe("checkPrevActiveSetUnique", () => {
   it("throws on duplicate entityId in previousActiveSet", () => {
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "well-as-proxy", entityId: "well-A" },
-        { kind: "well-as-proxy", entityId: "well-A" }, // duplicate
+        { kind: "group-as-proxy", entityId: "group-A" },
+        { kind: "group-as-proxy", entityId: "group-A" }, // duplicate
       ],
     };
     expect(() => checkPrevActiveSetUnique(state)).toThrow(
-      /duplicate entityId well-A in state\.previousActiveSet/,
+      /duplicate entityId group-A in state\.previousActiveSet/,
     );
   });
 });
@@ -307,17 +307,17 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "well-as-proxy", entityId: "well-A" },
+        { kind: "group-as-proxy", entityId: "group-A" },
         {
-          kind: "field",
-          entityId: "field-A1",
-          imageId: "img-field-A1",
-          mode: "fields-with-detail",
+          kind: "tile",
+          entityId: "tile-A1",
+          imageId: "img-tile-A1",
+          mode: "tiles-with-detail",
           targetLod: 0,
           coarsestDetailLod: 0,
           detailOwnedLodRange: [0, 0],
           proxyAvailable: false,
-          wellProxyAvailable: false,
+          groupProxyAvailable: false,
         },
       ],
     };
@@ -328,10 +328,10 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
       previousActiveSet: [
-        // Well that's now invisible — invisible permits any entity kind.
-        { kind: "invisible", entityId: "well-A", imageId: "img-well-A", coarsestLod: 0 },
-        // Field that's now invisible — same story.
-        { kind: "invisible", entityId: "field-A1", imageId: "img-field-A1", coarsestLod: 0 },
+        // Group that's now invisible — invisible permits any entity kind.
+        { kind: "invisible", entityId: "group-A", imageId: "img-group-A", coarsestLod: 0 },
+        // Tile that's now invisible — same story.
+        { kind: "invisible", entityId: "tile-A1", imageId: "img-tile-A1", coarsestLod: 0 },
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
@@ -342,51 +342,51 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const state: PlanningState = {
       previousActiveSet: [
         // entityId not present in snapshot — disappeared, NOT a violation.
-        { kind: "well-as-proxy", entityId: "well-gone-last-tick" },
+        { kind: "group-as-proxy", entityId: "group-gone-last-tick" },
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 
-  it("throws when a well-as-proxy entry references a non-Well entity", () => {
+  it("throws when a group-as-proxy entry references a non-Group entity", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
       previousActiveSet: [
-        // field-A1 is a Field but the entry says it was a well-as-proxy.
-        { kind: "well-as-proxy", entityId: "field-A1" },
+        // tile-A1 is a Tile but the entry says it was a group-as-proxy.
+        { kind: "group-as-proxy", entityId: "tile-A1" },
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
-      /disagrees with entity kind Field \(expected Well\)/,
+      /disagrees with entity kind Tile \(expected Group\)/,
     );
   });
 
-  it("throws when a field entry references a Well entity (only Field/Image allowed)", () => {
+  it("throws when a tile entry references a Group entity (only Tile/Image allowed)", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
       previousActiveSet: [
         {
-          kind: "field",
-          entityId: "well-A", // Well, not Field/Image
-          imageId: "img-well-A",
-          mode: "fields-with-detail",
+          kind: "tile",
+          entityId: "group-A", // Group, not Tile/Image
+          imageId: "img-group-A",
+          mode: "tiles-with-detail",
           targetLod: 0,
           coarsestDetailLod: 0,
           detailOwnedLodRange: [0, 0],
           proxyAvailable: false,
-          wellProxyAvailable: false,
+          groupProxyAvailable: false,
         },
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
-      /disagrees with entity kind Well \(expected Field or Image\)/,
+      /disagrees with entity kind Group \(expected Tile or Image\)/,
     );
   });
 
-  it("passes when a field entry references an Image entity (singleton case)", () => {
-    // Image entities are treated as singleton "wells with one field" by
-    // groupByWell — the active-set entry is a FieldEntry even though the
-    // entity is an ImageSnapshot. See modes.ts::groupByWell.
+  it("passes when a tile entry references an Image entity (singleton case)", () => {
+    // Image entities are treated as singleton "groups with one tile" by
+    // groupMembers — the active-set entry is a TileEntry even though the
+    // entity is an ImageSnapshot. See modes.ts::groupMembers.
     const snap = createSyntheticSnapshot({
       datasetId: "ds-singleton",
       entities: [
@@ -400,15 +400,15 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const state: PlanningState = {
       previousActiveSet: [
         {
-          kind: "field",
+          kind: "tile",
           entityId: "img-only",
           imageId: "img-only-image",
-          mode: "fields-with-detail",
+          mode: "tiles-with-detail",
           targetLod: 0,
           coarsestDetailLod: 0,
           detailOwnedLodRange: [0, 0],
           proxyAvailable: false,
-          wellProxyAvailable: false,
+          groupProxyAvailable: false,
         },
       ],
     };
@@ -433,9 +433,9 @@ describe("validatePlanningInputs (composing)", () => {
     const snap = makeValidSnapshot();
     snap.entities.push(
       createSyntheticEntity({
-        entityId: "well-B",
-        imageId: "img-well-A", // duplicate of well-A's
-        kind: "Well",
+        entityId: "group-B",
+        imageId: "img-group-A", // duplicate of group-A's
+        kind: "Group",
       }),
     );
     expect(() => validatePlanningInputs(snap, createSyntheticState())).toThrow(
@@ -446,12 +446,12 @@ describe("validatePlanningInputs (composing)", () => {
   it("propagates a state-side violation (smoke)", () => {
     const state: PlanningState = {
       previousActiveSet: [
-        { kind: "well-as-proxy", entityId: "well-X" },
-        { kind: "well-as-proxy", entityId: "well-X" },
+        { kind: "group-as-proxy", entityId: "group-X" },
+        { kind: "group-as-proxy", entityId: "group-X" },
       ],
     };
     expect(() => validatePlanningInputs(makeValidSnapshot(), state)).toThrow(
-      /duplicate entityId well-X in state\.previousActiveSet/,
+      /duplicate entityId group-X in state\.previousActiveSet/,
     );
   });
 });

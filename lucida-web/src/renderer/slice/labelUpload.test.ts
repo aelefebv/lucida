@@ -38,7 +38,7 @@ function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
   return {
     type: "labelSliceChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-    memberId: "img-0:label:mito",
+    memberId: "img-0:label:region-b",
     chunks: [{ data: plane.buffer as ArrayBuffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
     level: 0,
     t: 0,
@@ -58,8 +58,8 @@ describe("handleLabelSliceChunkData", () => {
 
     handleLabelSliceChunkData(ctx, labelPlaneMsg(plane));
 
-    expect(ctx.state.labelSlicePools.has("img-0:label:mito")).toBe(true);
-    const pool = ctx.state.labelSlicePools.get("img-0:label:mito")!;
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(true);
+    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
     expect(pool.width).toBe(2);
     expect(pool.height).toBe(2);
 
@@ -74,11 +74,11 @@ describe("handleLabelSliceChunkData", () => {
     const ctx = makeCtx(writes);
     // Z=5 plane, then Z=6 plane — same dims, different ids.
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
-    const poolAfterZ5 = ctx.state.labelSlicePools.get("img-0:label:mito");
+    const poolAfterZ5 = ctx.state.labelSlicePools.get("img-0:label:region-b");
     const textureZ5 = poolAfterZ5?.texture;
 
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([5, 6, 7, 8])));
-    const poolAfterZ6 = ctx.state.labelSlicePools.get("img-0:label:mito");
+    const poolAfterZ6 = ctx.state.labelSlicePools.get("img-0:label:region-b");
 
     // Same pool + same texture object: overwritten in place, not destroyed
     // + recreated (which would blank the overlay mid-scrub).
@@ -101,7 +101,7 @@ describe("handleLabelSliceChunkData", () => {
       chunkX: 128,
       chunkY: 128,
     });
-    const pool = ctx.state.labelSlicePools.get("img-0:label:mito")!;
+    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
     expect(pool.width).toBeLessThanOrEqual(64);
     expect(pool.height).toBeLessThanOrEqual(64);
     expect(writes).toHaveLength(1);
@@ -114,6 +114,6 @@ describe("handleLabelSliceChunkData", () => {
     ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, asset: 0, request: 1 };
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect(writes).toHaveLength(0);
-    expect(ctx.state.labelSlicePools.has("img-0:label:mito")).toBe(false);
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
   });
 });

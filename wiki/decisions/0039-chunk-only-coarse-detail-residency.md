@@ -5,7 +5,7 @@ description: "Lucida's fallback/residency model moves to two canonical chunk tie
 tags: [lucida, decision]
 source_path: wiki/decisions/0039-chunk-only-coarse-detail-residency.md
 created: 2026-05-18
-modified: 2026-05-18
+modified: 2026-07-06
 ---
 
 # Chunk-only coarse/detail residency
@@ -16,12 +16,12 @@ Status: Accepted
 
 Lucida's fallback/residency model moves to two canonical chunk tiers:
 
-- `coarse` — a bounded per-image or per-field representation used for spatial
+- `coarse` — a bounded per-image or per-tile representation used for spatial
   context and fallback.
 - `detail` — the selected source pyramid level for inspection around the active
   viewport.
 
-Both tiers are chunks. The end state has no active field-proxy or well-proxy
+Both tiers are chunks. The end state has no active tile-proxy or group-proxy
 fallback path. Planning, CPU cache, upload, worker protocol, GPU residency,
 descriptor state, shaders, telemetry, and debug surfaces should carry tier
 meaning explicitly instead of inferring fallback behavior from proxy catalogs or
@@ -37,9 +37,9 @@ Shader fallback order becomes selected detail, then coarse, then blank.
 `overview` may exist as a migration alias, but new concepts should use
 `coarse`.
 
-Wells remain layout/grouping concepts. Residency may be decided and scheduled
-per field/image, not per well. This supersedes the proxy-era rule that a plate
-well is the residency/promotion unit.
+Groups remain layout/grouping concepts. Residency may be decided and scheduled
+per tile/image, not per group. This supersedes the proxy-era rule that a collection
+group is the residency/promotion unit.
 
 PRD: #672.
 
@@ -49,7 +49,7 @@ Chunks are the durable storage, fetch, decode, upload, and shader-addressing
 unit. The proxy fallback model introduced a parallel asset class with its own
 catalog, generation path, cache, upload messages, atlases, descriptors, and
 shader fallback logic. That duplication made fallback behavior harder to budget
-and harder to reason about, especially once large plates exposed far more proxy
+and harder to reason about, especially once large collections exposed far more proxy
 candidates than GPU memory could hold.
 
 A chunk-only model keeps fallback in the same pipeline as detail. The renderer
@@ -61,7 +61,7 @@ an explicit budget and eviction policy. It also honors
 because tier selection and priority remain planner-visible inputs/outputs rather
 than hidden worker state.
 
-The highest-resolution default is a product requirement. Microscopists expect
+The highest-resolution default is a product requirement. Users expect
 inspection to begin at the best available source resolution; lowering detail LOD
 is an explicit user choice, not an automatic memory-pressure response.
 
@@ -73,17 +73,17 @@ changes, honoring
 memory bound.
 
 This decision intentionally relaxes
-[Principles — Planning Domain](../principles/planning.md#3-wells-are-coherent-visual-units) for residency. The old
-well-as-unit rule was appropriate for proxy promotion modes, where a well proxy
-was itself the fallback asset. In the chunk-only model, fields already have
-their own image chunks and can be scheduled independently while the well remains
+[Principles — Planning Domain](../principles/planning.md#3-groups-are-coherent-visual-units) for residency. The old
+group-as-unit rule was appropriate for proxy promotion modes, where a group proxy
+was itself the fallback asset. In the chunk-only model, tiles already have
+their own image chunks and can be scheduled independently while the group remains
 the user's layout/navigation unit.
 
 ## Consequences
 
 - Planning emits tier-labeled chunk requests for `coarse` and `detail`.
-- The three promotion modes (`well-as-proxy`,
-  `fields-with-proxy-fallback`, `fields-with-detail`) are retired in the new
+- The three promotion modes (`group-as-proxy`,
+  `tiles-with-proxy-fallback`, `tiles-with-detail`) are retired in the new
   path.
 - Catalog degradation by proxy availability no longer controls fallback
   availability in the new path.
@@ -120,13 +120,13 @@ the user's layout/navigation unit.
 ## Related
 
 - [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
-- [Principles — Planning Domain](../principles/planning.md#3-wells-are-coherent-visual-units)
+- [Principles — Planning Domain](../principles/planning.md#3-groups-are-coherent-visual-units)
 - [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit)
 - [Principles — Planning Domain](../principles/planning.md#5-wasm-owns-truth-planning-consumes-a-snapshot)
 - [Principles — Planning Domain](../principles/planning.md#6-anticipate-the-users-likely-next-gesture)
 - Supersedes the new-path behavior in [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](0004-multi-pool-atlases.md)
 - Supersedes the new-path behavior in [Catalog Degradation Steps One Tier at a Time](0024-catalog-degrade-one-tier-at-a-time.md)
-- Supersedes the new-path behavior in [Wells Are the Planning Unit on Plates](0025-wells-as-planning-unit.md)
+- Supersedes the new-path behavior in [Groups Are the Planning Unit in Collections](0025-groups-as-planning-unit.md)
 - Supersedes the new-path behavior in [Budgeted proxy GPU residency](0038-budgeted-proxy-gpu-residency.md)
 - PRD #672
 - Issue #561

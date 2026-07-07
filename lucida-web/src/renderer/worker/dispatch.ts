@@ -92,7 +92,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         if (!detailPoolKey && !coarsePoolKey) {
           // No chunk pool — still report dataset so the handler can
           // bind a dummy chunk atlas and proceed with proxy-only render
-          // (e.g. well-as-proxy entries).
+          // (e.g. group-as-proxy entries).
           return datasetId ? { detailPoolKey: null, coarsePoolKey: null, datasetId } : null;
         }
         return { detailPoolKey, coarsePoolKey, datasetId };
@@ -128,7 +128,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         if (!detailPoolKey && !coarsePoolKey) {
           // No chunk pool — still report datasetId so the handler can
           // bind a dummy chunk atlas and proceed with a proxy-only
-          // render (well-as-proxy entries take this path).
+          // render (group-as-proxy entries take this path).
           return datasetId ? { detailPoolKey: null, coarsePoolKey: null, datasetId } : null;
         }
         return { detailPoolKey, coarsePoolKey, datasetId };
@@ -205,12 +205,12 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
           ctx.state.memberTierToPool.delete(memberTierKey(memberId, "coarse"));
         }
       }
-      // Drop well→fields entries owned by this dataset. Tracked via
-      // wellsByDataset so we don't have to scan every well's child set.
-      const wells = ctx.state.wellsByDataset.get(msg.datasetId);
-      if (wells) {
-        for (const wellId of wells) ctx.state.wellToFields.delete(wellId);
-        ctx.state.wellsByDataset.delete(msg.datasetId);
+      // Drop group→tiles entries owned by this dataset. Tracked via
+      // groupsByDataset so we don't have to scan every group's child set.
+      const groups = ctx.state.groupsByDataset.get(msg.datasetId);
+      if (groups) {
+        for (const groupId of groups) ctx.state.groupToTiles.delete(groupId);
+        ctx.state.groupsByDataset.delete(msg.datasetId);
       }
       // If the dataset being dropped is the one whose cold state is
       // active, clear that pointer too — no more renders/uploads will

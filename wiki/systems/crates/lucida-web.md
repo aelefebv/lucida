@@ -1,16 +1,16 @@
 ---
 type: Crate
 title: "lucida-web"
-description: "React 19 + Vite 7 + WebGPU frontend that consumes the lucida-core WASM build and renders multi-channel volumetric microscopy datasets."
+description: "React 19 + Vite 7 + WebGPU frontend that consumes the lucida-core WASM build and renders multi-channel volumetric image datasets."
 tags: [lucida, crate]
 source_path: wiki/systems/crates/lucida-web.md
 created: 2026-04-18
-modified: 2026-07-04
+modified: 2026-07-06
 ---
 
 # lucida-web
 
-React 19 + Vite 7 + WebGPU frontend that consumes the [lucida-core](lucida-core.md) WASM build and renders multi-channel volumetric microscopy datasets. The web client is a thin orchestration layer over the WASM Scene — JS owns the network, the GPU, and the DOM; WASM owns the truth about what's visible and where.
+React 19 + Vite 7 + WebGPU frontend that consumes the [lucida-core](lucida-core.md) WASM build and renders multi-channel volumetric image datasets. The web client is a thin orchestration layer over the WASM Scene — JS owns the network, the GPU, and the DOM; WASM owns the truth about what's visible and where.
 
 This article is a roadmap. The substantive content for each subsystem lives in its own article.
 
@@ -72,7 +72,7 @@ Subdirectories:
 - `pipeline/` — planning, tickCoordinator, CpuCache, contentSource, decode pool, asset catalog, layout builders/registry
 - `renderer/` — GPU worker, atlases, indirection, descriptor buffer, wanted-set, four WGSL shaders (`compositor.wgsl`, `slice.wgsl`, `volume.wgsl`, `cursors.wgsl` for peer-cursor rendering), residency
 - `hooks/` — the React hooks driving App.tsx
-- `components/` — React components: viewers, controls, file browser, plate selector, peer cursors, FPS counter, minimap, layout switcher, layer panel, colormap selector, dimension controls, contrast controls, and the annotation/mentions/thread overlays
+- `components/` — React components: viewers, controls, file browser, collection selector, peer cursors, FPS counter, minimap, layout switcher, layer panel, colormap selector, dimension controls, contrast controls, and the annotation/mentions/thread overlays
 - `config/` — `keyBindings.ts` (keyboard binding map)
 - `debug/` — DebugPanel/DebugOverlays and debugStats — runtime telemetry overlay. The panel + overlay components are code-split: App.tsx loads them via `React.lazy` as a separate on-demand chunk (first Debug-button click / overlay toggle), so they stay out of the main production bundle; only the small gate/stat modules (`logging.ts`, `debugStats.ts`) are statically imported. Dev-build editable, prod read-only — see [Debug overlays & diagnostics UI](../subsystems/debug-overlays.md)
 - `zarr/intensitySampler.ts` — coarse-LOD intensity readout for the volume sampler

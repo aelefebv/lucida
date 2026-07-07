@@ -147,7 +147,7 @@ export interface ProxyAssetDataMessage {
   datasetId: string;
   entityId: string;
   imageId: string;
-  kind: "WellProxy3D" | "FieldProxy3D";
+  kind: "GroupProxy3D" | "TileProxy3D";
   t: number;
   c: number;
   /** `[Z, Y, X]` voxel counts. */
@@ -165,9 +165,9 @@ export interface VolumeLayerParams {
   renderMode: "translucent" | "max_intensity";
   scissorRect?: [number, number, number, number];
   /**
-   * Per-entity id retained for compatibility and inspection. For field
-   * entries this is the field's entity id; for `well-as-proxy` entries
-   * this is the well's entity id. Proxy binding is selected from the
+   * Per-entity id retained for compatibility and inspection. For tile
+   * entries this is the tile's entity id; for `group-as-proxy` entries
+   * this is the group's entity id. Proxy binding is selected from the
    * member id because proxy residency is scoped by `(entity, t, c)`.
    */
   entityId?: string;
@@ -381,7 +381,7 @@ export interface DestroyMessage {
 // --- Cold state (main → worker, per epoch change) ---
 
 /**
- * Shared fields across both {@link ColdStateActiveEntry} variants. Not
+ * Shared tiles across both {@link ColdStateActiveEntry} variants. Not
  * exported — consumers should use the discriminated union below and
  * narrow via `entry.kind`.
  */
@@ -402,24 +402,24 @@ interface ColdStateActiveEntryBase {
   }>;
   /**
    * Which proxy kind (if any) this entry would prefer. For
-   * `well-as-proxy` this is `WellProxy3D`; for field modes it's
-   * `FieldProxy3D` if the catalog advertises it.
+   * `group-as-proxy` this is `GroupProxy3D`; for tile modes it's
+   * `TileProxy3D` if the catalog advertises it.
    */
-  proxyKind?: "WellProxy3D" | "FieldProxy3D";
+  proxyKind?: "GroupProxy3D" | "TileProxy3D";
   /** Catalog says the preferred proxy is fetchable. */
   proxyAvailable: boolean;
   /**
-   * Catalog says the parent well's `WellProxy3D` is fetchable. For
-   * `well-as-proxy` entries equals `proxyAvailable`; for field entries
-   * this drives the secondary parent-well-proxy request.
+   * Catalog says the parent group's `GroupProxy3D` is fetchable. For
+   * `group-as-proxy` entries equals `proxyAvailable`; for tile entries
+   * this drives the secondary parent-group-proxy request.
    */
-  wellProxyAvailable: boolean;
+  groupProxyAvailable: boolean;
   /**
    * Precomputed column-major model matrix mapping the entity's
    * `[0,1]^3` unit cube to world space. The orchestrator derives this
-   * from `scene.member_model_matrix` for field entries and synthesises
-   * it from the well AABB for `well-as-proxy` entries (see
-   * `synthesizeWellRosterEntry` in tickCoordinator.ts). The worker writes
+   * from `scene.member_model_matrix` for tile entries and synthesises
+   * it from the group AABB for `group-as-proxy` entries (see
+   * `synthesizeGroupRosterEntry` in tickCoordinator.ts). The worker writes
    * this straight into the descriptor buffer; render messages do not
    * carry per-frame model matrices.
    */
@@ -443,15 +443,15 @@ interface ColdStateActiveEntryBase {
 /**
  * Per-entity cold-state record. Discriminated union on `kind`:
  *
- *   - `kind: "field"` — an image member with a real `imageId` and
+ *   - `kind: "tile"` — an image member with a real `imageId` and
  *     (usually) chunks to upload. `mode` distinguishes whether the
  *     worker should serve the proxy alongside the chunks
- *     (`fields-with-proxy-fallback`) or rely on chunks only
- *     (`fields-with-detail`). Invisible entries from the planner also
- *     surface as `field` with `mode: "fields-with-detail"` so the
+ *     (`tiles-with-proxy-fallback`) or rely on chunks only
+ *     (`tiles-with-detail`). Invisible entries from the planner also
+ *     surface as `tile` with `mode: "tiles-with-detail"` so the
  *     worker doesn't try to fetch proxies for them.
- *   - `kind: "well-as-proxy"` — a synthesised well-level entry with no
- *     backing image; the worker renders the well's proxy directly.
+ *   - `kind: "group-as-proxy"` — a synthesised group-level entry with no
+ *     backing image; the worker renders the group's proxy directly.
  *     `imageId` is intentionally absent (`?: never`) — use `entityId`
  *     as the routing key throughout the pipeline.
  *
@@ -462,35 +462,35 @@ interface ColdStateActiveEntryBase {
  */
 export type ColdStateActiveEntry =
   | (ColdStateActiveEntryBase & {
-      kind: "field";
+      kind: "tile";
       /** Image member id from the planner. Always a non-empty string. */
       imageId: string;
-      mode: "fields-with-detail" | "fields-with-proxy-fallback";
+      mode: "tiles-with-detail" | "tiles-with-proxy-fallback";
       /**
-       * Parent well id for field entries (so the worker can map a
-       * field's descriptor back to its parent's wellProxyHandle).
-       * `null` for fields that don't belong to a well. The orchestrator
+       * Parent group id for tile entries (so the worker can map a
+       * tile's descriptor back to its parent's groupProxyHandle).
+       * `null` for tiles that don't belong to a group. The orchestrator
        * always emits a string or null — never `undefined`.
        */
-      parentWellId: string | null;
+      parentGroupId: string | null;
     })
   | (ColdStateActiveEntryBase & {
-      kind: "well-as-proxy";
+      kind: "group-as-proxy";
       /**
-       * Well-as-proxy entries have no backing image — use the well's
+       * Group-as-proxy entries have no backing image — use the group's
        * `entityId` as the routing key throughout the pipeline.
        * Declared `?: never` so the type system rejects any consumer
        * that tries to read it.
        */
       imageId?: never;
-      mode: "well-as-proxy";
-      /** Wells have no parent well. */
-      parentWellId: null;
+      mode: "group-as-proxy";
+      /** Groups have no parent group. */
+      parentGroupId: null;
     });
 
 /**
  * Per-channel display state in cold state. The worker writes these
- * fields into the GPU `EntityDescriptor` and resolves `colormapName` to
+ * tiles into the GPU `EntityDescriptor` and resolves `colormapName` to
  * a CPU-side LUT texture binding per draw (the descriptor's
  * `colormapLutIndex` is informational, not authoritative).
  *
@@ -666,7 +666,7 @@ export type MissingProxy = {
   kind: "proxy";
   datasetId: string;
   entityId: string;
-  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  proxyKind: "GroupProxy3D" | "TileProxy3D";
   t: number;
   c: number;
 };

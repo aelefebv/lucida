@@ -5,8 +5,8 @@
  * production-side state added for it to work.
  *
  * Primary overlays, each gated by its own toggle in the Logging tab:
- *  - wellModes: per-well badge with detail/coarse worker-delivered coverage
- *  - chunkGrid: planned LOD chunk grid for every visible field, colored
+ *  - groupModes: per-group badge with detail/coarse worker-delivered coverage
+ *  - chunkGrid: planned LOD chunk grid for every visible tile, colored
  *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
  *  - renderRadius: actual detail/coarse render-radius boundary, projected
@@ -16,9 +16,9 @@
  *
  *   voxel coords  →  world coords  →  WasmScene.project_to_screen
  *
- * The middle step differs by mode. Slice: world == voxel + field
+ * The middle step differs by mode. Slice: world == voxel + tile
  * position offset (camera projects voxel space directly). Volume: world
- * == field model matrix * (voxel / fullVoxel), which maps the field's
+ * == tile model matrix * (voxel / fullVoxel), which maps the tile's
  * unit cube into normalized world space and bakes in the Y-flip and
  * physical-extent normalization the renderer applies.
  */
@@ -65,21 +65,21 @@ const POLL_MS = 100;
 const MAX_CHUNK_RECTS = 600;
 
 const MODE_COLOR: Record<string, string> = {
-  "well-as-proxy": "#88f",
-  "fields-with-proxy-fallback": "#fb4",
-  "fields-with-detail": "#4f4",
+  "group-as-proxy": "#88f",
+  "tiles-with-proxy-fallback": "#fb4",
+  "tiles-with-detail": "#4f4",
   "render-detail": "#4f4",
   "render-coarse": "#6cf",
   "render-waiting": "#fb4",
 };
 
 const MODE_LABEL: Record<string, string> = {
-  "well-as-proxy": "WP",
-  "fields-with-proxy-fallback": "FP",
-  "fields-with-detail": "FD",
+  "group-as-proxy": "WP",
+  "tiles-with-proxy-fallback": "FP",
+  "tiles-with-detail": "FD",
 };
 
-interface WellBadge {
+interface GroupBadge {
   key: string;
   centerX: number;
   centerY: number;
@@ -106,7 +106,7 @@ export interface TierCoverageCounts {
   inFlight: number;
 }
 
-export interface WellTierCoverage {
+export interface GroupTierCoverage {
   detail: TierCoverageCounts;
   coarse: TierCoverageCounts;
 }
@@ -211,7 +211,7 @@ function emptyTierCoverageCounts(): TierCoverageCounts {
   return { wanted: 0, shown: 0, ready: 0, inFlight: 0 };
 }
 
-function emptyWellTierCoverage(): WellTierCoverage {
+function emptyGroupTierCoverage(): GroupTierCoverage {
   return {
     detail: emptyTierCoverageCounts(),
     coarse: emptyTierCoverageCounts(),
@@ -225,22 +225,22 @@ function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
-export function buildWellTierCoverage(
+export function buildGroupTierCoverage(
   plan: Pick<RequestPlan, "requests">,
   parentByEntity: ReadonlyMap<string, string | null>,
   cpuCache: Pick<CpuCache, "deliveryState"> | null,
   cacheSnap: CacheStateSnapshot | null,
-): Map<string, WellTierCoverage> {
-  const out = new Map<string, WellTierCoverage>();
+): Map<string, GroupTierCoverage> {
+  const out = new Map<string, GroupTierCoverage>();
   for (const req of plan.requests) {
     const tier = overlayTierForRequest(req);
     if (!tier) continue;
 
-    const wellId = parentByEntity.get(req.entityId) ?? req.entityId;
-    let coverage = out.get(wellId);
+    const groupId = parentByEntity.get(req.entityId) ?? req.entityId;
+    let coverage = out.get(groupId);
     if (!coverage) {
-      coverage = emptyWellTierCoverage();
-      out.set(wellId, coverage);
+      coverage = emptyGroupTierCoverage();
+      out.set(groupId, coverage);
     }
 
     const counts = coverage[tier];
@@ -261,7 +261,7 @@ export function buildWellTierCoverage(
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function formatTierCoverageLabel(
-  coverage: WellTierCoverage,
+  coverage: GroupTierCoverage,
   fallbackLabel: string,
   fallbackLod: number | null,
 ): string {
@@ -286,7 +286,7 @@ export function formatTierCoverageLabel(
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function tierCoverageMode(
-  coverage: WellTierCoverage,
+  coverage: GroupTierCoverage,
   fallbackMode: string,
 ): string {
   const detailComplete =
@@ -302,7 +302,7 @@ export function tierCoverageMode(
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function formatTierCoverageTitle(
-  coverage: WellTierCoverage,
+  coverage: GroupTierCoverage,
   fallbackLabel: string,
   fallbackLod: number | null,
 ): string {
@@ -387,11 +387,11 @@ function geometryForLevels(
 }
 
 /**
- * Per-field projection frame. `model === null` means 2D (slice mode):
+ * Per-tile projection frame. `model === null` means 2D (slice mode):
  * voxel + position is world. `model !== null` means 3D: voxel /
  * fullVoxel goes through the model matrix to get world.
  */
-interface FieldFrame {
+interface TileFrame {
   pos: [number, number];
   fullVoxel: [number, number, number];
   model: Float32Array | null;
@@ -410,9 +410,9 @@ function projectWorld(
   return { x: arr[0] / dpr, y: arr[1] / dpr };
 }
 
-/** Convert field-local voxel coords to world coords for the active mode. */
+/** Convert tile-local voxel coords to world coords for the active mode. */
 function voxelToWorld(
-  frame: FieldFrame,
+  frame: TileFrame,
   vx: number,
   vy: number,
   vz: number,
@@ -435,8 +435,8 @@ function voxelToWorld(
   return [frame.pos[0] + vx, frame.pos[1] + vy, vz];
 }
 
-/** Field's world-space centroid (the (0.5, 0.5, 0.5) point of its unit cube). */
-function fieldWorldCenter(frame: FieldFrame): [number, number, number] {
+/** Tile's world-space centroid (the (0.5, 0.5, 0.5) point of its unit cube). */
+function tileWorldCenter(frame: TileFrame): [number, number, number] {
   return voxelToWorld(
     frame,
     frame.fullVoxel[0] / 2,
@@ -446,12 +446,12 @@ function fieldWorldCenter(frame: FieldFrame): [number, number, number] {
 }
 
 /**
- * Project a field-local voxel-space AABB to a screen-space AABB by
+ * Project a tile-local voxel-space AABB to a screen-space AABB by
  * projecting all 8 corners and reducing.
  */
 function projectVoxelAabb(
   ws: WasmScene,
-  frame: FieldFrame,
+  frame: TileFrame,
   vMin: [number, number, number],
   vMax: [number, number, number],
   dpr: number,
@@ -499,7 +499,7 @@ function pathFromProjectedPoints(points: Array<{ x: number; y: number }>): strin
 
 function projectRadiusCircle(
   ws: WasmScene,
-  frame: FieldFrame,
+  frame: TileFrame,
   centerLocalVox: [number, number, number],
   radiusVox: number,
   plane: RadiusPath["plane"],
@@ -568,7 +568,7 @@ export function DebugOverlays({
 
   const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null;
 
-  const [badges, setBadges] = useState<WellBadge[]>([]);
+  const [badges, setBadges] = useState<GroupBadge[]>([]);
   const [chunks, setChunks] = useState<ChunkRect[]>([]);
   const [radiusPaths, setRadiusPaths] = useState<RadiusPath[]>([]);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
@@ -607,9 +607,9 @@ export function DebugOverlays({
       const yMax = canvasHCss + 32;
 
       // Per-tick model-matrix cache; one WASM call per (dsId, imageId)
-      // even when many overlays / wells reference the same field.
+      // even when many overlays / groups reference the same tile.
       const modelCache = new Map<string, Float32Array | null>();
-      const getFrame = (dsId: string, imageId: string, lvl0Shape: number[]): FieldFrame => {
+      const getFrame = (dsId: string, imageId: string, lvl0Shape: number[]): TileFrame => {
         const cacheKey = `${dsId}|${imageId}`;
         let model: Float32Array | null | undefined = modelCache.get(cacheKey);
         if (model === undefined) {
@@ -651,18 +651,18 @@ export function DebugOverlays({
               positions = {};
             }
             const centerGlobal = visibleRegionCenterVox(visibleRegion);
-            let frame: FieldFrame | null = null;
+            let frame: TileFrame | null = null;
             let centerLocal: [number, number, number] = centerGlobal;
 
             if (is3D) {
               const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
               let best: {
                 score: number;
-                frame: FieldFrame;
+                frame: TileFrame;
                 pos: [number, number];
               } | null = null;
               for (const entry of plan.activeSet) {
-                if (entry.kind !== "field") continue;
+                if (entry.kind !== "tile") continue;
                 const pos = positions[entry.entityId];
                 const img = imgById.get(entry.imageId);
                 const lvl0 = img?.multiscale.levels[0];
@@ -731,9 +731,9 @@ export function DebugOverlays({
         setRadiusPaths([]);
       }
 
-      // Well badges
-      if (enabled.wellModes && plans) {
-        const out: WellBadge[] = [];
+      // Group badges
+      if (enabled.groupModes && plans) {
+        const out: GroupBadge[] = [];
         for (const [dsId, plan] of plans) {
           const ds = datasets.get(dsId);
           if (!ds) continue;
@@ -749,23 +749,23 @@ export function DebugOverlays({
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
           const cacheSnap = cpuCache?.snapshot() ?? null;
-          const coverageByWell = buildWellTierCoverage(
+          const coverageByGroup = buildGroupTierCoverage(
             plan,
             parentByEntity,
             cpuCache,
             cacheSnap,
           );
 
-          // Per-well aggregator carrying world centroids of fields.
-          const wells = new Map<string, {
+          // Per-group aggregator carrying world centroids of tiles.
+          const groups = new Map<string, {
             mode: string;
             lod: number | null;
-            coverage: WellTierCoverage;
+            coverage: GroupTierCoverage;
             worldCentroids: Array<[number, number, number]>;
           }>();
 
-          const addField = (
-            wellId: string,
+          const addTile = (
+            groupId: string,
             entityId: string,
             imageId: string,
             mode: string,
@@ -777,40 +777,40 @@ export function DebugOverlays({
             if (!pos || !lvl0) return;
             const frame = getFrame(dsId, imageId, lvl0.shape);
             frame.pos = pos;
-            const worldCenter = fieldWorldCenter(frame);
-            let agg = wells.get(wellId);
+            const worldCenter = tileWorldCenter(frame);
+            let agg = groups.get(groupId);
             if (!agg) {
               agg = {
                 mode,
                 lod,
-                coverage: coverageByWell.get(wellId) ?? emptyWellTierCoverage(),
+                coverage: coverageByGroup.get(groupId) ?? emptyGroupTierCoverage(),
                 worldCentroids: [],
               };
-              wells.set(wellId, agg);
+              groups.set(groupId, agg);
             }
             agg.worldCentroids.push(worldCenter);
           };
 
           for (const entry of plan.activeSet) {
-            if (entry.kind === "well-as-proxy") {
+            if (entry.kind === "group-as-proxy") {
               for (const ent of ds.manifest.entities) {
-                if (ent.parent === entry.entityId && ent.kind === "Field") {
+                if (ent.parent === entry.entityId && ent.kind === "Tile") {
                   const img = ds.manifest.images.find(i => i.image_id === ent.id)
                     ?? ds.manifest.images[0];
-                  // well-as-proxy entries have no LOD bookkeeping —
+                  // group-as-proxy entries have no LOD bookkeeping —
                   // surface `null` so the badge skips the LOD label.
-                  if (img) addField(entry.entityId, ent.id, img.image_id, "well-as-proxy", null);
+                  if (img) addTile(entry.entityId, ent.id, img.image_id, "group-as-proxy", null);
                 }
               }
-            } else if (entry.kind === "field") {
-              const wellId = parentByEntity.get(entry.entityId) ?? entry.entityId;
-              addField(wellId, entry.entityId, entry.imageId, entry.mode, entry.targetLod);
+            } else if (entry.kind === "tile") {
+              const groupId = parentByEntity.get(entry.entityId) ?? entry.entityId;
+              addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.targetLod);
             }
             // entry.kind === "invisible" — skipped (not rendered as a
-            // well badge; invisibles never had a promotion mode).
+            // group badge; invisibles never had a promotion mode).
           }
 
-          for (const [wellId, agg] of wells) {
+          for (const [groupId, agg] of groups) {
             if (agg.worldCentroids.length === 0) continue;
             let sumX = 0;
             let sumY = 0;
@@ -827,7 +827,7 @@ export function DebugOverlays({
               continue;
             }
             out.push({
-              key: `${dsId}/${wellId}`,
+              key: `${dsId}/${groupId}`,
               centerX: screen.x,
               centerY: screen.y,
               mode: tierCoverageMode(agg.coverage, agg.mode),
@@ -849,8 +849,8 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // Chunk grid for every visible field-mode entry.
-      // (well-as-proxy entries don't iterate chunks — they're served by
+      // Chunk grid for every visible tile-mode entry.
+      // (group-as-proxy entries don't iterate chunks — they're served by
       // a single proxy asset.)
       if (enabled.chunkGrid && plans && cpuCache) {
         const out: ChunkRect[] = [];
@@ -867,7 +867,7 @@ export function DebugOverlays({
           const r = pending[i];
           rankByKey.set(`${r.entityId}/${r.chunkKey}`, i);
         }
-        // Same idea for proxies, used by the WP-well rendering path.
+        // Same idea for proxies, used by the WP-group rendering path.
         const pendingProxies = cpuCache.getPendingProxySnapshot();
         const proxyRankByKey = new Map<string, number>();
         for (let i = 0; i < pendingProxies.length; i++) {
@@ -897,13 +897,13 @@ export function DebugOverlays({
             // a type error.
             if (entry.kind === "invisible") continue;
 
-            // Well-as-proxy: there's no chunk grid because the well is
-            // served by a single proxy asset. Render one rect per well
-            // colored by proxy status, so plates at WP zoom still
+            // Group-as-proxy: there's no chunk grid because the group is
+            // served by a single proxy asset. Render one rect per group
+            // colored by proxy status, so collections at WP zoom still
             // surface load progress.
-            if (entry.kind === "well-as-proxy") {
-              const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "WellProxy3D", t, c);
-              const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "WellProxy3D", t, c);
+            if (entry.kind === "group-as-proxy") {
+              const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "GroupProxy3D", t, c);
+              const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "GroupProxy3D", t, c);
               let status: ChunkRect["status"] = "planned";
               let priorityRank: number | undefined;
               if (cached) {
@@ -911,23 +911,23 @@ export function DebugOverlays({
               } else if (inFlight) {
                 status = "in-flight";
               } else if (enabled.plannedRank) {
-                priorityRank = proxyRankByKey.get(`${dsId}|${entry.entityId}|WellProxy3D|${t}|${c}`);
+                priorityRank = proxyRankByKey.get(`${dsId}|${entry.entityId}|GroupProxy3D|${t}|${c}`);
               }
 
-              // Union of constituent fields' world AABBs gives the
-              // well's world AABB in either mode (in 3D each field has
+              // Union of constituent tiles' world AABBs gives the
+              // group's world AABB in either mode (in 3D each tile has
               // its own model matrix, so we union after voxelToWorld).
               let minX = Infinity, minY = Infinity, minZ = Infinity;
               let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
               let any = false;
               for (const ent of ds.manifest.entities) {
-                if (ent.parent !== entry.entityId || ent.kind !== "Field") continue;
-                const fieldImg = ds.manifest.images.find(i => i.image_id === ent.id)
+                if (ent.parent !== entry.entityId || ent.kind !== "Tile") continue;
+                const tileImg = ds.manifest.images.find(i => i.image_id === ent.id)
                   ?? ds.manifest.images[0];
-                if (!fieldImg) continue;
+                if (!tileImg) continue;
                 const fpos = positions[ent.id];
                 if (!fpos) continue;
-                const flvl0 = fieldImg.multiscale.levels[0];
+                const flvl0 = tileImg.multiscale.levels[0];
                 if (!flvl0) continue;
                 const fframe = getFrame(dsId, ent.id, flvl0.shape);
                 fframe.pos = fpos;
@@ -960,7 +960,7 @@ export function DebugOverlays({
               if (!projected) continue;
               if (sxMax < xMin || syMax < yMin || sxMin > xMax || syMin > yMax) continue;
               out.push({
-                key: `${dsId}/${entry.entityId}/well-proxy`,
+                key: `${dsId}/${entry.entityId}/group-proxy`,
                 x: sxMin,
                 y: syMin,
                 w: sxMax - sxMin,
@@ -1239,7 +1239,7 @@ export function DebugOverlays({
           })}
         </svg>
       )}
-      {enabled.wellModes && badges.map(b => (
+      {enabled.groupModes && badges.map(b => (
         <div
           key={b.key}
           style={{

@@ -14,7 +14,7 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [Worker Eviction Reporting Is Async](worker-eviction-async-reporting.md) — worker posts `chunksEvicted` async; main-thread send-tracking must reconcile
 - [Minimap Skip-When-Stationary via Render Key](minimap-render-key.md) — minimap skips render when key matches; new visual inputs must extend the key
 - [WASM Rebuild After Rust Changes](wasm-rebuild-after-rust-changes.md) — `npm run build:wasm` is the second half of every Rust change
-- [Stage Translations Are Microns; Lucida Composes in Voxels](stage-translations-are-microns.md) — OME-Zarr stores stage positions in microns; `lucida-store` converts to voxels at import
+- [Explicit Translations Are in Physical Units; Lucida Composes in Voxels](explicit-translations-are-physical-units.md) — OME-Zarr stores explicit tile translations in physical units; `lucida-store` converts to voxels at import
 - [Proxy Generator Priority Is Not Honored Yet](proxy-priority-not-honored.md) — `priority` parameter on `ProxyGenerator::request` exists for API stability but FIFO today
 - [Non-canonical axes are pinned to index 0](non-canonical-axes.md) — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible. Pinned axes and canonical-indexed axes (`t`, `c`) with `chunk_size > 1` are handled via post-decode byte slicing
 - [Blosc support is a deliberately narrow subset](blosc-support.md) — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time

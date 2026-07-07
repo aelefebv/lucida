@@ -6,17 +6,17 @@
 
 use lucida_content::{ImageId, VoxelTransform};
 
-/// A single field's voxel data plus the transform that places its voxel
-/// grid into image / field coordinates.
-pub struct FieldVolume {
+/// A single tile's voxel data plus the transform that places its voxel
+/// grid into image / tile coordinates.
+pub struct TileVolume {
     /// Densely-packed `u16` voxels in `[Z, Y, X]` row-major order
     /// (X varies fastest).
     pub data: Vec<u16>,
     /// `[Z, Y, X]` voxel counts.
     pub dims: [u32; 3],
-    /// Maps voxel-index space `(x, y, z)` to image / field-local space.
-    /// Used by the well aggregator to find a sample location after
-    /// transforming a target well coordinate back into the field.
+    /// Maps voxel-index space `(x, y, z)` to image / tile-local space.
+    /// Used by the group aggregator to find a sample location after
+    /// transforming a target group coordinate back into the tile.
     pub voxel_to_image: VoxelTransform,
 }
 
@@ -28,13 +28,13 @@ pub struct FieldVolume {
 /// implement it inline against synthetic data.
 pub trait ProxySourceData {
     /// Read the requested level for the requested image at `(t, c)`.
-    fn read_field_volume(
+    fn read_tile_volume(
         &self,
         image_id: &ImageId,
         t: u32,
         c: u32,
         level: usize,
-    ) -> Result<FieldVolume, SourceError>;
+    ) -> Result<TileVolume, SourceError>;
 }
 
 /// Errors a source can return. These propagate up through

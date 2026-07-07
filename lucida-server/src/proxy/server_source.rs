@@ -17,7 +17,7 @@ use std::sync::Arc;
 use lucida_content::{
     DataType, DatasetManifest, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
 };
-use lucida_proxy::{FieldVolume, ProxyKind, ProxySourceData, ProxySpec, SourceError};
+use lucida_proxy::{ProxyKind, ProxySourceData, ProxySpec, SourceError, TileVolume};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
 
@@ -28,7 +28,7 @@ use crate::decode::{DecodeError, decode_storage_bytes};
 /// Implements [`ProxySourceData`] by lookup; never performs I/O.
 pub struct ServerProxySource {
     /// Keyed by `(image_id.0, t, c, level)`.
-    volumes: HashMap<VolumeKey, OwnedFieldVolume>,
+    volumes: HashMap<VolumeKey, OwnedTileVolume>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -39,7 +39,7 @@ struct VolumeKey {
     level: usize,
 }
 
-struct OwnedFieldVolume {
+struct OwnedTileVolume {
     data: Vec<u16>,
     dims: [u32; 3],
     voxel_to_image: VoxelTransform,
@@ -93,7 +93,7 @@ impl ServerProxySource {
                 c,
                 level,
             },
-            OwnedFieldVolume {
+            OwnedTileVolume {
                 data,
                 dims,
                 voxel_to_image,
@@ -103,13 +103,13 @@ impl ServerProxySource {
 }
 
 impl ProxySourceData for ServerProxySource {
-    fn read_field_volume(
+    fn read_tile_volume(
         &self,
         image_id: &ImageId,
         t: u32,
         c: u32,
         level: usize,
-    ) -> Result<FieldVolume, SourceError> {
+    ) -> Result<TileVolume, SourceError> {
         let key = VolumeKey {
             image_id: image_id.0.clone(),
             t,
@@ -118,7 +118,7 @@ impl ProxySourceData for ServerProxySource {
         };
         self.volumes
             .get(&key)
-            .map(|v| FieldVolume {
+            .map(|v| TileVolume {
                 data: v.data.clone(),
                 dims: v.dims,
                 voxel_to_image: v.voxel_to_image.clone(),
@@ -130,8 +130,8 @@ impl ProxySourceData for ServerProxySource {
 /// Pre-fetch all chunks needed to satisfy `spec` from `store`, decode
 /// them, and assemble dense `(Z, Y, X)` u16 volumes per image.
 ///
-/// For a `FieldProxy3D` this fetches one image (the entity's image). For
-/// a `WellProxy3D` it fetches one image per field child. For each image
+/// For a `TileProxy3D` this fetches one image (the entity's image). For
+/// a `GroupProxy3D` it fetches one image per tile child. For each image
 /// we pick the same level [`lucida_proxy`] would (`pick_level`) and read
 /// every chunk in that level's grid for `(t, c)`, decompressing per
 /// `ChunkResolver::storage_compression`.
@@ -149,7 +149,7 @@ pub async fn build_server_proxy_source(
 
     // Determine which images contribute to this proxy.
     let image_ids: Vec<&ImageSpec> = match spec.kind {
-        ProxyKind::FieldProxy3D => {
+        ProxyKind::TileProxy3D => {
             // Single image owned by the entity.
             let img = content
                 .images()
@@ -158,10 +158,10 @@ pub async fn build_server_proxy_source(
                 .ok_or_else(|| BuildSourceError::MissingImage(entity.id.clone()))?;
             vec![img]
         }
-        ProxyKind::WellProxy3D => {
-            if !matches!(entity.kind, EntityKind::Well) {
-                // Treat non-well entities the same way `aggregate_well`
-                // does: fall back to FieldProxy semantics. This keeps the
+        ProxyKind::GroupProxy3D => {
+            if !matches!(entity.kind, EntityKind::Group) {
+                // Treat non-group entities the same way `aggregate_group`
+                // does: fall back to TileProxy semantics. This keeps the
                 // pre-fetch consistent with `generate_proxy`'s dispatch.
                 let img = content
                     .images()
@@ -172,7 +172,7 @@ pub async fn build_server_proxy_source(
             } else {
                 let mut imgs: Vec<&ImageSpec> = Vec::new();
                 for child in content.entities().iter().filter(|c| {
-                    matches!(c.kind, EntityKind::Field) && c.parent.as_ref() == Some(&entity.id)
+                    matches!(c.kind, EntityKind::Tile) && c.parent.as_ref() == Some(&entity.id)
                 }) {
                     let img = content
                         .images()
@@ -182,7 +182,7 @@ pub async fn build_server_proxy_source(
                     imgs.push(img);
                 }
                 if imgs.is_empty() {
-                    return Err(BuildSourceError::NoFields(entity.id.clone()));
+                    return Err(BuildSourceError::NoTiles(entity.id.clone()));
                 }
                 imgs
             }
@@ -271,9 +271,9 @@ pub(crate) async fn fetch_dense_volume(
         fetch_volume_region(content, image, t, c, level, region, store, resolver).await?;
 
     // voxel_to_image: maps level-`level` voxel coords to full-res image-space
-    // (= level-0 voxel space). The aggregator composes this with field_to_well
-    // (in full-res voxel units) to compute the well's AABB. Without this scale,
-    // a level-k voxel is treated as 1 full-res voxel and fields shrink to
+    // (= level-0 voxel space). The aggregator composes this with tile_to_group
+    // (in full-res voxel units) to compute the group's AABB. Without this scale,
+    // a level-k voxel is treated as 1 full-res voxel and tiles shrink to
     // `full_res / 2^k` in the proxy — see #417.
     //
     // Shape ratio is more robust than OME-Zarr per-level `scale` metadata
@@ -529,7 +529,7 @@ fn is_identity(t: &VoxelTransform) -> bool {
 /// Try to find a `voxel → image-local` transform. The current import
 /// pipeline does not emit such an edge per se; we look for a `image-owner →
 /// image-owner` self-edge (used elsewhere in the graph) and fall back to
-/// identity. Identity is the right behavior for single-field datasets and
+/// identity. Identity is the right behavior for single-tile datasets and
 /// matches the test fixtures.
 fn find_voxel_to_image(content: &DatasetManifest, owner: &EntityId) -> VoxelTransform {
     content
@@ -591,8 +591,8 @@ pub enum BuildSourceError {
     MissingEntity(EntityId),
     #[error("image not found for entity: {0}")]
     MissingImage(EntityId),
-    #[error("well has no field children: {0}")]
-    NoFields(EntityId),
+    #[error("group has no tile children: {0}")]
+    NoTiles(EntityId),
     #[error("level {level} out of range for image {image}")]
     BadLevel { image: ImageId, level: usize },
     #[error("requested t={t} or c={c} out of bounds for image {image}")]
@@ -630,7 +630,7 @@ impl From<BuildSourceError> for SourceError {
         match e {
             BuildSourceError::MissingEntity(_)
             | BuildSourceError::MissingImage(_)
-            | BuildSourceError::NoFields(_)
+            | BuildSourceError::NoTiles(_)
             | BuildSourceError::OutOfBounds { .. }
             | BuildSourceError::SpatialOutOfBounds { .. }
             | BuildSourceError::BadLevel { .. } => SourceError::NotFound,

@@ -8,10 +8,10 @@
  * {@link DEFAULT_PLANNING_CONFIG} without a circular dependency.
  */
 
-/** Far threshold (px). Below this, a well promotes to `well-as-proxy`. */
+/** Far threshold (px). Below this, a group promotes to `group-as-proxy`. */
 export const FAR_THRESHOLD_PX = 80;
 
-/** Medium/Detail threshold (px). Above this, fields use real detail chunks. */
+/** Medium/Detail threshold (px). Above this, tiles use real detail chunks. */
 export const DETAIL_THRESHOLD_PX = 150;
 
 /** Hysteresis band (px) on either side of each threshold. */
@@ -27,7 +27,7 @@ export const MINIMAP_LANE_OFFSET = 0;
 /** Priority lane offset for detail requests (visible chunks). */
 export const DETAIL_LANE_OFFSET = 500;
 
-/** Priority lane offset for proxy requests (well/field proxy fallbacks). */
+/** Priority lane offset for proxy requests (group/tile proxy fallbacks). */
 export const PROXY_LANE_OFFSET = 1000;
 
 /** Default worker-global GPU proxy residency budget: 128 MiB. */
@@ -82,18 +82,18 @@ export const DISTANCE_WEIGHT = 10;
 export const DEPTH_BIAS_VIEW = 0;
 
 /**
- * Bump on the parent-well `WellProxy3D` request inside
- * `fields-with-proxy-fallback` — pushes it below per-field proxies so
- * the well proxy is only a coarse fallback while those are in flight.
+ * Bump on the parent-group `GroupProxy3D` request inside
+ * `tiles-with-proxy-fallback` — pushes it below per-tile proxies so
+ * the group proxy is only a coarse fallback while those are in flight.
  */
-export const WELL_PROXY_PRIORITY_BUMP = 100;
+export const GROUP_PROXY_PRIORITY_BUMP = 100;
 
 /** Per-tick planning tunables threaded through {@link plan}. */
 export interface PlanningConfig {
   // -- mode-decision thresholds ---------------------------------------
-  /** Below this projected diagonal (px) a well promotes to `well-as-proxy`. */
+  /** Below this projected diagonal (px) a group promotes to `group-as-proxy`. */
   farThresholdPx: number;
-  /** Above this projected diagonal (px) fields use real detail chunks. */
+  /** Above this projected diagonal (px) tiles use real detail chunks. */
   detailThresholdPx: number;
   /** Hysteresis band (px) on either side of each threshold. */
   hysteresisPx: number;
@@ -117,10 +117,10 @@ export interface PlanningConfig {
    */
   depthBiasView: number;
   /**
-   * Bump applied to the parent-well `WellProxy3D` request emitted inside
-   * `fields-with-proxy-fallback`. Pushes it below per-field proxies.
+   * Bump applied to the parent-group `GroupProxy3D` request emitted inside
+   * `tiles-with-proxy-fallback`. Pushes it below per-tile proxies.
    */
-  wellProxyPriorityBump: number;
+  groupProxyPriorityBump: number;
 
   // -- GPU proxy residency -------------------------------------------
   /** Worker-global GPU proxy residency budget, in bytes. */
@@ -148,7 +148,7 @@ export interface PlanningConfig {
   minimapLaneOffset: number;
   /** Detail requests (visible chunks). */
   detailLaneOffset: number;
-  /** Proxy requests (well/field proxy fallbacks). */
+  /** Proxy requests (group/tile proxy fallbacks). */
   proxyLaneOffset: number;
   /** Prefetch (next-timepoint) requests. */
   prefetchLaneOffset: number;
@@ -167,7 +167,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
-  wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
+  groupProxyPriorityBump: GROUP_PROXY_PRIORITY_BUMP,
   proxyResidencyBudgetBytes: DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   coarseDetailEnabled: true,
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,

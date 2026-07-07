@@ -260,8 +260,10 @@ mod tests {
         let mut v = SavedView::empty([1024, 768]);
         v.datasets.push("gs://bucket/a.zarr".to_string());
         v.datasets.push("/data/b.zarr".to_string());
-        v.active_layouts
-            .insert(DatasetId("ds-aaaa".into()), LayoutId("plate-3x3".into()));
+        v.active_layouts.insert(
+            DatasetId("ds-aaaa".into()),
+            LayoutId("collection-3x3".into()),
+        );
         v.dataset_order.push(DatasetId("ds-aaaa".into()));
         v.view.t = 7;
         v.view.c = 2;
@@ -283,7 +285,7 @@ mod tests {
                 contrast_max: 1000.0,
                 gamma: 1.0,
                 // A user channel-name override rides the saved view too.
-                name: Some("Nucleus".into()),
+                name: Some("Region A".into()),
             }],
             ..Default::default()
         };

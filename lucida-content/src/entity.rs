@@ -10,11 +10,19 @@ pub struct Entity {
     pub labels: EntityLabels,
 }
 
+/// The content kind of an [`Entity`].
+///
+/// These are content-layer concepts and deliberately separate from two
+/// neighbouring vocabularies. The scene and renderer call a placed
+/// image-bearing entity — a `Tile`, or a single-image `Image` — a *member*.
+/// The generic "group"/"tile" that appear downstream as GPU pool and atlas
+/// units are pooling concepts, unrelated to the `Group`/`Tile` content kinds
+/// defined here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntityKind {
     Image,
-    Well,
-    Field,
+    Group,
+    Tile,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -22,13 +30,13 @@ pub struct EntityLabels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub well_row: Option<String>,
+    pub group_row: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub well_column: Option<String>,
+    pub group_column: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field_index: Option<u32>,
+    pub tile_index: Option<u32>,
 }

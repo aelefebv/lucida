@@ -3,7 +3,7 @@
  *
  *     `${datasetId}|${entityId}|${proxyKind}|${t}|${c}`
  *
- * Three input shapes use slightly different field names for the proxy
+ * Three input shapes use slightly different tile names for the proxy
  * kind, so one helper per shape keeps each call site type-honest without
  * runtime branching.
  */

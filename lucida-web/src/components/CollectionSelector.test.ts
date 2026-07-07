@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractPlateData } from "./PlateSelector.tsx";
+import { extractCollectionData } from "./CollectionSelector.tsx";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 
 function makeImage(image_id: string, owner: string): ImageSpec {
@@ -28,11 +28,11 @@ function makeImage(image_id: string, owner: string): ImageSpec {
   };
 }
 
-function plate2x2(): DatasetManifest {
+function collection2x2(): DatasetManifest {
   return {
-    dataset_id: "plate-2x2",
-    name: "plate",
-    kind: { Plate: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Grid", has_stage_positions: false } },
+    dataset_id: "collection-2x2",
+    name: "collection",
+    kind: { Collection: { rows: ["A", "B"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities: [
       { id: "e0", kind: "Image", parent: null, labels: { row_index: 0, column_index: 0 } },
       { id: "e1", kind: "Image", parent: null, labels: { row_index: 0, column_index: 1 } },
@@ -57,7 +57,7 @@ function plate2x2(): DatasetManifest {
   };
 }
 
-describe("extractPlateData", () => {
+describe("extractCollectionData", () => {
   it("returns null for Single dataset kind", () => {
     const g: DatasetManifest = {
       dataset_id: "ds",
@@ -69,11 +69,11 @@ describe("extractPlateData", () => {
       source_layouts: [],
       default_layout_id: null,
     };
-    expect(extractPlateData(g)).toBeNull();
+    expect(extractCollectionData(g)).toBeNull();
   });
 
   it("uses source default placements when no active overrides are passed", () => {
-    const data = extractPlateData(plate2x2());
+    const data = extractCollectionData(collection2x2());
     expect(data).not.toBeNull();
     expect(data!.members).toHaveLength(4);
     const e0 = data!.members.find((m) => m.id === "e0")!;
@@ -87,7 +87,7 @@ describe("extractPlateData", () => {
       { entity_id: "e2", position: [512, 0] as [number, number] }, // dense-style: row 0
       { entity_id: "e3", position: [768, 0] as [number, number] },
     ];
-    const data = extractPlateData(plate2x2(), dense);
+    const data = extractCollectionData(collection2x2(), dense);
     expect(data).not.toBeNull();
     const e2 = data!.members.find((m) => m.id === "e2")!;
     expect(e2.position).toEqual([512, 0]);
@@ -96,7 +96,7 @@ describe("extractPlateData", () => {
   });
 
   it("falls back to source layout when activeLayoutPlacements is empty", () => {
-    const data = extractPlateData(plate2x2(), []);
+    const data = extractCollectionData(collection2x2(), []);
     expect(data).not.toBeNull();
     const e3 = data!.members.find((m) => m.id === "e3")!;
     // Source default puts e3 at (256, 256), not whatever empty would produce.
@@ -107,7 +107,7 @@ describe("extractPlateData", () => {
     const dense = [
       { entity_id: "e0", position: [42, 99] as [number, number] },
     ];
-    const data = extractPlateData(plate2x2(), dense);
+    const data = extractCollectionData(collection2x2(), dense);
     const e0 = data!.members.find((m) => m.id === "e0")!;
     expect(e0.rowIndex).toBe(0);
     expect(e0.columnIndex).toBe(0);

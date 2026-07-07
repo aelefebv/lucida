@@ -36,7 +36,7 @@ function makeProxyEntry(overrides: Partial<ProxyCacheEntry> & {
     datasetId: "ds-1",
     entityId: "e-1",
     imageId: "img-1",
-    proxyKind: "FieldProxy3D",
+    proxyKind: "TileProxy3D",
     t: 0,
     c: 0,
     insertedAt: nextInsertedAt++,
@@ -64,20 +64,20 @@ function makeStore(opts?: { budgetBytes?: number }) {
 describe("proxyInnerKey", () => {
   it("composes a stable string from (entityId, kind, t, c)", () => {
     expect(proxyInnerKey({
-      entityId: "e-1", kind: "FieldProxy3D", t: 0, c: 0,
-    })).toBe("e-1|FieldProxy3D|0|0");
+      entityId: "e-1", kind: "TileProxy3D", t: 0, c: 0,
+    })).toBe("e-1|TileProxy3D|0|0");
   });
 
-  it("distinguishes WellProxy3D vs FieldProxy3D", () => {
-    const a = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 0, c: 0 });
-    const b = proxyInnerKey({ entityId: "e-1", kind: "WellProxy3D", t: 0, c: 0 });
+  it("distinguishes GroupProxy3D vs TileProxy3D", () => {
+    const a = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 0, c: 0 });
+    const b = proxyInnerKey({ entityId: "e-1", kind: "GroupProxy3D", t: 0, c: 0 });
     expect(a).not.toBe(b);
   });
 
   it("distinguishes channels and timepoints", () => {
-    const a = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 0, c: 0 });
-    const b = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 1, c: 0 });
-    const c = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 0, c: 1 });
+    const a = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 0, c: 0 });
+    const b = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 1, c: 0 });
+    const c = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 0, c: 1 });
     expect(new Set([a, b, c]).size).toBe(3);
   });
 });
@@ -90,7 +90,7 @@ describe("ProxyStore basics", () => {
   it("insert + get round-trip returns the live entry", () => {
     const { store } = makeStore();
     const entry = makeProxyEntry({ bytes: 256 });
-    const key = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 0, c: 0 });
+    const key = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 0, c: 0 });
     store.insert("ds-1", key, entry);
     expect(store.get("ds-1", key)).toBe(entry);
     expect(store.bytes).toBe(256);
@@ -103,7 +103,7 @@ describe("ProxyStore basics", () => {
 
   it("has reflects insert / remove", () => {
     const { store } = makeStore();
-    const key = "e-1|FieldProxy3D|0|0";
+    const key = "e-1|TileProxy3D|0|0";
     expect(store.has("ds-1", key)).toBe(false);
     store.insert("ds-1", key, makeProxyEntry({ bytes: 100 }));
     expect(store.has("ds-1", key)).toBe(true);
@@ -118,7 +118,7 @@ describe("ProxyStore basics", () => {
 
   it("remove decrements bytes", () => {
     const { store } = makeStore();
-    const key = "e-1|FieldProxy3D|0|0";
+    const key = "e-1|TileProxy3D|0|0";
     store.insert("ds-1", key, makeProxyEntry({ bytes: 256 }));
     expect(store.bytes).toBe(256);
     expect(store.remove("ds-1", key)).toBe(true);
@@ -127,7 +127,7 @@ describe("ProxyStore basics", () => {
 
   it("partitions entries by datasetId in the outer map", () => {
     const { store } = makeStore();
-    const key = "e-1|FieldProxy3D|0|0";
+    const key = "e-1|TileProxy3D|0|0";
     store.insert("ds-A", key, makeProxyEntry({ bytes: 100, datasetId: "ds-A" }));
     store.insert("ds-B", key, makeProxyEntry({ bytes: 200, datasetId: "ds-B" }));
     expect(store.get("ds-A", key)?.datasetId).toBe("ds-A");
@@ -143,8 +143,8 @@ describe("ProxyStore basics", () => {
 describe("ProxyStore.cancelDataset", () => {
   it("drops every entry under a dataset and zeros their bytes", () => {
     const { store, evictions } = makeStore();
-    const k0 = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 0, c: 0 });
-    const k1 = proxyInnerKey({ entityId: "e-1", kind: "FieldProxy3D", t: 1, c: 0 });
+    const k0 = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 0, c: 0 });
+    const k1 = proxyInnerKey({ entityId: "e-1", kind: "TileProxy3D", t: 1, c: 0 });
     store.insert("ds-A", k0, makeProxyEntry({ bytes: 100, datasetId: "ds-A" }));
     store.insert("ds-A", k1, makeProxyEntry({ bytes: 100, datasetId: "ds-A" }));
     store.insert("ds-B", k0, makeProxyEntry({ bytes: 50, datasetId: "ds-B" }));
@@ -274,11 +274,11 @@ describe("ProxyStore residency reporting", () => {
 
   it("dump returns one entry per cached proxy with the expected shape", () => {
     const { store } = makeStore();
-    store.insert("ds-1", "e-1|FieldProxy3D|0|0", makeProxyEntry({
+    store.insert("ds-1", "e-1|TileProxy3D|0|0", makeProxyEntry({
       bytes: 256,
       datasetId: "ds-1",
       entityId: "e-1",
-      proxyKind: "FieldProxy3D",
+      proxyKind: "TileProxy3D",
       t: 0,
       c: 0,
       insertedAt: 42,
@@ -288,7 +288,7 @@ describe("ProxyStore residency reporting", () => {
     expect(dump[0]).toEqual({
       datasetId: "ds-1",
       entityId: "e-1",
-      proxyKind: "FieldProxy3D",
+      proxyKind: "TileProxy3D",
       t: 0,
       c: 0,
       bytes: 256,

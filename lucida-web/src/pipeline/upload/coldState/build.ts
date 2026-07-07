@@ -47,11 +47,11 @@ export function buildColdActiveEntry(
     return { level: idx, chunkShape, gridShape, levelDims };
   });
 
-  // `parentWellId` lets the worker fan out a well-proxy upload to its
-  // child fields' descriptors. Narrowing on `kind === "Field"` gives a
-  // `FieldSnapshot` whose `parentId` is non-null by construction.
-  const parentWellId =
-    entity?.kind === "Field" ? entity.parentId : null;
+  // `parentGroupId` lets the worker fan out a group-proxy upload to its
+  // child tiles' descriptors. Narrowing on `kind === "Tile"` gives a
+  // `TileSnapshot` whose `parentId` is non-null by construction.
+  const parentGroupId =
+    entity?.kind === "Tile" ? entity.parentId : null;
 
   // Identity fallback is defensive: a missing roster match renders at
   // the unit cube — a clear visual failure, not a silent off-screen one.
@@ -59,9 +59,9 @@ export function buildColdActiveEntry(
   const modelMatrix = matrices?.model ?? identityMatrix();
   const invModelMatrix = matrices?.inv ?? identityMatrix();
 
-  if (entry.kind === "well-as-proxy") {
+  if (entry.kind === "group-as-proxy") {
     return {
-      kind: "well-as-proxy",
+      kind: "group-as-proxy",
       entityId: entry.entityId,
       layoutPositionVox: entity?.layoutPositionVox,
       targetLod: 0,
@@ -70,13 +70,13 @@ export function buildColdActiveEntry(
       coarseLevel: null,
       wantedLodLevels: [0],
       levels,
-      mode: "well-as-proxy",
-      proxyKind: "WellProxy3D",
+      mode: "group-as-proxy",
+      proxyKind: "GroupProxy3D",
       proxyAvailable: true,
-      wellProxyAvailable: true,
+      groupProxyAvailable: true,
       // Pinned here (vs reusing the computed value above) so the type
-      // checker narrows `kind: "well-as-proxy"` without re-deriving.
-      parentWellId: null,
+      // checker narrows `kind: "group-as-proxy"` without re-deriving.
+      parentGroupId: null,
       modelMatrix,
       invModelMatrix,
       displayStateByChannel,
@@ -84,7 +84,7 @@ export function buildColdActiveEntry(
   }
   if (entry.kind === "invisible") {
     return {
-      kind: "field",
+      kind: "tile",
       entityId: entry.entityId,
       layoutPositionVox: entity?.layoutPositionVox,
       imageId: entry.imageId,
@@ -94,21 +94,21 @@ export function buildColdActiveEntry(
       coarseLevel: null,
       wantedLodLevels: [entry.coarsestLod],
       levels,
-      // Invisibles surface as `fields-with-detail` so the wanted-set
+      // Invisibles surface as `tiles-with-detail` so the wanted-set
       // rules don't ask for proxies for an entity that won't render.
-      mode: "fields-with-detail",
+      mode: "tiles-with-detail",
       proxyKind: undefined,
       proxyAvailable: false,
-      wellProxyAvailable: false,
-      parentWellId,
+      groupProxyAvailable: false,
+      parentGroupId,
       modelMatrix,
       invModelMatrix,
       displayStateByChannel,
     };
   }
-  // Narrowed: entry is FieldEntry.
+  // Narrowed: entry is TileEntry.
   return {
-    kind: "field",
+    kind: "tile",
     entityId: entry.entityId,
     layoutPositionVox: entity?.layoutPositionVox,
     imageId: entry.imageId,
@@ -121,8 +121,8 @@ export function buildColdActiveEntry(
     mode: entry.mode,
     proxyKind: entry.proxyKind,
     proxyAvailable: entry.proxyAvailable,
-    wellProxyAvailable: entry.wellProxyAvailable,
-    parentWellId,
+    groupProxyAvailable: entry.groupProxyAvailable,
+    parentGroupId,
     modelMatrix,
     invModelMatrix,
     displayStateByChannel,

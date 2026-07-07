@@ -1,11 +1,11 @@
 import { useMemo } from "react";
 import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
 
-export interface PlateKind {
+export interface CollectionKind {
   rows: string[];
   columns: string[];
   positioning_mode: string;
-  has_stage_positions: boolean;
+  has_explicit_positions: boolean;
 }
 
 interface PlacedMember {
@@ -15,40 +15,40 @@ interface PlacedMember {
   columnIndex?: number;
 }
 
-interface PlateSelectorProps {
-  plateKind: PlateKind;
+interface CollectionSelectorProps {
+  collectionKind: CollectionKind;
   members: PlacedMember[];
-  plateName: string;
-  onWellClick: (centerX: number, centerY: number) => void;
+  collectionName: string;
+  onGroupClick: (centerX: number, centerY: number) => void;
   onPositioningModeToggle?: () => void;
 }
 
 /**
- * Extract PlateKind and positioned members from a DatasetManifest.
+ * Extract CollectionKind and positioned members from a DatasetManifest.
  *
  * `activeLayoutPlacements`, when provided and non-empty, takes precedence
  * over the source default layout. Use this to make click-to-pan reflect
  * the currently active (possibly browser-authored) layout — the visual
- * row/col grid stays anchored to the plate's logical structure either way.
+ * row/col grid stays anchored to the collection's logical structure either way.
  *
- * Returns null if the dataset is not a plate.
+ * Returns null if the dataset is not a collection.
  */
-// Co-located with the PlateSelector component that consumes it; the
+// Co-located with the CollectionSelector component that consumes it; the
 // fast-refresh ergonomics cost is small vs splitting to a sibling.
 // eslint-disable-next-line react-refresh/only-export-components
-export function extractPlateData(
+export function extractCollectionData(
   manifest: DatasetManifest,
   activeLayoutPlacements?: { entity_id: string; position: [number, number] }[] | null,
-): { plateKind: PlateKind; members: PlacedMember[] } | null {
+): { collectionKind: CollectionKind; members: PlacedMember[] } | null {
   if (manifest.kind === "Single") return null;
-  if (typeof manifest.kind !== "object" || !("Plate" in manifest.kind)) return null;
+  if (typeof manifest.kind !== "object" || !("Collection" in manifest.kind)) return null;
 
-  const plate = (manifest.kind as Exclude<DatasetKind, "Single">).Plate;
-  const plateKind: PlateKind = {
-    rows: plate.rows,
-    columns: plate.columns,
-    positioning_mode: plate.positioning_mode,
-    has_stage_positions: plate.has_stage_positions,
+  const collection = (manifest.kind as Exclude<DatasetKind, "Single">).Collection;
+  const collectionKind: CollectionKind = {
+    rows: collection.rows,
+    columns: collection.columns,
+    positioning_mode: collection.positioning_mode,
+    has_explicit_positions: collection.has_explicit_positions,
   };
 
   // Derive members from entities + the supplied placements (or fall back
@@ -82,7 +82,7 @@ export function extractPlateData(
     }
   }
 
-  return { plateKind, members };
+  return { collectionKind, members };
 }
 
 const CELL_SIZE = 24;
@@ -91,16 +91,16 @@ const PADDING = 8;
 const HEADER_HEIGHT = 20;
 const TOGGLE_HEIGHT = 24;
 
-export function PlateSelector({
-  plateKind,
+export function CollectionSelector({
+  collectionKind,
   members,
-  plateName,
-  onWellClick,
+  collectionName,
+  onGroupClick,
   onPositioningModeToggle,
-}: PlateSelectorProps) {
-  // Build a set of populated wells by matching entity IDs to well-like entities.
-  // A well is populated if any member belongs to it (entity parent or label-based).
-  const wellMemberMap = useMemo(() => {
+}: CollectionSelectorProps) {
+  // Build a set of populated groups by matching entity IDs to group-like entities.
+  // A group is populated if any member belongs to it (entity parent or label-based).
+  const groupMemberMap = useMemo(() => {
     const map = new Map<string, PlacedMember[]>();
     for (const member of members) {
       if (member.rowIndex != null && member.columnIndex != null) {
@@ -113,43 +113,43 @@ export function PlateSelector({
     return map;
   }, [members]);
 
-  // Build a well lookup by (row, col) for grid rendering
-  const wellPathMap = useMemo(() => {
+  // Build a group lookup by (row, col) for grid rendering
+  const groupPathMap = useMemo(() => {
     const map = new Map<string, string>();
-    for (let r = 0; r < plateKind.rows.length; r++) {
-      for (let c = 0; c < plateKind.columns.length; c++) {
-        map.set(`${r},${c}`, `${plateKind.rows[r]}/${plateKind.columns[c]}`);
+    for (let r = 0; r < collectionKind.rows.length; r++) {
+      for (let c = 0; c < collectionKind.columns.length; c++) {
+        map.set(`${r},${c}`, `${collectionKind.rows[r]}/${collectionKind.columns[c]}`);
       }
     }
     return map;
-  }, [plateKind.rows, plateKind.columns]);
+  }, [collectionKind.rows, collectionKind.columns]);
 
-  const handleWellClick = (rowIdx: number, colIdx: number) => {
+  const handleGroupClick = (rowIdx: number, colIdx: number) => {
     const key = `${rowIdx},${colIdx}`;
-    const wellMembers = wellMemberMap.get(key);
-    if (!wellMembers || wellMembers.length === 0) return;
+    const groupMembers = groupMemberMap.get(key);
+    if (!groupMembers || groupMembers.length === 0) return;
 
-    // Compute center as the average position of all members in this well
+    // Compute center as the average position of all members in this group
     let sumX = 0;
     let sumY = 0;
-    for (const m of wellMembers) {
+    for (const m of groupMembers) {
       sumX += m.position[0];
       sumY += m.position[1];
     }
-    const centerX = sumX / wellMembers.length;
-    const centerY = sumY / wellMembers.length;
+    const centerX = sumX / groupMembers.length;
+    const centerY = sumY / groupMembers.length;
 
-    onWellClick(centerX, centerY);
+    onGroupClick(centerX, centerY);
   };
 
   const gridWidth =
     CELL_SIZE +
     CELL_GAP +
-    plateKind.columns.length * (CELL_SIZE + CELL_GAP) -
+    collectionKind.columns.length * (CELL_SIZE + CELL_GAP) -
     CELL_GAP;
   const panelWidth = Math.max(gridWidth + PADDING * 2, 100);
   const showToggle =
-    plateKind.has_stage_positions && onPositioningModeToggle != null;
+    collectionKind.has_explicit_positions && onPositioningModeToggle != null;
 
   return (
     <div
@@ -170,7 +170,7 @@ export function PlateSelector({
         width: panelWidth,
       }}
     >
-      {/* Plate name */}
+      {/* Collection name */}
       <div
         style={{
           height: HEADER_HEIGHT,
@@ -183,7 +183,7 @@ export function PlateSelector({
           opacity: 0.8,
         }}
       >
-        {plateName}
+        {collectionName}
       </div>
 
       {/* Column headers */}
@@ -194,7 +194,7 @@ export function PlateSelector({
           marginBottom: 1,
         }}
       >
-        {plateKind.columns.map((col) => (
+        {collectionKind.columns.map((col) => (
           <div
             key={col}
             style={{
@@ -211,7 +211,7 @@ export function PlateSelector({
       </div>
 
       {/* Grid rows */}
-      {plateKind.rows.map((rowName, rowIdx) => (
+      {collectionKind.rows.map((rowName, rowIdx) => (
         <div
           key={rowName}
           style={{
@@ -233,17 +233,17 @@ export function PlateSelector({
             {rowName}
           </div>
 
-          {/* Well cells */}
-          {plateKind.columns.map((_colName, colIdx) => {
+          {/* Group cells */}
+          {collectionKind.columns.map((_colName, colIdx) => {
             const key = `${rowIdx},${colIdx}`;
-            const populated = wellMemberMap.has(key);
-            const wellExists = wellPathMap.has(key);
+            const populated = groupMemberMap.has(key);
+            const groupExists = groupPathMap.has(key);
 
             return (
               <button
                 key={colIdx}
                 disabled={!populated}
-                onClick={() => populated && handleWellClick(rowIdx, colIdx)}
+                onClick={() => populated && handleGroupClick(rowIdx, colIdx)}
                 style={{
                   width: CELL_SIZE,
                   height: CELL_SIZE,
@@ -260,7 +260,7 @@ export function PlateSelector({
                   fontSize: 8,
                   cursor: populated ? "pointer" : "default",
                   display: "flex",
-                  visibility: wellExists ? "visible" : "hidden",
+                  visibility: groupExists ? "visible" : "hidden",
                   alignItems: "center",
                   justifyContent: "center",
                   transition: "background 0.1s",
@@ -282,7 +282,7 @@ export function PlateSelector({
                 }}
               >
                 {populated
-                  ? `${plateKind.rows[rowIdx]}${plateKind.columns[colIdx]}`
+                  ? `${collectionKind.rows[rowIdx]}${collectionKind.columns[colIdx]}`
                   : ""}
               </button>
             );
@@ -319,9 +319,9 @@ export function PlateSelector({
               "rgba(255, 255, 255, 0.08)";
           }}
         >
-          {plateKind.positioning_mode === "stage" ? "Stage" : "Grid"}
+          {collectionKind.positioning_mode === "Explicit" ? "Explicit positions" : "Grid layout"}
           {" \u2194 "}
-          {plateKind.positioning_mode === "stage" ? "Grid" : "Stage"}
+          {collectionKind.positioning_mode === "Explicit" ? "Grid layout" : "Explicit positions"}
         </button>
       )}
     </div>

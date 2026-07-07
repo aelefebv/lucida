@@ -5,7 +5,7 @@ description: "The minimap is its own dedicated planning lane (MINIMAP) with prio
 tags: [lucida, decision]
 source_path: wiki/decisions/0023-minimap-lane-with-highest-priority.md
 created: 2026-05-14
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Minimap Lane with Highest Priority
@@ -22,7 +22,7 @@ The minimap exists to give the user immediate spatial context — "where am I in
 
 Promoting minimap to the highest priority honors [Principles — Planning Domain](../principles/planning.md#1-visual-smoothness-over-fetch-optimality) (the user's first impression of a dataset is shaped by what loads first; spatial context is part of smoothness) and [Principles — Planning Domain](../principles/planning.md#6-anticipate-the-users-likely-next-gesture) (the most likely first action after opening a dataset is "look around" — minimap supports that immediately).
 
-The starvation risk on initial load is bounded: minimap chunks are small (~16 chunks for a typical plate at the coarsest LOD). The window where minimap competes with detail is one to two seconds, after which the cache holds the minimap and detail fetches resume unimpeded.
+The starvation risk on initial load is bounded: minimap chunks are small (~16 chunks for a typical collection at the coarsest LOD). The window where minimap competes with detail is one to two seconds, after which the cache holds the minimap and detail fetches resume unimpeded.
 
 ## Tradeoffs
 

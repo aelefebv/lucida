@@ -188,11 +188,11 @@
             ],
             "channel_infos": [
               {
-                "label": "DAPI",
+                "label": "Channel 0",
                 "color": "0000FF"
               },
               {
-                "label": "GFP"
+                "label": "Channel 1"
               }
             ]
           }
@@ -216,10 +216,10 @@
       "default_layout_id": "layout-source",
       "labels": [
         {
-          "name": "nuclei",
+          "name": "region-a",
           "source_image_id": "multiscale-0",
           "image": {
-            "image_id": "multiscale-0:label:nuclei",
+            "image_id": "multiscale-0:label:region-a",
             "owner": "img-0",
             "multiscale": {
               "axes": [
@@ -309,7 +309,7 @@
             }
           },
           {
-            "image_id": "multiscale-0:label:nuclei",
+            "image_id": "multiscale-0:label:region-a",
             "wire_format": {
               "Raw": {
                 "data_type": "Uint32"
@@ -324,11 +324,11 @@
         {
           "entity_id": "img-0",
           "kinds": [
-            "FieldProxy3D"
+            "TileProxy3D"
           ],
           "footprints": [
             {
-              "kind": "FieldProxy3D",
+              "kind": "TileProxy3D",
               "dims": [
                 50,
                 128,

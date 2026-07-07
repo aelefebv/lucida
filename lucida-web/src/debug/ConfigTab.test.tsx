@@ -36,7 +36,7 @@ describe("ConfigTab — rendering", () => {
     // Priority weights.
     expect(screen.getByText(/Importance weight/)).toBeTruthy();
     expect(screen.getByText(/Distance weight/)).toBeTruthy();
-    expect(screen.getByText(/Well-proxy priority bump/)).toBeTruthy();
+    expect(screen.getByText(/Group-proxy priority bump/)).toBeTruthy();
     expect(screen.getByText(/Detail render radius/)).toBeTruthy();
     expect(screen.getByText(/Coarse render radius/)).toBeTruthy();
 

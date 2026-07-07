@@ -91,7 +91,7 @@ interface Props {
    * render loop dirty and the volume repaints under the moved camera. The 3D
    * twin of the 2D overlay's prop: the pull-based loop won't repaint on its own,
    * so `focusPin`'s recenter (issue #526) must trip it, exactly like the
-   * plate-selector well-click does after a `set_center`. Optional + defaulted to
+   * collection-selector group-click does after a `set_center`. Optional + defaulted to
    * a no-op so the overlay works unwired (e.g. a test harness); then a recenter
    * simply isn't reflected until the next frame the loop already redraws. */
   onViewportChanged?: () => void;

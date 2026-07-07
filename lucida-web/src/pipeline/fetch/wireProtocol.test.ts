@@ -106,20 +106,20 @@ describe("parseProxyHeader", () => {
 
 describe("proxyResponseKey", () => {
   it("composes the canonical zero-padded form", () => {
-    expect(proxyResponseKey("ent-1", "WellProxy3D", 0, 0)).toBe(
-      "proxy/ent-1/WellProxy3D/T00000_C000",
+    expect(proxyResponseKey("ent-1", "GroupProxy3D", 0, 0)).toBe(
+      "proxy/ent-1/GroupProxy3D/T00000_C000",
     );
   });
 
   it("zero-pads T to 5 digits and C to 3 digits", () => {
-    expect(proxyResponseKey("ent-7", "FieldProxy3D", 12, 3)).toBe(
-      "proxy/ent-7/FieldProxy3D/T00012_C003",
+    expect(proxyResponseKey("ent-7", "TileProxy3D", 12, 3)).toBe(
+      "proxy/ent-7/TileProxy3D/T00012_C003",
     );
   });
 
   it("does not truncate large indices", () => {
-    expect(proxyResponseKey("ent-x", "WellProxy3D", 999999, 9999)).toBe(
-      "proxy/ent-x/WellProxy3D/T999999_C9999",
+    expect(proxyResponseKey("ent-x", "GroupProxy3D", 999999, 9999)).toBe(
+      "proxy/ent-x/GroupProxy3D/T999999_C9999",
     );
   });
 });

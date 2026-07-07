@@ -668,15 +668,15 @@ impl Scene {
                             "dataset_id": dataset_id.0,
                             "n_entities": event.manifest.entities().len(),
                             "n_images": event.manifest.images().len(),
-                            "n_wells": shape.n_wells,
-                            "n_fields": shape.n_fields,
+                            "n_groups": shape.n_groups,
+                            "n_tiles": shape.n_tiles,
                             "n_orphans": shape.n_orphans,
                             "n_layouts": shape.n_layouts,
                             "channel_count": channel_count,
                             "kind": kind_label(&event.manifest.kind),
-                            "plate_rows": shape.plate_rows,
-                            "plate_columns": shape.plate_columns,
-                            "has_stage_positions": shape.has_stage_positions,
+                            "collection_rows": shape.collection_rows,
+                            "collection_columns": shape.collection_columns,
+                            "has_explicit_positions": shape.has_explicit_positions,
                             "default_layout_id": event.manifest.default_layout_id.as_ref().map(|id| id.0.clone()),
                             "epochs": {
                                 "content": self.epochs.content,
@@ -1146,19 +1146,19 @@ impl Scene {
     }
 }
 
-/// Aggregated counts and plate metadata used by both the
+/// Aggregated counts and collection metadata used by both the
 /// `scene.dataset_opened.applied` log enrichment and the
 /// `manifest.shape_anomaly` check. Single pass over `entities()` so the
-/// extra accounting is cheap even for plates with many fields.
+/// extra accounting is cheap even for collections with many tiles.
 struct ManifestShape {
-    n_wells: usize,
-    n_fields: usize,
+    n_groups: usize,
+    n_tiles: usize,
     n_orphans: usize,
     n_layouts: usize,
-    n_fields_without_image: usize,
-    plate_rows: Option<usize>,
-    plate_columns: Option<usize>,
-    has_stage_positions: Option<bool>,
+    n_tiles_without_image: usize,
+    collection_rows: Option<usize>,
+    collection_columns: Option<usize>,
+    has_explicit_positions: Option<bool>,
 }
 
 fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
@@ -1166,43 +1166,43 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
     let entity_ids: HashSet<&EntityId> = entities.iter().map(|e| &e.id).collect();
     let image_owners: HashSet<&EntityId> = manifest.images().iter().map(|i| &i.owner).collect();
 
-    let (plate_rows, plate_columns, has_stage_positions) = match &manifest.kind {
-        DatasetKind::Plate {
+    let (collection_rows, collection_columns, has_explicit_positions) = match &manifest.kind {
+        DatasetKind::Collection {
             rows,
             columns,
-            has_stage_positions,
+            has_explicit_positions,
             ..
         } => (
             Some(rows.len()),
             Some(columns.len()),
-            Some(*has_stage_positions),
+            Some(*has_explicit_positions),
         ),
         DatasetKind::Single => (None, None, None),
     };
 
     let mut shape = ManifestShape {
-        n_wells: 0,
-        n_fields: 0,
+        n_groups: 0,
+        n_tiles: 0,
         n_orphans: 0,
         n_layouts: manifest.source_layouts().len(),
-        n_fields_without_image: 0,
-        plate_rows,
-        plate_columns,
-        has_stage_positions,
+        n_tiles_without_image: 0,
+        collection_rows,
+        collection_columns,
+        has_explicit_positions,
     };
 
     for entity in entities {
         match entity.kind {
-            EntityKind::Well => shape.n_wells += 1,
-            EntityKind::Field => {
-                shape.n_fields += 1;
+            EntityKind::Group => shape.n_groups += 1,
+            EntityKind::Tile => {
+                shape.n_tiles += 1;
                 if let Some(parent) = &entity.parent
                     && !entity_ids.contains(parent)
                 {
                     shape.n_orphans += 1;
                 }
                 if !image_owners.contains(&entity.id) {
-                    shape.n_fields_without_image += 1;
+                    shape.n_tiles_without_image += 1;
                 }
             }
             EntityKind::Image => {}
@@ -1215,28 +1215,28 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
 fn manifest_anomalies(manifest: &DatasetManifest, shape: &ManifestShape) -> Vec<String> {
     let mut issues = Vec::new();
 
-    if matches!(manifest.kind, DatasetKind::Plate { .. }) {
-        if shape.plate_rows == Some(0) {
-            issues.push("plate has zero rows".into());
+    if matches!(manifest.kind, DatasetKind::Collection { .. }) {
+        if shape.collection_rows == Some(0) {
+            issues.push("collection has zero rows".into());
         }
-        if shape.plate_columns == Some(0) {
-            issues.push("plate has zero columns".into());
+        if shape.collection_columns == Some(0) {
+            issues.push("collection has zero columns".into());
         }
-        if shape.n_fields == 0 {
-            issues.push("plate has wells but no fields".into());
+        if shape.n_tiles == 0 {
+            issues.push("collection has groups but no tiles".into());
         }
     }
 
     if shape.n_orphans > 0 {
         issues.push(format!(
-            "{} field(s) reference a parent entity that doesn't exist",
+            "{} tile(s) reference a parent entity that doesn't exist",
             shape.n_orphans
         ));
     }
-    if shape.n_fields_without_image > 0 {
+    if shape.n_tiles_without_image > 0 {
         issues.push(format!(
-            "{} field(s) have no associated image",
-            shape.n_fields_without_image
+            "{} tile(s) have no associated image",
+            shape.n_tiles_without_image
         ));
     }
 
@@ -1254,12 +1254,12 @@ fn manifest_anomalies(manifest: &DatasetManifest, shape: &ManifestShape) -> Vec<
     issues
 }
 
-/// Short, stable label for the dataset kind (e.g. `"Single"`, `"Plate"`).
+/// Short, stable label for the dataset kind (e.g. `"Single"`, `"Collection"`).
 /// Avoids leaking the full Debug output (which includes row/column lists).
 fn kind_label(kind: &DatasetKind) -> &'static str {
     match kind {
         DatasetKind::Single => "Single",
-        DatasetKind::Plate { .. } => "Plate",
+        DatasetKind::Collection { .. } => "Collection",
     }
 }
 
@@ -1733,7 +1733,7 @@ mod tests {
             contrast_min: 100.0,
             contrast_max: 50000.0,
             gamma: 0.8,
-            name: Some("Nucleus".into()),
+            name: Some("Region A".into()),
         };
         let json = serde_json::to_string(&cs).unwrap();
         let parsed: ChannelSettings = serde_json::from_str(&json).unwrap();
@@ -1742,7 +1742,7 @@ mod tests {
         assert_eq!(parsed.contrast_min, 100.0);
         assert_eq!(parsed.contrast_max, 50000.0);
         assert_eq!(parsed.gamma, 0.8);
-        assert_eq!(parsed.name.as_deref(), Some("Nucleus"));
+        assert_eq!(parsed.name.as_deref(), Some("Region A"));
     }
 
     #[test]
@@ -1860,13 +1860,13 @@ mod tests {
         let cmd = ViewportCommand::SetChannelName {
             dataset_id: "ds1".into(),
             channel: 2,
-            name: Some("Nucleus".into()),
+            name: Some("Region A".into()),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         // The exact wire shape the web client emits (snake_case tag).
         assert_eq!(
             json,
-            r#"{"type":"set_channel_name","dataset_id":"ds1","channel":2,"name":"Nucleus"}"#
+            r#"{"type":"set_channel_name","dataset_id":"ds1","channel":2,"name":"Region A"}"#
         );
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
@@ -1877,7 +1877,7 @@ mod tests {
             } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(channel, 2);
-                assert_eq!(name.as_deref(), Some("Nucleus"));
+                assert_eq!(name.as_deref(), Some("Region A"));
             }
             _ => panic!("expected SetChannelName"),
         }
@@ -2027,7 +2027,7 @@ mod tests {
             ViewportCommand::SetChannelName {
                 dataset_id: "ds1".into(),
                 channel: 1,
-                name: Some("Membrane".into()),
+                name: Some("Region D".into()),
             }
             .into(),
         );
@@ -2035,7 +2035,7 @@ mod tests {
             scene.dataset_settings[&ds_id].channel_settings[1]
                 .name
                 .as_deref(),
-            Some("Membrane")
+            Some("Region D")
         );
 
         // `None` clears it back to the fallback (omero/`Ch N`).
@@ -2087,7 +2087,7 @@ mod tests {
             ViewportCommand::SetChannelName {
                 dataset_id: "ds1".into(),
                 channel: 0,
-                name: Some("Nucleus".into()),
+                name: Some("Region A".into()),
             }
             .into(),
         );
@@ -3345,7 +3345,7 @@ mod tests {
             delta: AssetCatalogDelta {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("ds1-entity".into()),
-                    kinds: vec![ProxyKind::FieldProxy3D],
+                    kinds: vec![ProxyKind::TileProxy3D],
                     footprints: vec![],
                 }],
             },
@@ -3370,7 +3370,7 @@ mod tests {
         let delta = AssetCatalogDelta {
             added: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("ds1-entity".into()),
-                kinds: vec![ProxyKind::FieldProxy3D],
+                kinds: vec![ProxyKind::TileProxy3D],
                 footprints: vec![],
             }],
         };
@@ -3395,7 +3395,7 @@ mod tests {
         // Catalog contents must be identical — the merge must dedupe.
         assert_eq!(after_first, after_second);
         assert_eq!(after_second.entries.len(), 1);
-        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
+        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::TileProxy3D]);
     }
 
     #[test]
@@ -3411,7 +3411,7 @@ mod tests {
                 delta: AssetCatalogDelta {
                     added: vec![ProxyAvailability {
                         entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::FieldProxy3D],
+                        kinds: vec![ProxyKind::TileProxy3D],
                         footprints: vec![],
                     }],
                 },
@@ -3425,7 +3425,7 @@ mod tests {
                 delta: AssetCatalogDelta {
                     added: vec![ProxyAvailability {
                         entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::WellProxy3D],
+                        kinds: vec![ProxyKind::GroupProxy3D],
                         footprints: vec![],
                     }],
                 },
@@ -3435,8 +3435,8 @@ mod tests {
 
         let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
         assert_eq!(cat.entries.len(), 1);
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::FieldProxy3D));
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::WellProxy3D));
+        assert!(cat.entries[0].kinds.contains(&ProxyKind::TileProxy3D));
+        assert!(cat.entries[0].kinds.contains(&ProxyKind::GroupProxy3D));
     }
 
     #[test]
@@ -3447,7 +3447,7 @@ mod tests {
         reg.catalog = AssetCatalog {
             entries: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("seed".into()),
-                kinds: vec![ProxyKind::WellProxy3D],
+                kinds: vec![ProxyKind::GroupProxy3D],
                 footprints: vec![],
             }],
         };
@@ -3469,7 +3469,7 @@ mod tests {
             delta: AssetCatalogDelta {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::FieldProxy3D],
+                    kinds: vec![ProxyKind::TileProxy3D],
                     footprints: vec![],
                 }],
             },
@@ -3481,7 +3481,7 @@ mod tests {
             DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(delta.added.len(), 1);
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::FieldProxy3D]);
+                assert_eq!(delta.added[0].kinds, vec![ProxyKind::TileProxy3D]);
             }
             _ => panic!("expected ApplyAssetCatalogDelta"),
         }
@@ -3651,17 +3651,17 @@ mod tests {
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
 
-        // Register a plate dataset with two members
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        // Register a collection dataset with two members
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let ds_id = DatasetId("plate".into());
+        let ds_id = DatasetId("collection".into());
         // Verify initial positions
         let derived = &scene.derived[&ds_id];
         assert_eq!(derived.members[0].position, [0.0, 0.0]);
@@ -3743,7 +3743,7 @@ mod tests {
             z: 3.5,
             t: 4,
             c: 2,
-            author: "biologist".into(),
+            author: "analyst".into(),
             kind: crate::scene::AnnotationKind::Point,
             view: None,
         };
@@ -3758,7 +3758,7 @@ mod tests {
         // The view's timepoint/channel ride the wire alongside z.
         assert_eq!(v["t"], 4);
         assert_eq!(v["c"], 2);
-        assert_eq!(v["author"], "biologist");
+        assert_eq!(v["author"], "analyst");
         assert_eq!(v["kind"], "point");
         // A point carries `end: null` on the wire.
         assert!(v["end"].is_null());
@@ -3785,7 +3785,7 @@ mod tests {
                 assert_eq!(z, 3.5);
                 assert_eq!(t, 4);
                 assert_eq!(c, 2);
-                assert_eq!(author, "biologist");
+                assert_eq!(author, "analyst");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
             }
             _ => panic!("expected AddAnnotation"),
@@ -4156,26 +4156,26 @@ mod tests {
         assert_eq!(line.end, Some([12.0, 13.0]));
     }
 
-    // --- Plate annotation anchoring (issue #780) ---
+    // --- Collection annotation anchoring (issue #780) ---
 
-    /// A two-well plate driven entirely through `DocumentState::apply` (the
+    /// A two-group collection driven entirely through `DocumentState::apply` (the
     /// server's canonical, persisted path), plus a second registered layout
-    /// "moved" in which well `w1` shifts by `+[0, 50]` and well `w2` stays put.
-    /// The base/source layout is "default" (from `make_plate_dataset_opened`),
+    /// "moved" in which group `w1` shifts by `+[0, 50]` and group `w2` stays put.
+    /// The base/source layout is "default" (from `make_collection_dataset_opened`),
     /// placing `w1` at `[0, 0]` and `w2` at `[100, 0]`. Returns the populated
     /// document and the dataset id.
-    fn plate_with_two_layouts() -> (crate::scene::DocumentState, DatasetId) {
+    fn collection_with_two_layouts() -> (crate::scene::DocumentState, DatasetId) {
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut doc = crate::scene::DocumentState::default();
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("w1", [0.0, 0.0]), ("w2", [100.0, 0.0])],
             [1, 1, 1, 64, 64],
             [1, 1, 1, 64, 64],
         );
         doc.apply(DocumentCommand::DatasetOpened(reg));
-        let ds = DatasetId("plate".into());
+        let ds = DatasetId("collection".into());
 
         // A second layout: w1 slides by +[0, 50]; w2 unchanged at [100, 0].
         let moved = LayoutSpec {
@@ -4216,14 +4216,19 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_on_plate_anchors_to_nearest_well() {
+    fn add_annotation_on_collection_anchors_to_nearest_group() {
         // A pin dropped near w1's active-layout position is glued to w1; one near
         // w2 is glued to w2. The anchor is derived inside apply from synced state.
         use lucida_content::EntityId;
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "near-w1", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd(
-            "plate",
+            "collection",
+            "near-w1",
+            [5.0, 5.0],
+            "alice",
+        ));
+        doc.apply(add_annotation_cmd(
+            "collection",
             "near-w2",
             [102.0, 1.0],
             "alice",
@@ -4239,7 +4244,7 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_on_non_plate_leaves_anchor_none() {
+    fn add_annotation_on_non_collection_leaves_anchor_none() {
         // A single-image dataset has nothing to anchor to: the pin stays
         // unanchored and a (hypothetical) layout switch would never move it.
         let mut doc = crate::scene::DocumentState::default();
@@ -4252,11 +4257,11 @@ mod tests {
 
     #[test]
     fn point_pin_reanchors_across_layout_switch_and_back_is_exact() {
-        // The crux (critical): a point glued to the MOVING well rides the well's
+        // The crux (critical): a point glued to the MOVING group rides the group's
         // +[0,50] delta on switch, and switching back restores the original
         // position exactly.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 5.0]);
 
         switch_to(&mut doc, &ds, "moved");
@@ -4275,12 +4280,12 @@ mod tests {
     }
 
     #[test]
-    fn line_reanchors_both_vertices_by_the_well_delta() {
-        // A line on the moving well: BOTH position and end shift by the same
+    fn line_reanchors_both_vertices_by_the_group_delta() {
+        // A line on the moving group: BOTH position and end shift by the same
         // delta (rigid whole-shape translate), length/angle preserved.
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
-            "plate",
+            "collection",
             "ln",
             [2.0, 2.0],
             [8.0, 6.0],
@@ -4300,12 +4305,12 @@ mod tests {
     }
 
     #[test]
-    fn box_reanchors_both_corners_by_the_well_delta() {
-        // A box on the moving well: both opposite corners shift by the delta, so
-        // the box keeps its size and slides with the well.
-        let (mut doc, ds) = plate_with_two_layouts();
+    fn box_reanchors_both_corners_by_the_group_delta() {
+        // A box on the moving group: both opposite corners shift by the delta, so
+        // the box keeps its size and slides with the group.
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
-            "plate",
+            "collection",
             "bx",
             [1.0, 1.0],
             [9.0, 5.0],
@@ -4318,22 +4323,37 @@ mod tests {
     }
 
     #[test]
-    fn pin_on_static_well_does_not_move_across_switch() {
+    fn pin_on_static_group_does_not_move_across_switch() {
         // Per-entity (critical): a pin glued to w2 (which doesn't move between the
         // two layouts) stays exactly where it was after the switch.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "static", [101.0, 2.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "static",
+            [101.0, 2.0],
+            "alice",
+        ));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "static").position, [101.0, 2.0]);
     }
 
     #[test]
-    fn two_pins_each_follow_their_own_well() {
+    fn two_pins_each_follow_their_own_group() {
         // Per-entity (critical): in one switch, the w1 pin moves by the w1 delta
         // and the w2 pin doesn't move — each tracks its own anchor independently.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "on-w1", [5.0, 5.0], "alice"));
-        doc.apply(add_annotation_cmd("plate", "on-w2", [101.0, 2.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "on-w1",
+            [5.0, 5.0],
+            "alice",
+        ));
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "on-w2",
+            [101.0, 2.0],
+            "alice",
+        ));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "on-w1").position, [5.0, 55.0]);
         assert_eq!(pin(&doc, &ds, "on-w2").position, [101.0, 2.0]);
@@ -4343,7 +4363,7 @@ mod tests {
     fn pin_without_anchor_is_left_in_place_on_switch() {
         // Backward-compat (critical): an annotation inserted with NO anchor (as a
         // pre-slice pin would deserialize) is untouched by a layout switch.
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         // Insert a pin directly with anchor == None (bypasses the auto-anchor at
         // creation, mimicking a pin that predates this slice).
         doc.add_annotation(
@@ -4382,7 +4402,7 @@ mod tests {
             "missing anchor key deserializes as None"
         );
 
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.add_annotation(ds.clone(), legacy);
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "old").position, [5.0, 5.0]);
@@ -4393,8 +4413,8 @@ mod tests {
         // Critical: after serialize -> deserialize, the anchor is preserved and a
         // SetActiveLayout still re-anchors correctly on the restored document.
         use lucida_content::EntityId;
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
 
         let blob = serde_json::to_string(&doc).unwrap();
         let mut restored: crate::scene::DocumentState = serde_json::from_str(&blob).unwrap();
@@ -4413,12 +4433,12 @@ mod tests {
     }
 
     #[test]
-    fn switch_between_three_positions_tracks_well_each_time() {
+    fn switch_between_three_positions_tracks_group_each_time() {
         // Robustness beyond the two-layout contract: a third layout moves w1 to a
         // different delta; the pin tracks w1 across default -> moved -> far ->
         // default, each hop applying the displacement between just those two.
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
-        let (mut doc, ds) = plate_with_two_layouts();
+        let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(DocumentCommand::RegisterLayout {
             dataset_id: ds.clone(),
             layout: LayoutSpec {
@@ -4436,7 +4456,7 @@ mod tests {
                 ],
             },
         });
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
 
         switch_to(&mut doc, &ds, "moved"); // w1 [0,0]->[0,50], delta [0,50]
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
@@ -4451,8 +4471,8 @@ mod tests {
         // Convergence/idempotency: a replayed or echoed `set_active_layout` to the
         // layout that's already active must not translate pins a second time. The
         // pin should sit where the first switch left it, not double-shifted.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
         // Re-apply the SAME switch (as a duplicate/echo would): no further move.
@@ -4464,8 +4484,14 @@ mod tests {
     fn reanchor_leaves_z_unchanged() {
         // Layouts are 2-D in-plane: the pin's depth must not be touched by a
         // re-anchor, only its in-plane position.
-        let (mut doc, ds) = plate_with_two_layouts();
-        doc.apply(add_annotation_cmd_z("plate", "p", [5.0, 5.0], 7.5, "alice"));
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd_z(
+            "collection",
+            "p",
+            [5.0, 5.0],
+            7.5,
+            "alice",
+        ));
         switch_to(&mut doc, &ds, "moved");
         let p = pin(&doc, &ds, "p");
         assert_eq!(p.position, [5.0, 55.0]);
@@ -4479,15 +4505,15 @@ mod tests {
         // document.apply) — same corrected position the server would persist.
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("w1", [0.0, 0.0]), ("w2", [100.0, 0.0])],
             [1, 1, 1, 64, 64],
             [1, 1, 1, 64, 64],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let ds = DatasetId("plate".into());
+        let ds = DatasetId("collection".into());
         scene.apply(
             DocumentCommand::RegisterLayout {
                 dataset_id: ds.clone(),
@@ -4508,7 +4534,7 @@ mod tests {
             }
             .into(),
         );
-        scene.apply(add_annotation_cmd("plate", "p", [5.0, 5.0], "alice").into());
+        scene.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice").into());
         assert_eq!(
             scene.document.annotations[&ds][0].anchor,
             Some(EntityId("w1".into()))
@@ -5020,14 +5046,14 @@ mod tests {
     #[test]
     fn annotation_set_position_preserves_other_fields_including_thread() {
         let mut pin = point_pin("pin-1");
-        pin.author = "biologist".into();
+        pin.author = "analyst".into();
         pin.add_comment(comment("c1", "alice", "look here"));
         pin.set_position([9.0, 9.0], 1.0);
         // Position/z change; id, author, kind, and the thread are untouched.
         assert_eq!(pin.position, [9.0, 9.0]);
         assert_eq!(pin.z, 1.0);
         assert_eq!(pin.id, "pin-1");
-        assert_eq!(pin.author, "biologist");
+        assert_eq!(pin.author, "analyst");
         assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
         assert_eq!(pin.comments.len(), 1);
         assert_eq!(pin.comments[0].id, "c1");
@@ -5349,11 +5375,11 @@ mod tests {
             Some([4.0, 4.0]),
             crate::scene::AnnotationKind::Box,
         );
-        r#box.author = "biologist".into();
+        r#box.author = "analyst".into();
         r#box.add_comment(comment("c1", "alice", "this region"));
         r#box.set_vertices([2.0, 2.0], [6.0, 5.0], 1.0);
         assert_eq!(r#box.id, "bx");
-        assert_eq!(r#box.author, "biologist");
+        assert_eq!(r#box.author, "analyst");
         assert_eq!(r#box.kind, crate::scene::AnnotationKind::Box);
         assert_eq!(r#box.comments.len(), 1);
         assert_eq!(r#box.comments[0].text, "this region");
@@ -5759,14 +5785,14 @@ mod tests {
     #[test]
     fn add_comment_command_matches_wire_contract() {
         // Field-for-field check against the slice's documented add wire shape.
-        let cmd = add_comment_cmd("wds-abc", "pin-1", "c-1", "biologist", "nice finding");
+        let cmd = add_comment_cmd("wds-abc", "pin-1", "c-1", "analyst", "nice finding");
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "add_comment");
         assert_eq!(v["dataset_id"], "wds-abc");
         assert_eq!(v["annotation_id"], "pin-1");
         assert_eq!(v["id"], "c-1");
-        assert_eq!(v["author"], "biologist");
+        assert_eq!(v["author"], "analyst");
         assert_eq!(v["text"], "nice finding");
 
         // And it parses back from exactly that shape.
@@ -5782,7 +5808,7 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
                 assert_eq!(annotation_id, "pin-1");
                 assert_eq!(id, "c-1");
-                assert_eq!(author, "biologist");
+                assert_eq!(author, "analyst");
                 assert_eq!(text, "nice finding");
             }
             _ => panic!("expected AddComment"),
@@ -6366,17 +6392,17 @@ mod tests {
         use lucida_content::LayoutId;
         let mut scene = Scene::new([800, 600]);
 
-        // Register a plate dataset with a known default layout
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        // Register a collection dataset with a known default layout
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let ds_id = DatasetId("plate".into());
+        let ds_id = DatasetId("collection".into());
         let positions_before: Vec<[f64; 2]> = scene.derived[&ds_id]
             .members
             .iter()

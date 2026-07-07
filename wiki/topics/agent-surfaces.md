@@ -5,7 +5,7 @@ description: "The non-browser client surfaces — the lucida CLI and the Python 
 tags: [lucida, topic]
 source_path: wiki/topics/agent-surfaces.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Topic: Agent Surfaces
@@ -23,7 +23,7 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 
 These let an agent *see* a dataset without a browser session of its own:
 
-- **`dataset montage`** ([lucida-cli](../systems/crates/lucida-cli.md)) — a labeled contact-sheet PNG sampling the dataset's primary axis (Z/T/field), with an optional JSON sidecar carrying per-cell re-openable `#view=` saved-view URLs
+- **`dataset montage`** ([lucida-cli](../systems/crates/lucida-cli.md)) — a labeled contact-sheet PNG sampling the dataset's primary axis (Z/T/tile), with an optional JSON sidecar carrying per-cell re-openable `#view=` saved-view URLs
 - **`viewer screenshot` / `viewer overview`** ([lucida-cli](../systems/crates/lucida-cli.md)) — render the durable headless viewer profile (or, with `--from-peer <client-id>`, a live peer) through headless Chrome, waiting on the web app's render-ready signal
 
 ## Cross-surface diagnostics

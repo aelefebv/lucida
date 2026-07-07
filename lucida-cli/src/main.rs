@@ -566,7 +566,7 @@ enum DatasetCommand {
         timeout_seconds: u64,
     },
     /// Render an agent overview: a contact-sheet montage sampling the dataset
-    /// (Z / T / fields), each cell a re-openable view. Writes a labeled PNG and,
+    /// (Z / T / tiles), each cell a re-openable view. Writes a labeled PNG and,
     /// with --json, a sidecar mapping each cell to its z/t/c + a `#view=` URL.
     Montage {
         /// Workspace-local dataset id or unambiguous dataset name
@@ -2132,7 +2132,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let full_x = dims[4];
                 let full_y = dims[3];
                 // MVP samples the Z / T / single axis with a whole-image fit.
-                // Per-field plate montage (which needs member positions) is a
+                // Per-tile collection montage (which needs member positions) is a
                 // follow-up slice, so plan as a single image here.
                 let plan = montage::plan_montage(dims, 1, *cells, *cols);
                 let viewport = [*cell_px, *cell_px];
@@ -2192,7 +2192,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         // no counting: cell at (row, col) == cells[row*cols + col].
                         "row": index as u32 / plan.cols.max(1),
                         "col": index as u32 % plan.cols.max(1),
-                        "z": cell.z, "t": cell.t, "c": cell.c, "field": cell.field,
+                        "z": cell.z, "t": cell.t, "c": cell.c, "tile": cell.tile,
                         "label": cell.label,
                         "url": url,
                     }));

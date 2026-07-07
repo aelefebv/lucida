@@ -1467,7 +1467,7 @@ fn encode_chunk_frame(
 /// chunk and proxy frames through the same binary handler.
 ///
 /// `key` is `proxy/{entity_id}/{kind_str}/T{t:05}_C{c:03}` where
-/// `kind_str` is `WellProxy3D` or `FieldProxy3D` (matching the JSON
+/// `kind_str` is `GroupProxy3D` or `TileProxy3D` (matching the JSON
 /// variant names of [`ProxyKind`]). The `proxy/` prefix lets the client
 /// distinguish proxy frames from chunk frames, which use
 /// `{dataset_id}/{image_id}/{chunk_key}`.
@@ -1569,8 +1569,8 @@ pub(crate) fn proxy_response_key(
 /// variant won't silently break the wire format.
 pub(crate) fn proxy_kind_str(kind: ProxyKind) -> &'static str {
     match kind {
-        ProxyKind::WellProxy3D => "WellProxy3D",
-        ProxyKind::FieldProxy3D => "FieldProxy3D",
+        ProxyKind::GroupProxy3D => "GroupProxy3D",
+        ProxyKind::TileProxy3D => "TileProxy3D",
     }
 }
 
@@ -1830,24 +1830,25 @@ mod tests {
 
     #[test]
     fn proxy_response_key_format_matches_spec() {
-        let key = proxy_response_key(&EntityId("field-A1".into()), ProxyKind::FieldProxy3D, 0, 0);
-        assert_eq!(key, "proxy/field-A1/FieldProxy3D/T00000_C000");
+        let key = proxy_response_key(&EntityId("tile-A1".into()), ProxyKind::TileProxy3D, 0, 0);
+        assert_eq!(key, "proxy/tile-A1/TileProxy3D/T00000_C000");
 
-        let well = proxy_response_key(&EntityId("well-B2".into()), ProxyKind::WellProxy3D, 12, 3);
-        assert_eq!(well, "proxy/well-B2/WellProxy3D/T00012_C003");
+        let group =
+            proxy_response_key(&EntityId("group-B2".into()), ProxyKind::GroupProxy3D, 12, 3);
+        assert_eq!(group, "proxy/group-B2/GroupProxy3D/T00012_C003");
     }
 
     #[test]
     fn proxy_kind_str_pins_variant_names() {
-        assert_eq!(proxy_kind_str(ProxyKind::WellProxy3D), "WellProxy3D");
-        assert_eq!(proxy_kind_str(ProxyKind::FieldProxy3D), "FieldProxy3D");
+        assert_eq!(proxy_kind_str(ProxyKind::GroupProxy3D), "GroupProxy3D");
+        assert_eq!(proxy_kind_str(ProxyKind::TileProxy3D), "TileProxy3D");
     }
 
     #[test]
     fn encode_proxy_frame_round_trips_header_and_voxels() {
         let asset = sample_asset([2, 3, 4]);
         let entity_id = EntityId("e1".into());
-        let buf = encode_proxy_frame(7, &entity_id, ProxyKind::FieldProxy3D, 5, 1, &asset)
+        let buf = encode_proxy_frame(7, &entity_id, ProxyKind::TileProxy3D, 5, 1, &asset)
             .expect("encode");
 
         // [client_id:u32 LE][key_len:u16 LE][key][header 64][voxels]
@@ -1859,7 +1860,7 @@ mod tests {
         let key_start = 6;
         let key_end = key_start + key_len;
         let key = std::str::from_utf8(&buf[key_start..key_end]).unwrap();
-        assert_eq!(key, "proxy/e1/FieldProxy3D/T00005_C001");
+        assert_eq!(key, "proxy/e1/TileProxy3D/T00005_C001");
 
         // Header round-trips via lucida_proxy::read_header.
         let mut header_cursor = std::io::Cursor::new(&buf[key_end..key_end + 64]);

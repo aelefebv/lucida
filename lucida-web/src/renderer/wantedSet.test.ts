@@ -53,10 +53,10 @@ function makeVisibleRegion(
 
 /**
  * Fixture builder for `ColdStateActiveEntry`. The type is a
- * discriminated union (`kind: "field" | "well-as-proxy"`); this helper
+ * discriminated union (`kind: "tile" | "group-as-proxy"`); this helper
  * inspects `overrides.mode` to pick the right variant so existing call
- * sites keep working unchanged (`mode: "well-as-proxy"` with
- * `imageId: ""` yields the well-as-proxy variant).
+ * sites keep working unchanged (`mode: "group-as-proxy"` with
+ * `imageId: ""` yields the group-as-proxy variant).
  */
 type WantedSetEntryOverrides = Partial<Omit<ColdStateActiveEntry, "kind">>;
 function makeActiveEntry(
@@ -80,7 +80,7 @@ function makeActiveEntry(
     ],
     proxyKind: overrides?.proxyKind,
     proxyAvailable: overrides?.proxyAvailable ?? false,
-    wellProxyAvailable: overrides?.wellProxyAvailable ?? false,
+    groupProxyAvailable: overrides?.groupProxyAvailable ?? false,
     detailLevel: overrides?.detailLevel,
     coarseLevel: overrides?.coarseLevel,
     wantedLodLevels: overrides?.wantedLodLevels,
@@ -97,23 +97,23 @@ function makeActiveEntry(
       },
     },
   };
-  // Default to `fields-with-detail` so existing tests keep their
+  // Default to `tiles-with-detail` so existing tests keep their
   // chunk-only expectations when no mode override is provided.
-  const mode = overrides?.mode ?? "fields-with-detail";
-  if (mode === "well-as-proxy") {
+  const mode = overrides?.mode ?? "tiles-with-detail";
+  if (mode === "group-as-proxy") {
     return {
       ...base,
-      kind: "well-as-proxy",
-      mode: "well-as-proxy",
-      parentWellId: null,
+      kind: "group-as-proxy",
+      mode: "group-as-proxy",
+      parentGroupId: null,
     };
   }
   return {
     ...base,
-    kind: "field",
+    kind: "tile",
     imageId: overrides?.imageId ?? "img",
     mode,
-    parentWellId: overrides?.parentWellId ?? null,
+    parentGroupId: overrides?.parentGroupId ?? null,
   };
 }
 
@@ -721,7 +721,7 @@ describe("computeWantedSet", () => {
   describe("proxy wanted-set", () => {
     /** Helper: pool snapshot with the given resident slot keys. */
     function makeProxyPool(
-      kind: "WellProxy3D" | "FieldProxy3D",
+      kind: "GroupProxy3D" | "TileProxy3D",
       keys: string[],
     ): ProxyAtlasSnapshot {
       const slots = new Map<string, number>();
@@ -729,16 +729,16 @@ describe("computeWantedSet", () => {
       return { kind, slots };
     }
 
-    it("well-as-proxy + no resident proxy -> emits MissingProxy { WellProxy3D }", () => {
+    it("group-as-proxy + no resident proxy -> emits MissingProxy { GroupProxy3D }", () => {
       const coldState = makeColdState({
         activeSet: [
           makeActiveEntry({
-            entityId: "well-1",
+            entityId: "group-1",
             imageId: "",
-            mode: "well-as-proxy",
-            proxyKind: "WellProxy3D",
+            mode: "group-as-proxy",
+            proxyKind: "GroupProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
+            groupProxyAvailable: true,
           }),
         ],
       });
@@ -748,36 +748,36 @@ describe("computeWantedSet", () => {
       expect(ps).toHaveLength(1);
       expect(ps[0]).toMatchObject({
         kind: "proxy",
-        entityId: "well-1",
-        proxyKind: "WellProxy3D",
+        entityId: "group-1",
+        proxyKind: "GroupProxy3D",
         t: 0,
         c: 0,
       });
-      // No chunks for well-as-proxy.
+      // No chunks for group-as-proxy.
       expect(chunks(result.missing)).toHaveLength(0);
     });
 
-    it("well-as-proxy + resident proxy -> empty wanted-set", () => {
+    it("group-as-proxy + resident proxy -> empty wanted-set", () => {
       const coldState = makeColdState({
         activeSet: [
           makeActiveEntry({
-            entityId: "well-1",
+            entityId: "group-1",
             imageId: "",
-            mode: "well-as-proxy",
-            proxyKind: "WellProxy3D",
+            mode: "group-as-proxy",
+            proxyKind: "GroupProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
+            groupProxyAvailable: true,
           }),
         ],
       });
       const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
-        ["any-pool", makeProxyPool("WellProxy3D", ["well-1|0|0"])],
+        ["any-pool", makeProxyPool("GroupProxy3D", ["group-1|0|0"])],
       ]);
       const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), proxyAtlases);
       expect(result.missing).toHaveLength(0);
     });
 
-    it("fields-with-detail + present field-proxy -> no proxy ask, chunk wanted-set unchanged", () => {
+    it("tiles-with-detail + present tile-proxy -> no proxy ask, chunk wanted-set unchanged", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
           xyBoundsVox: [0, 0, 32, 32],
@@ -785,12 +785,12 @@ describe("computeWantedSet", () => {
         }),
         activeSet: [
           makeActiveEntry({
-            entityId: "field-1",
+            entityId: "tile-1",
             imageId: "img",
-            mode: "fields-with-detail",
-            proxyKind: "FieldProxy3D",
+            mode: "tiles-with-detail",
+            proxyKind: "TileProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: false,
+            groupProxyAvailable: false,
           }),
         ],
       });
@@ -799,7 +799,7 @@ describe("computeWantedSet", () => {
       ]);
       const volumeAtlases = new Map([["ds-0", atlas]]);
       const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
-        ["pool-A", makeProxyPool("FieldProxy3D", ["field-1|0|0"])],
+        ["pool-A", makeProxyPool("TileProxy3D", ["tile-1|0|0"])],
       ]);
       const result = computeWantedSet(
         coldState,
@@ -813,7 +813,7 @@ describe("computeWantedSet", () => {
       expect(chunks(result.missing)).toHaveLength(1);
     });
 
-    it("fields-with-detail + missing advertised field-proxy -> emits MissingProxy { FieldProxy3D }", () => {
+    it("tiles-with-detail + missing advertised tile-proxy -> emits MissingProxy { TileProxy3D }", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
           xyBoundsVox: [0, 0, 32, 32],
@@ -821,10 +821,10 @@ describe("computeWantedSet", () => {
         }),
         activeSet: [
           makeActiveEntry({
-            entityId: "field-1",
+            entityId: "tile-1",
             imageId: "img",
-            mode: "fields-with-detail",
-            proxyKind: "FieldProxy3D",
+            mode: "tiles-with-detail",
+            proxyKind: "TileProxy3D",
             proxyAvailable: true,
           }),
         ],
@@ -842,8 +842,8 @@ describe("computeWantedSet", () => {
       );
       const ps = proxies(result.missing);
       expect(ps).toHaveLength(1);
-      expect(ps[0].entityId).toBe("field-1");
-      expect(ps[0].proxyKind).toBe("FieldProxy3D");
+      expect(ps[0].entityId).toBe("tile-1");
+      expect(ps[0].proxyKind).toBe("TileProxy3D");
     });
 
     it("desiredProxyKeys=[] suppresses otherwise-missing proxy asks", () => {
@@ -851,12 +851,12 @@ describe("computeWantedSet", () => {
         desiredProxyKeys: [],
         activeSet: [
           makeActiveEntry({
-            entityId: "well-1",
+            entityId: "group-1",
             imageId: "",
-            mode: "well-as-proxy",
-            proxyKind: "WellProxy3D",
+            mode: "group-as-proxy",
+            proxyKind: "GroupProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
+            groupProxyAvailable: true,
           }),
         ],
       });
@@ -864,18 +864,18 @@ describe("computeWantedSet", () => {
       expect(result.missing).toHaveLength(0);
     });
 
-    it("desiredProxyKeys gates field and parent-well proxy asks independently", () => {
+    it("desiredProxyKeys gates tile and parent-group proxy asks independently", () => {
       const coldState = makeColdState({
-        desiredProxyKeys: ["ds-0|well-1|WellProxy3D|0|0"],
+        desiredProxyKeys: ["ds-0|group-1|GroupProxy3D|0|0"],
         activeSet: [
           makeActiveEntry({
-            entityId: "field-1",
+            entityId: "tile-1",
             imageId: "img",
-            mode: "fields-with-proxy-fallback",
-            proxyKind: "FieldProxy3D",
+            mode: "tiles-with-proxy-fallback",
+            proxyKind: "TileProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
-            parentWellId: "well-1",
+            groupProxyAvailable: true,
+            parentGroupId: "group-1",
           }),
         ],
       });
@@ -883,12 +883,12 @@ describe("computeWantedSet", () => {
       const ps = proxies(result.missing);
       expect(ps).toHaveLength(1);
       expect(ps[0]).toMatchObject({
-        entityId: "well-1",
-        proxyKind: "WellProxy3D",
+        entityId: "group-1",
+        proxyKind: "GroupProxy3D",
       });
     });
 
-    it("fields-with-detail + proxyAvailable=false -> no MissingProxy", () => {
+    it("tiles-with-detail + proxyAvailable=false -> no MissingProxy", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
           xyBoundsVox: [0, 0, 32, 32],
@@ -896,11 +896,11 @@ describe("computeWantedSet", () => {
         }),
         activeSet: [
           makeActiveEntry({
-            entityId: "field-1",
+            entityId: "tile-1",
             imageId: "img",
-            mode: "fields-with-detail",
+            mode: "tiles-with-detail",
             // Catalog says no proxy exists — don't ask for one.
-            proxyKind: "FieldProxy3D",
+            proxyKind: "TileProxy3D",
             proxyAvailable: false,
           }),
         ],
@@ -919,7 +919,7 @@ describe("computeWantedSet", () => {
       expect(proxies(result.missing)).toHaveLength(0);
     });
 
-    it("fields-with-proxy-fallback emits both field-proxy and parent-well-proxy (deduped per well)", () => {
+    it("tiles-with-proxy-fallback emits both tile-proxy and parent-group-proxy (deduped per group)", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
           xyBoundsVox: [0, 0, 32, 32],
@@ -927,36 +927,36 @@ describe("computeWantedSet", () => {
         }),
         activeSet: [
           makeActiveEntry({
-            entityId: "field-A",
+            entityId: "tile-A",
             imageId: "imgA",
-            mode: "fields-with-proxy-fallback",
-            proxyKind: "FieldProxy3D",
+            mode: "tiles-with-proxy-fallback",
+            proxyKind: "TileProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
-            parentWellId: "well-1",
+            groupProxyAvailable: true,
+            parentGroupId: "group-1",
           }),
           makeActiveEntry({
-            entityId: "field-B",
+            entityId: "tile-B",
             imageId: "imgB",
-            mode: "fields-with-proxy-fallback",
-            proxyKind: "FieldProxy3D",
+            mode: "tiles-with-proxy-fallback",
+            proxyKind: "TileProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
-            parentWellId: "well-1",
+            groupProxyAvailable: true,
+            parentGroupId: "group-1",
           }),
         ],
       });
       const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), new Map());
       const ps = proxies(result.missing);
-      // 2 field proxies + 1 deduped well proxy = 3
-      const fieldProxies = ps.filter((p) => p.proxyKind === "FieldProxy3D");
-      const wellProxies = ps.filter((p) => p.proxyKind === "WellProxy3D");
-      expect(fieldProxies.map((p) => p.entityId).sort()).toEqual(["field-A", "field-B"]);
-      expect(wellProxies).toHaveLength(1);
-      expect(wellProxies[0].entityId).toBe("well-1");
+      // 2 tile proxies + 1 deduped group proxy = 3
+      const tileProxies = ps.filter((p) => p.proxyKind === "TileProxy3D");
+      const groupProxies = ps.filter((p) => p.proxyKind === "GroupProxy3D");
+      expect(tileProxies.map((p) => p.entityId).sort()).toEqual(["tile-A", "tile-B"]);
+      expect(groupProxies).toHaveLength(1);
+      expect(groupProxies[0].entityId).toBe("group-1");
     });
 
-    it("mixed modes: well-as-proxy + fields-with-detail -> both reported correctly", () => {
+    it("mixed modes: group-as-proxy + tiles-with-detail -> both reported correctly", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
           xyBoundsVox: [0, 0, 32, 32],
@@ -964,18 +964,18 @@ describe("computeWantedSet", () => {
         }),
         activeSet: [
           makeActiveEntry({
-            entityId: "well-X",
+            entityId: "group-X",
             imageId: "",
-            mode: "well-as-proxy",
-            proxyKind: "WellProxy3D",
+            mode: "group-as-proxy",
+            proxyKind: "GroupProxy3D",
             proxyAvailable: true,
-            wellProxyAvailable: true,
+            groupProxyAvailable: true,
           }),
           makeActiveEntry({
-            entityId: "field-Y",
+            entityId: "tile-Y",
             imageId: "imgY",
-            mode: "fields-with-detail",
-            proxyKind: "FieldProxy3D",
+            mode: "tiles-with-detail",
+            proxyKind: "TileProxy3D",
             proxyAvailable: true,
           }),
         ],
@@ -992,11 +992,11 @@ describe("computeWantedSet", () => {
         new Map(),
       );
       const ps = proxies(result.missing);
-      const wellMissing = ps.filter((p) => p.proxyKind === "WellProxy3D" && p.entityId === "well-X");
-      const fieldMissing = ps.filter((p) => p.proxyKind === "FieldProxy3D" && p.entityId === "field-Y");
-      expect(wellMissing).toHaveLength(1);
-      expect(fieldMissing).toHaveLength(1);
-      // Field-Y also has chunk wanted-set entries.
+      const groupMissing = ps.filter((p) => p.proxyKind === "GroupProxy3D" && p.entityId === "group-X");
+      const tileMissing = ps.filter((p) => p.proxyKind === "TileProxy3D" && p.entityId === "tile-Y");
+      expect(groupMissing).toHaveLength(1);
+      expect(tileMissing).toHaveLength(1);
+      // Tile-Y also has chunk wanted-set entries.
       expect(chunks(result.missing).length).toBeGreaterThan(0);
     });
   });

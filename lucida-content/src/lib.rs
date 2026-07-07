@@ -1,3 +1,4 @@
+pub mod collection;
 pub mod entity;
 pub mod graph;
 pub mod id;
@@ -6,10 +7,10 @@ pub mod kind;
 pub mod label;
 pub mod layout;
 pub mod normalize;
-pub mod plate;
 pub mod transform;
 pub mod url;
 
+pub use collection::CollectionLayoutError;
 pub use entity::*;
 pub use graph::*;
 pub use id::*;
@@ -18,5 +19,4 @@ pub use kind::*;
 pub use label::*;
 pub use layout::*;
 pub use normalize::*;
-pub use plate::PlateLayoutError;
 pub use transform::*;

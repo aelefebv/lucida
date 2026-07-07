@@ -155,7 +155,7 @@ describe("label color TS <-> WGSL parity", () => {
   });
 
   it("declared palette scan matches labelColor(explicit) for declared + undeclared ids", () => {
-    // yeast-style declared colors, incl. an id past 16 bits.
+    // volume-style declared colors, incl. an id past 16 bits.
     const declared: Array<{ value: number; rgba: [number, number, number, number] }> = [
       { value: 2, rgba: [230, 25, 75, 255] },
       { value: 92801, rgba: [10, 20, 30, 200] },

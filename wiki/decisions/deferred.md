@@ -5,7 +5,7 @@ description: "Things we explored, decided not to ship today, and want to remembe
 tags: [lucida, decision]
 source_path: wiki/decisions/deferred.md
 created: 2026-05-14
-modified: 2026-05-14
+modified: 2026-07-06
 ---
 
 # Deferred — considered but not built yet
@@ -36,7 +36,7 @@ per-LOD pool sizing.
 
 **Cost.** Most of the work is in the atlas allocator and eviction
 policy on the GPU worker side. Planning's contribution is small
-(restore the buffer config + thread it through `makeFieldEntry`).
+(restore the buffer config + thread it through `makeTileEntry`).
 Test coverage on the atlas would need to grow to exercise multi-LOD
 scenarios. Memory budgets per atlas would likely need to grow to
 absorb the extra residency.

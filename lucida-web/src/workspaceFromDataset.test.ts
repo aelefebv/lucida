@@ -17,7 +17,7 @@ const createWorkspaceMock = vi.mocked(createWorkspace);
 function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
   return {
     id: "ws-new",
-    name: "embryo.ome.zarr",
+    name: "sample.ome.zarr",
     role: "owner",
     created_by: "owner@example.com",
     created_at: "2026-06-23T00:00:00Z",
@@ -37,14 +37,14 @@ afterEach(() => {
 
 describe("datasetBasename", () => {
   it("takes the last path segment of a remote URL", () => {
-    expect(datasetBasename("gs://bucket/scans/embryo.ome.zarr")).toBe(
-      "embryo.ome.zarr",
+    expect(datasetBasename("gs://bucket/scans/sample.ome.zarr")).toBe(
+      "sample.ome.zarr",
     );
   });
 
   it("ignores a trailing slash", () => {
-    expect(datasetBasename("/data/scans/embryo.ome.zarr/")).toBe(
-      "embryo.ome.zarr",
+    expect(datasetBasename("/data/scans/sample.ome.zarr/")).toBe(
+      "sample.ome.zarr",
     );
   });
 
@@ -66,19 +66,19 @@ describe("datasetBasename", () => {
 
 describe("workspaceNameFromDatasets", () => {
   it("uses the basename for a single dataset", () => {
-    expect(workspaceNameFromDatasets(["/data/embryo.ome.zarr"])).toBe(
-      "embryo.ome.zarr",
+    expect(workspaceNameFromDatasets(["/data/sample.ome.zarr"])).toBe(
+      "sample.ome.zarr",
     );
   });
 
   it("appends (+N) for multiple datasets, keyed to the first basename", () => {
     expect(
       workspaceNameFromDatasets([
-        "/data/embryo.ome.zarr",
+        "/data/sample.ome.zarr",
         "gs://bucket/brain.zarr",
         "/data/heart.zarr",
       ]),
-    ).toBe("embryo.ome.zarr (+2)");
+    ).toBe("sample.ome.zarr (+2)");
   });
 
   it("returns empty when no usable basenames (lets server default apply)", () => {
@@ -89,11 +89,11 @@ describe("workspaceNameFromDatasets", () => {
 
 describe("createWorkspaceFromDatasets", () => {
   it("creates a workspace named from the single dataset basename", async () => {
-    createWorkspaceMock.mockResolvedValue(record({ name: "embryo.ome.zarr" }));
+    createWorkspaceMock.mockResolvedValue(record({ name: "sample.ome.zarr" }));
 
-    const ws = await createWorkspaceFromDatasets(["/data/embryo.ome.zarr"]);
+    const ws = await createWorkspaceFromDatasets(["/data/sample.ome.zarr"]);
 
-    expect(createWorkspaceMock).toHaveBeenCalledWith("embryo.ome.zarr");
+    expect(createWorkspaceMock).toHaveBeenCalledWith("sample.ome.zarr");
     expect(ws.id).toBe("ws-new");
   });
 

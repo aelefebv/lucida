@@ -2318,7 +2318,7 @@ fn generated_status_for_source_error(error: &BuildSourceError) -> GeneratedChunk
         BuildSourceError::Fetch { .. } => GeneratedChunkStatus::FailedTransient,
         BuildSourceError::MissingEntity(_)
         | BuildSourceError::MissingImage(_)
-        | BuildSourceError::NoFields(_)
+        | BuildSourceError::NoTiles(_)
         | BuildSourceError::BadLevel { .. }
         | BuildSourceError::OutOfBounds { .. }
         | BuildSourceError::SpatialOutOfBounds { .. }

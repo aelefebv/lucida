@@ -4,9 +4,9 @@
 //! - [`InstrumentedStore`]: an `ObjectStore` wrapper that counts `get`
 //!   calls and can introduce per-call delays to make timing-sensitive
 //!   tests deterministic.
-//! - [`build_single_field_dataset`]: builds a `DatasetManifest`, a
+//! - [`build_single_tile_dataset`]: builds a `DatasetManifest`, a
 //!   `ChunkResolver`, and a populated `CachedStore` for a single
-//!   FieldProxy3D-shaped image with a configurable level grid.
+//!   TileProxy3D-shaped image with a configurable level grid.
 
 #![allow(dead_code)]
 
@@ -127,7 +127,7 @@ impl ObjectStore for InstrumentedStore {
 }
 
 /// Bundle of state for a synthetic single-field dataset suitable for
-/// `FieldProxy3D` generation. The store is populated with one chunk per
+/// `TileProxy3D` generation. The store is populated with one chunk per
 /// `(z, y, x)` cell in `level_grid_shape`; each chunk holds
 /// `level_chunk_shape` worth of u16s where every voxel equals
 /// `(z * 100 + y * 10 + x) % u16::MAX`. The exact contents don't matter
@@ -144,7 +144,7 @@ pub struct SyntheticDataset {
 /// Build a synthetic single-image dataset with one level. `level_shape`
 /// is `[T, C, Z, Y, X]`; `chunk_shape` is the per-chunk voxel count.
 /// Grid shape is computed via `ceil(shape / chunk_shape)`.
-pub async fn build_single_field_dataset(
+pub async fn build_single_tile_dataset(
     level_shape: [u64; 5],
     chunk_shape: [u64; 5],
     delay_ms: u64,

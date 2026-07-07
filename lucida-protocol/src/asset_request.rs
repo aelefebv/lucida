@@ -10,8 +10,8 @@
 //! ```json
 //! { "type": "asset_request",
 //!   "dataset_id": "ds-...",
-//!   "entity_id":  "field-A1",
-//!   "kind":       "FieldProxy3D",
+//!   "entity_id":  "tile-A1",
+//!   "kind":       "TileProxy3D",
 //!   "t": 0,
 //!   "c": 0 }
 //! ```
@@ -55,8 +55,8 @@ mod tests {
     fn asset_message_round_trip() {
         let msg = AssetMessage::AssetRequest {
             dataset_id: DatasetId("ds-x".into()),
-            entity_id: EntityId("field-A1".into()),
-            kind: ProxyKind::FieldProxy3D,
+            entity_id: EntityId("tile-A1".into()),
+            kind: ProxyKind::TileProxy3D,
             t: 0,
             c: 0,
         };
@@ -72,8 +72,8 @@ mod tests {
                 c,
             } => {
                 assert_eq!(dataset_id, DatasetId("ds-x".into()));
-                assert_eq!(entity_id, EntityId("field-A1".into()));
-                assert_eq!(kind, ProxyKind::FieldProxy3D);
+                assert_eq!(entity_id, EntityId("tile-A1".into()));
+                assert_eq!(kind, ProxyKind::TileProxy3D);
                 assert_eq!(t, 0);
                 assert_eq!(c, 0);
             }
@@ -84,8 +84,8 @@ mod tests {
     fn asset_request_struct_round_trip() {
         let req = AssetRequest {
             dataset_id: DatasetId("ds-y".into()),
-            entity_id: EntityId("well-B2".into()),
-            kind: ProxyKind::WellProxy3D,
+            entity_id: EntityId("group-B2".into()),
+            kind: ProxyKind::GroupProxy3D,
             t: 3,
             c: 1,
         };

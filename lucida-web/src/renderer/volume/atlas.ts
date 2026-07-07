@@ -195,7 +195,7 @@ let depthTexture: GPUTexture | null = null;
 let depthW = 0;
 let depthH = 0;
 
-// Shared dummy indirection buffer for `well-as-proxy` chunk bindings.
+// Shared dummy indirection buffer for `group-as-proxy` chunk bindings.
 // Same reasoning as `depthTexture`: not per-session state.
 let dummyIndirectionBuf: GPUBuffer | null = null;
 export function getDummyIndirection(device: GPUDevice): GPUBuffer {

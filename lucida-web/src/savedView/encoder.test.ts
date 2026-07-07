@@ -57,7 +57,7 @@ describe("SavedView encoder", () => {
       const v = emptySliceView();
       v.datasets = ["gs://bucket/a.zarr"];
       v.dataset_order = ["ds-aaaa"];
-      v.active_layouts = { "ds-aaaa": "plate-3x3" };
+      v.active_layouts = { "ds-aaaa": "collection-3x3" };
       v.dataset_settings = { "ds-aaaa": defaultDatasetSettings(2) };
       v.view.t = 5;
       v.view.c = 1;
@@ -216,13 +216,13 @@ describe("SavedView encoder", () => {
       v.datasets = ["gs://x"];
       v.dataset_order = ["ds-x"];
       const ch0 = defaultChannel(0);
-      ch0.name = "Nucleus"; // user override
+      ch0.name = "Region A"; // user override
       const settings = defaultDatasetSettings(2);
       settings.channel_settings = [ch0, defaultChannel(1)];
       v.dataset_settings = { "ds-x": settings };
       const back = await decode(await encode(v));
       // The override persists through the saved-view round-trip...
-      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Nucleus");
+      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Region A");
       // ...and a channel with no override has no `name` key (back-compat with
       // pre-slice payloads).
       expect(back.dataset_settings["ds-x"].channel_settings![1].name).toBeUndefined();
@@ -236,12 +236,12 @@ describe("SavedView encoder", () => {
       v.datasets = ["gs://x"];
       v.dataset_order = ["ds-x"];
       const ch0 = defaultChannel(0); // every field default...
-      ch0.name = "Membrane"; // ...except the override.
+      ch0.name = "Region D"; // ...except the override.
       const settings = defaultDatasetSettings(1);
       settings.channel_settings = [ch0];
       v.dataset_settings = { "ds-x": settings };
       const back = await decode(await encode(v));
-      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Membrane");
+      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Region D");
     });
 
     it("auto_contrast: false entries round-trip; true entries are stripped (default)", async () => {
@@ -299,9 +299,9 @@ describe("SavedView encoder", () => {
 
   describe("size budget", () => {
     /**
-     * Synthesize a 384-well plate scenario:
-     *   - 1 dataset (384 wells, but they're members not separate datasets)
-     *   - active layout pointing at a 24x16 plate spec
+     * Synthesize a 384-group collection scenario:
+     *   - 1 dataset (384 groups, but they're members not separate datasets)
+     *   - active layout pointing at a 24x16 collection spec
      *   - default channel settings, default contrast/gamma
      *   - typical slice camera position
      *
@@ -309,11 +309,11 @@ describe("SavedView encoder", () => {
      * gzip+base64. The dataset side is one URL; the wire-cost driver
      * is the per-channel display defaults — which the encoder strips.
      */
-    it("384-well plate share link fits under 1 KB", async () => {
+    it("384-group collection share link fits under 1 KB", async () => {
       const v = emptySliceView([1280, 720]);
-      v.datasets = ["gs://bucket/big-plate-screen-2024.zarr"];
+      v.datasets = ["gs://bucket/big-collection-screen-2024.zarr"];
       v.dataset_order = ["ds-7777aaaabbbbcccc"];
-      v.active_layouts = { "ds-7777aaaabbbbcccc": "plate-24x16-grid" };
+      v.active_layouts = { "ds-7777aaaabbbbcccc": "collection-24x16-grid" };
       v.dataset_settings = {
         "ds-7777aaaabbbbcccc": defaultDatasetSettings(4),
       };

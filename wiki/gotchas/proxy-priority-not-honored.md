@@ -5,7 +5,7 @@ description: "lucida-server proxy::ProxyGenerator::request(spec, priority) accep
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/proxy-priority-not-honored.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Proxy Generator Priority Is Not Honored Yet
@@ -21,13 +21,13 @@ Symptoms of relying on priority:
 
 ## What this means in practice
 
-- Background pre-gen on dataset open is best-effort. If you have a 96-well plate, all 96 wells' `(T=0, C=0)` proxy requests enter the semaphore queue. On-demand requests issued during this run wait their turn.
+- Background pre-gen on dataset open is best-effort. If you have a 96-group collection, all 96 groups' `(T=0, C=0)` proxy requests enter the semaphore queue. On-demand requests issued during this run wait their turn.
 - For interactive use today, keep pre-gen volumes modest. The semaphore's concurrency setting (default `num_cpus / 2`) caps the worst-case backlog.
 
 ## What to do
 
 - **Don't rely on priority ordering.** Pass it for forward-compatibility, but design assuming FIFO.
-- **If interactivity matters more than coverage**, reduce pre-generation scope (e.g. only for the visible wells initially, expand on demand).
+- **If interactivity matters more than coverage**, reduce pre-generation scope (e.g. only for the visible groups initially, expand on demand).
 - **When the priority scheduler lands**, the parameter starts being honored — code passing thoughtful priorities will benefit; code passing the same priority everywhere won't.
 
 ## Where the comment lives

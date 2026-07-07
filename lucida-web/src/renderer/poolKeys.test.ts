@@ -77,8 +77,8 @@ describe("memberTierKey", () => {
 describe("proxyPoolKey (re-export)", () => {
   it("is the same function as proxyAtlas.proxyPoolKey", () => {
     // Smoke check: the canonical proxy format is `${datasetId}|proxy|${kind}|${x}x${y}x${z}|ch${channel}`.
-    expect(proxyPoolKey("ds1", "WellProxy3D", [64, 128, 256], 0)).toBe(
-      "ds1|proxy|WellProxy3D|256x128x64|ch0",
+    expect(proxyPoolKey("ds1", "GroupProxy3D", [64, 128, 256], 0)).toBe(
+      "ds1|proxy|GroupProxy3D|256x128x64|ch0",
     );
   });
 });

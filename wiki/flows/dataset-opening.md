@@ -5,7 +5,7 @@ description: "From \"user pastes a URL\" to \"first chunks render.\" Crosses luc
 tags: [lucida, flow]
 source_path: wiki/flows/dataset-opening.md
 created: 2026-04-18
-modified: 2026-07-03
+modified: 2026-07-06
 ---
 
 # Flow: Dataset Opening
@@ -39,7 +39,7 @@ From "user pastes a URL" to "first chunks render." Crosses [lucida-web](../syste
 5. **Next RAF tick** ([Flow: Chunk Lifecycle](chunk-lifecycle.md)):
    1. TickCoordinator's `planAndFetch` runs because `interactiveDirty`.
    2. WASM `view_query(dsId)` returns visible entities with `projected_diagonal_px` and `idealTargetLod`.
-   3. [Planning Domain](../systems/subsystems/planning-domain.md) resolves explicit detail/coarse levels per field/image and enumerates tier-labeled wanted chunks with priorities.
+   3. [Planning Domain](../systems/subsystems/planning-domain.md) resolves explicit detail/coarse levels per tile/image and enumerates tier-labeled wanted chunks with priorities.
    4. [CPU Cache](../systems/subsystems/cpu-cache.md) `submit(plan)` queues unique requests.
    5. Fetches launch via `contentSource.fetch(req)` → server, bounded by `decode-pool-size × 3` and 32 MB in-flight.
 6. **Server serves chunks**:
@@ -54,7 +54,7 @@ From "user pastes a URL" to "first chunks render." Crosses [lucida-web](../syste
 
 ## Where things can hang
 
-- **Server-side import** (step 3.iii) — for slow object stores or many wells, can take seconds. The handler is `tokio::spawn`'d so the connection stays responsive; clients receive request-correlated `dataset_open_progress` messages before the final success/failure.
+- **Server-side import** (step 3.iii) — for slow object stores or many groups, can take seconds. The handler is `tokio::spawn`'d so the connection stays responsive; clients receive request-correlated `dataset_open_progress` messages before the final success/failure.
 - **Generated coarse backlog** (step 3.x) — generated coarse chunks may be advertised before bytes are ready. Detail chunks are independent and arrive in parallel; pending generated chunks surface as status messages and later readiness deltas.
 - **First chunk to GPU** (steps 5–10) — typical first-frame time is one RAF + one network round-trip + one decode + one upload, so on the order of 50–100 ms after `dataset_opened`.
 

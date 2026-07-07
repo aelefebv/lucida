@@ -33,7 +33,7 @@ fn downsample_256_to_128_x_gradient() {
 
     let spec = ProxySpec {
         entity_id: EntityId("img-entity".into()),
-        kind: ProxyKind::FieldProxy3D,
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 128,
@@ -96,7 +96,7 @@ fn downsample_anisotropic_proportional_scaling() {
 
     let spec = ProxySpec {
         entity_id: EntityId("img-entity".into()),
-        kind: ProxyKind::FieldProxy3D,
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 128,
@@ -127,7 +127,7 @@ fn downsample_target_larger_than_source_clamps() {
 
     let spec = ProxySpec {
         entity_id: EntityId("img-entity".into()),
-        kind: ProxyKind::FieldProxy3D,
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 256, // larger than source

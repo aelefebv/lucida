@@ -41,8 +41,8 @@
   ],
   "entity_kinds": [
     "Image",
-    "Well",
-    "Field"
+    "Group",
+    "Tile"
   ],
   "data_types": [
     "Uint8",
@@ -52,12 +52,12 @@
     "Float64"
   ],
   "positioning_modes": [
-    "Stage",
-    "Grid"
+    "Explicit",
+    "Derived"
   ],
   "proxy_kinds": [
-    "WellProxy3D",
-    "FieldProxy3D"
+    "GroupProxy3D",
+    "TileProxy3D"
   ],
   "dataset_open_stages": [
     "request_received",

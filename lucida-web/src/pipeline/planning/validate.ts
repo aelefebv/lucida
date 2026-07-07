@@ -27,30 +27,30 @@
 import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState } from "./types.ts";
 
 /**
- * Check 1 — FieldSnapshot.parentId references a known WellSnapshot.
+ * Check 1 — TileSnapshot.parentId references a known GroupSnapshot.
  *
- * Every {@link FieldSnapshot}'s `parentId`, when present in
- * `snapshot.entities`, must refer to an entity whose `kind === "Well"`.
+ * Every {@link TileSnapshot}'s `parentId`, when present in
+ * `snapshot.entities`, must refer to an entity whose `kind === "Group"`.
  *
  * The snapshot only carries entities WASM's `view_query` returned this
- * tick — a visible field can have an invisible parent well that doesn't
- * appear at all. The planner's `groupByWell` already handles this via a
- * `wellEntity: null` group (see `pipeline/planning/modes.ts`); treating
+ * tick — a visible tile can have an invisible parent group that doesn't
+ * appear at all. The planner's `groupMembers` already handles this via a
+ * `groupEntity: null` group (see `pipeline/planning/modes.ts`); treating
  * a missing parent as a violation would false-positive on every
- * legitimate field-without-visible-parent snapshot the orchestrator
+ * legitimate tile-without-visible-parent snapshot the orchestrator
  * builds. This narrowed form catches the genuinely-broken case (parent
- * IS in entities but it's not a Well) without contradicting reality.
+ * IS in entities but it's not a Group) without contradicting reality.
  */
-export function checkFieldParentRefs(snapshot: PlanningSnapshot): void {
+export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
   const byId = new Map<string, EntitySnapshot>();
   for (const e of snapshot.entities) byId.set(e.entityId, e);
   for (const e of snapshot.entities) {
-    if (e.kind !== "Field") continue;
+    if (e.kind !== "Tile") continue;
     const parent = byId.get(e.parentId);
     if (!parent) continue; // parent not in this tick's entities — not a violation
-    if (parent.kind !== "Well") {
+    if (parent.kind !== "Group") {
       throw new Error(
-        `validatePlanningInputs: FieldSnapshot ${e.entityId} parentId references non-Well entity ${e.parentId} (kind=${parent.kind})`,
+        `validatePlanningInputs: TileSnapshot ${e.entityId} parentId references non-Group entity ${e.parentId} (kind=${parent.kind})`,
       );
     }
   }
@@ -60,7 +60,7 @@ export function checkFieldParentRefs(snapshot: PlanningSnapshot): void {
  * Check 2 — entityId uniqueness.
  *
  * Every `entityId` must be unique across `snapshot.entities`. Duplicate
- * ids cause `prevModeByWell` (and other entity-keyed maps inside the
+ * ids cause `prevModeByGroup` (and other entity-keyed maps inside the
  * planner and downstream consumers) to silently drop earlier values.
  */
 export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
@@ -82,9 +82,9 @@ export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
  * Duplicate `imageId`s break `minimapPending` keying and any
  * image-keyed downstream lookup (cache keys, residency tables).
  *
- * Empty-string `imageId` is the conventional placeholder for `Well`
- * entities (the well IS the proxy — there is no image to key against);
- * a multi-well plate snapshot legitimately carries multiple
+ * Empty-string `imageId` is the conventional placeholder for `Group`
+ * entities (the group IS the proxy — there is no image to key against);
+ * a multi-group collection snapshot legitimately carries multiple
  * `imageId: ""` entries. The check only flags duplicates among the
  * non-empty image ids that actually drive image-keyed downstream
  * lookups.
@@ -132,7 +132,7 @@ export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
  * Check 5 — visibleRegion bbox + z-range validity.
  *
  * `visibleRegion.xyBoundsVox` must be a valid bbox: `xMin <= xMax` and
- * `yMin <= yMax`. `zRangeVox[0] <= zRangeVox[1]`. The field shape is
+ * `yMin <= yMax`. `zRangeVox[0] <= zRangeVox[1]`. The tile shape is
  * `[minX, minY, maxX, maxY]` (see `pipeline/viewport.ts`).
  *
  * A degenerate bbox produces no chunks, but it's a producer bug worth
@@ -175,7 +175,7 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
  * Check 8 — previousActiveSet has no duplicate entityIds.
  *
  * `state.previousActiveSet` must have no duplicate `entityId` entries.
- * Duplicates break `prevModeByWell`'s last-write-wins indexing
+ * Duplicates break `prevModeByGroup`'s last-write-wins indexing
  * downstream of the planner.
  */
 export function checkPrevActiveSetUnique(state: PlanningState): void {
@@ -197,14 +197,14 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
  * `snapshot.entities`, the entry's `kind` must agree with the entity's
  * `kind`:
  *
- *   - `kind: "well-as-proxy"` ⇒ entity must be `kind: "Well"`.
- *   - `kind: "field"`         ⇒ entity must be `kind: "Field"` OR
- *     `kind: "Image"`. The planner's `groupByWell` synthesizes an
+ *   - `kind: "group-as-proxy"` ⇒ entity must be `kind: "Group"`.
+ *   - `kind: "tile"`         ⇒ entity must be `kind: "Tile"` OR
+ *     `kind: "Image"`. The planner's `groupMembers` synthesizes an
  *     `__image__${entityId}` group for `Image` entities (singletons,
- *     non-plate datasets) so they go through the same field-mode
- *     code path as plate fields. The active-set entry it produces is
- *     therefore a `FieldEntry` even though the entity itself is an
- *     `ImageSnapshot`. See `pipeline/planning/modes.ts::groupByWell`.
+ *     non-collection datasets) so they go through the same tile-mode
+ *     code path as collection tiles. The active-set entry it produces is
+ *     therefore a `TileEntry` even though the entity itself is an
+ *     `ImageSnapshot`. See `pipeline/planning/modes.ts::groupMembers`.
  *   - `kind: "invisible"`     ⇒ NOT validated against entity kind. An
  *     entity can become invisible regardless of its kind, so the
  *     invisible variant is intentionally permissive.
@@ -241,17 +241,17 @@ export function checkPrevActiveSetKindAgreement(
  * kinds it may correspond to. Returns `null` for `kind: "invisible"` —
  * invisible entries are permissive (any entity can become invisible).
  *
- * `field` accepts both `Field` and `Image`: see the comment on
+ * `tile` accepts both `Tile` and `Image`: see the comment on
  * {@link checkPrevActiveSetKindAgreement} for the singleton rationale.
  */
 function allowedEntityKindsFor(
   entry: ActiveSetEntry,
 ): EntitySnapshot["kind"][] | null {
   switch (entry.kind) {
-    case "well-as-proxy":
-      return ["Well"];
-    case "field":
-      return ["Field", "Image"];
+    case "group-as-proxy":
+      return ["Group"];
+    case "tile":
+      return ["Tile", "Image"];
     case "invisible":
       return null;
   }
@@ -271,7 +271,7 @@ export function validatePlanningInputs(
   snapshot: PlanningSnapshot,
   state: PlanningState,
 ): void {
-  checkFieldParentRefs(snapshot);
+  checkTileParentRefs(snapshot);
   checkUniqueEntityIds(snapshot);
   checkUniqueImageIds(snapshot);
   checkLevelShapeArity(snapshot);

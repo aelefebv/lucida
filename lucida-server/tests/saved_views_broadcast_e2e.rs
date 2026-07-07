@@ -304,7 +304,7 @@ async fn post_broadcasts_to_clients_with_overlapping_datasets() {
 
     // POST a bookmark scoped to URL_A
     let body = json!({
-        "name": "Apoptotic morphology",
+        "name": "Group B7 view",
         "datasets": [URL_A],
         "view": sample_view_json(),
     });

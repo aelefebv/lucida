@@ -140,7 +140,7 @@ export interface SliceAtlasState {
   indirectionDirty: boolean;
 }
 
-// Shared dummy 2D indirection buffer for well-as-proxy slice layers.
+// Shared dummy 2D indirection buffer for group-as-proxy slice layers.
 // Stays at module scope: it's a per-device singleton, not per-session
 // state.
 let dummySliceIndirectionBuf: GPUBuffer | null = null;

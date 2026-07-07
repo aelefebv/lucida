@@ -199,7 +199,7 @@ export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: Minimap
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
-  // Bounding boxes (per-member — shows each FOV's outline)
+  // Bounding boxes (per-member — shows each tile's outline)
   for (const layer of layers) {
     drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, "rgba(255,255,255,0.5)");
   }
@@ -208,7 +208,7 @@ export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: Minimap
   drawAxisArrows(ctx, viewProj, canvasW, canvasH);
 
   if (mode === "slice") {
-    // Slice plane (per-member — shows Z within each FOV)
+    // Slice plane (per-member — shows Z within each tile)
     for (const layer of layers) {
       const dims = datasetDims.get(layer.datasetId);
       if (!dims) continue;

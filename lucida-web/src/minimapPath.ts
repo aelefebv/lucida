@@ -194,7 +194,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
   for (const [, ds] of datasets) {
-    // Iterate per-member so each FOV gets its own minimap overview texture.
+    // Iterate per-member so each tile gets its own minimap overview texture.
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
       const multiscale = img.multiscale;
@@ -392,7 +392,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   }
 
   if (state.overlayCallback) {
-    // Dataset dimensions (per member — all members share the same FOV shape)
+    // Dataset dimensions (per member — all members share the same tile shape)
     const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
     for (const layer of overlayLayers) {
       // Find the parent dataset for this member
@@ -450,7 +450,7 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
   state.overviewUploaded.delete(dsId);
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
-  // Clear any member-keyed entries (plate case, e.g. "dsId:A/1/0").
+  // Clear any member-keyed entries (collection case, e.g. "dsId:A/1/0").
   const prefix = dsId + ":";
   for (const key of [...state.overviewKey.keys()]) {
     if (key.startsWith(prefix)) {

@@ -178,7 +178,7 @@ export interface ResolvedLabel {
 }
 
 /** A resolved label paired with its user-controlled overlay opacity, plus the
- *  identity fields ({@link ResolvedLabel} extras) the fetch + render paths use.
+ *  identity tiles ({@link ResolvedLabel} extras) the fetch + render paths use.
  *  One is emitted per VISIBLE + eligible label by {@link resolveVisibleLabels}. */
 export interface ResolvedVisibleLabel extends ResolvedLabel {
   /** Label-group name (from the manifest), for UI/debug. */

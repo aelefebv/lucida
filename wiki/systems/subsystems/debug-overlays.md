@@ -5,7 +5,7 @@ description: "The in-app developer surface for inspecting the rendering pipeline
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/debug-overlays.md
 created: 2026-06-25
-modified: 2026-07-04
+modified: 2026-07-06
 ---
 
 # Debug overlays & diagnostics UI
@@ -63,9 +63,9 @@ The prod/dev split below is what keeps that out of production behavior.
 - **`DebugOverlays`** — an absolutely-positioned layer over the canvas with
   `pointer-events: none`, so it never steals interaction. Each overlay is gated
   by its own toggle and polls scene state every 100 ms. The overlays:
-  - *wellModes* — per-well badge with detail/coarse coverage (`Dn/m Cn/m`) and
-    promotion mode, placed at the well's projected world centroid.
-  - *chunkGrid* — the planned LOD chunk grid for every visible field, colored by
+  - *groupModes* — per-group badge with detail/coarse coverage (`Dn/m Cn/m`) and
+    promotion mode, placed at the group's projected world centroid.
+  - *chunkGrid* — the planned LOD chunk grid for every visible tile, colored by
     status (cached/in-flight/planned) or, via the *chunkTier* / *cachedTier* /
     *plannedRank* sub-toggles, by render tier, eviction tier, or fetch-queue
     rank. Capped at 600 rects/tick as a backstop.

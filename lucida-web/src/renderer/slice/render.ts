@@ -95,7 +95,7 @@ function ensureLabelPalette(
  * so a single-LOD descriptor (grid 1×1) reads it directly. The quad is
  * sized to the SOURCE's voxel extent (`layer.dataW/dataH`, from
  * `labelFootprint`) and placed at the source member's `offsetX/offsetY`, so
- * a coarser label still covers the same field of view. Declared OME colors
+ * a coarser label still covers the same region of the view. Declared OME colors
  * are honored via the palette buffer; the rest use the glasbey hash.
  * Returns the drawn view, or null when the pool has no resident slice yet.
  */
@@ -210,24 +210,24 @@ export function handleSliceRenderMultiPass(
     // Resolve proxy texture handles via the descriptor's dense pool
     // array. Slot indices + dims come from the GPU descriptor.
     const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
-    let fieldProxyTexture: GPUTexture | null = null;
-    let fieldProxySlotResident = false;
-    let wellProxyTexture: GPUTexture | null = null;
-    let wellProxySlotResident = false;
+    let tileProxyTexture: GPUTexture | null = null;
+    let tileProxySlotResident = false;
+    let groupProxyTexture: GPUTexture | null = null;
+    let groupProxySlotResident = false;
 
     if (desc) {
-      if (desc.fieldProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
+      if (desc.tileProxyHandle) {
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
         if (poolIdx !== undefined) {
-          fieldProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-          fieldProxySlotResident = true;
+          tileProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
+          tileProxySlotResident = true;
         }
       }
-      if (desc.wellProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.wellProxyHandle.poolKey);
+      if (desc.groupProxyHandle) {
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
         if (poolIdx !== undefined) {
-          wellProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-          wellProxySlotResident = true;
+          groupProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
+          groupProxySlotResident = true;
         }
       }
     }
@@ -235,9 +235,9 @@ export function handleSliceRenderMultiPass(
     // Skip when the layer has nothing renderable: no detail/coarse chunks
     // AND no resident proxy. Entities with either chunk tier or a resident
     // proxy continue rendering; the shader fallback chain handles the rest.
-    if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) continue;
+    if (!hasDetail && !hasCoarse && !tileProxySlotResident && !groupProxySlotResident) continue;
 
-    renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
+    renderer.setProxyTextures(tileProxyTexture, groupProxyTexture);
 
     renderer.setTierAtlases(
       hasDetail && detailAtlas ? detailAtlas.texture : null,

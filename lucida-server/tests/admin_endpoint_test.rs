@@ -126,7 +126,7 @@ fn populate_dataset(cache_dir: &Path, url: &str) -> std::path::PathBuf {
     let dir = cache_dir
         .join(hex16(&dataset_url_hash16(url)))
         .join("entity")
-        .join("field3d");
+        .join("tile3d");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("T00000_C000.bin"), b"a").unwrap();
     std::fs::write(dir.join("T00001_C000.bin"), b"b").unwrap();

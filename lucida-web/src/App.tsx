@@ -18,7 +18,7 @@ import {
 } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
-import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
+import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
@@ -442,7 +442,7 @@ function App({
   });
 
   // Layout registry — null until WasmScene is set up; subscribe so the
-  // PlateSelector and LayoutSwitcher re-derive on layout changes (local or
+  // CollectionSelector and LayoutSwitcher re-derive on layout changes (local or
   // peer). The version counter is the stable snapshot for useSyncExternalStore.
   const layoutRegistry = bridge.sessionRef.current?.ensureLayoutRegistry() ?? null;
   useSyncExternalStore(
@@ -463,7 +463,7 @@ function App({
   // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
   // changeTick alone doesn't bump on viewport-only mutations like
   // pan/zoom/T/C/Z/contrast). Used here AND threaded into SliceViewer /
-  // VolumeViewer / PlateSelector / handleCameraModeToggle
+  // VolumeViewer / CollectionSelector / handleCameraModeToggle
   // — anywhere a viewport mutation already calls bridge.emitPresence.
   const emitPresenceWithUrl = useCallback(() => {
     bridge.emitPresence();
@@ -827,7 +827,7 @@ function App({
         datasetId: string,
         entityId: string,
         imageId: string,
-        kind: "WellProxy3D" | "FieldProxy3D",
+        kind: "GroupProxy3D" | "TileProxy3D",
         t = 0,
         c = 0,
       ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
@@ -1195,10 +1195,10 @@ function App({
           // sessionController.ts, which bumps the settings generation after
           // every applied command and marks interactive — so the planner
           // re-reads and the canvas replans/renders without waiting for a
-          // pan/zoom (the #780 class: a missed signal here leaves plate
+          // pan/zoom (the #780 class: a missed signal here leaves collection
           // members drawn at their pre-switch positions).
           invalidateDisplaySettings(render.loopRef.current, "layout_switch");
-          // A local layout switch re-anchors plate annotations in core (issue
+          // A local layout switch re-anchors collection annotations in core (issue
           // #780), but — unlike an inbound peer switch (see sessionController.ts) — it
           // doesn't bump the remote document version on its own, so the overlay
           // would keep showing pins at their pre-switch positions for the
@@ -1350,19 +1350,19 @@ function App({
                 (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
                 ?? (activeId ? ds.manifest.source_layouts.find((l) => l.id === activeId)?.placements : null)
                 ?? null;
-              const plateData = extractPlateData(ds.manifest, activePlacements);
-              if (!plateData) return null;
+              const collectionData = extractCollectionData(ds.manifest, activePlacements);
+              if (!collectionData) return null;
               return (
-                <PlateSelector
-                  plateKind={plateData.plateKind}
-                  members={plateData.members}
-                  plateName={ds.name}
-                  onWellClick={(cx, cy) => {
+                <CollectionSelector
+                  collectionKind={collectionData.collectionKind}
+                  members={collectionData.members}
+                  collectionName={ds.name}
+                  onGroupClick={(cx, cy) => {
                     const ws = scene.wasmSceneRef.current;
                     if (!ws) return;
                     applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
                     emitPresenceWithUrl();
-                    requestRender(render.loopRef.current, "plate_well_click");
+                    requestRender(render.loopRef.current, "collection_group_click");
                   }}
                 />
               );

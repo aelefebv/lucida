@@ -29,6 +29,13 @@ pub struct DatasetDerivedState {
 }
 
 /// Precomputed per image-bearing entity.
+///
+/// A *member* is a placed image-bearing entity as the scene and renderer refer
+/// to it — an [`EntityKind::Tile`], or a single-image [`EntityKind::Image`].
+/// This is a separate vocabulary from the three that meet here: the generic
+/// "group" and "tile" used elsewhere as GPU pool and atlas units are pooling
+/// concepts, distinct from the [`EntityKind::Group`] / [`EntityKind::Tile`]
+/// content kinds a member is derived from.
 #[derive(Debug, Clone)]
 pub struct MemberState {
     pub entity_id: EntityId,
@@ -73,7 +80,7 @@ impl VisibleContentBounds2D {
 /// sizes across datasets, plus a Y translation (`top_align`) that top-aligns
 /// volumes of different heights in 3D. Kept in `f64`; consumers that build
 /// `f32` matrices cast at application time ([`Self::apply`]), consumers that
-/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the fields directly.
+/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the tiles directly.
 #[derive(Debug, Clone, Copy)]
 struct PlacementCorrection {
     correction: f64,
@@ -497,7 +504,7 @@ impl Scene {
     /// single-member-at-origin case this is a single element whose
     /// `needed`/`prefetch` lists are identical to the old flat plan.
     ///
-    /// For multi-member datasets (plates), each member's AABB is checked
+    /// For multi-member datasets (collections), each member's AABB is checked
     /// against the visible region, and chunk planning is done in
     /// member-local coordinates.
     pub fn chunk_plan_for(&self, dataset_id: &DatasetId) -> Option<Vec<MemberChunkPlan>> {
@@ -512,8 +519,8 @@ impl Scene {
             }
 
             let level0 = &member.levels[0];
-            let fov_w = level0.shape[4] as f64; // X
-            let fov_h = level0.shape[3] as f64; // Y
+            let tile_w = level0.shape[4] as f64; // X
+            let tile_h = level0.shape[3] as f64; // Y
 
             // Compute visible region using the member's volume transform.
             let vol_shape = [
@@ -530,8 +537,8 @@ impl Scene {
             // AABB culling (same logic as current but using member.position)
             let pos_x = member.position[0];
             let pos_y = member.position[1];
-            let member_max_x = pos_x + fov_w;
-            let member_max_y = pos_y + fov_h;
+            let member_max_x = pos_x + tile_w;
+            let member_max_y = pos_y + tile_h;
 
             let [vis_min_x, vis_min_y, vis_max_x, vis_max_y] = region.xy_bounds;
 
@@ -711,8 +718,8 @@ impl Scene {
     /// `ray_hit_local` uses the inverse to express hits in `[0,1]³`.
     ///
     /// For a dataset whose first member has layout position `[0, 0]` this
-    /// equals [`Self::member_world_matrix`]; for an offset member (e.g. a plate
-    /// well) the two differ only by the corrected XY translation.
+    /// equals [`Self::member_world_matrix`]; for an offset member (e.g. a collection
+    /// group) the two differ only by the corrected XY translation.
     ///
     /// Returns the identity for an unknown dataset or one with no members, so
     /// consumers degrade to an uncorrected unit cube rather than a special
@@ -779,13 +786,13 @@ impl Scene {
                 // Slice mode: ray and member positions are both in voxel space.
                 let pos_x = member.position[0];
                 let pos_y = member.position[1];
-                let fov_w = level0.shape[4] as f64;
-                let fov_h = level0.shape[3] as f64;
+                let tile_w = level0.shape[4] as f64;
+                let tile_h = level0.shape[3] as f64;
 
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
 
-                if rx >= pos_x && rx <= pos_x + fov_w && ry >= pos_y && ry <= pos_y + fov_h {
+                if rx >= pos_x && rx <= pos_x + tile_w && ry >= pos_y && ry <= pos_y + tile_h {
                     Some(([rx, ry, 0.0], 0.0))
                 } else {
                     None
@@ -1083,7 +1090,7 @@ impl Scene {
             let pos = member.position;
 
             // Compute screen-space bounding box.
-            // 2D: corners in voxel space (pos to pos+fov_size).
+            // 2D: corners in voxel space (pos to pos+tile_size).
             // 3D: corners from rendering_transform (includes position, Y-flip, global correction).
             let mut screen_min = [f64::MAX, f64::MAX];
             let mut screen_max = [f64::MIN, f64::MIN];
@@ -1308,7 +1315,7 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
 
 /// Find the position of an entity in the layout.
 /// For Image entities: look up directly in layout placements.
-/// For Field entities: look up parent well's placement + field->well transform translation.
+/// For Tile entities: look up parent group's placement + tile->group transform translation.
 ///
 /// Returns `[0.0, 0.0]` as a last-resort fallback for an entity with no resolvable
 /// placement, so render-path callers always get *some* position. Annotation
@@ -1351,8 +1358,8 @@ pub(crate) fn resolve_entity_position(
         return Some(p.position);
     }
 
-    // Otherwise, compose a field's position from its parent well's placement plus
-    // the field->well transform translation. Only resolvable if the parent is
+    // Otherwise, compose a tile's position from its parent group's placement plus
+    // the tile->group transform translation. Only resolvable if the parent is
     // itself placed in this layout.
     let entity = entities.iter().find(|e| &e.id == entity_id)?;
     let parent_id = entity.parent.as_ref()?;
@@ -1640,8 +1647,8 @@ pub(crate) mod test_helpers {
         opened
     }
 
-    /// Create a DatasetOpened for a plate with multiple image members.
-    pub fn make_plate_dataset_opened(
+    /// Create a DatasetOpened for a collection with multiple image members.
+    pub fn make_collection_dataset_opened(
         id: &str,
         name: &str,
         members: Vec<(&str, [f64; 2])>,
@@ -1738,11 +1745,11 @@ pub(crate) mod test_helpers {
         let manifest = DatasetManifest::new(
             DatasetId(id.to_string()),
             name.to_string(),
-            DatasetKind::Plate {
+            DatasetKind::Collection {
                 rows: vec!["A".to_string()],
                 columns: vec!["1".to_string(), "2".to_string()],
-                positioning_mode: PositioningMode::Grid,
-                has_stage_positions: false,
+                positioning_mode: PositioningMode::Derived,
+                has_explicit_positions: false,
             },
             entities,
             vec![],
@@ -1913,7 +1920,7 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        // Serialize, then strip optional fields
+        // Serialize, then strip optional tiles
         let json = serde_json::to_string(&scene).unwrap();
         let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
         val.as_object_mut().unwrap().remove("dataset_order");
@@ -2006,11 +2013,11 @@ mod tests {
     }
 
     #[test]
-    fn visible_content_bounds_include_all_visible_plate_members() {
+    fn visible_content_bounds_include_all_visible_collection_members() {
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [300.0, 100.0])],
             [1, 1, 5, 64, 32],
             [1, 1, 1, 32, 32],
@@ -2031,7 +2038,7 @@ mod tests {
 
         scene
             .dataset_settings
-            .get_mut(&DatasetId("plate".into()))
+            .get_mut(&DatasetId("collection".into()))
             .unwrap()
             .visible = false;
         assert_eq!(scene.visible_content_bounds_2d(), None);
@@ -2042,15 +2049,15 @@ mod tests {
         // Two members side-by-side, each 256x256 in XY. Camera at origin
         // should see member at [0,0] but not the one at [10000, 0].
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [10000.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let ds_id = DatasetId("plate".into());
+        let ds_id = DatasetId("collection".into());
         let plans = scene.chunk_plan_for(&ds_id).unwrap();
         // Only the member at origin should be visible
         assert_eq!(plans.len(), 1);
@@ -2323,15 +2330,15 @@ mod tests {
         if let Camera::Slice(ref mut v) = scene.camera {
             v.center = [256.0, 128.0];
         }
-        let reg = test_helpers::make_plate_dataset_opened(
-            "plate",
-            "plate",
+        let reg = test_helpers::make_collection_dataset_opened(
+            "collection",
+            "collection",
             vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let ds_id = DatasetId("plate".into());
+        let ds_id = DatasetId("collection".into());
         let plans = scene.chunk_plan_for(&ds_id).unwrap();
         let ids: Vec<&ImageId> = plans.iter().map(|p| &p.image_id).collect();
         assert!(
@@ -2376,15 +2383,15 @@ mod tests {
 
     #[test]
     fn dataset_world_bounds_frames_each_dataset_not_the_union() {
-        // A single image at the origin plus a 2-well plate offset along X. The
+        // A single image at the origin plus a 2-group collection offset along X. The
         // single dataset's box must be its OWN footprint, never the union that
-        // would also include the offset plate well.
+        // would also include the offset collection group.
         let mut scene = Scene::new([800, 600]);
         scene.apply(
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("a", "a", 1)).into(),
         );
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
                 "b",
                 "b",
                 vec![("b-m1", [0.0, 0.0]), ("b-m2", [256.0, 0.0])],
@@ -2402,18 +2409,18 @@ mod tests {
             a_min != b_min || a_max != b_max,
             "per-dataset bounds must differ for differently-placed datasets"
         );
-        // The plate spans two wells along X, so it is wider than the single image.
+        // The collection spans two groups along X, so it is wider than the single image.
         let a_width = a_max[0] - a_min[0];
         let b_width = b_max[0] - b_min[0];
         assert!(
             b_width > a_width + 1e-9,
-            "plate width {b_width} should exceed single-image width {a_width}"
+            "collection width {b_width} should exceed single-image width {a_width}"
         );
         // Crucially, "a" must NOT have grown to the union: its max-x stays near
-        // its own footprint, well short of the offset plate's far edge.
+        // its own footprint, group short of the offset collection's far edge.
         assert!(
             a_max[0] < b_max[0] - 1e-9,
-            "dataset_world_bounds('a') leaked the union (max-x {} vs plate max-x {})",
+            "dataset_world_bounds('a') leaked the union (max-x {} vs collection max-x {})",
             a_max[0],
             b_max[0]
         );
@@ -2425,7 +2432,7 @@ mod tests {
         // the renderer/minimap use — no second, drifting path.
         let mut scene = Scene::new([800, 600]);
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
                 "p",
                 "p",
                 vec![("p-m1", [0.0, 0.0]), ("p-m2", [256.0, 128.0])],
@@ -2469,13 +2476,16 @@ mod tests {
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("solo", "solo", 1))
                 .into(),
         );
-        // Config 2 + 3: a second, multi-member dataset — one well at the origin
+        // Config 2 + 3: a second, multi-member dataset — one group at the origin
         // and one with a non-trivial XY offset + anisotropic footprint.
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
-                "plate",
-                "plate",
-                vec![("plate-m1", [0.0, 0.0]), ("plate-m2", [256.0, 128.0])],
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
+                "collection",
+                "collection",
+                vec![
+                    ("collection-m1", [0.0, 0.0]),
+                    ("collection-m2", [256.0, 128.0]),
+                ],
                 [1, 1, 4, 200, 256],
                 [1, 1, 4, 200, 256],
             ))
@@ -2483,7 +2493,7 @@ mod tests {
         );
 
         let mut members_seen = 0;
-        for ds in ["solo", "plate"] {
+        for ds in ["solo", "collection"] {
             let derived = scene
                 .derived
                 .get(&DatasetId(ds.into()))
@@ -2522,7 +2532,7 @@ mod tests {
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("a", "a", 1)).into(),
         );
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
                 "b",
                 "b",
                 vec![("b-m1", [0.0, 0.0]), ("b-m2", [256.0, 128.0])],
@@ -2571,12 +2581,12 @@ mod tests {
         }
     }
 
-    /// Open a 512-voxel-cube dataset ("big") next to a two-well plate whose
-    /// wells are 256 voxels across ("plate", first well at the layout origin,
-    /// second offset). With isotropic unit spacing the plate's global
+    /// Open a 512-voxel-cube dataset ("big") next to a two-group collection whose
+    /// groups are 256 voxels across ("collection", first group at the layout origin,
+    /// second offset). With isotropic unit spacing the collection's global
     /// correction is a real 0.5 and its top-align term is (512-200)/512 —
     /// non-trivial placement on every axis this module corrects.
-    fn scene_with_big_and_plate() -> Scene {
+    fn scene_with_big_and_collection() -> Scene {
         let mut scene = Scene::new([800, 600]);
         scene.apply(
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
@@ -2590,9 +2600,9 @@ mod tests {
             .into(),
         );
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
-                "plate",
-                "plate",
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
+                "collection",
+                "collection",
                 vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
                 [1, 1, 4, 200, 256],
                 [1, 1, 1, 128, 128],
@@ -2607,14 +2617,14 @@ mod tests {
     /// origin it equals `rendering_transform`'s forward model
     /// element-for-element (the dataset-level matrix omits layout offsets, and
     /// an origin member has none). Checked for a single-image dataset and a
-    /// plate whose correction is a real 0.5 — so a policy change in
+    /// collection whose correction is a real 0.5 — so a policy change in
     /// `rendering_transform`'s placement would be caught here, not silently
     /// desync the minimap.
     #[test]
     fn dataset_model_matrix_matches_rendering_transform_for_origin_member() {
-        let scene = scene_with_big_and_plate();
+        let scene = scene_with_big_and_collection();
 
-        for ds in ["big", "plate"] {
+        for ds in ["big", "collection"] {
             let derived = scene
                 .derived
                 .get(&DatasetId(ds.into()))
@@ -2638,24 +2648,24 @@ mod tests {
             }
         }
 
-        // The plate is half the physical size of "big": its correction is a
+        // The collection is half the physical size of "big": its correction is a
         // real 0.5 (halved scales) and it is top-aligned below the taller
         // dataset's rim — this is NOT an identity or uncorrected transform.
-        let plate = scene.dataset_model_matrix("plate");
+        let collection = scene.dataset_model_matrix("collection");
         assert!(
-            (plate[0] - 0.5).abs() < 1e-6,
-            "global correction should halve the plate's X scale, got {}",
-            plate[0]
+            (collection[0] - 0.5).abs() < 1e-6,
+            "global correction should halve the collection's X scale, got {}",
+            collection[0]
         );
         assert!(
-            (plate[5] - 0.5 * 200.0 / 256.0).abs() < 1e-6,
+            (collection[5] - 0.5 * 200.0 / 256.0).abs() < 1e-6,
             "corrected Y scale wrong: {}",
-            plate[5]
+            collection[5]
         );
         assert!(
-            (plate[13] - (512.0 - 200.0) / 512.0).abs() < 1e-6,
+            (collection[13] - (512.0 - 200.0) / 512.0).abs() < 1e-6,
             "top-align term missing or wrong: {}",
-            plate[13]
+            collection[13]
         );
         // "big" attains the global max: correction 1, no top-align shift.
         let big = scene.dataset_model_matrix("big");
@@ -2673,7 +2683,7 @@ mod tests {
     /// change would scramble picking.
     #[test]
     fn dataset_inv_model_matrix_matches_render_inverse_and_round_trips() {
-        let scene = scene_with_big_and_plate();
+        let scene = scene_with_big_and_collection();
 
         // Multiply two column-major 4x4 matrices: returns a*b.
         let mul = |a: &[f32; 16], b: &[f32; 16]| -> [f32; 16] {
@@ -2693,7 +2703,7 @@ mod tests {
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
 
-        for ds in ["big", "plate"] {
+        for ds in ["big", "collection"] {
             let derived = scene
                 .derived
                 .get(&DatasetId(ds.into()))
@@ -2729,23 +2739,23 @@ mod tests {
     /// and framing are seeded from it), not the uncorrected unit-cube size.
     #[test]
     fn volume_diagonal_is_the_corrected_scale_diagonal() {
-        // Alone in the scene, the plate needs no correction: the diagonal is
+        // Alone in the scene, the collection needs no correction: the diagonal is
         // its anisotropic normalized-cube diagonal.
         let mut scene = Scene::new([800, 600]);
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
-                "plate",
-                "plate",
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
+                "collection",
+                "collection",
                 vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
                 [1, 1, 4, 200, 256],
                 [1, 1, 1, 128, 128],
             ))
             .into(),
         );
-        let plate_alone: f64 =
+        let collection_alone: f64 =
             (1.0f64 + (200.0f64 / 256.0).powi(2) + (4.0f64 / 256.0).powi(2)).sqrt();
         assert!(
-            (scene.volume_diagonal() - plate_alone).abs() < 1e-6,
+            (scene.volume_diagonal() - collection_alone).abs() < 1e-6,
             "uncorrected diagonal wrong: {}",
             scene.volume_diagonal()
         );
@@ -2782,14 +2792,14 @@ mod tests {
         );
 
         // Deterministic correction!=1 coverage (independent of map order):
-        // through the dataset-level matrix, the plate's corrected diagonal is
+        // through the dataset-level matrix, the collection's corrected diagonal is
         // exactly half its standalone diagonal.
-        let m = scene.dataset_model_matrix("plate");
-        let plate_diag =
+        let m = scene.dataset_model_matrix("collection");
+        let collection_diag =
             ((m[0] as f64).powi(2) + (m[5] as f64).powi(2) + (m[10] as f64).powi(2)).sqrt();
         assert!(
-            (plate_diag - 0.5 * plate_alone).abs() < 1e-6,
-            "plate's corrected diagonal should be half its standalone one: {plate_diag}"
+            (collection_diag - 0.5 * collection_alone).abs() < 1e-6,
+            "collection's corrected diagonal should be half its standalone one: {collection_diag}"
         );
     }
 
@@ -2826,7 +2836,7 @@ mod tests {
     fn dataset_world_bounds_equals_rendering_transform_corner_fold() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_plate_dataset_opened(
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
                 "p",
                 "p",
                 vec![("p-m1", [0.0, 0.0]), ("p-m2", [256.0, 128.0])],

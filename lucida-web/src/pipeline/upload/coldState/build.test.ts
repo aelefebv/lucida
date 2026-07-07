@@ -2,7 +2,7 @@
  * Unit tests for `buildColdState` / `buildColdActiveEntry`.
  *
  * The end-to-end pure builder collapses three near-duplicate per-variant
- * literals (well-as-proxy / invisible / field) into one branching
+ * literals (group-as-proxy / invisible / tile) into one branching
  * function and a top-level `Array.map`. Tests cover each variant +
  * display-state fallback + empty active set + multi-dataset shape.
  */
@@ -22,13 +22,13 @@ import { buildColdState, buildColdActiveEntry } from "./build.ts";
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function makeField(
+function makeTile(
   entityId: string,
   imageId: string,
   parentId: string,
 ): EntitySnapshot {
   return {
-    kind: "Field",
+    kind: "Tile",
     entityId,
     imageId,
     parentId,
@@ -103,33 +103,33 @@ function makeMatrices(): Map<string, { model: Float32Array; inv: Float32Array }>
 // ---------------------------------------------------------------------------
 
 describe("buildColdActiveEntry", () => {
-  it("maps a `field` entry forwarding LOD + mode + proxy flags + parentWellId", () => {
-    const entityById = new Map([["ent-a", makeField("ent-a", "img-a", "well-0")]]);
+  it("maps a `tile` entry forwarding LOD + mode + proxy flags + parentGroupId", () => {
+    const entityById = new Map([["ent-a", makeTile("ent-a", "img-a", "group-0")]]);
     const matricesByEntity = makeMatrices();
-    const fieldEntry: ActiveSetEntry = {
-      kind: "field",
+    const tileEntry: ActiveSetEntry = {
+      kind: "tile",
       entityId: "ent-a",
       imageId: "img-a",
-      mode: "fields-with-proxy-fallback",
+      mode: "tiles-with-proxy-fallback",
       targetLod: 1,
       coarsestDetailLod: 3,
       detailOwnedLodRange: [1, 3],
-      proxyKind: "FieldProxy3D",
+      proxyKind: "TileProxy3D",
       proxyAvailable: true,
-      wellProxyAvailable: false,
+      groupProxyAvailable: false,
     } as ActiveSetEntry;
 
-    const result = buildColdActiveEntry(fieldEntry, entityById, matricesByEntity, {});
+    const result = buildColdActiveEntry(tileEntry, entityById, matricesByEntity, {});
 
     expect(result.entityId).toBe("ent-a");
     expect(result.imageId).toBe("img-a");
     expect(result.targetLod).toBe(1);
     expect(result.detailOwnedLodRange).toEqual([1, 3]);
-    expect(result.mode).toBe("fields-with-proxy-fallback");
-    expect(result.proxyKind).toBe("FieldProxy3D");
+    expect(result.mode).toBe("tiles-with-proxy-fallback");
+    expect(result.proxyKind).toBe("TileProxy3D");
     expect(result.proxyAvailable).toBe(true);
-    expect(result.wellProxyAvailable).toBe(false);
-    expect(result.parentWellId).toBe("well-0");
+    expect(result.groupProxyAvailable).toBe(false);
+    expect(result.parentGroupId).toBe("group-0");
     // Levels are derived from the entity's `levels` array.
     expect(result.levels).toHaveLength(1);
     expect(result.levels[0]).toEqual({
@@ -143,34 +143,34 @@ describe("buildColdActiveEntry", () => {
     expect(result.invModelMatrix[5]).toBe(1);
   });
 
-  it("maps a `well-as-proxy` entry to mode well-as-proxy, targetLod 0, WellProxy3D, etc.", () => {
+  it("maps a `group-as-proxy` entry to mode group-as-proxy, targetLod 0, GroupProxy3D, etc.", () => {
     const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
     const synthM = new Float32Array(16); synthM[0] = 30; synthM[5] = 30; synthM[10] = 30; synthM[15] = 1;
     const synthInv = new Float32Array(16); synthInv[0] = 1/30; synthInv[5] = 1/30; synthInv[10] = 1/30; synthInv[15] = 1;
-    matricesByEntity.set("well-0", { model: synthM, inv: synthInv });
+    matricesByEntity.set("group-0", { model: synthM, inv: synthInv });
 
-    const entry: ActiveSetEntry = { kind: "well-as-proxy", entityId: "well-0" } as ActiveSetEntry;
+    const entry: ActiveSetEntry = { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry;
     const result = buildColdActiveEntry(entry, new Map(), matricesByEntity, {});
 
-    expect(result.kind).toBe("well-as-proxy");
-    expect(result.entityId).toBe("well-0");
-    // The well-as-proxy variant has no `imageId` field (`?: never`).
+    expect(result.kind).toBe("group-as-proxy");
+    expect(result.entityId).toBe("group-0");
+    // The group-as-proxy variant has no `imageId` tile (`?: never`).
     // Guard the assertion so the type narrows cleanly.
-    if (result.kind !== "well-as-proxy") throw new Error("expected well-as-proxy");
+    if (result.kind !== "group-as-proxy") throw new Error("expected group-as-proxy");
     expect((result as unknown as Record<string, unknown>).imageId).toBeUndefined();
     expect(result.targetLod).toBe(0);
     expect(result.detailOwnedLodRange).toEqual([0, 0]);
-    expect(result.mode).toBe("well-as-proxy");
-    expect(result.proxyKind).toBe("WellProxy3D");
+    expect(result.mode).toBe("group-as-proxy");
+    expect(result.proxyKind).toBe("GroupProxy3D");
     expect(result.proxyAvailable).toBe(true);
-    expect(result.wellProxyAvailable).toBe(true);
-    expect(result.parentWellId).toBeNull();
+    expect(result.groupProxyAvailable).toBe(true);
+    expect(result.parentGroupId).toBeNull();
     expect(result.modelMatrix[0]).toBe(30);
     expect(result.invModelMatrix[0]).toBeCloseTo(1 / 30);
   });
 
-  it("maps an `invisible` entry to legacy fields-with-detail mode at coarsestLod", () => {
-    const entityById = new Map([["ent-x", makeField("ent-x", "img-x", "well-0")]]);
+  it("maps an `invisible` entry to legacy tiles-with-detail mode at coarsestLod", () => {
+    const entityById = new Map([["ent-x", makeTile("ent-x", "img-x", "group-0")]]);
     const entry: ActiveSetEntry = {
       kind: "invisible",
       entityId: "ent-x",
@@ -184,28 +184,28 @@ describe("buildColdActiveEntry", () => {
     expect(result.imageId).toBe("img-x");
     expect(result.targetLod).toBe(3);
     expect(result.detailOwnedLodRange).toEqual([3, 3]);
-    expect(result.mode).toBe("fields-with-detail");
+    expect(result.mode).toBe("tiles-with-detail");
     expect(result.proxyKind).toBeUndefined();
     expect(result.proxyAvailable).toBe(false);
-    expect(result.wellProxyAvailable).toBe(false);
-    expect(result.parentWellId).toBe("well-0"); // Field's parent
+    expect(result.groupProxyAvailable).toBe(false);
+    expect(result.parentGroupId).toBe("group-0"); // Tile's parent
   });
 });
 
 describe("buildColdState", () => {
   it("builds the message shape: type, epochs, datasetId, current{T,Z}, region, viewMode", () => {
-    const entities = [makeField("ent-a", "img-a", "well-0")];
+    const entities = [makeTile("ent-a", "img-a", "group-0")];
     const activeSet: ActiveSetEntry[] = [
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: false,
-        wellProxyAvailable: false,
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
 
@@ -235,19 +235,19 @@ describe("buildColdState", () => {
   });
 
   it("threads desired proxy keys into cold state in stable order", () => {
-    const entities = [makeField("ent-a", "img-a", "well-0")];
+    const entities = [makeTile("ent-a", "img-a", "group-0")];
     const activeSet: ActiveSetEntry[] = [
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: true,
-        proxyKind: "FieldProxy3D",
-        wellProxyAvailable: false,
+        proxyKind: "TileProxy3D",
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
 
@@ -259,8 +259,8 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       desiredProxyKeys: new Set([
-        "ds1|ent-b|FieldProxy3D|0|0",
-        "ds1|ent-a|FieldProxy3D|0|0",
+        "ds1|ent-b|TileProxy3D|0|0",
+        "ds1|ent-a|TileProxy3D|0|0",
       ]),
       epochs: makeEpochs(),
       matricesByEntity: makeMatrices(),
@@ -268,24 +268,24 @@ describe("buildColdState", () => {
     });
 
     expect(msg.desiredProxyKeys).toEqual([
-      "ds1|ent-a|FieldProxy3D|0|0",
-      "ds1|ent-b|FieldProxy3D|0|0",
+      "ds1|ent-a|TileProxy3D|0|0",
+      "ds1|ent-b|TileProxy3D|0|0",
     ]);
   });
 
   it("bakes display state per visible channel with dataset-level fallbacks", () => {
-    const entities = [makeField("ent-a", "img-a", "well-0")];
+    const entities = [makeTile("ent-a", "img-a", "group-0")];
     const activeSet: ActiveSetEntry[] = [
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: false,
-        wellProxyAvailable: false,
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
     const dsSettings = makeDsSettings({
@@ -329,27 +329,27 @@ describe("buildColdState", () => {
 
   it("handles all three active-set variants in one tick (multi-variant)", () => {
     const entities = [
-      makeField("ent-a", "img-a", "well-0"),
-      makeField("ent-i", "img-i", "well-1"), // invisible owner
+      makeTile("ent-a", "img-a", "group-0"),
+      makeTile("ent-i", "img-i", "group-1"), // invisible owner
     ];
 
     const matrices = new Map<string, { model: Float32Array; inv: Float32Array }>();
     const m = new Float32Array(16); m[0] = m[5] = m[10] = m[15] = 1; // identity
-    matrices.set("well-0", { model: m, inv: m });
+    matrices.set("group-0", { model: m, inv: m });
     matrices.set("ent-a", { model: m, inv: m });
 
     const activeSet: ActiveSetEntry[] = [
-      { kind: "well-as-proxy", entityId: "well-0" } as ActiveSetEntry,
+      { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry,
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: false,
-        wellProxyAvailable: false,
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
       { kind: "invisible", entityId: "ent-i", imageId: "img-i", coarsestLod: 2 } as ActiveSetEntry,
     ];
@@ -367,9 +367,9 @@ describe("buildColdState", () => {
     });
 
     expect(msg.activeSet).toHaveLength(3);
-    expect(msg.activeSet[0].mode).toBe("well-as-proxy");
-    expect(msg.activeSet[1].mode).toBe("fields-with-detail");
-    expect(msg.activeSet[2].mode).toBe("fields-with-detail"); // invisible legacy encoding
+    expect(msg.activeSet[0].mode).toBe("group-as-proxy");
+    expect(msg.activeSet[1].mode).toBe("tiles-with-detail");
+    expect(msg.activeSet[2].mode).toBe("tiles-with-detail"); // invisible legacy encoding
     expect(msg.activeSet[2].targetLod).toBe(2);              // invisible @ coarsestLod
   });
 
@@ -393,18 +393,18 @@ describe("buildColdState", () => {
   it("multi-dataset: two independent calls produce two distinct messages keyed by datasetId", () => {
     const sharedActive: ActiveSetEntry[] = [
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: false,
-        wellProxyAvailable: false,
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
-    const entities = [makeField("ent-a", "img-a", "well-0")];
+    const entities = [makeTile("ent-a", "img-a", "group-0")];
 
     const msg1 = buildColdState({
       datasetId: "ds1",

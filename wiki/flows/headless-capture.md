@@ -5,7 +5,7 @@ description: "How a CLI/agent command turns a dataset into a PNG without a human
 tags: [lucida, flow]
 source_path: wiki/flows/headless-capture.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Flow: Headless Capture (montage + viewer screenshot/overview)
@@ -15,13 +15,13 @@ How a CLI/agent command turns a dataset into a PNG without a human at a browser:
 ## Trace: `dataset montage`
 
 1. **Fetch shape** — `DatasetWorkspaceClient::info` returns `dims = [T,C,Z,Y,X]` and the `workspace_dataset_id` (`main.rs:~2085`).
-2. **Plan cells + grid** — `montage::plan_montage` (`montage.rs:82`) picks a `MontageAxis` by priority: a multi-field plate samples fields, else a Z>1 stack samples Z (evenly, both ends inclusive), else a T>1 series samples T, else a single cell. `grid_cols` lays a roughly-square grid capped at `--cols` (default 4).
+2. **Plan cells + grid** — `montage::plan_montage` (`montage.rs:82`) picks a `MontageAxis` by priority: a multi-tile collection samples tiles, else a Z>1 stack samples Z (evenly, both ends inclusive), else a T>1 series samples T, else a single cell. `grid_cols` lays a roughly-square grid capped at `--cols` (default 4).
 3. **Probe one shared contrast window** — `build_cell_view` for the middle cell with `contrast: None` (auto on), wrapped in `with_render_param`, is loaded by `probe_montage_auto_contrast` → `capture_cdp_auto_contrast`, which reads `window.__lucidaAutoContrast`. The CLI then clips the low end (`BG_CLIP = 0.3`) to make ONE shared window for every cell. Per-cell auto-contrast would flatten a contact sheet (every cell the same brightness); a shared, background-clipped window keeps brightness comparable and through-stack structure visible. Best-effort: an unreadable probe falls back to per-cell auto.
 4. **Compose per-cell inline views** — for each cell, `build_cell_view(ds_id, cell, full_x, full_y, viewport, shared_contrast)` (`montage.rs:179`) builds a `SavedView` with a fit 2D `Slice` camera, the cell's z/t/c, the dataset visible, and EMPTY `datasets` (workspace-dataset-id form — the dataset is already open in the target workspace). A pinned window also restores the channel's natural colormap (`default_for_channel`), which a bare explicit window would reset to gray. `viewer_inline_view_web_url` (`main.rs:3274`) encodes it as a `#view=<base64url(gzip(json))>` fragment.
 5. **Two URLs per cell** — the clean interactive URL goes into the sidecar (`cells[].url`, for drill-in); `with_render_param` (`montage.rs:326`) adds `?render=1` ahead of the fragment for the actual capture.
 6. **Capture in one browser session** — `capture_montage_pngs` (`main.rs:3360`) launches Chrome once (`--headless=new --enable-unsafe-webgpu --ignore-gpu-blocklist`, ephemeral user-data-dir), discovers the DevTools endpoint from stderr, and drives `capture_cdp_png` per URL (a fresh target each) — far cheaper than relaunching per cell.
 7. **Stitch + label** — `stitch_grid` (`montage.rs:280`) decodes the thumbnails, lays them row-major on a dark backdrop, and burns each cell's slice label into its corner (8×8 bitmap font) so the sheet is self-identifying — an agent reads the slice straight off the image.
-8. **Write outputs** — the montage PNG, plus (with `--json`) an `out.png.json` sidecar carrying axis/cols/rows, the shared `contrast`, and per-cell `{index,row,col,z,t,c,field,label,url}` so a cell at `(row,col)` maps to `cells[row*cols+col]` with no counting.
+8. **Write outputs** — the montage PNG, plus (with `--json`) an `out.png.json` sidecar carrying axis/cols/rows, the shared `contrast`, and per-cell `{index,row,col,z,t,c,tile,label,url}` so a cell at `(row,col)` maps to `cells[row*cols+col]` with no counting.
 
 ## Trace: `view screenshot` / `view overview`
 
@@ -60,7 +60,7 @@ Two pieces in [lucida-web](../systems/crates/lucida-web.md) make headless captur
 
 - **`__lucidaCaptureReady` is a hand-shook contract, not an API.** A viewer change that stops publishing it, renames a field, or stops setting `ready`/`frameCount` silently breaks every CLI capture (montage, screenshot, overview, and the tryout harness) — the symptom is a render-timeout, not a build error. The Rust-side `LUCIDA_CAPTURE_READY_PROBE` JS string and the `LucidaCaptureReadyState` shape must stay in lockstep.
 - **The CDP client is hand-rolled.** Raw `Target/Page/Runtime/Emulation` calls over a WebSocket (`cdp_call`), Chrome discovered by `find_browser_binary` (`LUCIDA_BROWSER` override, then known macOS/PATH names). No puppeteer; a Chrome protocol change lands here.
-- **Per-field plate montage is not wired yet.** `dataset montage` plans as a single image (`plan_montage(dims, 1, …)` at the call site) even though `MontageAxis::Field` exists — member positions are a follow-up slice. A plate currently montages by Z/T of field 0.
+- **Per-tile collection montage is not wired yet.** `dataset montage` plans as a single image (`plan_montage(dims, 1, …)` at the call site) even though `MontageAxis::Tile` exists — member positions are a follow-up. A collection currently montages by Z/T of tile 0.
 - **WebGPU must be available in headless Chrome.** The flags force it on, but a host without a usable GPU stack yields a never-ready probe (the frame never renders) rather than a clear "no GPU" message.
 
 ## Related

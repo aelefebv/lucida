@@ -5,7 +5,7 @@ description: "A collaborative markup layer over a dataset: point/line/box pins, 
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/annotations.md
 created: 2026-06-25
-modified: 2026-07-04
+modified: 2026-07-06
 ---
 
 # Annotations, comments, and mentions
@@ -22,7 +22,7 @@ collaboration feature beyond [presence/follow](presence-and-follow-mode.md).
 `DocumentState.annotations` (keyed by dataset id). A pin carries an in-plane
 world `position [x,y]`, an additive `z` depth, discrete view selectors `t`/`c`,
 an `AnnotationKind` (Point/Line/Box), an optional second vertex `end` (line
-endpoint / box corner), its insertion-ordered `comments`, an optional plate
+endpoint / box corner), its insertion-ordered `comments`, an optional collection
 `anchor` entity, and an optional captured `view` (a [SavedView](saved-views.md)).
 Every field added after slice 1 is `#[serde(default)]`, so old persisted/wire
 documents deserialize unchanged and a pin serializes identically whether or not
@@ -46,8 +46,8 @@ epoch as the pin itself. See [Scene State and Epochs](scene-state-and-epochs.md)
 
 Pins are anchored in **world space** (the same frame as `centroidWorld` /
 layout positions, per ADR-0030), so they stay glued to the data for every peer
-regardless of viewport. On a plate dataset, `AddAnnotation`'s apply additionally
-glues the pin to the nearest placeable well/field (`nearest_anchor`) — computed
+regardless of viewport. On a collection dataset, `AddAnnotation`'s apply additionally
+glues the pin to the nearest placeable group/tile (`nearest_anchor`) — computed
 inside the canonical apply from synced state, so server and clients derive the
 **same** anchor without it riding the wire. When the active layout changes,
 `reanchor_for_layout` rigidly translates each anchored pin (position + `end`) by

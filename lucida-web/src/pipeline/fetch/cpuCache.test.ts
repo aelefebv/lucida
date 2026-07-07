@@ -165,16 +165,16 @@ function makePlan(
   epochs?: Partial<SceneEpochs>,
 ): RequestPlan {
   const resolvedActiveSet: ActiveSetEntry[] = activeSet ?? [{
-    kind: "field",
+    kind: "tile",
     entityId: "entity-1",
     imageId: "image-1",
-    mode: "fields-with-detail",
+    mode: "tiles-with-detail",
     targetLod: 0,
     coarsestDetailLod: 2,
     detailOwnedLodRange: [0, 2],
     proxyKind: undefined,
     proxyAvailable: false,
-    wellProxyAvailable: false,
+    groupProxyAvailable: false,
   }];
   return {
     requests,
@@ -196,16 +196,16 @@ function makePlan(
 
 function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
   return {
-    kind: "field",
+    kind: "tile",
     entityId,
     imageId: imageId ?? entityId.replace("entity", "image"),
-    mode: "fields-with-detail",
+    mode: "tiles-with-detail",
     targetLod: 0,
     coarsestDetailLod: 2,
     detailOwnedLodRange: [0, 2],
     proxyKind: undefined,
     proxyAvailable: false,
-    wellProxyAvailable: false,
+    groupProxyAvailable: false,
   };
 }
 
@@ -312,7 +312,7 @@ describe("CpuCache", () => {
         datasetId: "ds-1",
         entityId: "entity-1",
         imageId: "image-1",
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         t: 0,
         c: 0,
         priority: 0,
@@ -490,12 +490,12 @@ describe("CpuCache", () => {
       cache.onPlanRebuildStart();
 
       const detail = makeRequest({
-        entityId: "field-entity",
-        imageId: "field-image",
+        entityId: "tile-entity",
+        imageId: "tile-image",
         chunkKey: "0/0/0/0/0/0",
         lane: "detail",
       });
-      cache.submit(makePlan([detail], [makeActiveEntry("field-entity", "field-image")]));
+      cache.submit(makePlan([detail], [makeActiveEntry("tile-entity", "tile-image")]));
       await flush();
 
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
@@ -544,7 +544,7 @@ describe("CpuCache", () => {
       cache.submit(makePlanWithProxies([], [req]));
       expect(Array.from(cache.getDeliverable())).toEqual([]);
 
-      cache.markProxyMissing("ds-1|entity-1|FieldProxy3D|0|0");
+      cache.markProxyMissing("ds-1|entity-1|TileProxy3D|0|0");
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["proxy"]);
     });
 
@@ -781,7 +781,7 @@ describe("CpuCache", () => {
         datasetId: "ds-1",
         entityId: "entity-1",
         imageId: "image-1",
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         t: 0,
         c: 0,
         priority: 0,
@@ -831,7 +831,7 @@ describe("CpuCache", () => {
         datasetId: "ds-1",
         entityId: "entity-1",
         imageId: "image-1",
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         t: 0,
         c: 0,
         priority: 0,
@@ -907,7 +907,7 @@ describe("CpuCache", () => {
         datasetId: "ds-1",
         entityId: "entity-1",
         imageId: "image-1",
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         t: 0, c: 0, priority: 0,
       };
 
@@ -962,12 +962,12 @@ describe("CpuCache", () => {
       await flush();
 
       expect(cache.telemetry().proxyBytes).toBe(256);
-      expect(cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0)).not.toBeNull();
+      expect(cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0)).not.toBeNull();
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
       expect(cache.telemetry().proxyBytes).toBe(0);
-      expect(cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0)).toBeNull();
+      expect(cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0)).toBeNull();
     });
 
     it("clears ready deliveries", async () => {
@@ -1041,7 +1041,7 @@ describe("CpuCache", () => {
       const reqA = makeRequest({ entityId: "entity-A", imageId: "image-A", chunkKey: "0/0/0/0/0/0" });
       const proxyA: ProxyRequest = {
         datasetId: "ds-A", entityId: "entity-A", imageId: "image-A",
-        kind: "FieldProxy3D", t: 0, c: 0, priority: 0,
+        kind: "TileProxy3D", t: 0, c: 0, priority: 0,
       };
       cache.submit({
         requests: [reqA],
@@ -1057,7 +1057,7 @@ describe("CpuCache", () => {
       const reqB = makeRequest({ entityId: "entity-B", imageId: "image-B", chunkKey: "0/0/0/0/0/0" });
       const proxyB: ProxyRequest = {
         datasetId: "ds-B", entityId: "entity-B", imageId: "image-B",
-        kind: "FieldProxy3D", t: 0, c: 0, priority: 0,
+        kind: "TileProxy3D", t: 0, c: 0, priority: 0,
       };
       cache.submit({
         requests: [reqB],
@@ -1070,7 +1070,7 @@ describe("CpuCache", () => {
       await flush();
 
       const beforeDetailB = cache.getCachedChunk("entity-B", "0/0/0/0/0/0");
-      const beforeProxyB = cache.getCachedProxy("ds-B", "entity-B", "FieldProxy3D", 0, 0);
+      const beforeProxyB = cache.getCachedProxy("ds-B", "entity-B", "TileProxy3D", 0, 0);
       expect(beforeDetailB).not.toBeNull();
       expect(beforeProxyB).not.toBeNull();
       const mainBytesBoth = cache.telemetry().mainBytes;
@@ -1080,10 +1080,10 @@ describe("CpuCache", () => {
 
       // Dataset A is gone.
       expect(cache.getCachedChunk("entity-A", "0/0/0/0/0/0")).toBeNull();
-      expect(cache.getCachedProxy("ds-A", "entity-A", "FieldProxy3D", 0, 0)).toBeNull();
+      expect(cache.getCachedProxy("ds-A", "entity-A", "TileProxy3D", 0, 0)).toBeNull();
       // Dataset B is intact.
       expect(cache.getCachedChunk("entity-B", "0/0/0/0/0/0")).not.toBeNull();
-      expect(cache.getCachedProxy("ds-B", "entity-B", "FieldProxy3D", 0, 0)).not.toBeNull();
+      expect(cache.getCachedProxy("ds-B", "entity-B", "TileProxy3D", 0, 0)).not.toBeNull();
       // Bytes accounting reflects only A's data was subtracted.
       expect(cache.telemetry().mainBytes).toBe(mainBytesBoth - 64);
       expect(cache.telemetry().proxyBytes).toBe(proxyBytesBoth - 128);
@@ -1666,7 +1666,7 @@ describe("CpuCache", () => {
         datasetId: "ds-1",
         entityId: "entity-1",
         imageId: "image-1",
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         t: 0,
         c: 0,
         priority: 0,
@@ -1705,7 +1705,7 @@ describe("CpuCache", () => {
       expect(source.fetchProxyCalls[0]).toMatchObject({
         datasetId: "ds-1",
         entityId: "entity-1",
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         t: 0,
         c: 0,
       });
@@ -1723,7 +1723,7 @@ describe("CpuCache", () => {
       if (d.kind !== "proxy") throw new Error("expected proxy delivery");
       expect(d.datasetId).toBe("ds-1");
       expect(d.entityId).toBe("entity-1");
-      expect(d.proxyKind).toBe("FieldProxy3D");
+      expect(d.proxyKind).toBe("TileProxy3D");
       expect(d.t).toBe(0);
       expect(d.c).toBe(0);
       expect(d.header).toEqual(source.proxyHeader);
@@ -1807,7 +1807,7 @@ describe("CpuCache", () => {
     it("getCachedProxy returns null for misses and the entry for hits", async () => {
       const { cache } = createTestCache();
       expect(
-        cache.getCachedProxy("ds-1", "entity-x", "FieldProxy3D", 0, 0),
+        cache.getCachedProxy("ds-1", "entity-x", "TileProxy3D", 0, 0),
       ).toBeNull();
 
       cache.submit(makeProxyPlan([makeProxyRequest()]));
@@ -1816,7 +1816,7 @@ describe("CpuCache", () => {
       const hit = cache.getCachedProxy(
         "ds-1",
         "entity-1",
-        "FieldProxy3D",
+        "TileProxy3D",
         0,
         0,
       );
@@ -1856,10 +1856,10 @@ describe("CpuCache", () => {
       // 300 > 256 → oldest (t=0) was evicted.
       expect(cache.telemetry().proxyBytes).toBeLessThanOrEqual(budget);
       expect(
-        cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0),
+        cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0),
       ).toBeNull();
       expect(
-        cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 2, 0),
+        cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 2, 0),
       ).not.toBeNull();
     });
 
@@ -1872,7 +1872,7 @@ describe("CpuCache", () => {
       cache.reset();
       expect(cache.telemetry().proxyBytes).toBe(0);
       expect(
-        cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0),
+        cache.getCachedProxy("ds-1", "entity-1", "TileProxy3D", 0, 0),
       ).toBeNull();
       // Counter sanity check — fetchProxy not called again on reset.
       const before = source.fetchProxyCount;

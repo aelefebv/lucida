@@ -5,7 +5,7 @@ description: "lucida-web/src/pipeline/fetch/ — host-side cache between the net
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/cpu-cache.md
 created: 2026-04-18
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # CPU Cache
@@ -87,5 +87,5 @@ Both `lastSeenTick` and `priority` are refreshed on every `submit()` for any cac
 - **Cache budgets are per-lane buckets, with limited elasticity.** Detail and coarse do not evict each other while both have demand. Borrowing only happens when one lane has no requested work.
 - **Delivery order is strict priority across deliverables.** `ready[]` no longer imposes decode-completion order; `getDeliverable()` merges currently-wanted cached entries by planner priority.
 - **In-flight fetches are not automatically current.** A chunk requested by an older camera/LOD plan may finish after a rebuild; it stays cached but is deliverable only if a newer submit refreshed that in-flight key. This prevents stale low-LOD arrivals from uploading into a zoomed-in cold state.
-- **Worker skipped feedback is image-keyed, rejection is entity-keyed.** `markChunkEvicted` resolves `(imageId, c, chunkKey)` back through the cache entry before marking rejections, so plate fields whose `entityId` differs from `imageId` do not repeatedly resend rejected chunks.
+- **Worker skipped feedback is image-keyed, rejection is entity-keyed.** `markChunkEvicted` resolves `(imageId, c, chunkKey)` back through the cache entry before marking rejections, so collection tiles whose `entityId` differs from `imageId` do not repeatedly resend rejected chunks.
 - **`submit` is called before upload in the same tick** — the planner refreshes wanted-generation on cached entries before `deliverToWorker` asks for deliverables. If you reorder these in `tickCoordinator.ts`, expect a one-frame upload latency or stale deliverability.

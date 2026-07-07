@@ -1,9 +1,9 @@
 {
   "manifest": {
-    "dataset_id": "wds-plate-77",
-    "name": "screening-plate-01.zarr",
+    "dataset_id": "wds-collection-77",
+    "name": "screening-collection-01.zarr",
     "kind": {
-      "Plate": {
+      "Collection": {
         "rows": [
           "A",
           "B"
@@ -13,37 +13,37 @@
           "2",
           "3"
         ],
-        "positioning_mode": "Stage",
-        "has_stage_positions": true
+        "positioning_mode": "Explicit",
+        "has_explicit_positions": true
       }
     },
     "entities": [
       {
-        "id": "well-A1",
-        "kind": "Well",
+        "id": "group-A1",
+        "kind": "Group",
         "parent": null,
         "labels": {
           "name": "A1",
-          "well_row": "A",
-          "well_column": "1",
+          "group_row": "A",
+          "group_column": "1",
           "row_index": 0,
           "column_index": 0
         }
       },
       {
-        "id": "field-A1-f0",
-        "kind": "Field",
-        "parent": "well-A1",
+        "id": "tile-A1-f0",
+        "kind": "Tile",
+        "parent": "group-A1",
         "labels": {
           "name": "A1/0",
-          "field_index": 0
+          "tile_index": 0
         }
       }
     ],
     "transforms": [
       {
-        "from": "field-A1-f0",
-        "to": "well-A1",
+        "from": "tile-A1-f0",
+        "to": "group-A1",
         "transform": {
           "matrix": [
             1.0,
@@ -68,8 +68,8 @@
     ],
     "images": [
       {
-        "image_id": "field-A1-f0-image",
-        "owner": "field-A1-f0",
+        "image_id": "tile-A1-f0-image",
+        "owner": "tile-A1-f0",
         "multiscale": {
           "axes": [
             {
@@ -160,18 +160,18 @@
     ],
     "source_layouts": [
       {
-        "id": "layout-stage",
-        "name": "Stage positions",
+        "id": "layout-explicit",
+        "name": "Explicit positions",
         "placements": [
           {
-            "entity_id": "well-A1",
+            "entity_id": "group-A1",
             "position": [
               0.0,
               0.0
             ]
           },
           {
-            "entity_id": "field-A1-f0",
+            "entity_id": "tile-A1-f0",
             "position": [
               2048.0,
               1024.0
@@ -180,13 +180,13 @@
         ]
       }
     ],
-    "default_layout_id": "layout-stage"
+    "default_layout_id": "layout-explicit"
   },
   "fetch": {
     "Proxied": {
       "images": [
         {
-          "image_id": "field-A1-f0-image",
+          "image_id": "tile-A1-f0-image",
           "wire_format": {
             "Lz4": {
               "data_type": "Uint8"

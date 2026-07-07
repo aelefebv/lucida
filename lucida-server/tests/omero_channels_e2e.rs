@@ -60,9 +60,9 @@ fn write_store(name: &str, omero: Option<serde_json::Value>) -> PathBuf {
 
 fn omero_three() -> serde_json::Value {
     serde_json::json!({"version": "0.5", "channels": [
-        {"label": "DAPI (405 nm)", "color": "0099ff"},
-        {"label": "ALEXA 594 (590 nm)", "color": "ff0000"},
-        {"label": "ALEXA 488 (499 nm)", "color": "00ff00"}
+        {"label": "Channel 0", "color": "0099ff"},
+        {"label": "Channel 6", "color": "ff0000"},
+        {"label": "Channel 7", "color": "00ff00"}
     ]})
 }
 
@@ -79,7 +79,7 @@ async fn omero_labels_flow_into_manifest() {
         blob.contains("channel_infos"),
         "manifest must carry channel_infos: {blob}"
     );
-    for label in ["DAPI (405 nm)", "ALEXA 594 (590 nm)", "ALEXA 488 (499 nm)"] {
+    for label in ["Channel 0", "Channel 6", "Channel 7"] {
         assert!(blob.contains(label), "manifest missing label {label:?}");
     }
 }
@@ -94,7 +94,7 @@ async fn no_omero_is_back_compatible() {
     // skip_serializing_if = empty => the field simply doesn't appear; import must not error.
     let blob = serde_json::to_string(&serde_json::to_value(&result.manifest).unwrap()).unwrap();
     assert!(
-        !blob.contains("DAPI"),
+        !blob.contains("Channel 0"),
         "no-omero store should carry no channel labels"
     );
 }

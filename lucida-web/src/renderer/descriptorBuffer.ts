@@ -47,9 +47,9 @@ import {
   OFFSET_COLORMAP_LUT_INDEX,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
-  OFFSET_FIELD_PROXY_DIMS,
-  OFFSET_FIELD_PROXY_POOL_INDEX,
-  OFFSET_FIELD_PROXY_SLOT_INDEX,
+  OFFSET_TILE_PROXY_DIMS,
+  OFFSET_TILE_PROXY_POOL_INDEX,
+  OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_LABEL_OPACITY,
@@ -62,9 +62,9 @@ import {
   OFFSET_PAD_PROXY0,
   OFFSET_PAD_PROXY1,
   OFFSET_PAD_PROXY2,
-  OFFSET_WELL_PROXY_DIMS,
-  OFFSET_WELL_PROXY_POOL_INDEX,
-  OFFSET_WELL_PROXY_SLOT_INDEX,
+  OFFSET_GROUP_PROXY_DIMS,
+  OFFSET_GROUP_PROXY_POOL_INDEX,
+  OFFSET_GROUP_PROXY_SLOT_INDEX,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -118,11 +118,11 @@ export interface EntityDescriptorIndex {
  * Mirrors the keying in `gpu.worker.ts`'s cold-state handler:
  *   - Single-channel field:           `entry.imageId`
  *   - Multi-channel field:            `${entry.imageId}:ch${channel}`
- *   - Single-channel well-as-proxy:   `entry.entityId`
- *   - Multi-channel well-as-proxy:    `${entry.entityId}:ch${channel}`
+ *   - Single-channel group-as-proxy:   `entry.entityId`
+ *   - Multi-channel group-as-proxy:    `${entry.entityId}:ch${channel}`
  *
  * `ColdStateActiveEntry` is a discriminated union on `kind`; narrowing
- * through `entry.kind` makes the well-as-proxy variant TS-visible (it
+ * through `entry.kind` makes the group-as-proxy variant TS-visible (it
  * has no `imageId`).
  */
 export function memberIdForColdEntry(
@@ -130,7 +130,7 @@ export function memberIdForColdEntry(
   channel: number,
   multiChannel: boolean,
 ): string {
-  const base = entry.kind === "well-as-proxy" ? entry.entityId : entry.imageId;
+  const base = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
   return multiChannel ? `${base}:ch${channel}` : base;
 }
 
@@ -228,8 +228,8 @@ export function buildDescriptorBuffer(
       proxyDescriptorKey(entry.entityId, cold.currentT, channel),
     );
     if (desc) proxyDescriptorByMember.set(memberId, desc);
-    if (desc?.fieldProxyHandle) recordPool(desc.fieldProxyHandle.poolKey);
-    if (desc?.wellProxyHandle) recordPool(desc.wellProxyHandle.poolKey);
+    if (desc?.tileProxyHandle) recordPool(desc.tileProxyHandle.poolKey);
+    if (desc?.groupProxyHandle) recordPool(desc.groupProxyHandle.poolKey);
   }
 
   const entityCount = indexByMember.size;
@@ -339,49 +339,49 @@ export function serializeEntityDescriptor(
   // Resolve proxy handles to (poolIndex, slotIndex, dims). Sentinels for
   // any missing handle.
   const desc = proxyDescriptorsByEntity.get(proxyKey ?? entry.entityId);
-  let fieldPoolIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let fieldSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let fieldDims: [number, number, number] = [1, 1, 1];
-  let wellPoolIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let wellSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
-  let wellDims: [number, number, number] = [1, 1, 1];
-  if (desc?.fieldProxyHandle) {
-    const p = proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
+  let tilePoolIdx = DESCRIPTOR_SENTINEL_INDEX;
+  let tileSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
+  let tileDims: [number, number, number] = [1, 1, 1];
+  let groupPoolIdx = DESCRIPTOR_SENTINEL_INDEX;
+  let groupSlotIdx = DESCRIPTOR_SENTINEL_INDEX;
+  let groupDims: [number, number, number] = [1, 1, 1];
+  if (desc?.tileProxyHandle) {
+    const p = proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
     if (p !== undefined) {
-      fieldPoolIdx = p;
-      fieldSlotIdx = desc.fieldProxyHandle.slotIndex >>> 0;
-      fieldDims = proxyPoolsByIndex[p].slotDims;
+      tilePoolIdx = p;
+      tileSlotIdx = desc.tileProxyHandle.slotIndex >>> 0;
+      tileDims = proxyPoolsByIndex[p].slotDims;
     }
   }
-  if (desc?.wellProxyHandle) {
-    const p = proxyPoolIndexByKey.get(desc.wellProxyHandle.poolKey);
+  if (desc?.groupProxyHandle) {
+    const p = proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
     if (p !== undefined) {
-      wellPoolIdx = p;
-      wellSlotIdx = desc.wellProxyHandle.slotIndex >>> 0;
-      wellDims = proxyPoolsByIndex[p].slotDims;
+      groupPoolIdx = p;
+      groupSlotIdx = desc.groupProxyHandle.slotIndex >>> 0;
+      groupDims = proxyPoolsByIndex[p].slotDims;
     }
   }
 
   const lutIdx = colormapLutIndices.get(displayState.colormapName) ?? 0;
 
   u32[OFFSET_CHANNEL_MASK / 4]          = displayState.channelMask >>> 0;
-  u32[OFFSET_FIELD_PROXY_POOL_INDEX / 4] = fieldPoolIdx;
-  u32[OFFSET_FIELD_PROXY_SLOT_INDEX / 4] = fieldSlotIdx;
-  u32[OFFSET_WELL_PROXY_POOL_INDEX / 4]  = wellPoolIdx;
-  u32[OFFSET_WELL_PROXY_SLOT_INDEX / 4]  = wellSlotIdx;
+  u32[OFFSET_TILE_PROXY_POOL_INDEX / 4] = tilePoolIdx;
+  u32[OFFSET_TILE_PROXY_SLOT_INDEX / 4] = tileSlotIdx;
+  u32[OFFSET_GROUP_PROXY_POOL_INDEX / 4]  = groupPoolIdx;
+  u32[OFFSET_GROUP_PROXY_SLOT_INDEX / 4]  = groupSlotIdx;
   u32[OFFSET_PAD_PROXY0 / 4] = 0;
   u32[OFFSET_PAD_PROXY1 / 4] = 0;
   u32[OFFSET_PAD_PROXY2 / 4] = 0;
-  const fieldDimsBase = OFFSET_FIELD_PROXY_DIMS / 4;
-  u32[fieldDimsBase + 0] = fieldDims[0];
-  u32[fieldDimsBase + 1] = fieldDims[1];
-  u32[fieldDimsBase + 2] = fieldDims[2];
-  u32[fieldDimsBase + 3] = 0;
-  const wellDimsBase = OFFSET_WELL_PROXY_DIMS / 4;
-  u32[wellDimsBase + 0] = wellDims[0];
-  u32[wellDimsBase + 1] = wellDims[1];
-  u32[wellDimsBase + 2] = wellDims[2];
-  u32[wellDimsBase + 3] = 0;
+  const tileDimsBase = OFFSET_TILE_PROXY_DIMS / 4;
+  u32[tileDimsBase + 0] = tileDims[0];
+  u32[tileDimsBase + 1] = tileDims[1];
+  u32[tileDimsBase + 2] = tileDims[2];
+  u32[tileDimsBase + 3] = 0;
+  const groupDimsBase = OFFSET_GROUP_PROXY_DIMS / 4;
+  u32[groupDimsBase + 0] = groupDims[0];
+  u32[groupDimsBase + 1] = groupDims[1];
+  u32[groupDimsBase + 2] = groupDims[2];
+  u32[groupDimsBase + 3] = 0;
 
   f32[OFFSET_CONTRAST_MIN / 4] = displayState.contrastMin;
   f32[OFFSET_CONTRAST_MAX / 4] = displayState.contrastMax;
@@ -435,8 +435,8 @@ export function serializeEntityDescriptor(
     }
   }
 
-  const detailLevel = entry.kind === "field" ? entry.detailLevel : undefined;
-  const coarseLevel = entry.kind === "field" ? entry.coarseLevel : undefined;
+  const detailLevel = entry.kind === "tile" ? entry.detailLevel : undefined;
+  const coarseLevel = entry.kind === "tile" ? entry.coarseLevel : undefined;
   const hasTierSources = detailLevel !== undefined;
   const detailMeta = hasTierSources
     ? findLodMeta(lodMetas, detailLevel)

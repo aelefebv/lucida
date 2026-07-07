@@ -1,5 +1,5 @@
 /**
- * Compute a screen-space scissor rect for a well's `[0,1]^3` unit cube.
+ * Compute a screen-space scissor rect for a group's `[0,1]^3` unit cube.
  *
  * Returns full-canvas `[0, 0, canvasW, canvasH]` when any corner has
  * `clipW <= 0` (behind camera); returns `null` when the clamped rect

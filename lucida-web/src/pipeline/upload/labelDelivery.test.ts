@@ -60,9 +60,9 @@ function ms(
 
 // Source is 2 Z-planes; label is a 2x2x2 chunk (fat Z: both planes in one chunk).
 const label: LabelSpec = {
-  name: "mito",
+  name: "region-b",
   source_image_id: "img-0",
-  image: ms("img-0:label:mito", "Uint32", [1, 1, 2, 2, 2], [1, 1, 2, 2, 2], [1, 1, 1, 1, 1]),
+  image: ms("img-0:label:region-b", "Uint32", [1, 1, 2, 2, 2], [1, 1, 2, 2, 2], [1, 1, 1, 1, 1]),
   colors: [],
   source_declared: true,
 };
@@ -101,7 +101,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 1 });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
-    expect(req.imageId).toBe("img-0:label:mito");
+    expect(req.imageId).toBe("img-0:label:region-b");
     expect(req.z).toBe(0); // Z=1 sits in Z-chunk 0 (chunkZ=2)
 
     // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids): plane0 then plane1.
@@ -125,7 +125,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     const datasets = new Map<string, DatasetEntry>([
       ["ds-0", { manifest } as unknown as DatasetEntry],
     ]);
-    const meta = buildManifestByImage(datasets).get("img-0:label:mito");
+    const meta = buildManifestByImage(datasets).get("img-0:label:region-b");
     expect(meta?.isLabel).toBe(true);
 
     const writes: WriteTextureCall[] = [];
@@ -152,12 +152,12 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     // sliceZ=1 → the delivery path extracts the z=1 plane (last 4 ids).
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
     expect(result).not.toBeNull();
-    expect(result!.memberId).toBe("img-0:label:mito");
+    expect(result!.memberId).toBe("img-0:label:region-b");
     // Only ONE 2x2 plane crosses (16 bytes), never the whole 8-id chunk (32).
     expect(result!.bytes).toBe(16);
 
     // 4. The plane landed in the pool sized to the label's own dims.
-    const pool = ctx.state.labelSlicePools.get("img-0:label:mito");
+    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b");
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);
@@ -172,11 +172,11 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
   it("drops a delivery whose Z-chunk no longer matches the current view", () => {
     const meta = buildManifestByImage(
       new Map<string, DatasetEntry>([["ds-0", { manifest } as unknown as DatasetEntry]]),
-    ).get("img-0:label:mito");
+    ).get("img-0:label:region-b");
     const delivery: ReadyChunkDelivery = {
       kind: "chunk",
-      entityId: "img-0:label:mito",
-      imageId: "img-0:label:mito",
+      entityId: "img-0:label:region-b",
+      imageId: "img-0:label:region-b",
       level: 0,
       t: 0, c: 0, z: 5, y: 0, x: 0, // z-chunk 5, but the view maps to z-chunk 0
       chunkKey: "0/0/0/5/0/0",
@@ -199,7 +199,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume" });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
-    expect(req.imageId).toBe("img-0:label:mito");
+    expect(req.imageId).toBe("img-0:label:region-b");
 
     // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids), incl. ids past 16 bits.
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
@@ -221,7 +221,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     const datasets = new Map<string, DatasetEntry>([
       ["ds-0", { manifest } as unknown as DatasetEntry],
     ]);
-    const meta = buildManifestByImage(datasets).get("img-0:label:mito");
+    const meta = buildManifestByImage(datasets).get("img-0:label:region-b");
     expect(meta?.isLabel).toBe(true);
 
     const writes: WriteTextureCall[] = [];
@@ -248,7 +248,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
 
     const result = dispatchLabelVolumeChunkDelivery(client, delivery, meta!, EPOCHS);
     expect(result).not.toBeNull();
-    expect(result!.memberId).toBe("img-0:label:mito");
+    expect(result!.memberId).toBe("img-0:label:region-b");
     // The WHOLE chunk crosses (8 ids * 4 = 32 bytes) — never a single ~plane.
     expect(result!.bytes).toBe(32);
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
@@ -256,7 +256,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
 
     // 4. The chunk landed in the volume pool sized to the label's own dims,
     //    stamped with the owning dataset for removal.
-    const pool = ctx.state.labelVolumePools.get("img-0:label:mito");
+    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b");
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);

@@ -63,7 +63,7 @@ function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
  *     (lower = more urgent).
  *   - Output objects are freshly allocated; the caller may mutate them.
  *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
- *   - `epochs.request` = input + 1; other epoch fields forwarded unchanged.
+ *   - `epochs.request` = input + 1; other epoch tiles forwarded unchanged.
  *   - `stats` reflects this call only.
  */
 export function plan(
@@ -99,10 +99,10 @@ export function plan(
   const allRequests: ChunkRequest[] = [];
   const proxyRequests: ProxyRequest[] = [];
 
-  // Track well-proxy requests we've already emitted (one per
-  // (wellId, t, c)) so multiple fields-with-proxy-fallback fields of
-  // the same well don't each push a duplicate parent-well request.
-  const wellProxyEmitted = new Set<string>();
+  // Track group-proxy requests we've already emitted (one per
+  // (groupId, t, c)) so multiple tiles-with-proxy-fallback tiles of
+  // the same group don't each push a duplicate parent-group request.
+  const groupProxyEmitted = new Set<string>();
 
   // Step 3: Minimap lane — highest priority (see ADR 0023). Emitted
   // before detail so the minimap appears within ~1s of dataset open
@@ -123,11 +123,11 @@ export function plan(
     stats,
     allRequests,
     proxyRequests,
-    wellProxyEmitted,
+    groupProxyEmitted,
     config,
   );
 
-  // Step 5: Prefetch lane — for field-mode entries only.
+  // Step 5: Prefetch lane — for tile-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
   // Step 6: Context fallback lane. The bridge emits explicit coarse

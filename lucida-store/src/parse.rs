@@ -67,7 +67,7 @@ pub(crate) struct ParsedMultiscales {
 }
 
 /// Parse OME multiscales from a root zarr.json value.
-/// `error_prefix` is prepended to error messages (e.g., "A/1/0: " for plates).
+/// `error_prefix` is prepended to error messages (e.g., "A/1/0: " for collections).
 pub(crate) fn parse_multiscales(
     root_json: &serde_json::Value,
     error_prefix: &str,
@@ -146,7 +146,7 @@ pub(crate) fn parse_multiscales(
 }
 
 /// Parse per-channel display info from the OME `omero.channels` block of a
-/// root (or FOV) `zarr.json` value.
+/// root (or tile) `zarr.json` value.
 ///
 /// GENERIC and untrusted-input safe. The omero block is optional rendering
 /// metadata that *any* OME-Zarr producer may emit, omit, or get wrong — this
@@ -374,7 +374,7 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 }
 
 /// Read ArrayMeta for each level in the multiscale pyramid.
-/// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for plate FOVs).
+/// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection tiles).
 pub(crate) async fn read_level_metas(
     store: &Arc<dyn ObjectStore>,
     base_prefix: &str,
@@ -496,28 +496,28 @@ mod tests {
     fn omero_channels_parses_labels_and_colors_in_order() {
         let root = root_with_omero(serde_json::json!({
             "channels": [
-                {"label": "DAPI", "color": "0000FF"},
-                {"label": "GFP", "color": "00FF00"},
-                {"label": "RFP", "color": "FF0000"}
+                {"label": "Channel 0", "color": "0000FF"},
+                {"label": "Channel 1", "color": "00FF00"},
+                {"label": "Channel 2", "color": "FF0000"}
             ]
         }));
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 3);
-        assert_eq!(infos[0].label, "DAPI");
+        assert_eq!(infos[0].label, "Channel 0");
         assert_eq!(infos[0].color.as_deref(), Some("0000FF"));
-        assert_eq!(infos[1].label, "GFP");
-        assert_eq!(infos[2].label, "RFP");
+        assert_eq!(infos[1].label, "Channel 1");
+        assert_eq!(infos[2].label, "Channel 2");
         assert_eq!(infos[2].color.as_deref(), Some("FF0000"));
     }
 
     #[test]
     fn omero_channels_label_only_is_fine() {
         let root = root_with_omero(serde_json::json!({
-            "channels": [{"label": "Brightfield"}]
+            "channels": [{"label": "Channel 9"}]
         }));
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].label, "Brightfield");
+        assert_eq!(infos[0].label, "Channel 9");
         assert_eq!(infos[0].color, None);
     }
 
@@ -542,7 +542,7 @@ mod tests {
         // Untrusted shape: channels is an object, a string, a number, null.
         for bad in [
             serde_json::json!({"channels": {"label": "X"}}),
-            serde_json::json!({"channels": "DAPI"}),
+            serde_json::json!({"channels": "Channel 0"}),
             serde_json::json!({"channels": 5}),
             serde_json::json!({"channels": null}),
         ] {
@@ -585,14 +585,14 @@ mod tests {
         // so the list is trimmed to length 1.
         let root = root_with_omero(serde_json::json!({
             "channels": [
-                {"label": "DAPI"},
+                {"label": "Channel 0"},
                 {"label": "  "},
                 {}
             ]
         }));
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].label, "DAPI");
+        assert_eq!(infos[0].label, "Channel 0");
     }
 
     #[test]
@@ -601,14 +601,14 @@ mod tests {
         // filled with the positional fallback so "Marker" still maps to ch 2.
         let root = root_with_omero(serde_json::json!({
             "channels": [
-                {"label": "DAPI"},
+                {"label": "Channel 0"},
                 {"label": "   "},
                 {"label": "Marker"}
             ]
         }));
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 3);
-        assert_eq!(infos[0].label, "DAPI");
+        assert_eq!(infos[0].label, "Channel 0");
         assert_eq!(infos[1].label, "Ch 1"); // positional fallback, alignment preserved
         assert_eq!(infos[1].color, None);
         assert_eq!(infos[2].label, "Marker");
@@ -617,10 +617,10 @@ mod tests {
     #[test]
     fn omero_channels_label_is_trimmed() {
         let root = root_with_omero(serde_json::json!({
-            "channels": [{"label": "  DAPI  "}]
+            "channels": [{"label": "  Channel 0  "}]
         }));
         let infos = parse_omero_channels(&root);
-        assert_eq!(infos[0].label, "DAPI");
+        assert_eq!(infos[0].label, "Channel 0");
     }
 
     #[test]
@@ -699,14 +699,10 @@ mod tests {
 
     #[test]
     fn labels_names_parses_in_order() {
-        let json = labels_group(serde_json::json!([
-            "mitochondria",
-            "foreground",
-            "mito_eroded"
-        ]));
+        let json = labels_group(serde_json::json!(["region-b", "foreground", "region-e"]));
         assert_eq!(
             parse_labels_names(&json),
-            vec!["mitochondria", "foreground", "mito_eroded"],
+            vec!["region-b", "foreground", "region-e"],
         );
     }
 
@@ -717,8 +713,8 @@ mod tests {
         assert!(parse_labels_names(&none).is_empty());
         // labels present but not an array.
         for bad in [
-            serde_json::json!("cells"),
-            serde_json::json!({"0": "cells"}),
+            serde_json::json!("region-c"),
+            serde_json::json!({"0": "region-c"}),
             serde_json::json!(7),
             serde_json::json!(null),
         ] {
@@ -728,8 +724,10 @@ mod tests {
 
     #[test]
     fn labels_names_dedupes_preserving_first_occurrence() {
-        let json = labels_group(serde_json::json!(["cells", "nuclei", "cells", "cells"]));
-        assert_eq!(parse_labels_names(&json), vec!["cells", "nuclei"]);
+        let json = labels_group(serde_json::json!([
+            "region-c", "region-a", "region-c", "region-c"
+        ]));
+        assert_eq!(parse_labels_names(&json), vec!["region-c", "region-a"]);
     }
 
     #[test]

@@ -435,10 +435,10 @@ fn enum_vocabulary() -> EnumVocabulary {
         clip_modes: vocab!(ClipMode::{ Plane, Sphere }),
         annotation_kinds: vocab!(AnnotationKind::{ Point, Line, Box }),
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
-        entity_kinds: vocab!(EntityKind::{ Image, Well, Field }),
+        entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
         data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Float32, Float64 }),
-        positioning_modes: vocab!(PositioningMode::{ Stage, Grid }),
-        proxy_kinds: vocab!(ProxyKind::{ WellProxy3D, FieldProxy3D }),
+        positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
+        proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,
             BindingBuild, GeneratedCoarsePlanning, WorkspacePersist, Broadcast, Complete,
@@ -469,7 +469,7 @@ fn enum_vocabulary() -> EnumVocabulary {
 
 const SINGLE_DATASET_ID: &str = "wds-0f3a";
 const SINGLE_IMAGE_ID: &str = "multiscale-0";
-const SINGLE_LABEL_IMAGE_ID: &str = "multiscale-0:label:nuclei";
+const SINGLE_LABEL_IMAGE_ID: &str = "multiscale-0:label:region-a";
 const SINGLE_ENTITY_ID: &str = "img-0";
 
 /// A realistic single-image manifest: multi-level 5D multiscale with a
@@ -543,18 +543,18 @@ fn single_manifest() -> DatasetManifest {
         }],
         channel_infos: vec![
             ChannelInfo {
-                label: "DAPI".into(),
+                label: "Channel 0".into(),
                 color: Some("0000FF".into()),
             },
             ChannelInfo {
-                label: "GFP".into(),
+                label: "Channel 1".into(),
                 color: None,
             },
         ],
     };
 
     let label = LabelSpec {
-        name: "nuclei".into(),
+        name: "region-a".into(),
         source_image_id: image_id.clone(),
         image: ImageSpec {
             image_id: ImageId(SINGLE_LABEL_IMAGE_ID.into()),
@@ -660,8 +660,8 @@ fn single_catalog() -> AssetCatalog {
     AssetCatalog {
         entries: vec![ProxyAvailability {
             entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::FieldProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::FieldProxy3D, [50, 128, 128])],
+            kinds: vec![ProxyKind::TileProxy3D],
+            footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [50, 128, 128])],
         }],
     }
 }
@@ -675,55 +675,55 @@ fn single_dataset_opened() -> DatasetOpened {
     }
 }
 
-/// A plate manifest: well/field entity hierarchy, stage positioning, and a
-/// field-owned image.
-fn plate_dataset_opened() -> DatasetOpened {
-    let well_id = EntityId("well-A1".into());
-    let field_id = EntityId("field-A1-f0".into());
-    let image_id = ImageId("field-A1-f0-image".into());
+/// A collection manifest: group/tile entity hierarchy, explicit positioning, and a
+/// tile-owned image.
+fn collection_dataset_opened() -> DatasetOpened {
+    let group_id = EntityId("group-A1".into());
+    let tile_id = EntityId("tile-A1-f0".into());
+    let image_id = ImageId("tile-A1-f0-image".into());
 
     let manifest = DatasetManifest::new(
-        DatasetId("wds-plate-77".into()),
-        "screening-plate-01.zarr".into(),
-        DatasetKind::Plate {
+        DatasetId("wds-collection-77".into()),
+        "screening-collection-01.zarr".into(),
+        DatasetKind::Collection {
             rows: vec!["A".into(), "B".into()],
             columns: vec!["1".into(), "2".into(), "3".into()],
-            positioning_mode: PositioningMode::Stage,
-            has_stage_positions: true,
+            positioning_mode: PositioningMode::Explicit,
+            has_explicit_positions: true,
         },
         vec![
             Entity {
-                id: well_id.clone(),
-                kind: EntityKind::Well,
+                id: group_id.clone(),
+                kind: EntityKind::Group,
                 parent: None,
                 labels: EntityLabels {
                     name: Some("A1".into()),
-                    well_row: Some("A".into()),
-                    well_column: Some("1".into()),
+                    group_row: Some("A".into()),
+                    group_column: Some("1".into()),
                     row_index: Some(0),
                     column_index: Some(0),
-                    field_index: None,
+                    tile_index: None,
                 },
             },
             Entity {
-                id: field_id.clone(),
-                kind: EntityKind::Field,
-                parent: Some(well_id.clone()),
+                id: tile_id.clone(),
+                kind: EntityKind::Tile,
+                parent: Some(group_id.clone()),
                 labels: EntityLabels {
                     name: Some("A1/0".into()),
-                    field_index: Some(0),
+                    tile_index: Some(0),
                     ..Default::default()
                 },
             },
         ],
         vec![TransformEdge {
-            from: field_id.clone(),
-            to: well_id.clone(),
+            from: tile_id.clone(),
+            to: group_id.clone(),
             transform: VoxelTransform::from_voxel_translation_2d(2048.0, 1024.0),
         }],
         vec![ImageSpec {
             image_id: image_id.clone(),
-            owner: field_id.clone(),
+            owner: tile_id.clone(),
             multiscale: MultiscaleInfo {
                 axes: vec![
                     Axis {
@@ -767,20 +767,20 @@ fn plate_dataset_opened() -> DatasetOpened {
             },
         }],
         vec![LayoutSpec {
-            id: LayoutId("layout-stage".into()),
-            name: "Stage positions".into(),
+            id: LayoutId("layout-explicit".into()),
+            name: "Explicit positions".into(),
             placements: vec![
                 EntityPlacement {
-                    entity_id: well_id,
+                    entity_id: group_id,
                     position: [0.0, 0.0],
                 },
                 EntityPlacement {
-                    entity_id: field_id,
+                    entity_id: tile_id,
                     position: [2048.0, 1024.0],
                 },
             ],
         }],
-        Some(LayoutId("layout-stage".into())),
+        Some(LayoutId("layout-explicit".into())),
     );
 
     DatasetOpened {
@@ -814,7 +814,7 @@ fn peer_display_settings() -> DatasetDisplaySettings {
                 contrast_min: 100.0,
                 contrast_max: 12000.0,
                 gamma: 1.0,
-                name: Some("Nuclei".into()),
+                name: Some("Region A".into()),
             },
             ChannelSettings {
                 visible: false,
@@ -1154,8 +1154,8 @@ fn asset_catalog_delta() -> AssetCatalogDelta {
     AssetCatalogDelta {
         added: vec![ProxyAvailability {
             entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::WellProxy3D, ProxyKind::FieldProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::WellProxy3D, [50, 256, 256])],
+            kinds: vec![ProxyKind::GroupProxy3D, ProxyKind::TileProxy3D],
+            footprints: vec![ProxyFootprint::u16(ProxyKind::GroupProxy3D, [50, 256, 256])],
         }],
     }
 }
@@ -1685,7 +1685,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 action: BookmarkAction::Updated,
                 dataset_urls: vec![
                     "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
-                    "gs://lucida-fixtures/screening-plate-01.zarr".into(),
+                    "gs://lucida-fixtures/screening-collection-01.zarr".into(),
                 ],
             },
             req("", &["/type", "/id", "/action", "/dataset_urls"]),
@@ -1973,7 +1973,7 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
 
 const DATASET_OPEN_FILES: &[&str] = &[
     "dataset-open/dataset_opened_single.json",
-    "dataset-open/dataset_opened_plate.json",
+    "dataset-open/dataset_opened_collection.json",
     "dataset-open/fetch_source_proxied.json",
     "dataset-open/fetch_source_direct.json",
     "dataset-open/fetch_source_local.json",
@@ -1998,9 +1998,9 @@ fn chunk_request_golden() -> ChunkMessage {
 
 fn asset_request_golden() -> AssetMessage {
     AssetMessage::AssetRequest {
-        dataset_id: DatasetId("wds-plate-77".into()),
-        entity_id: EntityId("field-A1-f0".into()),
-        kind: ProxyKind::FieldProxy3D,
+        dataset_id: DatasetId("wds-collection-77".into()),
+        entity_id: EntityId("tile-A1-f0".into()),
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 2,
     }
@@ -2082,17 +2082,17 @@ fn dataset_open_payloads_match_goldens() {
         &mut failures,
     );
     check(
-        "dataset-open/dataset_opened_plate.json",
-        &plate_dataset_opened(),
+        "dataset-open/dataset_opened_collection.json",
+        &collection_dataset_opened(),
         &req(
             "",
             &[
                 "/manifest",
                 "/fetch",
-                "/manifest/kind/Plate/rows",
-                "/manifest/kind/Plate/columns",
-                "/manifest/kind/Plate/positioning_mode",
-                "/manifest/kind/Plate/has_stage_positions",
+                "/manifest/kind/Collection/rows",
+                "/manifest/kind/Collection/columns",
+                "/manifest/kind/Collection/positioning_mode",
+                "/manifest/kind/Collection/has_explicit_positions",
             ],
         ),
         &mut failures,

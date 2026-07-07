@@ -13,9 +13,9 @@
  *   4. Allocate (or look up) the slot for `(entityId, t, c)` — may evict
  *      the LRU head if the pool is full.
  *   5. Upload via `device.queue.writeTexture`.
- *   6. Update the entity's descriptor. For `WellProxy3D`, fan out the
- *      handle to every child field's descriptor (see
- *      {@link propagateWellProxyToFields}).
+ *   6. Update the entity's descriptor. For `GroupProxy3D`, fan out the
+ *      handle to every child tile's descriptor (see
+ *      {@link propagateGroupProxyToTiles}).
  *
  * Returns an outcome describing what changed so the caller can decide
  * whether to rebuild the per-dataset descriptor buffer (only when the
@@ -44,7 +44,7 @@ import {
   destroyProxyAtlas,
 } from "../proxyAtlas.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { propagateWellProxyToFields } from "./propagate.ts";
+import { propagateGroupProxyToTiles } from "./propagate.ts";
 import {
   clearResidentProxyDescriptor,
   desiredProxyCountForPool,
@@ -85,7 +85,7 @@ function getOrCreateProxyDescriptor(
   const key = proxyDescriptorKey(entityId, t, c);
   let d = proxyDescriptorsByEntity.get(key);
   if (!d) {
-    d = { fieldProxyHandle: null, wellProxyHandle: null };
+    d = { tileProxyHandle: null, groupProxyHandle: null };
     proxyDescriptorsByEntity.set(key, d);
   }
   return d;
@@ -237,18 +237,18 @@ export function handleProxyUpload(
     msg.t,
     msg.c,
   );
-  if (msg.kind === "FieldProxy3D") {
-    desc.fieldProxyHandle = handle;
+  if (msg.kind === "TileProxy3D") {
+    desc.tileProxyHandle = handle;
   } else {
-    // WellProxy3D — set on the well itself AND propagate to all child
-    // fields so their `wellProxyHandle` points at the parent's slot.
-    desc.wellProxyHandle = handle;
-    propagateWellProxyToFields(
+    // GroupProxy3D — set on the group itself AND propagate to all child
+    // tiles so their `groupProxyHandle` points at the parent's slot.
+    desc.groupProxyHandle = handle;
+    propagateGroupProxyToTiles(
       handle,
       msg.entityId,
       msg.t,
       msg.c,
-      state.wellToFields,
+      state.groupToTiles,
       state.proxyDescriptorsByEntity,
     );
   }

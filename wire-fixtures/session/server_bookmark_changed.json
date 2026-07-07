@@ -4,6 +4,6 @@
   "action": "updated",
   "dataset_urls": [
     "gs://lucida-fixtures/kidney-multiplex.zarr",
-    "gs://lucida-fixtures/screening-plate-01.zarr"
+    "gs://lucida-fixtures/screening-collection-01.zarr"
   ]
 }

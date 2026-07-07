@@ -16,7 +16,7 @@ function mul(a: Float32Array, b: Float32Array): number[] {
 
 describe("labelFootprint", () => {
   it("sizes a coarser label to the source's full-res extent (alignment)", () => {
-    // yeast mitochondria: label is 4x downsampled in Y/X vs. the source.
+    // volume region-b: label is 4x downsampled in Y/X vs. the source.
     const source: Level0 = { shape: [1, 1, 30, 340, 348], scale: [1, 1, 1, 1, 1] };
     const label: Level0 = { shape: [1, 1, 30, 85, 87], scale: [1, 1, 1, 4, 4] };
     const { dataW, dataH } = labelFootprint(source, label);
@@ -40,7 +40,7 @@ describe("labelFootprint", () => {
     expect(dataH).toBeCloseTo(256, 6);
   });
 
-  it("accounts for a physically-scaled source (microns per pixel)", () => {
+  it("accounts for a physically-scaled source (physical units per pixel)", () => {
     // Source at 0.5 um/px, label at 2.0 um/px -> label covers 4x source px.
     const source: Level0 = { shape: [1, 1, 1, 1000, 1000], scale: [1, 1, 1, 0.5, 0.5] };
     const label: Level0 = { shape: [1, 1, 1, 250, 250], scale: [1, 1, 1, 2.0, 2.0] };
@@ -62,7 +62,7 @@ describe("labelModelMatrices", () => {
   const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
   it("passes the source matrices through for a same-extent (downsampled) label", () => {
-    // yeast mito: 4× coarser in Y/X but the SAME physical extent as its source.
+    // volume region-b: 4× coarser in Y/X but the SAME physical extent as its source.
     const source: Level0 = { shape: [1, 1, 30, 340, 348], scale: [1, 1, 1, 1, 1] };
     const label: Level0 = { shape: [1, 1, 30, 85, 87], scale: [1, 1, 1, 4, 4] };
     const model = new Float32Array([2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 5, 0, 7, 11, 13, 1]);

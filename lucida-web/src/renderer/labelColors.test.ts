@@ -18,7 +18,7 @@ describe("labelColor", () => {
   });
 
   it("normalizes a declared SEMI-TRANSPARENT color (alpha<255) to opaque", () => {
-    // Regression: the ISR plate declares cells 1..10 with alpha=128, which
+    // Regression: the ISR collection declares cells 1..10 with alpha=128, which
     // rendered them at ~50% while glasbey-fallback cells stayed opaque — a
     // patchwork the opacity slider couldn't correct. Alpha is now uniform;
     // the per-label opacity is the sole transparency control.
@@ -27,7 +27,7 @@ describe("labelColor", () => {
   });
 
   it("honors explicit colors for ids well past the 16-bit range", () => {
-    // The yeast fixture declares a color for value 92801 (> 65535).
+    // The volume fixture declares a color for value 92801 (> 65535).
     const explicit = new Map<number, RGBA>([[92801, [1, 2, 3, 255]]]);
     expect(labelColor(92801, explicit)).toEqual([1, 2, 3, 255]);
   });
@@ -65,7 +65,7 @@ describe("labelColor", () => {
     }
   });
 
-  it("produces distinct colors across a dense id range (well-distributed)", () => {
+  it("produces distinct colors across a dense id range (group-distributed)", () => {
     const seen = new Set<string>();
     let collisions = 0;
     for (let id = 1; id <= 2000; id++) {

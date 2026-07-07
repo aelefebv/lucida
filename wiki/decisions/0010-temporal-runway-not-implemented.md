@@ -5,7 +5,7 @@ description: "GPU-side temporal lookahead (keeping next-timepoint chunks residen
 tags: [lucida, decision]
 source_path: wiki/decisions/0010-temporal-runway-not-implemented.md
 created: 2026-04-18
-modified: 2026-05-14
+modified: 2026-07-06
 ---
 
 # GPU-Side Temporal Lookahead — Won't Implement
@@ -18,7 +18,7 @@ GPU-side temporal lookahead (keeping next-timepoint chunks resident on the GPU w
 
 ## Why not GPU-side lookahead
 
-- **GPU memory is the binding constraint** for plate datasets. Reserving slots for next-timepoint speculation means fewer slots available for currently-visible detail; the latter is always more valuable.
+- **GPU memory is the binding constraint** for collection datasets. Reserving slots for next-timepoint speculation means fewer slots available for currently-visible detail; the latter is always more valuable.
 - **Mapping vs unmapping is the expensive part of GPU residency**, not the upload itself. Once chunks are in the [CPU Cache](../systems/subsystems/cpu-cache.md), pushing them to a free GPU slot is fast. So a CPU-side prefetch that uploads on-demand at scrub time has competitive perceived latency without sacrificing GPU capacity.
 - **Scrubbing patterns are bursty, not continuous.** Users scrub through a range, pause, then scrub more. The CPU cache's prefetch tier keeps the relevant chunks decoded; the GPU upload happens at the scrub event. Latency is a few ms — well under perceptual threshold.
 

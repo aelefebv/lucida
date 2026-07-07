@@ -50,7 +50,7 @@
       }
     },
     {
-      "image_id": "multiscale-0:label:nuclei",
+      "image_id": "multiscale-0:label:region-a",
       "info": {
         "level_index": 1,
         "role": "coarse",

@@ -31,16 +31,16 @@ EXPECTED_OPEN_STAGES = {
 }
 FIXTURES = [
     {
-        "name": "cppx_plate",
-        "path": "20250925_CPPX245_ISR_Washout_v4.ome.zarr",
-        "kind": "plate",
+        "name": "collection_a",
+        "path": "collection_a.ome.zarr",
+        "kind": "collection",
         "min_images": 1,
         "min_entities": 1,
         "min_channels": 3,
     },
     {
-        "name": "yeast_3d",
-        "path": "yeast_3d_mitochondria_large.ome.zarr",
+        "name": "volume_3d",
+        "path": "volume_3d.ome.zarr",
         "kind": "single",
         "min_images": 1,
         "min_entities": 1,

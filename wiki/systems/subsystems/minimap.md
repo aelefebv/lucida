@@ -5,14 +5,14 @@ description: "lucida-web/src/minimapPath.ts plus renderer/minimapHandlers.ts —
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/minimap.md
 created: 2026-05-19
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Minimap
 
 `lucida-web/src/minimapPath.ts` plus `renderer/minimapHandlers.ts` — the separate low-resolution spatial context path. The minimap is intentionally not the same thing as the coarse fallback tier.
 
-It is fed by **two paths**: [Planning Domain](planning-domain.md) emits `lane:"minimap"` requests into the [CPU Cache](cpu-cache.md), AND `tickMinimapOverview` (in `minimapPath.ts`) independently drains the CPU cache and uploads to the worker via the `minimapUploadOverviewChunksForLayer` message. The overview texture is **per-member/FOV** (each minimap layer gets its own), not one whole-dataset texture.
+It is fed by **two paths**: [Planning Domain](planning-domain.md) emits `lane:"minimap"` requests into the [CPU Cache](cpu-cache.md), AND `tickMinimapOverview` (in `minimapPath.ts`) independently drains the CPU cache and uploads to the worker via the `minimapUploadOverviewChunksForLayer` message. The overview texture is **per-member/tile** (each minimap layer gets its own), not one whole-dataset texture.
 
 ## Model
 
@@ -20,8 +20,8 @@ The minimap uses the manifest's explicit `coarse_level_index` pointer. That poin
 
 This keeps two concerns separate:
 
-- **coarse tier** — per-field/image fallback/context chunks used by the main renderer and selected by the same explicit coarse pointer.
-- **minimap** — per-member/FOV navigation context (each FOV gets its own overview texture) with its own render key, upload budget, and cache lane.
+- **coarse tier** — per-tile/image fallback/context chunks used by the main renderer and selected by the same explicit coarse pointer.
+- **minimap** — per-member/tile navigation context (each tile gets its own overview texture) with its own render key, upload budget, and cache lane.
 
 The minimap binds its own colormap LUT (`resolveMinimapLayerColormap`) and per-channel contrast (`resolveMinimapLayerContrast`) so 2D matches 3D — it previously rendered gray/dark (PR #835/#837).
 

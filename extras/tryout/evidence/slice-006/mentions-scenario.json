@@ -42,7 +42,7 @@
         },
         {
           "action": "click_row_with_text",
-          "detail": "clicked row[0] ([data-testid^=\"mention-of-me-item-\"]) containing: can you confirm these are mitochondria?",
+          "detail": "clicked row[0] ([data-testid^=\"mention-of-me-item-\"]) containing: can you confirm these are region-a?",
           "ok": true
         },
         {

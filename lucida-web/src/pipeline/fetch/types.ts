@@ -85,7 +85,7 @@ export interface ReadyProxyDelivery {
   datasetId: string;
   entityId: string;
   imageId: string;
-  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  proxyKind: "GroupProxy3D" | "TileProxy3D";
   t: number;
   c: number;
   header: ProxyHeaderJs;

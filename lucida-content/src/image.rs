@@ -48,7 +48,7 @@ pub struct MultiscaleInfo {
 /// state (`ChannelSettings`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelInfo {
-    /// Non-empty channel label (e.g. `"DAPI"`). The parse layer drops blank /
+    /// Non-empty channel label (e.g. `"Channel 0"`). The parse layer drops blank /
     /// whitespace-only labels, so any value present here is meaningful.
     pub label: String,
     /// Optional color hint, as the raw omero hex string without a leading `#`
@@ -239,20 +239,20 @@ mod tests {
     fn channel_infos_round_trip_with_and_without_color() {
         let info = minimal_multiscale(vec![
             ChannelInfo {
-                label: "DAPI".to_string(),
+                label: "Channel 0".to_string(),
                 color: Some("0000FF".to_string()),
             },
             ChannelInfo {
-                label: "GFP".to_string(),
+                label: "Channel 1".to_string(),
                 color: None,
             },
         ]);
         let json = serde_json::to_value(&info).unwrap();
         let back: MultiscaleInfo = serde_json::from_value(json).unwrap();
         assert_eq!(back.channel_infos.len(), 2);
-        assert_eq!(back.channel_infos[0].label, "DAPI");
+        assert_eq!(back.channel_infos[0].label, "Channel 0");
         assert_eq!(back.channel_infos[0].color.as_deref(), Some("0000FF"));
-        assert_eq!(back.channel_infos[1].label, "GFP");
+        assert_eq!(back.channel_infos[1].label, "Channel 1");
         assert_eq!(back.channel_infos[1].color, None);
     }
 
@@ -271,13 +271,13 @@ mod tests {
     #[test]
     fn channel_info_color_omitted_when_none() {
         let info = ChannelInfo {
-            label: "Brightfield".to_string(),
+            label: "Channel 9".to_string(),
             color: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(
             json.get("label").and_then(|v| v.as_str()),
-            Some("Brightfield")
+            Some("Channel 9")
         );
         assert!(
             json.get("color").is_none(),

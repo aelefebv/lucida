@@ -38,8 +38,8 @@ export class SliceRenderer {
   private coarseAtlasSlotDims: [number, number] = [0, 0];
   // Proxy textures still bound CPU-side (slot indices and dims come
   // from the descriptor).
-  private fieldProxyTexture: GPUTexture | null = null;
-  private wellProxyTexture: GPUTexture | null = null;
+  private tileProxyTexture: GPUTexture | null = null;
+  private groupProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
 
   constructor(device: GPUDevice) {
@@ -84,7 +84,7 @@ export class SliceRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
         },
-        // Proxy textures (fieldProxy + wellProxy). 3D r16uint, same as
+        // Proxy textures (tileProxy + groupProxy). 3D r16uint, same as
         // volume.wgsl — slice mode reads at the slot's Z midpoint.
         {
           binding: 7,
@@ -242,11 +242,11 @@ export class SliceRenderer {
    * chain decides per-fragment whether to consult them.
    */
   setProxyTextures(
-    fieldTexture: GPUTexture | null,
-    wellTexture: GPUTexture | null,
+    tileTexture: GPUTexture | null,
+    groupTexture: GPUTexture | null,
   ) {
-    this.fieldProxyTexture = fieldTexture;
-    this.wellProxyTexture = wellTexture;
+    this.tileProxyTexture = tileTexture;
+    this.groupProxyTexture = groupTexture;
     this.rebuildBindGroup();
   }
 
@@ -292,8 +292,8 @@ export class SliceRenderer {
     const coarseAtlas = this.coarseAtlasTexture ?? this.dummyTexture;
     const coarseIndirection = this.coarseIndirectionBuffer ?? this.dummyIndirectionBuffer;
     const dummyProxy = this.getDummyProxyTexture();
-    const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
-    const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
+    const tileProxyView = (this.tileProxyTexture ?? dummyProxy).createView();
+    const groupProxyView = (this.groupProxyTexture ?? dummyProxy).createView();
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -304,8 +304,8 @@ export class SliceRenderer {
         { binding: 4, resource: this.lutSampler },
         { binding: 5, resource: coarseAtlas.createView() },
         { binding: 6, resource: { buffer: coarseIndirection } },
-        { binding: 7, resource: fieldProxyView },
-        { binding: 8, resource: wellProxyView },
+        { binding: 7, resource: tileProxyView },
+        { binding: 8, resource: groupProxyView },
       ],
     });
   }

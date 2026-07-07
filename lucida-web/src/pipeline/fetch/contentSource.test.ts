@@ -172,7 +172,7 @@ describe("ProxiedContentSource.fetch", () => {
       ctrl.signal,
     );
     const proxyPromise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
       ctrl.signal,
     );
 
@@ -229,7 +229,7 @@ describe("ProxiedContentSource.fetchProxy", () => {
   it("happy path: sends asset_request; handleProxyData decodes header + slices payload", async () => {
     const ctrl = new AbortController();
     const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
       ctrl.signal,
     );
 
@@ -237,11 +237,11 @@ describe("ProxiedContentSource.fetchProxy", () => {
     const msg = JSON.parse(sentMessages[0]);
     expect(msg.type).toBe("asset_request");
     expect(msg.entity_id).toBe("ent-1");
-    expect(msg.kind).toBe("WellProxy3D");
+    expect(msg.kind).toBe("GroupProxy3D");
 
     const response = makeProxyResponse({ dims: [2, 2, 2], payloadBytes: 16 });
     source.handleProxyData(
-      proxyResponseKey("ent-1", "WellProxy3D", 0, 0),
+      proxyResponseKey("ent-1", "GroupProxy3D", 0, 0),
       response,
     );
 
@@ -259,7 +259,7 @@ describe("ProxiedContentSource.fetchProxy", () => {
     );
     const ctrl = new AbortController();
     const promise = fastSource.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
       ctrl.signal,
     );
     vi.advanceTimersByTime(60);
@@ -269,7 +269,7 @@ describe("ProxiedContentSource.fetchProxy", () => {
   it("aborts when the signal fires", async () => {
     const ctrl = new AbortController();
     const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
       ctrl.signal,
     );
     ctrl.abort();
@@ -279,13 +279,13 @@ describe("ProxiedContentSource.fetchProxy", () => {
   it("propagates parse errors from a malformed header", async () => {
     const ctrl = new AbortController();
     const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
       ctrl.signal,
     );
 
     const bad = makeProxyResponse({ badMagic: true });
     source.handleProxyData(
-      proxyResponseKey("ent-1", "WellProxy3D", 0, 0),
+      proxyResponseKey("ent-1", "GroupProxy3D", 0, 0),
       bad,
     );
 
@@ -301,13 +301,13 @@ describe("ProxiedContentSource.handleBinary", () => {
   it("routes a `proxy/...` key to the proxy queue", async () => {
     const ctrl = new AbortController();
     const promise = source.fetchProxy(
-      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      { datasetId: "ds-1", entityId: "ent-1", kind: "GroupProxy3D", t: 0, c: 0 },
       ctrl.signal,
     );
 
     const response = makeProxyResponse({ dims: [2, 2, 2], payloadBytes: 16 });
     source.handleBinary(
-      proxyResponseKey("ent-1", "WellProxy3D", 0, 0),
+      proxyResponseKey("ent-1", "GroupProxy3D", 0, 0),
       response,
     );
 

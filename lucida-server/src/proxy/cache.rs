@@ -257,12 +257,12 @@ fn hex16(bytes: &[u8; 16]) -> String {
 }
 
 /// Stable, filesystem-safe identifier for a `ProxyKind`. We pin it
-/// explicitly rather than using `Debug` so that renaming an enum variant
-/// does not silently invalidate the on-disk layout.
+/// explicitly rather than using `Debug` so the on-disk layout is decoupled
+/// from the enum's Rust identifiers.
 fn kind_segment(kind: ProxyKind) -> &'static str {
     match kind {
-        ProxyKind::FieldProxy3D => "field3d",
-        ProxyKind::WellProxy3D => "well3d",
+        ProxyKind::TileProxy3D => "tile3d",
+        ProxyKind::GroupProxy3D => "group3d",
     }
 }
 

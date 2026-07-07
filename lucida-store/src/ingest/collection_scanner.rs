@@ -1,7 +1,7 @@
-//! Scan a directory of HCS TIFF files and discover plate structure.
+//! Scan a directory of tiled TIFF files and discover collection structure.
 //!
-//! Parses filenames matching `r{row}c{col}f{field}p{plane}-ch{channel}t{timepoint}.tiff`
-//! and builds a `PlateLayout` describing wells, FOVs, channels, timepoints, and Z planes.
+//! Parses filenames matching `r{row}c{col}f{tile}p{plane}-ch{channel}t{timepoint}.tiff`
+//! and builds a `CollectionLayout` describing groups, tiles, channels, timepoints, and Z planes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -14,13 +14,13 @@ use tiff::tags::Tag;
 
 use super::pyramid::VoxelSize;
 
-/// Complete plate layout discovered from scanning a directory.
+/// Complete collection layout discovered from scanning a directory.
 #[derive(Debug)]
-pub struct PlateLayout {
+pub struct CollectionLayout {
     pub name: String,
     pub rows: Vec<String>,
     pub columns: Vec<String>,
-    pub wells: Vec<WellLayout>,
+    pub groups: Vec<GroupLayout>,
     pub channels: u32,
     pub timepoints: u32,
     pub z_planes: u32,
@@ -29,19 +29,19 @@ pub struct PlateLayout {
     pub voxel_size: VoxelSize,
 }
 
-/// A single well in the plate layout.
+/// A single group in the collection layout.
 #[derive(Debug)]
-pub struct WellLayout {
+pub struct GroupLayout {
     pub row_name: String,
     pub col_name: String,
     pub row_index: u32,
     pub col_index: u32,
-    pub fovs: Vec<FovLayout>,
+    pub tiles: Vec<TileLayout>,
 }
 
-/// A single FOV within a well.
+/// A single tile within a group.
 #[derive(Debug)]
-pub struct FovLayout {
+pub struct TileLayout {
     pub index: u32,
     /// Maps (timepoint, channel, z_plane) → file path. All 0-indexed.
     pub files: HashMap<(u32, u32, u32), PathBuf>,
@@ -52,7 +52,7 @@ pub struct FovLayout {
 struct ParsedFilename {
     row: u32,
     col: u32,
-    field: u32,
+    tile: u32,
     plane: u32,
     channel: u32,
     timepoint: u32,
@@ -67,15 +67,15 @@ pub fn row_number_to_letter(n: u32) -> String {
     char::from(b'A' + (n - 1) as u8).to_string()
 }
 
-/// Scan a directory for HCS TIFF files and build a PlateLayout.
+/// Scan a directory for tiled TIFF files and build a CollectionLayout.
 ///
 /// Recursively searches for files matching the `rXXcXXfXXpXX-chXXtXX.tiff` pattern.
 /// Voxel size is extracted from the first TIFF's resolution tag; `voxel_overrides`
 /// take precedence if provided.
-pub fn scan_plate_directory(
+pub fn scan_collection_directory(
     dir: &Path,
     voxel_overrides: Option<VoxelSize>,
-) -> Result<PlateLayout, String> {
+) -> Result<CollectionLayout, String> {
     let re = Regex::new(r"(?i)r(\d+)c(\d+)f(\d+)p(\d+)-ch(\d+)t(\d+)\.tiff?$")
         .map_err(|e| format!("regex error: {e}"))?;
 
@@ -85,12 +85,12 @@ pub fn scan_plate_directory(
 
     if parsed_files.is_empty() {
         return Err(format!(
-            "no HCS TIFF files found in {}. Expected filenames like r01c01f01p01-ch01t01.tiff",
+            "no tiled TIFF files found in {}. Expected filenames like r01c01f01p01-ch01t01.tiff",
             dir.display()
         ));
     }
 
-    eprintln!("Found {} HCS TIFF files", parsed_files.len());
+    eprintln!("Found {} tiled TIFF files", parsed_files.len());
 
     // Discover unique values for each dimension.
     let mut all_rows = BTreeSet::new();
@@ -144,29 +144,29 @@ pub fn scan_plate_directory(
         .map(|(i, &p)| (p, i as u32))
         .collect();
 
-    // Group files by (row, col) → (field) → files.
+    // Group files by (row, col) → (tile) → files.
     // Use BTreeMap for sorted key ordering.
-    let mut well_map: BTreeMap<(u32, u32), BTreeMap<u32, Vec<&ParsedFilename>>> = BTreeMap::new();
+    let mut group_map: BTreeMap<(u32, u32), BTreeMap<u32, Vec<&ParsedFilename>>> = BTreeMap::new();
     for pf in &parsed_files {
-        well_map
+        group_map
             .entry((pf.row, pf.col))
             .or_default()
-            .entry(pf.field)
+            .entry(pf.tile)
             .or_default()
             .push(pf);
     }
 
-    // Build WellLayout structs.
-    let mut wells = Vec::new();
-    for (&(row, col), fov_map) in &well_map {
+    // Build GroupLayout structs.
+    let mut groups = Vec::new();
+    for (&(row, col), tile_map) in &group_map {
         let row_name = row_number_to_letter(row);
         let col_name = col.to_string();
         let ri = row_index_map[&row];
         let ci = col_index_map[&col];
 
-        let mut fovs = Vec::new();
-        for (&field, files) in fov_map {
-            let fov_index = field - 1; // 1-indexed → 0-indexed
+        let mut tiles = Vec::new();
+        for (&tile, files) in tile_map {
+            let tile_index = tile - 1; // 1-indexed → 0-indexed
             let mut file_map = HashMap::new();
             for pf in files {
                 let t = timepoint_index[&pf.timepoint];
@@ -174,19 +174,19 @@ pub fn scan_plate_directory(
                 let z = plane_index[&pf.plane];
                 file_map.insert((t, c, z), pf.path.clone());
             }
-            fovs.push(FovLayout {
-                index: fov_index,
+            tiles.push(TileLayout {
+                index: tile_index,
                 files: file_map,
             });
         }
-        fovs.sort_by_key(|f| f.index);
+        tiles.sort_by_key(|f| f.index);
 
-        wells.push(WellLayout {
+        groups.push(GroupLayout {
             row_name,
             col_name,
             row_index: ri,
             col_index: ci,
-            fovs,
+            tiles,
         });
     }
 
@@ -204,18 +204,18 @@ pub fn scan_plate_directory(
         None => tiff_voxel,
     };
 
-    // Derive plate name from directory.
+    // Derive collection name from directory.
     let name = dir
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("plate")
+        .unwrap_or("collection")
         .to_string();
 
-    Ok(PlateLayout {
+    Ok(CollectionLayout {
         name,
         rows,
         columns,
-        wells,
+        groups,
         channels,
         timepoints,
         z_planes,
@@ -225,7 +225,7 @@ pub fn scan_plate_directory(
     })
 }
 
-/// Recursively scan a directory for files matching the HCS pattern.
+/// Recursively scan a directory for files matching the tiled pattern.
 fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> Result<(), String> {
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
@@ -241,7 +241,7 @@ fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> 
         {
             let row: u32 = caps[1].parse().unwrap();
             let col: u32 = caps[2].parse().unwrap();
-            let field: u32 = caps[3].parse().unwrap();
+            let tile: u32 = caps[3].parse().unwrap();
             let plane: u32 = caps[4].parse().unwrap();
             let channel: u32 = caps[5].parse().unwrap();
             let timepoint: u32 = caps[6].parse().unwrap();
@@ -249,7 +249,7 @@ fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> 
             results.push(ParsedFilename {
                 row,
                 col,
-                field,
+                tile,
                 plane,
                 channel,
                 timepoint,
@@ -316,7 +316,7 @@ fn read_tiff_info(path: &Path) -> Result<(u32, u32, VoxelSize), String> {
         }
     }
 
-    // Z defaults to 1.0 for plate data (no Z resolution in individual TIFFs).
+    // Z defaults to 1.0 for collection data (no Z resolution in individual TIFFs).
 
     // Seek back to start for potential reuse.
     let _ = reader.seek(SeekFrom::Start(0));
@@ -363,14 +363,14 @@ mod tests {
     #[test]
     fn scan_empty_directory() {
         let dir = std::env::temp_dir()
-            .join(format!("lucida_plate_scan_{}", std::process::id()))
+            .join(format!("lucida_collection_scan_{}", std::process::id()))
             .join("empty");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let result = scan_plate_directory(&dir, None);
+        let result = scan_collection_directory(&dir, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("no HCS TIFF files found"));
+        assert!(result.unwrap_err().contains("no tiled TIFF files found"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

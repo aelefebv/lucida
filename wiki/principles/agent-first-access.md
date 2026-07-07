@@ -5,7 +5,7 @@ description: "Lucida should be drivable without a human in the loop: an LLM agen
 tags: [lucida, principle]
 source_path: wiki/principles/agent-first-access.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Agent-First Access
@@ -19,7 +19,7 @@ Lucida should be drivable without a human in the loop: an LLM agent or a script 
 ## Principles
 
 - **An LLM agent can get a montage overview of a dataset easily.**
-  - today: `lucida dataset montage` samples a dataset across Z/T/fields into a labeled contact-sheet PNG, with an optional JSON sidecar mapping every cell to its z/t/c indices and a drill-in `#view=` URL. One command turns an opaque volume into an at-a-glance overview an agent can reason about.
+  - today: `lucida dataset montage` samples a dataset across Z/T/tiles into a labeled contact-sheet PNG, with an optional JSON sidecar mapping every cell to its z/t/c indices and a drill-in `#view=` URL. One command turns an opaque volume into an at-a-glance overview an agent can reason about.
 
 - **Any view an agent can describe, it can render headless — no human clicking.**
   - today: `lucida viewer screenshot` / `viewer overview` render an arbitrary view (or a peer's current view) to a PNG. Honest caveat: rendering drives a *headless browser* (Chrome/Chromium + WebGPU over the DevTools Protocol), discovered via `LUCIDA_BROWSER` — there is no browserless native renderer yet, so "headless" means "no human," not "no browser."

@@ -28,7 +28,7 @@ function makeTickStats(over: Partial<UploadTickStats> = {}): UploadTickStats {
 
 /**
  * Toggle `debugStats.enabled` for each test so `publish` actually
- * writes to the shared `debugStats.upload` field (mirrors the
+ * writes to the shared `debugStats.upload` tile (mirrors the
  * orchestrator's existing test harness setup).
  */
 let previousEnabled = false;
@@ -285,7 +285,7 @@ describe("UploadTelemetry — shape regression", () => {
    * Run a known sequence of recordEvent + publish calls and assert the
    * produced `UploadRollingStats` shape (every key, in order) matches
    * the expected snapshot. Safety net: if the module starts dropping or
-   * renaming a field, this test catches it before downstream consumers
+   * renaming a tile, this test catches it before downstream consumers
    * (the debug panel) break.
    */
   it("preserves the full UploadRollingStats key set", () => {

@@ -3,30 +3,30 @@ import type { PlanningConfig } from "./config.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
-  FieldSnapshot,
+  TileSnapshot,
   PlanningSnapshot,
   ProxyRequest,
 } from "./types.ts";
 
 const FALLBACK_PROXY_BYTES = 1 * 128 * 128 * 2;
 
-type ProxyRepresentation = "field" | "well";
+type ProxyRepresentation = "tile" | "group";
 
 interface ProxyResidencyGroup {
   snapshot: PlanningSnapshot;
   datasetId: string;
-  wellId: string;
+  groupId: string;
   t: number;
-  fields: FieldSnapshot[];
-  well: EntitySnapshot | null;
-  fieldRequests: ProxyRequest[];
-  wellRequests: ProxyRequest[];
+  tiles: TileSnapshot[];
+  groupEntity: EntitySnapshot | null;
+  tileRequests: ProxyRequest[];
+  groupRequests: ProxyRequest[];
 }
 
 interface ProxyBundleCandidate {
   groupKey: string;
   datasetId: string;
-  wellId: string;
+  groupId: string;
   representation: ProxyRepresentation;
   requests: ProxyRequest[];
   proxyKeys: string[];
@@ -38,7 +38,7 @@ interface ProxyBundleCandidate {
 
 export interface ProxyResidencyBundleDecision {
   datasetId: string;
-  wellId: string;
+  groupId: string;
   representation: ProxyRepresentation;
   proxyKeys: string[];
   bytes: number;
@@ -164,35 +164,35 @@ function buildGroups(
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) entityById.set(entity.entityId, entity);
 
-  const activeFieldById = new Map<string, FieldSnapshot>();
-  const activeWellById = new Map<string, EntitySnapshot>();
+  const activeTileById = new Map<string, TileSnapshot>();
+  const activeGroupById = new Map<string, EntitySnapshot>();
   for (const entry of activeSet) {
-    if (entry.kind === "field") {
+    if (entry.kind === "tile") {
       const entity = entityById.get(entry.entityId);
-      if (entity?.kind === "Field") activeFieldById.set(entity.entityId, entity);
-      if (entity !== undefined && entity.kind !== "Field") {
-        activeWellById.set(entity.entityId, entity);
+      if (entity?.kind === "Tile") activeTileById.set(entity.entityId, entity);
+      if (entity !== undefined && entity.kind !== "Tile") {
+        activeGroupById.set(entity.entityId, entity);
       }
-    } else if (entry.kind === "well-as-proxy") {
+    } else if (entry.kind === "group-as-proxy") {
       const entity = entityById.get(entry.entityId);
-      if (entity !== undefined) activeWellById.set(entity.entityId, entity);
+      if (entity !== undefined) activeGroupById.set(entity.entityId, entity);
     }
   }
 
   const groups = new Map<string, ProxyResidencyGroup>();
-  const getGroup = (datasetId: string, wellId: string, t: number): ProxyResidencyGroup => {
-    const key = groupKey(datasetId, wellId, t);
+  const getGroup = (datasetId: string, groupId: string, t: number): ProxyResidencyGroup => {
+    const key = groupKey(datasetId, groupId, t);
     let group = groups.get(key);
     if (!group) {
       group = {
         snapshot,
         datasetId,
-        wellId,
+        groupId,
         t,
-        fields: [],
-        well: activeWellById.get(wellId) ?? entityById.get(wellId) ?? null,
-        fieldRequests: [],
-        wellRequests: [],
+        tiles: [],
+        groupEntity: activeGroupById.get(groupId) ?? entityById.get(groupId) ?? null,
+        tileRequests: [],
+        groupRequests: [],
       };
       groups.set(key, group);
     }
@@ -201,21 +201,21 @@ function buildGroups(
 
   for (const req of proxyRequests) {
     const entity = entityById.get(req.entityId);
-    const wellId = wellIdForRequest(req, entity);
-    const group = getGroup(req.datasetId, wellId, req.t);
-    if (req.kind === "FieldProxy3D") {
-      group.fieldRequests.push(req);
-      if (entity?.kind === "Field" && !group.fields.some((f) => f.entityId === entity.entityId)) {
-        group.fields.push(entity);
+    const groupId = groupIdForRequest(req, entity);
+    const group = getGroup(req.datasetId, groupId, req.t);
+    if (req.kind === "TileProxy3D") {
+      group.tileRequests.push(req);
+      if (entity?.kind === "Tile" && !group.tiles.some((f) => f.entityId === entity.entityId)) {
+        group.tiles.push(entity);
       } else {
-        const activeField = activeFieldById.get(req.entityId);
-        if (activeField && !group.fields.some((f) => f.entityId === activeField.entityId)) {
-          group.fields.push(activeField);
+        const activeTile = activeTileById.get(req.entityId);
+        if (activeTile && !group.tiles.some((f) => f.entityId === activeTile.entityId)) {
+          group.tiles.push(activeTile);
         }
       }
     } else {
-      group.wellRequests.push(req);
-      group.well = entity ?? group.well;
+      group.groupRequests.push(req);
+      group.groupEntity = entity ?? group.groupEntity;
     }
   }
 
@@ -225,11 +225,11 @@ function buildGroups(
 function buildCandidates(groups: ProxyResidencyGroup[], config: PlanningConfig): ProxyBundleCandidate[] {
   const out: ProxyBundleCandidate[] = [];
   for (const group of groups) {
-    if (group.fieldRequests.length > 0) {
-      out.push(buildCandidate(group, "field", group.fieldRequests, config));
+    if (group.tileRequests.length > 0) {
+      out.push(buildCandidate(group, "tile", group.tileRequests, config));
     }
-    if (group.wellRequests.length > 0) {
-      out.push(buildCandidate(group, "well", group.wellRequests, config));
+    if (group.groupRequests.length > 0) {
+      out.push(buildCandidate(group, "group", group.groupRequests, config));
     }
   }
   return out;
@@ -259,22 +259,22 @@ function buildCandidate(
   const entities = representativeEntities(group, representation);
   const importance = maxImportance(entities);
   const distance = nearestDistanceFromViewCenter(group.snapshot, entities);
-  const representationBias = representation === "field" ? 0 : 1;
+  const representationBias = representation === "tile" ? 0 : 1;
   const score =
     representationBias +
     (1 - importance) * config.importanceWeight +
     distance * config.distanceWeight;
 
   return {
-    groupKey: groupKey(group.datasetId, group.wellId, group.t),
+    groupKey: groupKey(group.datasetId, group.groupId, group.t),
     datasetId: group.datasetId,
-    wellId: group.wellId,
+    groupId: group.groupId,
     representation,
     requests,
     proxyKeys,
     bytes,
     score,
-    tieBreak: `${group.datasetId}|${group.wellId}|${representation}`,
+    tieBreak: `${group.datasetId}|${group.groupId}|${representation}`,
     missingFootprints,
   };
 }
@@ -283,9 +283,9 @@ function representativeEntities(
   group: ProxyResidencyGroup,
   representation: ProxyRepresentation,
 ): EntitySnapshot[] {
-  if (representation === "field" && group.fields.length > 0) return group.fields;
-  if (group.well) return [group.well];
-  return group.fields;
+  if (representation === "tile" && group.tiles.length > 0) return group.tiles;
+  if (group.groupEntity) return [group.groupEntity];
+  return group.tiles;
 }
 
 function maxImportance(entities: EntitySnapshot[]): number {
@@ -329,7 +329,7 @@ function decisionFor(
 ): ProxyResidencyBundleDecision {
   return {
     datasetId: candidate.datasetId,
-    wellId: candidate.wellId,
+    groupId: candidate.groupId,
     representation: candidate.representation,
     proxyKeys: [...candidate.proxyKeys],
     bytes: candidate.bytes,
@@ -338,12 +338,12 @@ function decisionFor(
   };
 }
 
-function wellIdForRequest(req: ProxyRequest, entity: EntitySnapshot | undefined): string {
-  if (req.kind === "WellProxy3D") return req.entityId;
-  if (entity?.kind === "Field") return entity.parentId;
+function groupIdForRequest(req: ProxyRequest, entity: EntitySnapshot | undefined): string {
+  if (req.kind === "GroupProxy3D") return req.entityId;
+  if (entity?.kind === "Tile") return entity.parentId;
   return req.entityId;
 }
 
-function groupKey(datasetId: string, wellId: string, t: number): string {
-  return `${datasetId}|${wellId}|${t}`;
+function groupKey(datasetId: string, groupId: string, t: number): string {
+  return `${datasetId}|${groupId}|${t}`;
 }

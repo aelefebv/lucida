@@ -80,15 +80,15 @@ export function emitMinimapLane(
 }
 
 /**
- * Detail lane — for each active entry, push detail chunks (field modes)
- * or a single proxy request per visible channel (`well-as-proxy`).
+ * Detail lane — for each active entry, push detail chunks (tile modes)
+ * or a single proxy request per visible channel (`group-as-proxy`).
  *
- * Also emits the per-field FieldProxy3D fallback for field-mode entries
- * whose proxy is advertised, and a parent `WellProxy3D` (deduped per
- * `(wellId, t, c)`) when the entry is in `fields-with-proxy-fallback`
- * and the parent well's proxy is advertised.
+ * Also emits the per-tile TileProxy3D fallback for tile-mode entries
+ * whose proxy is advertised, and a parent `GroupProxy3D` (deduped per
+ * `(groupId, t, c)`) when the entry is in `tiles-with-proxy-fallback`
+ * and the parent group's proxy is advertised.
  *
- * Mutates `allRequests`, `proxyRequests`, and `wellProxyEmitted`.
+ * Mutates `allRequests`, `proxyRequests`, and `groupProxyEmitted`.
  */
 export function emitDetailLane(
   activeSet: ActiveSetEntry[],
@@ -97,20 +97,20 @@ export function emitDetailLane(
   stats: PlanStats,
   allRequests: ChunkRequest[],
   proxyRequests: ProxyRequest[],
-  wellProxyEmitted: Set<string>,
+  groupProxyEmitted: Set<string>,
   config: PlanningConfig,
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
-    if (entry.kind === "well-as-proxy") {
-      // `imageId: ""` matches the pre-discrimination convention — wells
+    if (entry.kind === "group-as-proxy") {
+      // `imageId: ""` matches the pre-discrimination convention — groups
       // have no single owning image.
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
           datasetId,
           entityId: entry.entityId,
           imageId: "",
-          kind: "WellProxy3D",
+          kind: "GroupProxy3D",
           t: snapshot.selection.t,
           c,
           priority: config.proxyLaneOffset + 0,
@@ -121,7 +121,7 @@ export function emitDetailLane(
 
     if (entry.kind === "invisible") continue;
 
-    // Narrowed: entry is FieldEntry below this point.
+    // Narrowed: entry is TileEntry below this point.
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
@@ -158,13 +158,13 @@ export function emitDetailLane(
       allRequests.push(req);
     }
 
-    if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+    if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
           datasetId,
           entityId: entry.entityId,
           imageId: entry.imageId,
-          kind: "FieldProxy3D",
+          kind: "TileProxy3D",
           t: snapshot.selection.t,
           c,
           priority: config.proxyLaneOffset + 1,
@@ -172,29 +172,29 @@ export function emitDetailLane(
       }
     }
 
-    // Parent-well proxy (only for proxy-fallback mode; at
-    // `fields-with-detail` zoom the chunk path keeps up). Dedup per
-    // (wellId, t, c). Narrow on `kind === "Field"` because only
-    // `FieldSnapshot` carries a `parentId`; a non-Field here is a
+    // Parent-group proxy (only for proxy-fallback mode; at
+    // `tiles-with-detail` zoom the chunk path keeps up). Dedup per
+    // (groupId, t, c). Narrow on `kind === "Tile"` because only
+    // `TileSnapshot` carries a `parentId`; a non-Tile here is a
     // producer invariant violation we skip silently.
     if (
-      entry.mode === "fields-with-proxy-fallback" &&
-      entry.wellProxyAvailable &&
-      entity.kind === "Field"
+      entry.mode === "tiles-with-proxy-fallback" &&
+      entry.groupProxyAvailable &&
+      entity.kind === "Tile"
     ) {
-      const wellId = entity.parentId;
+      const groupId = entity.parentId;
       for (const c of snapshot.selection.visibleChannels) {
-        const dedupKey = `${wellId}|${snapshot.selection.t}|${c}`;
-        if (wellProxyEmitted.has(dedupKey)) continue;
-        wellProxyEmitted.add(dedupKey);
+        const dedupKey = `${groupId}|${snapshot.selection.t}|${c}`;
+        if (groupProxyEmitted.has(dedupKey)) continue;
+        groupProxyEmitted.add(dedupKey);
         proxyRequests.push({
           datasetId,
-          entityId: wellId,
+          entityId: groupId,
           imageId: "",
-          kind: "WellProxy3D",
+          kind: "GroupProxy3D",
           t: snapshot.selection.t,
           c,
-          priority: config.proxyLaneOffset + config.wellProxyPriorityBump,
+          priority: config.proxyLaneOffset + config.groupProxyPriorityBump,
         });
       }
     }
@@ -202,7 +202,7 @@ export function emitDetailLane(
 }
 
 /**
- * Prefetch lane — for each field-mode active entry, emit chunks for the
+ * Prefetch lane — for each tile-mode active entry, emit chunks for the
  * next `config.prefetchDepth` timepoints (bounded by the entity's max T).
  *
  * Mutates `allRequests`.
@@ -217,7 +217,7 @@ export function emitPrefetchLane(
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
-    if (entry.kind !== "field") continue;
+    if (entry.kind !== "tile") continue;
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
     if (entity.levels.length === 0) continue;
@@ -269,7 +269,7 @@ export function emitPrefetchLane(
 
 /**
  * Coarse lane — source-backed chunk-only fallback. Emits exactly the
- * coarse level selected on each field entry, independent of the detail
+ * coarse level selected on each tile entry, independent of the detail
  * lane. Intermediate pyramid levels are intentionally skipped.
  */
 export function emitCoarseLane(
@@ -282,7 +282,7 @@ export function emitCoarseLane(
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
-    if (entry.kind !== "field") continue;
+    if (entry.kind !== "tile") continue;
     if (entry.coarseLevel === undefined || entry.coarseLevel === null) continue;
 
     const entity = entityById.get(entry.entityId);

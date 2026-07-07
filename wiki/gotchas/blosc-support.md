@@ -5,7 +5,7 @@ description: "CZI-derived OME-Zarrs (and many older Bioformats exports) compress
 tags: [lucida, gotcha]
 source_path: wiki/gotchas/blosc-support.md
 created: 2026-04-23
-modified: 2026-04-23
+modified: 2026-07-06
 ---
 
 # Blosc support is a deliberately narrow subset
@@ -44,7 +44,7 @@ The test file documents this one-liner inline so the regen recipe stays next to 
 ## Why this subset and not all of Blosc
 
 - `zstd` is the only inner cname seen in CZI exports we have hit, and it's the modern default for Blosc-emitting tools. Adding `lz4`/`zlib` is straightforward (more crate deps), but until a dataset forces it, we keep the surface minimal.
-- Typesize 8 would cover float64 / int64 chunks, which OME-Zarr image data effectively never uses. Microscopy is uint8/uint16, occasionally uint32.
+- Typesize 8 would cover float64 / int64 chunks, which OME-Zarr image data effectively never uses. Image data is typically uint8/uint16, occasionally uint32.
 - Blosc2 changes the frame format and adds chunked sub-frames. Supporting it is a separate decoder, not a tweak; deferring until needed.
 
 ## Related

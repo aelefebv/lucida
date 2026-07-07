@@ -6,12 +6,12 @@
       {
         "entity_id": "img-0",
         "kinds": [
-          "WellProxy3D",
-          "FieldProxy3D"
+          "GroupProxy3D",
+          "TileProxy3D"
         ],
         "footprints": [
           {
-            "kind": "WellProxy3D",
+            "kind": "GroupProxy3D",
             "dims": [
               50,
               256,

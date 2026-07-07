@@ -6,8 +6,12 @@ async fn main() {
         eprintln!("Usage: cargo run -p lucida-store --example import_debug -- <path-or-url>");
         eprintln!();
         eprintln!("Examples:");
-        eprintln!("  cargo run -p lucida-store --example import_debug -- example_files/yeast_3d_mitochondria.ome.zarr");
-        eprintln!("  cargo run -p lucida-store --example import_debug -- gs://bucket/dataset.ome.zarr");
+        eprintln!(
+            "  cargo run -p lucida-store --example import_debug -- example_files/volume-3d.ome.zarr"
+        );
+        eprintln!(
+            "  cargo run -p lucida-store --example import_debug -- gs://bucket/dataset.ome.zarr"
+        );
         std::process::exit(1);
     });
 

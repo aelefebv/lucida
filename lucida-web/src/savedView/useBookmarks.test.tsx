@@ -196,8 +196,8 @@ describe("useBookmarks — loading lifecycle", () => {
 describe("useBookmarks — filter logic", () => {
   it("substring matches against name + created_by_name + created_by", async () => {
     const items = [
-      makeBm({ id: "b1", name: "Apoptosis well B7", created_by_name: "Alice", created_by: "alice@x" }),
-      makeBm({ id: "b2", name: "CYP7A1 stain", created_by_name: "Bob", created_by: "bob@x" }),
+      makeBm({ id: "b1", name: "Group B7 view", created_by_name: "Alice", created_by: "alice@x" }),
+      makeBm({ id: "b2", name: "Channel 0 view", created_by_name: "Bob", created_by: "bob@x" }),
       makeBm({ id: "b3", name: "Random", created_by_name: "Carol", created_by: "carol@x" }),
     ];
     apiSpy.responder = () => jsonResponse(200, items);
@@ -212,7 +212,7 @@ describe("useBookmarks — filter logic", () => {
     await act(async () => outRef.current?.setSearch("bob"));
     expect(outRef.current?.bookmarks.map((b) => b.id)).toEqual(["b2"]);
 
-    await act(async () => outRef.current?.setSearch("apoptosis"));
+    await act(async () => outRef.current?.setSearch("b7"));
     expect(outRef.current?.bookmarks.map((b) => b.id)).toEqual(["b1"]);
   });
 

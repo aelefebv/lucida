@@ -55,8 +55,8 @@ export class VolumeRenderer {
   // indices + dims; the texture handle stays CPU-side because WebGPU
   // bind groups can't index into a texture array without a texture-
   // array binding (future optimization).
-  private fieldProxyTexture: GPUTexture | null = null;
-  private wellProxyTexture: GPUTexture | null = null;
+  private tileProxyTexture: GPUTexture | null = null;
+  private groupProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
 
   constructor(device: GPUDevice) {
@@ -101,7 +101,7 @@ export class VolumeRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
         },
-        // Proxy textures (fieldProxy + wellProxy)
+        // Proxy textures (tileProxy + groupProxy)
         {
           binding: 7,
           visibility: GPUShaderStage.FRAGMENT,
@@ -221,11 +221,11 @@ export class VolumeRenderer {
    * chain decides per-fragment whether to consult them.
    */
   setProxyTextures(
-    fieldTexture: GPUTexture | null,
-    wellTexture: GPUTexture | null,
+    tileTexture: GPUTexture | null,
+    groupTexture: GPUTexture | null,
   ) {
-    this.fieldProxyTexture = fieldTexture;
-    this.wellProxyTexture = wellTexture;
+    this.tileProxyTexture = tileTexture;
+    this.groupProxyTexture = groupTexture;
   }
 
   setAtlas(
@@ -259,8 +259,8 @@ export class VolumeRenderer {
     this.detailAtlasSlotDims = detailAtlasSlotDims;
     this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0, 0];
     const dummyProxy = this.getDummyProxyTexture();
-    const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
-    const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
+    const tileProxyView = (this.tileProxyTexture ?? dummyProxy).createView();
+    const groupProxyView = (this.groupProxyTexture ?? dummyProxy).createView();
     const coarseBindingTexture = coarseTexture ?? detailTexture;
     const coarseBindingIndirection = coarseIndirectionBuf ?? detailIndirectionBuf;
     this.bindGroup = this.device.createBindGroup({
@@ -273,8 +273,8 @@ export class VolumeRenderer {
         { binding: 4, resource: this.lutSampler },
         { binding: 5, resource: coarseBindingTexture.createView() },
         { binding: 6, resource: { buffer: coarseBindingIndirection } },
-        { binding: 7, resource: fieldProxyView },
-        { binding: 8, resource: wellProxyView },
+        { binding: 7, resource: tileProxyView },
+        { binding: 8, resource: groupProxyView },
       ],
     });
   }

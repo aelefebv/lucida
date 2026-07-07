@@ -1,7 +1,7 @@
+pub mod collection_metadata;
+pub mod collection_reader;
+pub mod collection_scanner;
 pub mod ome_metadata;
-pub mod plate_metadata;
-pub mod plate_reader;
-pub mod plate_scanner;
 pub mod pyramid;
 pub mod tiff_reader;
 pub mod zarr_writer;
@@ -157,28 +157,28 @@ pub fn convert_tiff_to_zarr(
     Ok(())
 }
 
-/// Convert an HCS TIFF directory to an OME-Zarr v0.5 plate store.
+/// Convert a tiled TIFF directory to an OME-Zarr v0.5 store.
 ///
 /// Scans `input_dir` for TIFF files matching `rXXcXXfXXpXX-chXXtXX.tiff`,
-/// discovers the plate structure, then converts each FOV into a multiscale
-/// pyramid under the standard plate hierarchy: `{row}/{col}/{fov}/`.
+/// discovers the collection structure, then converts each tile into a multiscale
+/// pyramid under the standard collection hierarchy: `{row}/{col}/{tile}/`.
 ///
 /// `chunk_size` is [Z, Y, X] matching lucida-core convention.
 /// `voxel_overrides` optionally overrides voxel sizes read from TIFF headers.
-pub fn convert_plate_to_zarr(
+pub fn convert_collection_to_zarr(
     input_dir: &Path,
     output: &Path,
     chunk_size: [u32; 3],
     voxel_overrides: Option<VoxelSize>,
 ) -> Result<(), String> {
-    let layout = plate_scanner::scan_plate_directory(input_dir, voxel_overrides)?;
+    let layout = collection_scanner::scan_collection_directory(input_dir, voxel_overrides)?;
 
     eprintln!(
-        "Plate: {} ({} rows x {} cols, {} wells)",
+        "Collection: {} ({} rows x {} cols, {} groups)",
         layout.name,
         layout.rows.len(),
         layout.columns.len(),
-        layout.wells.len(),
+        layout.groups.len(),
     );
     eprintln!(
         "  Image: {}x{}, {} channel(s), {} timepoint(s), {} Z plane(s)",
@@ -193,33 +193,33 @@ pub fn convert_plate_to_zarr(
         layout.voxel_size.x, layout.voxel_size.y, layout.voxel_size.z,
     );
 
-    // Write plate-level metadata.
-    plate_metadata::write_plate_metadata(output, &layout)?;
+    // Write collection-level metadata.
+    collection_metadata::write_collection_metadata(output, &layout)?;
 
-    let total_fovs: usize = layout.wells.iter().map(|w| w.fovs.len()).sum();
-    let mut fov_count = 0usize;
+    let total_tiles: usize = layout.groups.iter().map(|w| w.tiles.len()).sum();
+    let mut tile_count = 0usize;
 
-    for well in &layout.wells {
+    for group in &layout.groups {
         eprintln!(
-            "Processing well {}/{} ({} FOVs)",
-            well.row_name,
-            well.col_name,
-            well.fovs.len(),
+            "Processing group {}/{} ({} tiles)",
+            group.row_name,
+            group.col_name,
+            group.tiles.len(),
         );
 
-        // Write well-level metadata.
-        plate_metadata::write_well_metadata(output, well)?;
+        // Write group-level metadata.
+        collection_metadata::write_group_metadata(output, group)?;
 
-        for (fov_idx, fov) in well.fovs.iter().enumerate() {
-            fov_count += 1;
+        for (tile_idx, tile) in group.tiles.iter().enumerate() {
+            tile_count += 1;
             eprintln!(
-                "  FOV {fov_idx} ({fov_count}/{total_fovs}): reading {} files...",
-                fov.files.len(),
+                "  tile {tile_idx} ({tile_count}/{total_tiles}): reading {} files...",
+                tile.files.len(),
             );
 
-            // Read all TIFF files for this FOV into a Volume.
-            let volume = plate_reader::read_fov_tiffs(
-                fov,
+            // Read all TIFF files for this tile into a Volume.
+            let volume = collection_reader::read_tile_tiffs(
+                tile,
                 layout.channels,
                 layout.timepoints,
                 layout.z_planes,
@@ -228,29 +228,29 @@ pub fn convert_plate_to_zarr(
                 layout.voxel_size,
             )?;
 
-            // Build FOV output path: {output}/{row}/{col}/{fov_idx}/
-            let fov_output = output
-                .join(&well.row_name)
-                .join(&well.col_name)
-                .join(fov_idx.to_string());
+            // Build tile output path: {output}/{row}/{col}/{tile_idx}/
+            let tile_output = output
+                .join(&group.row_name)
+                .join(&group.col_name)
+                .join(tile_idx.to_string());
 
             // Build pyramid and write as a standalone OME-Zarr image.
-            write_volume_pyramid(&fov_output, volume, &chunk_size)?;
+            write_volume_pyramid(&tile_output, volume, &chunk_size)?;
         }
     }
 
     eprintln!(
-        "Wrote OME-Zarr plate to {} ({} wells, {} FOVs)",
+        "Wrote OME-Zarr collection to {} ({} groups, {} tiles)",
         output.display(),
-        layout.wells.len(),
-        fov_count,
+        layout.groups.len(),
+        tile_count,
     );
     Ok(())
 }
 
 /// Write a Volume as a multiscale pyramid OME-Zarr store.
 ///
-/// This is a shared helper used by both single-TIFF and plate pipelines.
+/// This is a shared helper used by both single-TIFF and collection pipelines.
 fn write_volume_pyramid(
     output: &Path,
     volume: tiff_reader::Volume,

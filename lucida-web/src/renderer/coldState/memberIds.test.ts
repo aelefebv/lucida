@@ -8,11 +8,11 @@
  * inline, so the matrix below pins what those call sites produce by
  * construction.
  *
- * The bug the helper guards against: well-as-proxy entries on the
+ * The bug the helper guards against: group-as-proxy entries on the
  * discriminated union have no `imageId`; inline
  * `${entry.imageId}:ch${channel}` reconstruction would produce ":ch5"
- * for multi-channel well-as-proxy entries — a key with no entity
- * prefix. Today masked because well-as-proxy entries have empty
+ * for multi-channel group-as-proxy entries — a key with no entity
+ * prefix. Today masked because group-as-proxy entries have empty
  * `levels[]` and the volume/slice pool loops short-circuit at the
  * targetLevel lookup. But the bad key would still get *registered* in
  * memberToPool if any caller bypassed the helper.
@@ -62,25 +62,25 @@ function makeEntry(
     ],
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
-    wellProxyAvailable: opts.wellProxyAvailable ?? false,
+    groupProxyAvailable: opts.groupProxyAvailable ?? false,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
   };
-  if (opts.mode === "well-as-proxy") {
+  if (opts.mode === "group-as-proxy") {
     return {
       ...base,
-      kind: "well-as-proxy",
-      mode: "well-as-proxy",
-      parentWellId: null,
+      kind: "group-as-proxy",
+      mode: "group-as-proxy",
+      parentGroupId: null,
     };
   }
   return {
     ...base,
-    kind: "field",
+    kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
-    parentWellId: opts.parentWellId ?? null,
+    parentGroupId: opts.parentGroupId ?? null,
   };
 }
 
@@ -111,36 +111,36 @@ function makeCold(
 
 // ---------------------------------------------------------------------------
 // Construction matrix — locks the four corner cases callers must agree on
-// (well-as-proxy is the easy one to get wrong).
+// (group-as-proxy is the easy one to get wrong).
 // ---------------------------------------------------------------------------
 
 describe("Suite D — memberIdForColdEntry matrix", () => {
-  it("single-channel field → imageId", () => {
-    const e = makeEntry({ entityId: "imgA", imageId: "imgA", mode: "fields-with-detail" });
+  it("single-channel tile → imageId", () => {
+    const e = makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" });
     expect(memberIdForColdEntry(e, 0, false)).toBe("imgA");
   });
 
-  it("multi-channel field → imageId:chN", () => {
-    const e = makeEntry({ entityId: "imgA", imageId: "imgA", mode: "fields-with-detail" });
+  it("multi-channel tile → imageId:chN", () => {
+    const e = makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" });
     expect(memberIdForColdEntry(e, 2, true)).toBe("imgA:ch2");
   });
 
-  it("single-channel well-as-proxy → entityId (NOT empty string)", () => {
-    // Regression: the helper routes via `entry.kind === "well-as-proxy"`
+  it("single-channel group-as-proxy → entityId (NOT empty string)", () => {
+    // Regression: the helper routes via `entry.kind === "group-as-proxy"`
     // and resolves to `entityId`. Inline `entry.imageId` construction
     // in memberToPool / wantedSet would have produced "" here.
-    const e = makeEntry({ entityId: "wellA", imageId: "", mode: "well-as-proxy" });
-    expect(memberIdForColdEntry(e, 0, false)).toBe("wellA");
+    const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
+    expect(memberIdForColdEntry(e, 0, false)).toBe("groupA");
     expect(memberIdForColdEntry(e, 0, false)).not.toBe("");
   });
 
-  it("multi-channel well-as-proxy → entityId:chN (NOT ':chN')", () => {
-    // Regression: well-as-proxy + multi-channel via old inline
+  it("multi-channel group-as-proxy → entityId:chN (NOT ':chN')", () => {
+    // Regression: group-as-proxy + multi-channel via old inline
     // `${entry.imageId}:ch${channel}` would have produced ":ch2" — a
     // member key with no entity prefix. The helper resolves to
     // entityId:chN.
-    const e = makeEntry({ entityId: "wellA", imageId: "", mode: "well-as-proxy" });
-    expect(memberIdForColdEntry(e, 2, true)).toBe("wellA:ch2");
+    const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
+    expect(memberIdForColdEntry(e, 2, true)).toBe("groupA:ch2");
     expect(memberIdForColdEntry(e, 2, true)).not.toBe(":ch2");
   });
 
@@ -149,25 +149,25 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
     // respective memberId without TypeScript or runtime needing to
     // inspect `imageId === ""`. This test asserts both arms of the
     // union round-trip through the helper correctly.
-    const field = makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "fields-with-detail" });
-    const well = makeEntry({ entityId: "well-b", imageId: "", mode: "well-as-proxy" });
-    expect(field.kind).toBe("field");
-    expect(well.kind).toBe("well-as-proxy");
-    expect(memberIdForColdEntry(field, 0, false)).toBe("img-a");
-    expect(memberIdForColdEntry(well, 0, false)).toBe("well-b");
-    expect(memberIdForColdEntry(field, 1, true)).toBe("img-a:ch1");
-    expect(memberIdForColdEntry(well, 1, true)).toBe("well-b:ch1");
+    const tile = makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "tiles-with-detail" });
+    const group = makeEntry({ entityId: "group-b", imageId: "", mode: "group-as-proxy" });
+    expect(tile.kind).toBe("tile");
+    expect(group.kind).toBe("group-as-proxy");
+    expect(memberIdForColdEntry(tile, 0, false)).toBe("img-a");
+    expect(memberIdForColdEntry(group, 0, false)).toBe("group-b");
+    expect(memberIdForColdEntry(tile, 1, true)).toBe("img-a:ch1");
+    expect(memberIdForColdEntry(group, 1, true)).toBe("group-b:ch1");
   });
 
-  it("mixed cold state (fields + wells, multi-channel) → canonical order", () => {
+  it("mixed cold state (tiles + groups, multi-channel) → canonical order", () => {
     // Canonical iteration order: activeSet outer, visibleChannels inner.
     const cold = makeCold(
       [
-        makeEntry({ entityId: "imgA", imageId: "imgA", mode: "fields-with-detail" }),
-        makeEntry({ entityId: "imgB", imageId: "imgB", mode: "fields-with-detail" }),
-        makeEntry({ entityId: "imgC", imageId: "imgC", mode: "fields-with-detail" }),
-        makeEntry({ entityId: "wellA", imageId: "", mode: "well-as-proxy" }),
-        makeEntry({ entityId: "wellB", imageId: "", mode: "well-as-proxy" }),
+        makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "imgC", imageId: "imgC", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" }),
+        makeEntry({ entityId: "groupB", imageId: "", mode: "group-as-proxy" }),
       ],
       [0, 1],
     );
@@ -176,8 +176,8 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
       "imgA:ch0", "imgA:ch1",
       "imgB:ch0", "imgB:ch1",
       "imgC:ch0", "imgC:ch1",
-      "wellA:ch0", "wellA:ch1",
-      "wellB:ch0", "wellB:ch1",
+      "groupA:ch0", "groupA:ch1",
+      "groupB:ch0", "groupB:ch1",
     ]);
     // Sanity: no canonical id is a bare ":chN" or empty string.
     for (const id of ids) {
@@ -188,7 +188,7 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
 
   it("canonical iteration uses explicit multi-channel mode with one visible channel", () => {
     const cold = makeCold(
-      [makeEntry({ entityId: "imgA", imageId: "imgA", mode: "fields-with-detail" })],
+      [makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" })],
       [2],
       true,
     );
@@ -210,8 +210,8 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
 // We assert against the cleanup contract directly rather than driving
 // the worker message loop: the contract is "every memberToDataset /
 // memberToPool entry whose value === datasetId is gone after
-// removeLayerResources(datasetId), and so are this dataset's wells in
-// wellToFields". The dispatcher implementation in gpu.worker.ts is a
+// removeLayerResources(datasetId), and so are this dataset's groups in
+// groupToTiles". The dispatcher implementation in gpu.worker.ts is a
 // tight transcription of this contract.
 // ---------------------------------------------------------------------------
 
@@ -229,10 +229,10 @@ function removeMemberRoutingForDataset(state: RendererState, datasetId: string):
     }
   }
   state.currentEntityMetasByDataset.delete(datasetId);
-  const wells = state.wellsByDataset.get(datasetId);
-  if (wells) {
-    for (const wellId of wells) state.wellToFields.delete(wellId);
-    state.wellsByDataset.delete(datasetId);
+  const groups = state.groupsByDataset.get(datasetId);
+  if (groups) {
+    for (const groupId of groups) state.groupToTiles.delete(groupId);
+    state.groupsByDataset.delete(datasetId);
   }
   if (state.currentColdState?.datasetId === datasetId) {
     state.currentColdState = null;
@@ -266,21 +266,21 @@ describe("Suite D — removeLayerResources cleanup", () => {
     expect(state.currentEntityMetasByDataset.has("ds2")).toBe(true);
   });
 
-  it("removeLayerResources clears well→fields entries owned by the dataset", () => {
+  it("removeLayerResources clears group→tiles entries owned by the dataset", () => {
     const state = createInitialState();
-    // Seed two wells across two datasets.
-    state.wellToFields.set("wellA", new Set(["fieldA1", "fieldA2"]));
-    state.wellToFields.set("wellB", new Set(["fieldB1"]));
-    state.wellsByDataset.set("ds1", new Set(["wellA"]));
-    state.wellsByDataset.set("ds2", new Set(["wellB"]));
+    // Seed two groups across two datasets.
+    state.groupToTiles.set("groupA", new Set(["tileA1", "tileA2"]));
+    state.groupToTiles.set("groupB", new Set(["tileB1"]));
+    state.groupsByDataset.set("ds1", new Set(["groupA"]));
+    state.groupsByDataset.set("ds2", new Set(["groupB"]));
 
     removeMemberRoutingForDataset(state, "ds1");
 
-    // ds1's well is gone; ds2's well remains.
-    expect(state.wellToFields.has("wellA")).toBe(false);
-    expect(state.wellToFields.has("wellB")).toBe(true);
-    expect(state.wellsByDataset.has("ds1")).toBe(false);
-    expect(state.wellsByDataset.has("ds2")).toBe(true);
+    // ds1's group is gone; ds2's group remains.
+    expect(state.groupToTiles.has("groupA")).toBe(false);
+    expect(state.groupToTiles.has("groupB")).toBe(true);
+    expect(state.groupsByDataset.has("ds1")).toBe(false);
+    expect(state.groupsByDataset.has("ds2")).toBe(true);
   });
 
   it("clears currentColdState when the dropped dataset is the active one", () => {

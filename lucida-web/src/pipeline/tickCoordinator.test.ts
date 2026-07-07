@@ -77,9 +77,9 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     viewQuery: {
       visible_entities: [
         {
-          entity_id: "field-0",
+          entity_id: "tile-0",
           image_id: "img-0",
-          kind: "Field",
+          kind: "Tile",
           visible: true,
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
@@ -89,7 +89,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
         },
       ],
     },
-    memberPositions: { "field-0": [0, 0] },
+    memberPositions: { "tile-0": [0, 0] },
     visibleRegion: {
       xy_bounds: [0, 0, 1024, 1024],
       z_range: [0, 1],
@@ -154,18 +154,18 @@ function createMockContent(): DatasetManifest {
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    // FieldSnapshot.parentId is required (non-null). The mock scene
-    // reports `field-0` as a Field, so the manifest must carry the
+    // TileSnapshot.parentId is required (non-null). The mock scene
+    // reports `tile-0` as a Tile, so the manifest must carry the
     // matching parent edge or `buildPlanningSnapshot` throws.
     entities: [
-      { id: "well-0", kind: "Well", parent: null, labels: {} },
-      { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
+      { id: "group-0", kind: "Group", parent: null, labels: {} },
+      { id: "tile-0", kind: "Tile", parent: "group-0", labels: {} },
     ],
     transforms: [],
     images: [
       {
         image_id: "img-0",
-        owner: "field-0",
+        owner: "tile-0",
         multiscale: {
           axes: [],
           data_type: "uint16",
@@ -351,14 +351,14 @@ describe("epoch caching", () => {
     ctx.client = { coldState, viewHotState: vi.fn() } as unknown as TickContext["client"];
     ctx.assetCatalog = createMockAssetCatalog([
       {
-        entity_id: "field-0",
-        kinds: ["FieldProxy3D"],
-        footprints: [{ kind: "FieldProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
+        entity_id: "tile-0",
+        kinds: ["TileProxy3D"],
+        footprints: [{ kind: "TileProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
       },
       {
-        entity_id: "well-0",
-        kinds: ["WellProxy3D"],
-        footprints: [{ kind: "WellProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
+        entity_id: "group-0",
+        kinds: ["GroupProxy3D"],
+        footprints: [{ kind: "GroupProxy3D", dims: [1, 128, 128], bytes: 512 * 1024 * 1024 }],
       },
     ]);
 
@@ -386,11 +386,11 @@ describe("epoch caching", () => {
   function labeledContent(): DatasetManifest {
     const manifest = createMockContent();
     (manifest as DatasetManifest).labels = [{
-      name: "mito",
+      name: "region-b",
       source_image_id: "img-0",
       image: {
-        image_id: "img-0:label:mito",
-        owner: "field-0",
+        image_id: "img-0:label:region-b",
+        owner: "tile-0",
         multiscale: {
           axes: [],
           data_type: "Uint32",
@@ -410,7 +410,7 @@ describe("epoch caching", () => {
 
   function labelRequestsFromSubmit(cpuCache: CpuCache) {
     const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
-    return submitted.requests.filter((r) => r.imageId === "img-0:label:mito");
+    return submitted.requests.filter((r) => r.imageId === "img-0:label:region-b");
   }
 
   it("merges the label's FULL z-grid into the fetch plan in volume mode", () => {
@@ -429,7 +429,7 @@ describe("epoch caching", () => {
     expect(labelReqs.length).toBe(2);
     expect(new Set(labelReqs.map((r) => r.z))).toEqual(new Set([0, 1]));
     // Scoped under the label's own image id, so intensity eviction is untouched.
-    expect(labelReqs.every((r) => r.imageId === "img-0:label:mito")).toBe(true);
+    expect(labelReqs.every((r) => r.imageId === "img-0:label:region-b")).toBe(true);
   });
 
   it("merges only the mapped z-plane in slice mode (unchanged)", () => {
@@ -483,9 +483,9 @@ describe("multi-dataset planning", () => {
       viewQuery: {
         visible_entities: [
           {
-            entity_id: "field-0",
+            entity_id: "tile-0",
             image_id: "img-0",
-            kind: "Field",
+            kind: "Tile",
             visible: true,
             projected_diagonal_px: 100,
             projected_area_px2: 10000,
@@ -528,7 +528,7 @@ describe("multi-dataset planning", () => {
       images: [
         {
           image_id: "img-1",
-          owner: "field-0",
+          owner: "tile-0",
           multiscale: {
             axes: [],
             data_type: "uint16",

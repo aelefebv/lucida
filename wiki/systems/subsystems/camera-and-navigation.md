@@ -5,7 +5,7 @@ description: "How Lucida moves the viewpoint through a dataset, and how raw keyb
 tags: [lucida, subsystem]
 source_path: wiki/systems/subsystems/camera-and-navigation.md
 created: 2026-06-25
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Camera and Navigation
@@ -68,5 +68,5 @@ It is purely a **fetch-priority hint** — not camera state, not saved-view/disp
 
 - **`viewMode` and `cameraMode` are two separate React states**, both mirrors of the canonical WASM camera. They can drift if a code path mutates the camera without updating the mirror — always re-read `camera_mode()` after a restore rather than trusting the React copy.
 - **`set_mode_*` is the conventional path; calling `set_mode_2d/3d/fly` on the inner scene directly bypasses the epoch bump** in `wasm.rs` and the renderer goes silently stale.
-- **XY frustum bounds are not clamped to the volume** (only Z is) — for plates the camera may look at a well at a large XY offset, and per-member AABB tests handle visibility downstream. Don't "fix" this by clamping XY.
+- **XY frustum bounds are not clamped to the volume** (only Z is) — for collections the camera may look at a group at a large XY offset, and per-member AABB tests handle visibility downstream. Don't "fix" this by clamping XY.
 - **Fly mode key handling is edge-detected and input-focus-gated.** A toggle that fires every frame, or one that steals keystrokes from a text field, means the edge-detect or `isInputFocused` guard was bypassed.

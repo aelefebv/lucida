@@ -2819,7 +2819,7 @@ mod tests {
                             "id": "entity-1",
                             "kind": "Image",
                             "parent": null,
-                            "labels": { "name": "field-1" }
+                            "labels": { "name": "tile-1" }
                         }
                     ],
                     "transforms": [],
@@ -2857,7 +2857,7 @@ mod tests {
                             "id": "entity-2",
                             "kind": "Image",
                             "parent": null,
-                            "labels": { "name": "field-2" }
+                            "labels": { "name": "tile-2" }
                         }
                     ],
                     "transforms": [],

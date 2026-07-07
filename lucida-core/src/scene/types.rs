@@ -191,7 +191,7 @@ impl DatasetDisplaySettings {
     /// Label policy: only the first DRAWABLE-dtype (uint32) label is visible by
     /// default (the rest start hidden), all at opacity 0.5 — one clean overlay on
     /// open, the user reveals the others via the per-label toggles. This keeps a
-    /// labeled plate from fetching + pooling every mask on open and avoids
+    /// labeled collection from fetching + pooling every mask on open and avoids
     /// stacking masks into a muddy first impression, while still exposing the
     /// full set for control.
     ///
@@ -372,10 +372,10 @@ pub struct Annotation {
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
     pub comments: Vec<Comment>,
-    /// The **plate entity (well/field) this pin is glued to** (issue #780). Set
+    /// The **collection entity (group/tile) this pin is glued to** (issue #780). Set
     /// once at creation, inside [`DocumentState::apply`] for `AddAnnotation`, to
     /// the nearest placeable entity in the dataset's resolved active layout (see
-    /// [`DocumentState::nearest_anchor`]). `None` for a non-plate dataset, when no
+    /// [`DocumentState::nearest_anchor`]). `None` for a non-collection dataset, when no
     /// entity position is resolvable, and for any pin created before this slice.
     ///
     /// When the active layout changes, an anchored pin's whole shape is translated
@@ -954,13 +954,13 @@ impl DocumentState {
         }
     }
 
-    /// Pick the plate entity a freshly-dropped pin should be glued to: the entity
+    /// Pick the collection entity a freshly-dropped pin should be glued to: the entity
     /// **nearest** to `position` (Euclidean) in `dataset_id`'s currently-resolved
     /// active layout (issue #780).
     ///
     /// Returns `None` — leaving the pin unanchored — when the dataset is not a
-    /// plate, is unknown, or has no entity with a resolvable position in the active
-    /// layout. Only entities that are actually placed (directly, or as a field via
+    /// collection, is unknown, or has no entity with a resolvable position in the active
+    /// layout. Only entities that are actually placed (directly, or as a tile via
     /// a placed parent) are candidates; an unplaceable entity is never treated as
     /// if it sat at the origin (that is the whole point of using
     /// [`resolve_entity_position`] rather than the render-path fallback).
@@ -972,9 +972,9 @@ impl DocumentState {
     /// convergent without traveling on the wire.
     fn nearest_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
         let manifest = self.manifests.get(dataset_id)?;
-        // Anchoring is plate-only (issue #780): a single-image dataset has no
-        // well/field to glue to, and its lone image doesn't move between layouts.
-        if !matches!(manifest.kind, DatasetKind::Plate { .. }) {
+        // Anchoring is collection-only (issue #780): a single-image dataset has no
+        // group/tile to glue to, and its lone image doesn't move between layouts.
+        if !matches!(manifest.kind, DatasetKind::Collection { .. }) {
             return None;
         }
 
@@ -1131,12 +1131,12 @@ impl DocumentState {
                 kind,
                 view,
             } => {
-                // Glue the new pin to the nearest plate well/field in the resolved
+                // Glue the new pin to the nearest collection group/tile in the resolved
                 // active layout (issue #780), so a later layout switch moves it
                 // with that entity. Computed here, inside the canonical apply, from
                 // synced state — so the server and every client derive the SAME
                 // anchor without it riding the `add_annotation` wire shape. `None`
-                // for a non-plate dataset or when nothing is placeable.
+                // for a non-collection dataset or when nothing is placeable.
                 let anchor = self.nearest_anchor(&dataset_id, position);
                 self.add_annotation(
                     dataset_id,

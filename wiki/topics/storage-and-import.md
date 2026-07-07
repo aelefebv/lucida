@@ -5,7 +5,7 @@ description: "How datasets get from a user-pasted URL to a planning-domain-ready
 tags: [lucida, topic]
 source_path: wiki/topics/storage-and-import.md
 created: 2026-05-07
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # Topic: Storage and Import
@@ -44,4 +44,4 @@ This page is a curated index. Articles live in their canonical homes; follow the
 - [Wire chunk keys: t/c are voxel coords, z/y/x are chunk-grid coords](../gotchas/wire-chunk-key-conventions.md) — wire chunk keys split asymmetrically: `t/c` are voxel coords, `z/y/x` are chunk-grid coords. The divide-and-slice for `t/c` happens server-side
 - [Non-canonical axes are pinned to index 0](../gotchas/non-canonical-axes.md) — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible
 - [Blosc support is a deliberately narrow subset](../gotchas/blosc-support.md) — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time
-- [Stage Translations Are Microns; Lucida Composes in Voxels](../gotchas/stage-translations-are-microns.md) — OME-Zarr stores stage positions in microns; `lucida-store` converts to voxels at import
+- [Explicit Translations Are in Physical Units; Lucida Composes in Voxels](../gotchas/explicit-translations-are-physical-units.md) — OME-Zarr stores explicit tile translations in physical units; `lucida-store` converts to voxels at import

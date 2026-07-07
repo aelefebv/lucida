@@ -17,10 +17,10 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::with_default;
 use tracing::{Event, Level, Metadata, Subscriber};
+use tracing::{field::Field, field::Visit};
 
 use super::cleanup::{CleanupState, sweep_once};
 use super::config::AuthConfig;

@@ -45,7 +45,7 @@ function label(name: string, dtype = "Uint32"): LabelSpec {
 function manifest(labels: LabelSpec[]): DatasetManifest {
   return {
     dataset_id: "ds-0",
-    name: "yeast",
+    name: "volume",
     kind: "Single",
     entities: [],
     transforms: [],
@@ -112,11 +112,11 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
         { visible: false, opacity: 0.25 },
       ]),
     );
-    const infos = buildLayerInfos(scene, datasetsWith([label("mito"), label("cells")]), emptyMaps);
+    const infos = buildLayerInfos(scene, datasetsWith([label("region-b"), label("region-c")]), emptyMaps);
     expect(infos).toHaveLength(1);
     expect(infos[0].labelRows).toEqual([
-      { index: 0, name: "mito", visible: true, opacity: 0.5 },
-      { index: 1, name: "cells", visible: false, opacity: 0.25 },
+      { index: 0, name: "region-b", visible: true, opacity: 0.5 },
+      { index: 1, name: "region-c", visible: false, opacity: 0.25 },
     ]);
   });
 
@@ -132,18 +132,18 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
     );
     const infos = buildLayerInfos(
       scene,
-      datasetsWith([label("nuclei", "Uint16"), label("cells", "Uint32")]),
+      datasetsWith([label("region-a", "Uint16"), label("region-c", "Uint32")]),
       emptyMaps,
     );
-    expect(infos[0].labelRows).toEqual([{ index: 1, name: "cells", visible: true, opacity: 0.7 }]);
+    expect(infos[0].labelRows).toEqual([{ index: 1, name: "region-c", visible: true, opacity: 0.7 }]);
   });
 
   it("with NO label_settings (empty), the first drawable label shows (render fallback)", () => {
     const scene = stubScene(["ds-0"], settingsWith([]));
-    const infos = buildLayerInfos(scene, datasetsWith([label("mito"), label("cells")]), emptyMaps);
+    const infos = buildLayerInfos(scene, datasetsWith([label("region-b"), label("region-c")]), emptyMaps);
     expect(infos[0].labelRows).toEqual([
-      { index: 0, name: "mito", visible: true, opacity: 0.5 },
-      { index: 1, name: "cells", visible: false, opacity: 0.5 },
+      { index: 0, name: "region-b", visible: true, opacity: 0.5 },
+      { index: 1, name: "region-c", visible: false, opacity: 0.5 },
     ]);
   });
 

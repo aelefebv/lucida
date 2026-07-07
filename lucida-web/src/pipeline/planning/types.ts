@@ -10,13 +10,13 @@ import type { VisibleRegion } from "../viewport.ts";
 
 /**
  * Shared shape across every {@link EntitySnapshot} variant. Holds the
- * fields that don't depend on the entity's `kind`. The variants
- * specialise the discriminator and add `parentId` for {@link FieldSnapshot}.
+ * tiles that don't depend on the entity's `kind`. The variants
+ * specialise the discriminator and add `parentId` for {@link TileSnapshot}.
  *
  * Conservative form: `levels` lives on the base because all three
- * variants still carry it (even {@link WellSnapshot}, despite
- * `well-as-proxy` never iterating well chunks). The aggressive form
- * stripping `levels` from {@link WellSnapshot} is deferred indefinitely;
+ * variants still carry it (even {@link GroupSnapshot}, despite
+ * `group-as-proxy` never iterating group chunks). The aggressive form
+ * stripping `levels` from {@link GroupSnapshot} is deferred indefinitely;
  * see ADR `0026-discriminated-active-set-and-entity-types.md`.
  */
 export interface BaseEntitySnapshot {
@@ -53,38 +53,38 @@ export interface BaseEntitySnapshot {
 }
 
 /**
- * A standalone image entity (non-plate datasets). Treated as its own
- * one-entry "well" by `groupByWell` so the rest of the planner is
- * uniform. No `parentId` field — top-level entity by construction.
+ * A standalone image entity (non-collection datasets). Treated as its own
+ * one-entry "group" by `groupMembers` so the rest of the planner is
+ * uniform. No `parentId` tile — top-level entity by construction.
  */
 export interface ImageSnapshot extends BaseEntitySnapshot {
   kind: "Image";
 }
 
 /**
- * A well entity on a plate. Top-level — no `parentId`. `groupByWell`
- * pairs it with its constituent {@link FieldSnapshot}s by id; promotion
- * may downgrade the well to `well-as-proxy` (rendered as one synthetic
- * cube) or leave it at field-mode (each field rendered separately).
+ * A group entity on a collection. Top-level — no `parentId`. `groupMembers`
+ * pairs it with its constituent {@link TileSnapshot}s by id; promotion
+ * may downgrade the group to `group-as-proxy` (rendered as one synthetic
+ * cube) or leave it at tile-mode (each tile rendered separately).
  */
-export interface WellSnapshot extends BaseEntitySnapshot {
-  kind: "Well";
+export interface GroupSnapshot extends BaseEntitySnapshot {
+  kind: "Group";
 }
 
 /**
- * A field entity belonging to a well on a plate. `parentId` is required
- * and non-null by contract: a field without a parent is a producer
+ * A tile entity belonging to a group on a collection. `parentId` is required
+ * and non-null by contract: a tile without a parent is a producer
  * invariant violation worth surfacing rather than silently coercing.
  *
- * Consumers that read `parentId` narrow on `kind === "Field"` first; the
+ * Consumers that read `parentId` narrow on `kind === "Tile"` first; the
  * post-narrow access has no `?? null` fallback.
  */
-export interface FieldSnapshot extends BaseEntitySnapshot {
-  kind: "Field";
+export interface TileSnapshot extends BaseEntitySnapshot {
+  kind: "Tile";
   /**
-   * Parent well's entity id. Required and non-null for {@link FieldSnapshot}
-   * — `groupByWell` keys field grouping off this id. Only fields carry
-   * a `parentId`; well/image variants don't.
+   * Parent group's entity id. Required and non-null for {@link TileSnapshot}
+   * — `groupMembers` keys tile grouping off this id. Only tiles carry
+   * a `parentId`; group/image variants don't.
    */
   parentId: string;
 }
@@ -93,11 +93,11 @@ export interface FieldSnapshot extends BaseEntitySnapshot {
  * Discriminated union of the three entity kinds. The previous flat
  * `EntitySnapshot` interface (with `parentId: string | null`) is
  * replaced; consumers narrow on `kind` before reading variant-specific
- * fields. Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+ * tiles. Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
  * extended from "carry-forward state is explicit" to "per-variant
  * invariants are compile-time enforced."
  */
-export type EntitySnapshot = ImageSnapshot | WellSnapshot | FieldSnapshot;
+export type EntitySnapshot = ImageSnapshot | GroupSnapshot | TileSnapshot;
 
 export interface SelectionState {
   t: number;
@@ -155,12 +155,12 @@ export interface PlanningSnapshot {
   /**
    * Asset catalog snapshot for promotion. The orchestrator passes
    * `ctx.assetCatalog.snapshot()` (always non-null); Planning consults
-   * it to decide whether `well-as-proxy` /
-   * `fields-with-proxy-fallback` are reachable for each well.
+   * it to decide whether `group-as-proxy` /
+   * `tiles-with-proxy-fallback` are reachable for each group.
    *
    * `null` is still accepted for callers that want to opt out — e.g.
    * tests and `createSyntheticSnapshot`. Treated as an empty catalog →
-   * no proxies available → all wells degrade to `fields-with-detail`.
+   * no proxies available → all groups degrade to `tiles-with-detail`.
    */
   assetCatalog: AssetCatalogSnapshot | null;
   /**
@@ -184,9 +184,9 @@ export interface PlanningSnapshot {
  * pointer returned in {@link RequestPlan.nextState} and threads it into
  * the next call to `plan`.
  *
- * v1 contains a single field — the previous tick's active set — used by
- * `buildPrevModeByWell` to drive promotion-mode hysteresis. The
- * container exists so future state (per-well stickiness counters,
+ * v1 contains a single tile — the previous tick's active set — used by
+ * `buildPrevModeByGroup` to drive promotion-mode hysteresis. The
+ * container exists so future state (per-group stickiness counters,
  * anticipation hints, planner state machines) can be added without
  * churning {@link PlanningSnapshot}'s contract.
  *
@@ -205,8 +205,8 @@ export interface RequestPlan {
    */
   requests: ChunkRequest[];
   /**
-   * Promotion decisions: one entry per visible well (`well-as-proxy`)
-   * or per visible field (field modes), plus invisible-entity
+   * Promotion decisions: one entry per visible group (`group-as-proxy`)
+   * or per visible tile (tile modes), plus invisible-entity
    * pass-throughs. Carries the resolved {@link EntityMode}, LOD range,
    * and proxy availability flags consumed by orchestrator delivery.
    */
@@ -244,7 +244,7 @@ export interface RequestPlan {
  * calls (detail + prefetch + overview lanes) and across all entities.
  */
 export interface PlanStats {
-  /** How many times catalog-aware promotion downgraded a well's mode. */
+  /** How many times catalog-aware promotion downgraded a group's mode. */
   catalogDegradations: number;
   /** Frustum / visible-region culling stages. */
   culling: PlanCullingStats;
@@ -308,16 +308,16 @@ export interface ChunkRequest {
  * [`CpuCache.submit`] which routes it to
  * [`ContentSource.fetchProxy`].
  *
- * Populated from the three-tier promotion: `WellProxy3D` for wells in
- * `well-as-proxy` and as a parent fallback for
- * `fields-with-proxy-fallback`; `FieldProxy3D` for fields in
- * `fields-with-proxy-fallback` and `fields-with-detail`.
+ * Populated from the three-tier promotion: `GroupProxy3D` for groups in
+ * `group-as-proxy` and as a parent fallback for
+ * `tiles-with-proxy-fallback`; `TileProxy3D` for tiles in
+ * `tiles-with-proxy-fallback` and `tiles-with-detail`.
  */
 export interface ProxyRequest {
   datasetId: string;
   entityId: string;
   imageId: string;
-  kind: "WellProxy3D" | "FieldProxy3D";
+  kind: "GroupProxy3D" | "TileProxy3D";
   t: number;
   c: number;
   /** Lower = more urgent. Same scale as `ChunkRequest.priority`. */
@@ -325,84 +325,84 @@ export interface ProxyRequest {
 }
 
 /**
- * Per-field promotion mode for visible field entries, selected by
- * `chooseEntityMode` from the well's projected diagonal (max of
- * constituent fields, in pixels):
+ * Per-tile promotion mode for visible tile entries, selected by
+ * `chooseEntityMode` from the group's projected diagonal (max of
+ * constituent tiles, in pixels):
  *
- *   - `fields-with-proxy-fallback` (mid range)  — request real field detail
- *     chunks but also fetch `FieldProxy3D` per visible field and the
- *     parent's `WellProxy3D` as a fast fallback while detail loads.
- *   - `fields-with-detail`        (> `DETAIL_THRESHOLD_PX`)  — real
- *     field detail chunks only; proxy is a stand-in fallback that the
+ *   - `tiles-with-proxy-fallback` (mid range)  — request real tile detail
+ *     chunks but also fetch `TileProxy3D` per visible tile and the
+ *     parent's `GroupProxy3D` as a fast fallback while detail loads.
+ *   - `tiles-with-detail`        (> `DETAIL_THRESHOLD_PX`)  — real
+ *     tile detail chunks only; proxy is a stand-in fallback that the
  *     worker uses when chunks are missing.
  *
- * The third tier — well-as-proxy (< `FAR_THRESHOLD_PX`) — does not
+ * The third tier — group-as-proxy (< `FAR_THRESHOLD_PX`) — does not
  * live on this type. It's a separate {@link ActiveSetEntry} variant
- * ({@link WellAsProxyEntry}) discriminated by `kind`, so per-variant
- * invariants (no LOD bookkeeping for well-as-proxy, no proxy
+ * ({@link GroupAsProxyEntry}) discriminated by `kind`, so per-variant
+ * invariants (no LOD bookkeeping for group-as-proxy, no proxy
  * bookkeeping for invisible) are compile-time enforced rather than
  * JSDoc'd.
  */
 export type EntityMode =
-  | "fields-with-proxy-fallback"
-  | "fields-with-detail";
+  | "tiles-with-proxy-fallback"
+  | "tiles-with-detail";
 
 /**
- * The full per-well decision space — what `chooseEntityMode` and
+ * The full per-group decision space — what `chooseEntityMode` and
  * `degradeForCatalog` return before the variant split. Includes
- * `well-as-proxy` because the per-well decision step still discriminates
+ * `group-as-proxy` because the per-group decision step still discriminates
  * on it before `assignModes` translates each result into the
  * matching {@link ActiveSetEntry} variant.
  *
- * Distinct from {@link EntityMode}, which is the narrower per-field
- * mode that lives only on {@link FieldEntry}.
+ * Distinct from {@link EntityMode}, which is the narrower per-tile
+ * mode that lives only on {@link TileEntry}.
  */
-export type ResolvedMode = EntityMode | "well-as-proxy";
+export type ResolvedMode = EntityMode | "group-as-proxy";
 
 /**
- * Promotion decision for one visible well or visible field, plus
+ * Promotion decision for one visible group or visible tile, plus
  * pass-through entries for invisible entities. Discriminated by `kind`
- * so each variant can declare only the fields that make sense for it
+ * so each variant can declare only the tiles that make sense for it
  * (per-variant invariants compile-time enforced — see
  * [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]).
  *
  * Three variants:
- *   - {@link WellAsProxyEntry} (`kind: "well-as-proxy"`) — one per
- *     well-as-proxy well; carries no LOD or imageId data.
- *   - {@link FieldEntry} (`kind: "field"`) — one per visible field in
- *     a field-mode well; carries LOD range, proxy availability flags.
+ *   - {@link GroupAsProxyEntry} (`kind: "group-as-proxy"`) — one per
+ *     group-as-proxy group; carries no LOD or imageId data.
+ *   - {@link TileEntry} (`kind: "tile"`) — one per visible tile in
+ *     a tile-mode group; carries LOD range, proxy availability flags.
  *   - {@link InvisibleEntry} (`kind: "invisible"`) — one per invisible
  *     entity, carrying just the coarsest LOD for downstream eviction.
  *
- * Consumers narrow on `kind` before reading variant-specific fields.
+ * Consumers narrow on `kind` before reading variant-specific tiles.
  */
-export type ActiveSetEntry = WellAsProxyEntry | FieldEntry | InvisibleEntry;
+export type ActiveSetEntry = GroupAsProxyEntry | TileEntry | InvisibleEntry;
 
 /**
- * Active-set entry for a well rendered as a single `WellProxy3D`
- * asset — no field chunks. Carries only the well's id; LOD bookkeeping
- * and proxy availability flags are implicit (the well-proxy IS the
+ * Active-set entry for a group rendered as a single `GroupProxy3D`
+ * asset — no tile chunks. Carries only the group's id; LOD bookkeeping
+ * and proxy availability flags are implicit (the group-proxy IS the
  * one asset that gets fetched at `PROXY_LANE_OFFSET`).
  */
-export interface WellAsProxyEntry {
-  kind: "well-as-proxy";
-  /** The well's entity id. */
+export interface GroupAsProxyEntry {
+  kind: "group-as-proxy";
+  /** The group's entity id. */
   entityId: string;
 }
 
 /**
- * Active-set entry for a visible field — one per visible field of a
- * well in a field-mode promotion. Carries the field's owning image
+ * Active-set entry for a visible tile — one per visible tile of a
+ * group in a tile-mode promotion. Carries the tile's owning image
  * id, the planning LOD range, and proxy availability flags that drive
  * the fallback request emission.
  */
-export interface FieldEntry {
-  kind: "field";
-  /** The field's entity id. */
+export interface TileEntry {
+  kind: "tile";
+  /** The tile's entity id. */
   entityId: string;
-  /** The field's owning image id (matches `EntitySnapshot.imageId`). */
+  /** The tile's owning image id (matches `EntitySnapshot.imageId`). */
   imageId: string;
-  /** Per-field promotion mode. See {@link EntityMode}. */
+  /** Per-tile promotion mode. See {@link EntityMode}. */
   mode: EntityMode;
   targetLod: number;
   coarsestDetailLod: number;
@@ -420,33 +420,33 @@ export interface FieldEntry {
   wantedLodLevels?: number[];
   /**
    * Which proxy kind this entry would prefer, if any. Always
-   * `FieldProxy3D` when set; `undefined` if the catalog has no field
+   * `TileProxy3D` when set; `undefined` if the catalog has no tile
    * proxy advertised for this entity.
    */
-  proxyKind?: "FieldProxy3D";
+  proxyKind?: "TileProxy3D";
   /**
    * True if the entry's preferred proxy is known to be in the catalog
-   * (the field's `FieldProxy3D`).
+   * (the tile's `TileProxy3D`).
    */
   proxyAvailable: boolean;
   /**
-   * Whether the parent well's `WellProxy3D` is advertised. Drives the
-   * secondary lower-priority well-proxy request in
-   * `fields-with-proxy-fallback` and the parent-fallback hint in
-   * `fields-with-detail`.
+   * Whether the parent group's `GroupProxy3D` is advertised. Drives the
+   * secondary lower-priority group-proxy request in
+   * `tiles-with-proxy-fallback` and the parent-fallback hint in
+   * `tiles-with-detail`.
    */
-  wellProxyAvailable: boolean;
+  groupProxyAvailable: boolean;
 }
 
 /**
  * Active-set entry for an invisible entity — pass-through so the CPU
  * cache eviction tier mapping and debug panels can still see it.
  * Carries only enough to identify the entity and its coarsest level
- * (used for overview-lane bookkeeping); no LOD range or proxy fields,
+ * (used for overview-lane bookkeeping); no LOD range or proxy tiles,
  * since invisibles don't request chunks or proxies.
  *
- * Distinct from a `fields-with-detail` field entry: keeping invisibles
- * as their own variant prevents `if (entry.mode === "fields-with-detail")`
+ * Distinct from a `tiles-with-detail` tile entry: keeping invisibles
+ * as their own variant prevents `if (entry.mode === "tiles-with-detail")`
  * checks from accidentally including invisible entities.
  */
 export interface InvisibleEntry {
@@ -457,16 +457,16 @@ export interface InvisibleEntry {
   coarsestLod: number;
 }
 
-export interface WellGroup {
-  /** The well's entity id. May be derived from `parentId` of fields. */
-  wellId: string;
+export interface MemberGroup {
+  /** The group's entity id. May be derived from `parentId` of tiles. */
+  groupId: string;
   /**
-   * The visible well entity if {@link EntitySnapshot.kind} === "Well"
+   * The visible group entity if {@link EntitySnapshot.kind} === "Group"
    * was in `entities`, otherwise `null`.
    */
-  wellEntity: EntitySnapshot | null;
-  /** All visible field entities whose `parentId === wellId`. */
-  fields: EntitySnapshot[];
-  /** Max projectedDiagonalPx across well + fields. */
+  groupEntity: EntitySnapshot | null;
+  /** All visible tile entities whose `parentId === groupId`. */
+  tiles: EntitySnapshot[];
+  /** Max projectedDiagonalPx across group + tiles. */
   projectedDiagonalPx: number;
 }

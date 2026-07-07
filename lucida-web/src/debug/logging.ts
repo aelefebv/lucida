@@ -96,7 +96,7 @@ export function debugLog(category: DebugCategory, event: string, data: Record<st
 // listener), different semantics (no console output, no WASM push-down,
 // no `*` shorthand).
 
-export const DEBUG_OVERLAYS = ["wellModes", "chunkGrid", "chunkTier", "renderRadius", "cachedTier", "plannedRank"] as const;
+export const DEBUG_OVERLAYS = ["groupModes", "chunkGrid", "chunkTier", "renderRadius", "cachedTier", "plannedRank"] as const;
 export type DebugOverlay = (typeof DEBUG_OVERLAYS)[number];
 
 const OVERLAY_LS_KEY = "debug.overlays";

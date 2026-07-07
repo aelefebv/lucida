@@ -44,7 +44,7 @@ export function useIntensityBatcher({
     const client = clientRef.current;
     if (!client) return;
     client.onIntensityRange = (rawId, min, max) => {
-      // For plate datasets, the GPU worker reports intensity using member IDs,
+      // For collection datasets, the GPU worker reports intensity using member IDs,
       // but contrast settings and data-range maps are keyed by parent dataset ID.
       let datasetId = rawId;
       const datasets = datasetsRef.current;

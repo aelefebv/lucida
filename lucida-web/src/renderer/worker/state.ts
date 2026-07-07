@@ -24,7 +24,7 @@ import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 
 export interface RendererState {
   // ── Cold-state routing ────────────────────────────────────────────
-  /** memberId → datasetId (canonical: imageId or imageId:chN; well-as-proxy resolves to entityId). */
+  /** memberId → datasetId (canonical: imageId or imageId:chN; group-as-proxy resolves to entityId). */
   memberToDataset: Map<string, string>;
   /** memberId → detail pool key. Legacy compatibility for callers that have not become tier-aware. */
   memberToPool: Map<string, string>;
@@ -32,19 +32,19 @@ export interface RendererState {
   memberTierToPool: Map<string, string>;
   /** Per-dataset entityMetas snapshot captured during the most recent cold state. */
   currentEntityMetasByDataset: Map<string, Map<string, LodIndirectionMeta[]>>;
-  /** wellId → set of child fieldEntityIds (used for WellProxy3D fan-out). */
-  wellToFields: Map<string, Set<string>>;
+  /** groupId → set of child tileEntityIds (used for GroupProxy3D fan-out). */
+  groupToTiles: Map<string, Set<string>>;
   /**
-   * dataset → wellIds whose entries currently live in {@link wellToFields}.
-   * Tracked so `removeLayerResources` can drop the well→fields entries
-   * owned by the removed dataset without scanning every well's child set.
+   * dataset → groupIds whose entries currently live in {@link groupToTiles}.
+   * Tracked so `removeLayerResources` can drop the group→tiles entries
+   * owned by the removed dataset without scanning every group's child set.
    */
-  wellsByDataset: Map<string, Set<string>>;
+  groupsByDataset: Map<string, Set<string>>;
 
   // ── Proxy + descriptor registries ────────────────────────────────
   /** dataset → poolKey → ProxyAtlasState (proxy GPU residency by `(datasetId, kind, slotDims, channel)`). */
   proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>;
-  /** `${entityId}|${t}|${c}` → field/well proxy handle pair (CPU mirror of GPU descriptor). */
+  /** `${entityId}|${t}|${c}` → tile/group proxy handle pair (CPU mirror of GPU descriptor). */
   proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>;
   /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
   descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
@@ -102,8 +102,8 @@ export function createInitialState(): RendererState {
     memberToPool: new Map(),
     memberTierToPool: new Map(),
     currentEntityMetasByDataset: new Map(),
-    wellToFields: new Map(),
-    wellsByDataset: new Map(),
+    groupToTiles: new Map(),
+    groupsByDataset: new Map(),
     proxyPoolsByDataset: new Map(),
     proxyDescriptorsByEntity: new Map(),
     descriptorBuffersByDataset: new Map(),

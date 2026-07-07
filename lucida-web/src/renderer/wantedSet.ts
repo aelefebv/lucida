@@ -45,7 +45,7 @@ export interface AtlasSnapshot {
  *
  * The map key is the composite slot key `${entityId}|${t}|${c}` —
  * matches `proxySlotKey()` in `./proxyAtlas.ts`. `kind` is carried so
- * residency checks distinguish `WellProxy3D` vs `FieldProxy3D` pools
+ * residency checks distinguish `GroupProxy3D` vs `TileProxy3D` pools
  * for entities that could appear as either (a defensive safeguard;
  * pool keying already separates them in practice).
  */
@@ -70,17 +70,17 @@ export interface WantedSetResult {
  * Proxy wanted-set rules: for each cold-state active entry, walk its
  * `mode`:
  *
- *   - `well-as-proxy` (entry.entityId IS the wellId)
- *       → emit a `MissingProxy { kind: WellProxy3D }` per visible
- *         channel if the well's slot isn't resident.
- *   - `fields-with-proxy-fallback` (entry.entityId is the fieldId)
- *       → emit a `MissingProxy { kind: FieldProxy3D }` for the field
+ *   - `group-as-proxy` (entry.entityId IS the groupId)
+ *       → emit a `MissingProxy { kind: GroupProxy3D }` per visible
+ *         channel if the group's slot isn't resident.
+ *   - `tiles-with-proxy-fallback` (entry.entityId is the tileId)
+ *       → emit a `MissingProxy { kind: TileProxy3D }` for the tile
  *         per channel (if `proxyAvailable`), and a single
- *         `MissingProxy { kind: WellProxy3D }` for the parent well per
- *         channel (if `wellProxyAvailable` and `parentWellId` is set).
- *         Parent-well requests are deduped per (parentWellId, t, c).
- *   - `fields-with-detail`
- *       → existing chunk wanted-set + a per-channel field-proxy
+ *         `MissingProxy { kind: GroupProxy3D }` for the parent group per
+ *         channel (if `groupProxyAvailable` and `parentGroupId` is set).
+ *         Parent-group requests are deduped per (parentGroupId, t, c).
+ *   - `tiles-with-detail`
+ *       → existing chunk wanted-set + a per-channel tile-proxy
  *         request when the catalog advertises one but it isn't yet
  *         resident.
  */
@@ -103,24 +103,24 @@ export function computeWantedSet(
 
   const isMultiChannel = coldState.multiChannel;
 
-  // Dedup per (wellId, t, c) so multiple field entries of the same
-  // parent only emit one parent-well-proxy request.
-  const wellProxyEmitted = new Set<string>();
+  // Dedup per (groupId, t, c) so multiple tile entries of the same
+  // parent only emit one parent-group-proxy request.
+  const groupProxyEmitted = new Set<string>();
 
   for (const entry of coldState.activeSet) {
-    // Proxy wanted-set. `entry.kind` discriminates so the field
-    // branches see the field variant typed-out.
-    if (entry.kind === "well-as-proxy") {
+    // Proxy wanted-set. `entry.kind` discriminates so the tile
+    // branches see the tile variant typed-out.
+    if (entry.kind === "group-as-proxy") {
       for (const c of coldState.visibleChannels) {
         if (
-          isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "WellProxy3D", coldState.currentT, c) &&
-          !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")
+          isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "GroupProxy3D", coldState.currentT, c) &&
+          !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "GroupProxy3D")
         ) {
           missing.push({
             kind: "proxy",
             datasetId: coldState.datasetId,
             entityId: entry.entityId,
-            proxyKind: "WellProxy3D",
+            proxyKind: "GroupProxy3D",
             t: coldState.currentT,
             c,
           });
@@ -129,62 +129,62 @@ export function computeWantedSet(
       continue;
     }
 
-    if (entry.mode === "fields-with-proxy-fallback") {
-      if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+    if (entry.mode === "tiles-with-proxy-fallback") {
+      if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
         for (const c of coldState.visibleChannels) {
           if (
-            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "FieldProxy3D", coldState.currentT, c) &&
-            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")
+            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "TileProxy3D", coldState.currentT, c) &&
+            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "TileProxy3D")
           ) {
             missing.push({
               kind: "proxy",
               datasetId: coldState.datasetId,
               entityId: entry.entityId,
-              proxyKind: "FieldProxy3D",
+              proxyKind: "TileProxy3D",
               t: coldState.currentT,
               c,
             });
           }
         }
       }
-      const wellId = entry.parentWellId ?? null;
-      if (entry.wellProxyAvailable && wellId) {
+      const groupId = entry.parentGroupId ?? null;
+      if (entry.groupProxyAvailable && groupId) {
         for (const c of coldState.visibleChannels) {
-          const dk = `${wellId}|${coldState.currentT}|${c}`;
-          if (wellProxyEmitted.has(dk)) continue;
+          const dk = `${groupId}|${coldState.currentT}|${c}`;
+          if (groupProxyEmitted.has(dk)) continue;
           if (
-            isProxyDesired(desiredProxyKeys, coldState.datasetId, wellId, "WellProxy3D", coldState.currentT, c) &&
-            !isProxyResident(proxyAtlases, wellId, coldState.currentT, c, "WellProxy3D")
+            isProxyDesired(desiredProxyKeys, coldState.datasetId, groupId, "GroupProxy3D", coldState.currentT, c) &&
+            !isProxyResident(proxyAtlases, groupId, coldState.currentT, c, "GroupProxy3D")
           ) {
-            wellProxyEmitted.add(dk);
+            groupProxyEmitted.add(dk);
             missing.push({
               kind: "proxy",
               datasetId: coldState.datasetId,
-              entityId: wellId,
-              proxyKind: "WellProxy3D",
+              entityId: groupId,
+              proxyKind: "GroupProxy3D",
               t: coldState.currentT,
               c,
             });
           } else {
             // Already resident; mark dedup to avoid re-checking.
-            wellProxyEmitted.add(dk);
+            groupProxyEmitted.add(dk);
           }
         }
       }
-    } else if (entry.mode === "fields-with-detail") {
-      // Field proxy fallback for the worker to use while detail chunks
+    } else if (entry.mode === "tiles-with-detail") {
+      // Tile proxy fallback for the worker to use while detail chunks
       // are still loading. Only request if catalog advertises one.
-      if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+      if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
         for (const c of coldState.visibleChannels) {
           if (
-            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "FieldProxy3D", coldState.currentT, c) &&
-            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")
+            isProxyDesired(desiredProxyKeys, coldState.datasetId, entry.entityId, "TileProxy3D", coldState.currentT, c) &&
+            !isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "TileProxy3D")
           ) {
             missing.push({
               kind: "proxy",
               datasetId: coldState.datasetId,
               entityId: entry.entityId,
-              proxyKind: "FieldProxy3D",
+              proxyKind: "TileProxy3D",
               t: coldState.currentT,
               c,
             });
@@ -194,7 +194,7 @@ export function computeWantedSet(
     }
 
     // Chunk wanted-set. memberIdForColdEntry centralizes the
-    // well-as-proxy → entityId convention even though those entries are
+    // group-as-proxy → entityId convention even though those entries are
     // narrowed out above.
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
@@ -339,7 +339,7 @@ function renderRadiusForTier(
 }
 
 function chunkSourcesForEntry(
-  entry: Exclude<ColdStateMessage["activeSet"][number], { kind: "well-as-proxy" }>,
+  entry: Exclude<ColdStateMessage["activeSet"][number], { kind: "group-as-proxy" }>,
 ): Array<{ tier: ChunkTier; levels: number[] }> {
   if (entry.detailLevel === undefined) {
     const levels = entry.wantedLodLevels && entry.wantedLodLevels.length > 0

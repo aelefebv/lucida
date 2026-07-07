@@ -428,16 +428,16 @@ describe("WorkspaceSavedViewsSidebar — filter and search", () => {
   it("the search box filters the list by name substring", async () => {
     responder = () =>
       jsonResponse(200, [
-        savedViewRow({ id: "b1", name: "Apoptosis", visibility: "shared" }),
-        savedViewRow({ id: "b2", name: "CYP7A1", visibility: "shared" }),
+        savedViewRow({ id: "b1", name: "Group B7 view", visibility: "shared" }),
+        savedViewRow({ id: "b2", name: "Channel 0 view", visibility: "shared" }),
       ]);
     await renderSidebar(true);
 
     const search = screen.getByPlaceholderText(/search/i);
-    await userEvent.type(search, "Apop");
+    await userEvent.type(search, "Group");
 
-    expect(screen.getByText("Apoptosis")).toBeTruthy();
-    expect(screen.queryByText("CYP7A1")).toBeNull();
+    expect(screen.getByText("Group B7 view")).toBeTruthy();
+    expect(screen.queryByText("Channel 0 view")).toBeNull();
   });
 });
 

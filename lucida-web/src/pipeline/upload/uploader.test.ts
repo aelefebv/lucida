@@ -56,9 +56,9 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     viewQuery: {
       visible_entities: [
         {
-          entity_id: "field-0",
+          entity_id: "tile-0",
           image_id: "img-0",
-          kind: "Field",
+          kind: "Tile",
           visible: true,
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
@@ -68,7 +68,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
         },
       ],
     },
-    memberPositions: { "field-0": [0, 0] },
+    memberPositions: { "tile-0": [0, 0] },
     visibleRegion: {
       xy_bounds: [0, 0, 1024, 1024],
       z_range: [0, 1],
@@ -134,14 +134,14 @@ function createMockContent(datasetId = "ds1"): DatasetManifest {
     name: "test",
     kind: "Single",
     entities: [
-      { id: "well-0", kind: "Well", parent: null, labels: {} },
-      { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
+      { id: "group-0", kind: "Group", parent: null, labels: {} },
+      { id: "tile-0", kind: "Tile", parent: "group-0", labels: {} },
     ],
     transforms: [],
     images: [
       {
         image_id: "img-0",
-        owner: "field-0",
+        owner: "tile-0",
         multiscale: {
           axes: [],
           data_type: "uint16",
@@ -188,7 +188,7 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
   return {
     kind: "chunk",
-    entityId: "field-0",
+    entityId: "tile-0",
     imageId: "img-0",
     level: 0,
     t: 0,
@@ -210,9 +210,9 @@ function makeProxyDelivery(overrides?: Partial<ReadyProxyDelivery>): ReadyProxyD
   return {
     kind: "proxy",
     datasetId: "ds1",
-    entityId: "field-0",
+    entityId: "tile-0",
     imageId: "img-0",
-    proxyKind: "FieldProxy3D",
+    proxyKind: "TileProxy3D",
     t: 0,
     c: 0,
     header: {
@@ -441,8 +441,8 @@ describe("Uploader worker feedback", () => {
     const missing: MissingProxy = {
       kind: "proxy",
       datasetId: "ds1",
-      entityId: "field-0",
-      proxyKind: "FieldProxy3D",
+      entityId: "tile-0",
+      proxyKind: "TileProxy3D",
       t: 0,
       c: 2,
     };
@@ -450,7 +450,7 @@ describe("Uploader worker feedback", () => {
     new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
 
     expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds1|field-0|FieldProxy3D|0|2",
+      "ds1|tile-0|TileProxy3D|0|2",
     );
   });
 
@@ -459,7 +459,7 @@ describe("Uploader worker feedback", () => {
     const missing: MissingChunk = {
       kind: "chunk",
       datasetId: "ds1",
-      entityId: "field-0",
+      entityId: "tile-0",
       memberId: "img-0:ch2",
       c: 2,
       chunkKey: "0/0/2/0/0/0",
@@ -591,6 +591,6 @@ describe("Uploader cold and hot state", () => {
       new Map(),
     );
     const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-    expect((cold.activeSet[0] as ActiveSetEntry).entityId).toBe("field-0");
+    expect((cold.activeSet[0] as ActiveSetEntry).entityId).toBe("tile-0");
   });
 });

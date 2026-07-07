@@ -1,9 +1,9 @@
 /**
- * Promotion-mode decision logic. Three-tier per-well:
- * group fields → pick {@link ResolvedMode} by projected diagonal with
+ * Promotion-mode decision logic. Three-tier per-group:
+ * group tiles → pick {@link ResolvedMode} by projected diagonal with
  * hysteresis → catalog-aware degrade if required proxy is missing →
- * emit one {@link ActiveSetEntry} per well (well-as-proxy) or per
- * visible field. See ADR 0029.
+ * emit one {@link ActiveSetEntry} per group (group-as-proxy) or per
+ * visible tile. See ADR 0029.
  */
 
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
@@ -13,12 +13,12 @@ import type {
   ActiveSetEntry,
   EntityMode,
   EntitySnapshot,
-  FieldEntry,
+  TileEntry,
   InvisibleEntry,
   PlanStats,
   ResolvedMode,
-  WellAsProxyEntry,
-  WellGroup,
+  GroupAsProxyEntry,
+  MemberGroup,
 } from "./types.ts";
 
 /**
@@ -30,10 +30,10 @@ import type {
  * previous mode wins as long as it's adjacent to the natural choice.
  *
  * Returns the broader {@link ResolvedMode} (which still includes
- * `"well-as-proxy"`) — the per-well decision step works on this set
+ * `"group-as-proxy"`) — the per-group decision step works on this set
  * before {@link assignModes} translates each result into the matching
  * {@link ActiveSetEntry} variant. {@link EntityMode} narrows to the two
- * field-mode values, so `chooseEntityMode` returns the wider union.
+ * tile-mode values, so `chooseEntityMode` returns the wider union.
  *
  * The `config` parameter defaults to {@link DEFAULT_PLANNING_CONFIG} so
  * call sites that don't care about live tunables (most tests) keep
@@ -50,58 +50,58 @@ export function chooseEntityMode(
   const medLower = config.detailThresholdPx - config.hysteresisPx;
 
   // Clearly past the thresholds: natural choice wins.
-  if (projectedDiagonalPx < farLower) return "well-as-proxy";
-  if (projectedDiagonalPx > medUpper) return "fields-with-detail";
+  if (projectedDiagonalPx < farLower) return "group-as-proxy";
+  if (projectedDiagonalPx > medUpper) return "tiles-with-detail";
   if (projectedDiagonalPx >= farUpper && projectedDiagonalPx <= medLower) {
-    return "fields-with-proxy-fallback";
+    return "tiles-with-proxy-fallback";
   }
 
   // In a hysteresis band — keep prev mode if it's a sensible neighbor.
-  if (prevMode === "well-as-proxy" && projectedDiagonalPx < farUpper) {
-    return "well-as-proxy";
+  if (prevMode === "group-as-proxy" && projectedDiagonalPx < farUpper) {
+    return "group-as-proxy";
   }
-  if (prevMode === "fields-with-detail" && projectedDiagonalPx > medLower) {
-    return "fields-with-detail";
+  if (prevMode === "tiles-with-detail" && projectedDiagonalPx > medLower) {
+    return "tiles-with-detail";
   }
-  if (prevMode === "fields-with-proxy-fallback") {
+  if (prevMode === "tiles-with-proxy-fallback") {
     // Already in the middle band — only flip when clearly past.
-    return "fields-with-proxy-fallback";
+    return "tiles-with-proxy-fallback";
   }
-  return prevMode ?? "fields-with-proxy-fallback";
+  return prevMode ?? "tiles-with-proxy-fallback";
 }
 
 /**
- * Group visible field entities by their parent well, also surfacing
+ * Group visible tile entities by their parent group, also surfacing
  * standalone {@link EntitySnapshot}s with `kind === "Image"` (which are
- * treated as their own one-entry "well" so the rest of the pipeline is
+ * treated as their own one-entry "group" so the rest of the pipeline is
  * uniform).
  *
- * `kind === "Well"` entries are grouped with their fields; if a well is
- * visible but has no visible fields, it still appears as a group with
- * `fields: []`.
+ * `kind === "Group"` entries are grouped with their tiles; if a group is
+ * visible but has no visible tiles, it still appears as a group with
+ * `tiles: []`.
  *
- * Exported so the orchestrator can reuse the same well-grouping rule
+ * Exported so the orchestrator can reuse the same grouping rule
  * when building the render-layer roster (see ADR 0025).
  */
-export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
-  const groups = new Map<string, WellGroup>();
+export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
+  const groups = new Map<string, MemberGroup>();
 
   for (const entity of entities) {
     if (!entity.visible) continue;
 
-    if (entity.kind === "Well") {
-      const wellId = entity.entityId;
-      let group = groups.get(wellId);
+    if (entity.kind === "Group") {
+      const groupId = entity.entityId;
+      let group = groups.get(groupId);
       if (!group) {
         group = {
-          wellId,
-          wellEntity: entity,
-          fields: [],
+          groupId,
+          groupEntity: entity,
+          tiles: [],
           projectedDiagonalPx: entity.projectedDiagonalPx,
         };
-        groups.set(wellId, group);
+        groups.set(groupId, group);
       } else {
-        group.wellEntity = entity;
+        group.groupEntity = entity;
         group.projectedDiagonalPx = Math.max(
           group.projectedDiagonalPx,
           entity.projectedDiagonalPx,
@@ -110,22 +110,22 @@ export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
       continue;
     }
 
-    if (entity.kind === "Field") {
-      // `FieldSnapshot.parentId` is non-null by construction. A field
+    if (entity.kind === "Tile") {
+      // `TileSnapshot.parentId` is non-null by construction. A tile
       // without a parent is a producer invariant violation, not an
       // orphan to coerce — so there's no `parentId === null` branch.
-      const wellId = entity.parentId;
-      let group = groups.get(wellId);
+      const groupId = entity.parentId;
+      let group = groups.get(groupId);
       if (!group) {
         group = {
-          wellId,
-          wellEntity: null,
-          fields: [entity],
+          groupId,
+          groupEntity: null,
+          tiles: [entity],
           projectedDiagonalPx: entity.projectedDiagonalPx,
         };
-        groups.set(wellId, group);
+        groups.set(groupId, group);
       } else {
-        group.fields.push(entity);
+        group.tiles.push(entity);
         group.projectedDiagonalPx = Math.max(
           group.projectedDiagonalPx,
           entity.projectedDiagonalPx,
@@ -134,13 +134,13 @@ export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
       continue;
     }
 
-    // kind === "Image": treat as singleton group (its own "well") so
-    // non-plate datasets keep working transparently.
-    const wellId = `__image__${entity.entityId}`;
-    groups.set(wellId, {
-      wellId,
-      wellEntity: null,
-      fields: [entity],
+    // kind === "Image": treat as singleton group (its own "group") so
+    // non-collection datasets keep working transparently.
+    const groupId = `__image__${entity.entityId}`;
+    groups.set(groupId, {
+      groupId,
+      groupEntity: null,
+      tiles: [entity],
       projectedDiagonalPx: entity.projectedDiagonalPx,
     });
   }
@@ -149,56 +149,56 @@ export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
 }
 
 /**
- * Build the prev-mode lookup keyed by well id.
+ * Build the prev-mode lookup keyed by group id.
  *
- * Indexes the previous active set by well id (for `well-as-proxy`
- * entries — `entityId` IS the wellId) or by parent well id (for field
+ * Indexes the previous active set by group id (for `group-as-proxy`
+ * entries — `entityId` IS the groupId) or by parent group id (for tile
  * entries) so both lookups land on the same `prevMode`. Returns a
  * fresh `Map`. Invisible entries are skipped — they had no promotion
  * decision to remember.
  *
  * Returns the broader {@link ResolvedMode} (since
- * `well-as-proxy` is no longer part of {@link EntityMode}). The map's
+ * `group-as-proxy` is no longer part of {@link EntityMode}). The map's
  * value still keys back into {@link chooseEntityMode}'s `prevMode`
  * argument.
  *
  * Pure helper — extracted from `assignModes` so the per-tick
- * mode-decision flow reads as `prev = buildPrevModeByWell(...);
+ * mode-decision flow reads as `prev = buildPrevModeByGroup(...);
  * desired = chooseEntityMode(prev, ...)`.
  */
-export function buildPrevModeByWell(
+export function buildPrevModeByGroup(
   prev: ActiveSetEntry[],
   entities: EntitySnapshot[],
 ): Map<string, ResolvedMode> {
-  const prevModeByWell = new Map<string, ResolvedMode>();
-  // Build a map from (entityId → wellId) so we can resolve where a
-  // field-mode entry's mode "belongs". For `well-as-proxy` entries
-  // entityId IS the wellId.
-  const fieldEntityToWell = new Map<string, string>();
+  const prevModeByGroup = new Map<string, ResolvedMode>();
+  // Build a map from (entityId → groupId) so we can resolve where a
+  // tile-mode entry's mode "belongs". For `group-as-proxy` entries
+  // entityId IS the groupId.
+  const tileEntityToGroup = new Map<string, string>();
   for (const entity of entities) {
-    // Narrowing on `kind === "Field"` gives a {@link FieldSnapshot}
+    // Narrowing on `kind === "Tile"` gives a {@link TileSnapshot}
     // with non-null `parentId`, so no extra guard is needed.
-    if (entity.kind === "Field") {
-      fieldEntityToWell.set(entity.entityId, entity.parentId);
+    if (entity.kind === "Tile") {
+      tileEntityToGroup.set(entity.entityId, entity.parentId);
     }
   }
   for (const p of prev) {
-    if (p.kind === "well-as-proxy") {
-      prevModeByWell.set(p.entityId, "well-as-proxy");
-    } else if (p.kind === "field") {
-      const wellId = fieldEntityToWell.get(p.entityId);
-      if (wellId !== undefined) {
-        // Same-well field-mode entries always agree on mode, so
+    if (p.kind === "group-as-proxy") {
+      prevModeByGroup.set(p.entityId, "group-as-proxy");
+    } else if (p.kind === "tile") {
+      const groupId = tileEntityToGroup.get(p.entityId);
+      if (groupId !== undefined) {
+        // Same-group tile-mode entries always agree on mode, so
         // first-write-wins is fine.
-        if (!prevModeByWell.has(wellId)) {
-          prevModeByWell.set(wellId, p.mode);
+        if (!prevModeByGroup.has(groupId)) {
+          prevModeByGroup.set(groupId, p.mode);
         }
       }
     }
     // p.kind === "invisible" — skip; invisible entries had no
     // promotion decision to remember.
   }
-  return prevModeByWell;
+  return prevModeByGroup;
 }
 
 /**
@@ -206,41 +206,41 @@ export function buildPrevModeByWell(
  *
  * Steps the desired mode down by exactly one tier when the chosen mode
  * requires a proxy that the catalog does not advertise. Tier order is
- * `well-as-proxy → fields-with-proxy-fallback → fields-with-detail`;
+ * `group-as-proxy → tiles-with-proxy-fallback → tiles-with-detail`;
  * tier-skipping is forbidden (see ADR 0024 for the rationale).
  *
  * Each step increments `stats.catalogDegradations` by 1 if `stats` is
- * non-null. A well that degrades twice (e.g. all the way from
- * `well-as-proxy` to `fields-with-detail`) increments by 2.
+ * non-null. A group that degrades twice (e.g. all the way from
+ * `group-as-proxy` to `tiles-with-detail`) increments by 2.
  *
- * Operates on the broader {@link ResolvedMode} so the per-well decision
- * step (which still discriminates on `well-as-proxy`) keeps a single
+ * Operates on the broader {@link ResolvedMode} so the per-group decision
+ * step (which still discriminates on `group-as-proxy`) keeps a single
  * call site. {@link assignModes} translates the post-degrade value
  * into the matching {@link ActiveSetEntry} variant.
  */
 export function degradeForCatalog(
   desired: ResolvedMode,
-  group: WellGroup,
+  group: MemberGroup,
   catalog: AssetCatalogSnapshot | null,
   stats: PlanStats | null,
 ): ResolvedMode {
-  const wellHasProxy =
-    catalog !== null && snapshotHasProxy(catalog, group.wellId, "WellProxy3D");
-  const anyFieldHasProxy =
+  const groupHasProxy =
+    catalog !== null && snapshotHasProxy(catalog, group.groupId, "GroupProxy3D");
+  const anyTileHasProxy =
     catalog !== null &&
-    group.fields.some((f) => snapshotHasProxy(catalog, f.entityId, "FieldProxy3D"));
+    group.tiles.some((f) => snapshotHasProxy(catalog, f.entityId, "TileProxy3D"));
 
   let mode: ResolvedMode = desired;
-  if (mode === "well-as-proxy" && !wellHasProxy) {
-    mode = "fields-with-proxy-fallback";
+  if (mode === "group-as-proxy" && !groupHasProxy) {
+    mode = "tiles-with-proxy-fallback";
     if (stats) stats.catalogDegradations++;
   }
   if (
-    mode === "fields-with-proxy-fallback" &&
-    !anyFieldHasProxy &&
-    !wellHasProxy
+    mode === "tiles-with-proxy-fallback" &&
+    !anyTileHasProxy &&
+    !groupHasProxy
   ) {
-    mode = "fields-with-detail";
+    mode = "tiles-with-detail";
     if (stats) stats.catalogDegradations++;
   }
   return mode;
@@ -249,14 +249,14 @@ export function degradeForCatalog(
 /**
  * Decide each entity's promotion mode and compute its LOD range.
  *
- * Three-tier per-well decision:
- *   - Group fields by parent well (or treat plain Images as singletons).
+ * Three-tier per-group decision:
+ *   - Group tiles by parent group (or treat plain Images as singletons).
  *   - For each group, pick a {@link EntityMode} from the group's projected
  *     diagonal with hysteresis against the previous active set.
  *   - Catalog-aware degrade: if the chosen mode requires a proxy that
  *     isn't advertised, fall through to the next finer mode.
- *   - Emit one `ActiveSetEntry` per well (`well-as-proxy`) or one per
- *     visible field (field modes).
+ *   - Emit one `ActiveSetEntry` per group (`group-as-proxy`) or one per
+ *     visible tile (tile modes).
  */
 export function assignModes(
   entities: EntitySnapshot[],
@@ -265,34 +265,34 @@ export function assignModes(
   stats: PlanStats | null = null,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): ActiveSetEntry[] {
-  const prevModeByWell = buildPrevModeByWell(previousActiveSet, entities);
+  const prevModeByGroup = buildPrevModeByGroup(previousActiveSet, entities);
 
   const out: ActiveSetEntry[] = [];
 
-  for (const group of groupByWell(entities)) {
-    const prev = prevModeByWell.get(group.wellId) ?? null;
+  for (const group of groupMembers(entities)) {
+    const prev = prevModeByGroup.get(group.groupId) ?? null;
     const desired = chooseEntityMode(prev, group.projectedDiagonalPx, config);
     const mode = degradeForCatalog(desired, group, catalog, stats);
 
-    // We need wellHasProxy as the `wellProxyAvailable` flag on field
+    // We need groupHasProxy as the `groupProxyAvailable` flag on tile
     // entries. `degradeForCatalog` recomputes it internally; we
     // recompute here too because we need the value, not just the
     // post-degrade mode. Cheap to recheck.
-    const wellHasProxy =
-      catalog !== null && snapshotHasProxy(catalog, group.wellId, "WellProxy3D");
+    const groupHasProxy =
+      catalog !== null && snapshotHasProxy(catalog, group.groupId, "GroupProxy3D");
 
-    if (mode === "well-as-proxy") {
-      out.push(makeWellAsProxyEntry(group));
+    if (mode === "group-as-proxy") {
+      out.push(makeGroupAsProxyEntry(group));
       continue;
     }
 
-    // Field-mode (proxy-fallback or detail). One entry per visible
-    // field. `wellEntity` (if visible) is intentionally NOT emitted as
-    // its own entry: the well's geometry is represented by its fields.
+    // Tile-mode (proxy-fallback or detail). One entry per visible
+    // tile. `groupEntity` (if visible) is intentionally NOT emitted as
+    // its own entry: the group's geometry is represented by its tiles.
     // `mode` here is narrowed to {@link EntityMode} because the
-    // `well-as-proxy` arm short-circuits above.
-    for (const field of group.fields) {
-      out.push(makeFieldEntry(field, mode, wellHasProxy, catalog));
+    // `group-as-proxy` arm short-circuits above.
+    for (const tile of group.tiles) {
+      out.push(makeTileEntry(tile, mode, groupHasProxy, catalog));
     }
   }
 
@@ -311,7 +311,7 @@ export function assignModes(
 
 /**
  * Chunk-only bridge mode assignment. Ignores proxy catalog and radius
- * promotion: every visible image/field renders as field-mode chunks
+ * promotion: every visible image/tile renders as tile-mode chunks
  * with an explicit detail level and, when compatible with the current
  * atlas layout, one source-backed coarse level in the fallback range.
  */
@@ -320,9 +320,9 @@ export function assignCoarseDetailModes(
 ): ActiveSetEntry[] {
   const out: ActiveSetEntry[] = [];
 
-  for (const group of groupByWell(entities)) {
-    for (const field of group.fields) {
-      out.push(makeCoarseDetailFieldEntry(field));
+  for (const group of groupMembers(entities)) {
+    for (const tile of group.tiles) {
+      out.push(makeCoarseDetailTileEntry(tile));
     }
   }
 
@@ -334,43 +334,43 @@ export function assignCoarseDetailModes(
   return out;
 }
 
-function makeWellAsProxyEntry(group: WellGroup): WellAsProxyEntry {
+function makeGroupAsProxyEntry(group: MemberGroup): GroupAsProxyEntry {
   return {
-    kind: "well-as-proxy",
-    entityId: group.wellId,
+    kind: "group-as-proxy",
+    entityId: group.groupId,
   };
 }
 
-function makeFieldEntry(
+function makeTileEntry(
   entity: EntitySnapshot,
   mode: EntityMode,
-  wellProxyAvailable: boolean,
+  groupProxyAvailable: boolean,
   catalog: AssetCatalogSnapshot | null,
-): FieldEntry {
+): TileEntry {
   // Planning hands the caller exactly one level: the orchestrator
   // does not filter the request stream to the target level, so
   // emitting a multi-level buffer would queue chunks the cache could
   // never use.
   const targetLod = entity.idealTargetLod;
   const coarsestDetailLod = targetLod;
-  const fieldProxyAvailable =
-    catalog !== null && snapshotHasProxy(catalog, entity.entityId, "FieldProxy3D");
+  const tileProxyAvailable =
+    catalog !== null && snapshotHasProxy(catalog, entity.entityId, "TileProxy3D");
 
   return {
-    kind: "field",
+    kind: "tile",
     entityId: entity.entityId,
     imageId: entity.imageId,
     mode,
     targetLod,
     coarsestDetailLod,
     detailOwnedLodRange: [targetLod, coarsestDetailLod],
-    proxyKind: "FieldProxy3D",
-    proxyAvailable: fieldProxyAvailable,
-    wellProxyAvailable,
+    proxyKind: "TileProxy3D",
+    proxyAvailable: tileProxyAvailable,
+    groupProxyAvailable,
   };
 }
 
-function makeCoarseDetailFieldEntry(entity: EntitySnapshot): FieldEntry {
+function makeCoarseDetailTileEntry(entity: EntitySnapshot): TileEntry {
   const detailLevel = clampLevel(entity, entity.detailLevel);
   const coarseLevel = compatibleCoarseLevel(entity, detailLevel);
   const coarsestDetailLod =
@@ -381,10 +381,10 @@ function makeCoarseDetailFieldEntry(entity: EntitySnapshot): FieldEntry {
       : [detailLevel];
 
   return {
-    kind: "field",
+    kind: "tile",
     entityId: entity.entityId,
     imageId: entity.imageId,
-    mode: "fields-with-detail",
+    mode: "tiles-with-detail",
     targetLod: detailLevel,
     coarsestDetailLod,
     detailOwnedLodRange: [detailLevel, coarsestDetailLod],
@@ -393,7 +393,7 @@ function makeCoarseDetailFieldEntry(entity: EntitySnapshot): FieldEntry {
     wantedLodLevels,
     proxyKind: undefined,
     proxyAvailable: false,
-    wellProxyAvailable: false,
+    groupProxyAvailable: false,
   };
 }
 

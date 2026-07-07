@@ -5,7 +5,7 @@ description: "coarse/detail (ADR 0039-0041)."
 tags: [lucida, flow]
 source_path: wiki/flows/proxy-generation.md
 created: 2026-04-18
-modified: 2026-07-03
+modified: 2026-07-06
 ---
 
 # Flow: Proxy Generation (S5)
@@ -14,7 +14,7 @@ Status: Historical / legacy bridge. The default fallback model is chunk-only
 coarse/detail (ADR 0039-0041). Proxy generation remains documented here only
 for the opt-in compatibility path and for understanding older code.
 
-How a `WellProxy3D` or `FieldProxy3D` request travels from the renderer's "I want this proxy" through the server's bounded-concurrency generator, the per-dataset on-disk cache, and back as a binary frame the renderer can drop into a proxy atlas.
+How a `GroupProxy3D` or `TileProxy3D` request travels from the renderer's "I want this proxy" through the server's bounded-concurrency generator, the per-dataset on-disk cache, and back as a binary frame the renderer can drop into a proxy atlas.
 
 ## Setup
 
@@ -22,7 +22,7 @@ After a dataset opens, [lucida-server](../systems/crates/lucida-server.md) kicks
 
 ## Trace: on-demand request
 
-1. **Renderer decides it wants a proxy** — [Planning Domain](../systems/subsystems/planning-domain.md) in well-as-proxy or proxy-fallback mode adds a `MissingProxy { entity, kind, t, c }` to the wanted-set delta. TickCoordinator emits an `AssetMessage::AssetRequest` over the WebSocket.
+1. **Renderer decides it wants a proxy** — [Planning Domain](../systems/subsystems/planning-domain.md) in group-as-proxy or proxy-fallback mode adds a `MissingProxy { entity, kind, t, c }` to the wanted-set delta. TickCoordinator emits an `AssetMessage::AssetRequest` over the WebSocket.
 2. **Wire**: `{type: "asset_request", dataset_id, entity_id, kind, t, c}`.
 3. **Server** ([lucida-server](../systems/crates/lucida-server.md) `handler.rs`):
    - At the `AssetRequest` call site, look up the dataset's `ServerBinding`, gate on `legacy_proxy_enabled`, and clone its `ProxyGenerator` (dropping the request with a log line if no binding exists). `serve_asset_request` itself receives the `&Arc<ProxyGenerator>` — the binding lookup is *not* inside it.
@@ -42,7 +42,7 @@ After a dataset opens, [lucida-server](../systems/crates/lucida-server.md) kicks
    ```
    [client_id u32 LE][key_len u16 LE][key bytes][header 64][voxels u16 row-major]
    ```
-   Key is `proxy/{entity_id}/{kind_str}/T{:05}_C{:03}` where `kind_str` is `WellProxy3D` or `FieldProxy3D` (literal strings — see `proxy_kind_str`).
+   Key is `proxy/{entity_id}/{kind_str}/T{:05}_C{:03}` where `kind_str` is `GroupProxy3D` or `TileProxy3D` (literal strings — see `proxy_kind_str`).
 6. **Client `bridge.ts::handleBinary`** parses the frame. Key prefix `proxy/` routes it to a separate proxy promise table (not the chunk pending-fetch map).
 7. **TickCoordinator** receives the proxy asset, posts a `proxyAssetData` message over [Worker Protocol](../systems/subsystems/worker-protocol.md) to the GPU worker.
 8. **Worker** allocates a slot in the appropriate proxy pool (keyed by `(datasetId, kind, slotDims, channel)` — see [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](../decisions/0004-multi-pool-atlases.md)) and writes the voxel buffer. Updates the descriptor's proxy slot handle for that entity.
@@ -78,7 +78,7 @@ The alternative — letting `lucida-proxy` do its own async I/O — would couple
 - **Priority parameter is currently unused.** The MVP semaphore is FIFO; `priority` is reserved for future scheduling. See the comment on `ProxyGenerator::request`.
 - **Pre-generation is best-effort.** Don't rely on it for correctness; treat it as a warm-up. The on-demand path is what guarantees the proxy lands.
 - **Cache directory keying is by URL hash, not `DatasetId`.** Same dataset re-opened in a new session reuses the same cache directory. Same dataset at a different URL has a different cache.
-- **Bare-image entities advertise `FieldProxy3D`**, not `ImageProxy3D` (which doesn't exist). The generator falls back to FieldProxy semantics for non-Well entities.
+- **Bare-image entities advertise `TileProxy3D`**, not `ImageProxy3D` (which doesn't exist). The generator falls back to TileProxy semantics for non-Group entities.
 
 ## Related
 

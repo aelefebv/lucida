@@ -4,50 +4,50 @@ mod common;
 use lucida_content::{EntityId, VoxelTransform};
 use lucida_proxy::{ProxyKind, ProxySpec, generate_proxy};
 
-use crate::common::{FieldSpec, MockSource, fill_volume, level5, sample, well_graph_with_fields};
+use crate::common::{MockSource, TileSpec, fill_volume, group_graph_with_tiles, level5, sample};
 
-/// Four constant-fill 16×16×4 fields placed in a 2×2 grid (16-unit
-/// spacing in X and Y, no gap). The well bounding box should span
-/// 32×32×4 in well coordinates.
+/// Four constant-fill 16×16×4 tiles placed in a 2×2 grid (16-unit
+/// spacing in X and Y, no gap). The group bounding box should span
+/// 32×32×4 in group coordinates.
 ///
-/// Field layout in well coords (XY):
+/// Tile layout in group coords (XY):
 ///
 /// ```text
 /// (0..16, 0..16)   value=10    (16..32, 0..16)  value=20
 /// (0..16, 16..32)  value=30    (16..32, 16..32) value=40
 /// ```
 ///
-/// We generate a target_long_axis=32 well proxy and check each quadrant.
+/// We generate a target_long_axis=32 group proxy and check each quadrant.
 #[test]
 fn aggregate_2x2_grid_no_gap_no_overlap() {
     let dims = [4u32, 16, 16]; // [Z, Y, X]
     let levels = vec![level5(0, [1, 1, 4, 16, 16])];
 
-    let graph = well_graph_with_fields(
-        "well",
+    let graph = group_graph_with_tiles(
+        "group",
         &[
-            FieldSpec {
-                field_id: "f00",
+            TileSpec {
+                tile_id: "f00",
                 image_id: "img-00",
-                field_index: 0,
+                tile_index: 0,
                 translation_xy: [0.0, 0.0],
             },
-            FieldSpec {
-                field_id: "f01",
+            TileSpec {
+                tile_id: "f01",
                 image_id: "img-01",
-                field_index: 1,
+                tile_index: 1,
                 translation_xy: [16.0, 0.0],
             },
-            FieldSpec {
-                field_id: "f10",
+            TileSpec {
+                tile_id: "f10",
                 image_id: "img-10",
-                field_index: 2,
+                tile_index: 2,
                 translation_xy: [0.0, 16.0],
             },
-            FieldSpec {
-                field_id: "f11",
+            TileSpec {
+                tile_id: "f11",
                 image_id: "img-11",
-                field_index: 3,
+                tile_index: 3,
                 translation_xy: [16.0, 16.0],
             },
         ],
@@ -73,8 +73,8 @@ fn aggregate_2x2_grid_no_gap_no_overlap() {
     }
 
     let spec = ProxySpec {
-        entity_id: EntityId("well".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 32,
@@ -99,39 +99,39 @@ fn aggregate_2x2_grid_no_gap_no_overlap() {
     }
 }
 
-/// 2×2 grid with a 16-unit gap between fields (so well spans 48×48 in
+/// 2×2 grid with a 16-unit gap between tiles (so group spans 48×48 in
 /// XY). The voxels in the gap region must stay zero.
 #[test]
 fn aggregate_2x2_grid_with_gap_zero_filled() {
     let dims = [4u32, 16, 16];
     let levels = vec![level5(0, [1, 1, 4, 16, 16])];
 
-    // Fields at corners of a 48×48 well with a 16-unit empty band in the middle.
-    let graph = well_graph_with_fields(
-        "well",
+    // Tiles at corners of a 48×48 group with a 16-unit empty band in the middle.
+    let graph = group_graph_with_tiles(
+        "group",
         &[
-            FieldSpec {
-                field_id: "f00",
+            TileSpec {
+                tile_id: "f00",
                 image_id: "img-00",
-                field_index: 0,
+                tile_index: 0,
                 translation_xy: [0.0, 0.0],
             },
-            FieldSpec {
-                field_id: "f01",
+            TileSpec {
+                tile_id: "f01",
                 image_id: "img-01",
-                field_index: 1,
+                tile_index: 1,
                 translation_xy: [32.0, 0.0],
             },
-            FieldSpec {
-                field_id: "f10",
+            TileSpec {
+                tile_id: "f10",
                 image_id: "img-10",
-                field_index: 2,
+                tile_index: 2,
                 translation_xy: [0.0, 32.0],
             },
-            FieldSpec {
-                field_id: "f11",
+            TileSpec {
+                tile_id: "f11",
                 image_id: "img-11",
-                field_index: 3,
+                tile_index: 3,
                 translation_xy: [32.0, 32.0],
             },
         ],
@@ -152,8 +152,8 @@ fn aggregate_2x2_grid_with_gap_zero_filled() {
     }
 
     let spec = ProxySpec {
-        entity_id: EntityId("well".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 48,
@@ -163,29 +163,29 @@ fn aggregate_2x2_grid_with_gap_zero_filled() {
     // Output should be 4×48×48.
     assert_eq!(asset.header.dims, [4, 48, 48]);
 
-    // Check a corner pixel inside f00 (top-left field).
+    // Check a corner pixel inside f00 (top-left tile).
     let center_tl = sample(&asset.voxels, asset.header.dims, 2, 4, 4);
-    assert_eq!(center_tl, 100, "TL field should fill its region");
+    assert_eq!(center_tl, 100, "TL tile should fill its region");
 
     // Check a pixel deep in the gap band — both X and Y in the empty 16..32 zone.
-    // The gap region has no field coverage, so it must be zero.
+    // The gap region has no tile coverage, so it must be zero.
     let gap = sample(&asset.voxels, asset.header.dims, 2, 24, 24);
     assert_eq!(gap, 0, "gap region must be zero-filled, got {gap}");
 }
 
-/// One well with a single field: aggregation should produce a faithful
-/// downsampling of that field.
+/// One group with a single tile: aggregation should produce a faithful
+/// downsampling of that tile.
 #[test]
-fn aggregate_single_field_well_works() {
+fn aggregate_single_tile_group_works() {
     let dims = [4u32, 32, 32];
     let levels = vec![level5(0, [1, 1, 4, 32, 32])];
 
-    let graph = well_graph_with_fields(
-        "well",
-        &[FieldSpec {
-            field_id: "f0",
+    let graph = group_graph_with_tiles(
+        "group",
+        &[TileSpec {
+            tile_id: "f0",
             image_id: "img-0",
-            field_index: 0,
+            tile_index: 0,
             translation_xy: [0.0, 0.0],
         }],
         levels,
@@ -203,8 +203,8 @@ fn aggregate_single_field_well_works() {
     );
 
     let spec = ProxySpec {
-        entity_id: EntityId("well".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 16,
@@ -215,31 +215,31 @@ fn aggregate_single_field_well_works() {
     assert_eq!(asset.header.dims, [2, 16, 16]);
     assert!(
         asset.voxels.iter().all(|&v| v == 77),
-        "single-field well should be uniform fill"
+        "single-tile group should be uniform fill"
     );
 }
 
-/// Two overlapping fields should produce an averaged result in the
-/// overlap zone. Outside the overlap, each region reflects its own field.
+/// Two overlapping tiles should produce an averaged result in the
+/// overlap zone. Outside the overlap, each region reflects its own tile.
 #[test]
-fn aggregate_overlapping_fields_average() {
+fn aggregate_overlapping_tiles_average() {
     let dims = [2u32, 16, 16]; // small Z, easier to reason about
     let levels = vec![level5(0, [1, 1, 2, 16, 16])];
 
-    // Two fields of width 16 placed at X=0 and X=8 — they overlap in X=8..16.
-    let graph = well_graph_with_fields(
-        "well",
+    // Two tiles of width 16 placed at X=0 and X=8 — they overlap in X=8..16.
+    let graph = group_graph_with_tiles(
+        "group",
         &[
-            FieldSpec {
-                field_id: "fL",
+            TileSpec {
+                tile_id: "fL",
                 image_id: "img-L",
-                field_index: 0,
+                tile_index: 0,
                 translation_xy: [0.0, 0.0],
             },
-            FieldSpec {
-                field_id: "fR",
+            TileSpec {
+                tile_id: "fR",
                 image_id: "img-R",
-                field_index: 1,
+                tile_index: 1,
                 translation_xy: [8.0, 0.0],
             },
         ],
@@ -267,15 +267,15 @@ fn aggregate_overlapping_fields_average() {
     );
 
     let spec = ProxySpec {
-        entity_id: EntityId("well".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 24,
     };
     let asset = generate_proxy(&spec, &graph, &source).unwrap();
 
-    // X span 0..24, Y span 0..16, Z span 0..2 (well bounding box).
+    // X span 0..24, Y span 0..16, Z span 0..2 (group bounding box).
     // Long axis = X = 24, target = 24, scale = 1.
     assert_eq!(asset.header.dims, [2, 16, 24]);
 
@@ -292,53 +292,53 @@ fn aggregate_overlapping_fields_average() {
     assert_eq!(v_overlap, 150, "overlap region should average");
 }
 
-/// Regression for #417: when a field's volume is read at a downsampled level,
+/// Regression for #417: when a tile's volume is read at a downsampled level,
 /// the source must provide a `voxel_to_image` scale transform mapping the
-/// level's voxel coords back to full-res-equivalent units. Without it, fields
-/// shrink to `full_res / 2^level` in the well-space proxy.
+/// level's voxel coords back to full-res-equivalent units. Without it, tiles
+/// shrink to `full_res / 2^level` in the group-space proxy.
 ///
-/// Setup: 2x2 grid well, fields are 32×32×32 at full-res, served downsampled
-/// to 16×16×16 (2x scale). Each field has a unique constant fill value.
-/// `field_to_well` translations are in full-res units (32-voxel pitch, no gap).
-/// With the correct `voxel_to_image = scale 2x`, the proxy's well-space AABB
+/// Setup: 2x2 grid group, tiles are 32×32×32 at full-res, served downsampled
+/// to 16×16×16 (2x scale). Each tile has a unique constant fill value.
+/// `tile_to_group` translations are in full-res units (32-voxel pitch, no gap).
+/// With the correct `voxel_to_image = scale 2x`, the proxy's group-space AABB
 /// spans 64×64×32 and each quadrant of the output is filled with the
-/// corresponding field's value. Without it, the AABB would only span 32×32×16
-/// and field content would not align to expected quadrants.
+/// corresponding tile's value. Without it, the AABB would only span 32×32×16
+/// and tile content would not align to expected quadrants.
 #[test]
-fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
-    // Field volumes provided at level 1 (16³), full-res is 32³ (2x scale).
+fn aggregate_downsampled_voxel_to_image_preserves_tile_extent() {
+    // Tile volumes provided at level 1 (16³), full-res is 32³ (2x scale).
     let level_dims = [16u32, 16, 16]; // [Z, Y, X] of the served downsampled volume
     let levels = vec![
         level5(0, [1, 1, 32, 32, 32]), // full-res
         level5(1, [1, 1, 16, 16, 16]), // downsampled
     ];
 
-    // Field translations are in full-res voxel units: 32-pitch 2x2 grid.
-    let graph = well_graph_with_fields(
-        "well",
+    // Tile translations are in full-res voxel units: 32-pitch 2x2 grid.
+    let graph = group_graph_with_tiles(
+        "group",
         &[
-            FieldSpec {
-                field_id: "f00",
+            TileSpec {
+                tile_id: "f00",
                 image_id: "img-00",
-                field_index: 0,
+                tile_index: 0,
                 translation_xy: [0.0, 0.0],
             },
-            FieldSpec {
-                field_id: "f01",
+            TileSpec {
+                tile_id: "f01",
                 image_id: "img-01",
-                field_index: 1,
+                tile_index: 1,
                 translation_xy: [32.0, 0.0],
             },
-            FieldSpec {
-                field_id: "f10",
+            TileSpec {
+                tile_id: "f10",
                 image_id: "img-10",
-                field_index: 2,
+                tile_index: 2,
                 translation_xy: [0.0, 32.0],
             },
-            FieldSpec {
-                field_id: "f11",
+            TileSpec {
+                tile_id: "f11",
                 image_id: "img-11",
-                field_index: 3,
+                tile_index: 3,
                 translation_xy: [32.0, 32.0],
             },
         ],
@@ -374,24 +374,24 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
     // target_long_axis=8 → threshold=16. Level 0 min spatial=32 ✓, level 1 min=16 ✓
     // → pick_level walks both, last passing level wins → chosen=1.
     let spec = ProxySpec {
-        entity_id: EntityId("well".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 8,
     };
     let asset = generate_proxy(&spec, &graph, &source).expect("generate ok");
 
-    // Expected well bounding box (in full-res-equivalent units): 64×64 in XY, 32 in Z.
+    // Expected group bounding box (in full-res-equivalent units): 64×64 in XY, 32 in Z.
     // Long axis = 64. Output scale = 8/64 = 0.125.
     // out_dims = [Z=32*0.125=4, Y=64*0.125=8, X=64*0.125=8].
     assert_eq!(
         asset.header.dims,
         [4, 8, 8],
-        "well AABB should be full-res-equivalent (64×64×32), not collapsed to level dims (32×32×16)"
+        "group AABB should be full-res-equivalent (64×64×32), not collapsed to level dims (32×32×16)"
     );
 
-    // Each quadrant of the [4, 8, 8] proxy should be filled with one field's value.
+    // Each quadrant of the [4, 8, 8] proxy should be filled with one tile's value.
     // Sample mid-quadrant voxel for each:
     //   TL  (X=0..4, Y=0..4) → f00 → 11
     //   TR  (X=4..8, Y=0..4) → f01 → 22

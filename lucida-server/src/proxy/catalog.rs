@@ -22,9 +22,9 @@ pub(crate) fn proxy_catalog_entries_for_manifest(
     }
 
     // Build the legacy proxy availability catalog by enumerating
-    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
-    // and bare Images advertise FieldProxy3D (the proxy generator falls
-    // back to FieldProxy semantics for non-Well entities — see
+    // entities. Groups advertise GroupProxy3D, Tiles advertise TileProxy3D,
+    // and bare Images advertise TileProxy3D (the proxy generator falls
+    // back to TileProxy semantics for non-Group entities — see
     // `build_server_proxy_source`). Entities without a contributing image
     // are skipped — Planning has nothing to fetch for them.
     manifest
@@ -32,12 +32,12 @@ pub(crate) fn proxy_catalog_entries_for_manifest(
         .iter()
         .filter_map(|entity| {
             let kinds = match entity.kind {
-                EntityKind::Well => vec![ProxyKind::WellProxy3D],
-                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
+                EntityKind::Group => vec![ProxyKind::GroupProxy3D],
+                EntityKind::Tile | EntityKind::Image => vec![ProxyKind::TileProxy3D],
             };
-            // Only advertise entities that own an image (Wells aggregate
-            // their fields' images downstream, so we keep all Wells).
-            let has_image = matches!(entity.kind, EntityKind::Well)
+            // Only advertise entities that own an image (Groups aggregate
+            // their tiles' images downstream, so we keep all Groups).
+            let has_image = matches!(entity.kind, EntityKind::Group)
                 || manifest.images().iter().any(|img| img.owner == entity.id);
             if !has_image {
                 return None;
@@ -91,6 +91,6 @@ mod tests {
         let manifest = single_image_manifest();
         let entries = proxy_catalog_entries_for_manifest(&manifest, true);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
+        assert_eq!(entries[0].kinds, vec![ProxyKind::TileProxy3D]);
     }
 }

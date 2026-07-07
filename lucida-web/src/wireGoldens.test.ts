@@ -279,8 +279,8 @@ const expectedManifestSingle: DatasetManifest = {
         data_type: "Uint16",
         pinned_axes: [{ name: "m", size: 4, pinned_index: 0 }],
         channel_infos: [
-          { label: "DAPI", color: "0000FF" },
-          { label: "GFP" },
+          { label: "Channel 0", color: "0000FF" },
+          { label: "Channel 1" },
         ],
       },
     },
@@ -295,10 +295,10 @@ const expectedManifestSingle: DatasetManifest = {
   default_layout_id: "layout-source",
   labels: [
     {
-      name: "nuclei",
+      name: "region-a",
       source_image_id: "multiscale-0",
       image: {
-        image_id: "multiscale-0:label:nuclei",
+        image_id: "multiscale-0:label:region-a",
         owner: "img-0",
         multiscale: {
           axes: [
@@ -333,7 +333,7 @@ const expectedFetchSingle: FetchSource = {
     images: [
       { image_id: "multiscale-0", wire_format: { Zstd: { data_type: "Uint16" } } },
       {
-        image_id: "multiscale-0:label:nuclei",
+        image_id: "multiscale-0:label:region-a",
         wire_format: { Raw: { data_type: "Uint32" } },
       },
     ],
@@ -344,9 +344,9 @@ const expectedCatalogSingle: WireAssetCatalog = {
   entries: [
     {
       entity_id: "img-0",
-      kinds: ["FieldProxy3D"],
+      kinds: ["TileProxy3D"],
       footprints: [
-        { kind: "FieldProxy3D", dims: [50, 128, 128], bytes: 1638400 },
+        { kind: "TileProxy3D", dims: [50, 128, 128], bytes: 1638400 },
       ],
     },
   ],
@@ -367,48 +367,48 @@ const expectedDatasetOpenedSingle: WireDatasetOpened = {
   opener_client_id: 7,
 };
 
-const expectedManifestPlate: DatasetManifest = {
-  dataset_id: "wds-plate-77",
-  name: "screening-plate-01.zarr",
+const expectedManifestCollection: DatasetManifest = {
+  dataset_id: "wds-collection-77",
+  name: "screening-collection-01.zarr",
   kind: {
-    Plate: {
+    Collection: {
       rows: ["A", "B"],
       columns: ["1", "2", "3"],
-      positioning_mode: "Stage",
-      has_stage_positions: true,
+      positioning_mode: "Explicit",
+      has_explicit_positions: true,
     },
   },
   entities: [
     {
-      id: "well-A1",
-      kind: "Well",
+      id: "group-A1",
+      kind: "Group",
       parent: null,
       labels: {
         name: "A1",
-        well_row: "A",
-        well_column: "1",
+        group_row: "A",
+        group_column: "1",
         row_index: 0,
         column_index: 0,
       },
     },
     {
-      id: "field-A1-f0",
-      kind: "Field",
-      parent: "well-A1",
-      labels: { name: "A1/0", field_index: 0 },
+      id: "tile-A1-f0",
+      kind: "Tile",
+      parent: "group-A1",
+      labels: { name: "A1/0", tile_index: 0 },
     },
   ],
   transforms: [
     {
-      from: "field-A1-f0",
-      to: "well-A1",
+      from: "tile-A1-f0",
+      to: "group-A1",
       transform: { matrix: IDENTITY_TRANSLATION(2048, 1024) },
     },
   ],
   images: [
     {
-      image_id: "field-A1-f0-image",
-      owner: "field-A1-f0",
+      image_id: "tile-A1-f0-image",
+      owner: "tile-A1-f0",
       multiscale: {
         axes: [
           { name: "c", kind: "Channel" },
@@ -439,23 +439,23 @@ const expectedManifestPlate: DatasetManifest = {
   ],
   source_layouts: [
     {
-      id: "layout-stage",
-      name: "Stage positions",
+      id: "layout-explicit",
+      name: "Explicit positions",
       placements: [
-        { entity_id: "well-A1", position: [0, 0] },
-        { entity_id: "field-A1-f0", position: [2048, 1024] },
+        { entity_id: "group-A1", position: [0, 0] },
+        { entity_id: "tile-A1-f0", position: [2048, 1024] },
       ],
     },
   ],
-  default_layout_id: "layout-stage",
+  default_layout_id: "layout-explicit",
 };
 
-const expectedDatasetOpenedPlate: WireDatasetOpened = {
-  manifest: expectedManifestPlate,
+const expectedDatasetOpenedCollection: WireDatasetOpened = {
+  manifest: expectedManifestCollection,
   fetch: {
     Proxied: {
       images: [
-        { image_id: "field-A1-f0-image", wire_format: { Lz4: { data_type: "Uint8" } } },
+        { image_id: "tile-A1-f0-image", wire_format: { Lz4: { data_type: "Uint8" } } },
       ],
     },
   },
@@ -478,7 +478,7 @@ const expectedDisplaySettings: WireDatasetDisplaySettings = {
       contrast_min: 100,
       contrast_max: 12000,
       gamma: 1,
-      name: "Nuclei",
+      name: "Region A",
     },
     {
       visible: false,
@@ -707,7 +707,7 @@ const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
   levels: [
     expectedGeneratedLevel,
     {
-      image_id: "multiscale-0:label:nuclei",
+      image_id: "multiscale-0:label:region-a",
       info: {
         level_index: 1,
         role: "coarse",
@@ -808,9 +808,9 @@ const expectedAssetCatalogDelta: WireAssetCatalogDelta = {
   added: [
     {
       entity_id: "img-0",
-      kinds: ["WellProxy3D", "FieldProxy3D"],
+      kinds: ["GroupProxy3D", "TileProxy3D"],
       footprints: [
-        { kind: "WellProxy3D", dims: [50, 256, 256], bytes: 6553600 },
+        { kind: "GroupProxy3D", dims: [50, 256, 256], bytes: 6553600 },
       ],
     },
   ],
@@ -1136,9 +1136,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     ).toStrictEqual({ dataset_id: "wds-0f3a", delta: expectedAssetCatalogDelta });
     const entity = catalog.snapshot().byEntity.get("img-0");
     expect(entity).toBeDefined();
-    expect([...entity!.kinds].sort()).toStrictEqual(["FieldProxy3D", "WellProxy3D"]);
-    expect(entity!.footprints.get("WellProxy3D")).toStrictEqual({
-      kind: "WellProxy3D",
+    expect([...entity!.kinds].sort()).toStrictEqual(["GroupProxy3D", "TileProxy3D"]);
+    expect(entity!.footprints.get("GroupProxy3D")).toStrictEqual({
+      kind: "GroupProxy3D",
       dims: [50, 256, 256],
       bytes: 6553600,
     });
@@ -1195,7 +1195,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       action: "updated",
       dataset_urls: [
         "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-plate-01.zarr",
+        "gs://lucida-fixtures/screening-collection-01.zarr",
       ],
     });
 
@@ -1209,7 +1209,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       "updated",
       [
         "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-plate-01.zarr",
+        "gs://lucida-fixtures/screening-collection-01.zarr",
       ],
     ];
     expect(onBookmarkChanged).toHaveBeenCalledWith(...expectedArgs);
@@ -1530,9 +1530,9 @@ describe("wire goldens: content-source request envelopes", () => {
     const controller = new AbortController();
     const pending = source.fetchProxy(
       {
-        datasetId: "wds-plate-77",
-        entityId: "field-A1-f0",
-        kind: "FieldProxy3D",
+        datasetId: "wds-collection-77",
+        entityId: "tile-A1-f0",
+        kind: "TileProxy3D",
         t: 0,
         c: 2,
       },
@@ -1568,19 +1568,19 @@ describe("wire goldens: dataset-open payloads", () => {
     expect(extractDataType(proxied!.images[1].wire_format)).toBe("Uint32");
   });
 
-  it("plate DatasetOpened matches the manifestTypes mirror", () => {
+  it("collection DatasetOpened matches the manifestTypes mirror", () => {
     const opened = coveredFixture(
-      "dataset-open/dataset_opened_plate.json",
+      "dataset-open/dataset_opened_collection.json",
     ) as WireDatasetOpened;
-    expect(opened).toStrictEqual(expectedDatasetOpenedPlate);
+    expect(opened).toStrictEqual(expectedDatasetOpenedCollection);
 
-    // Plate-kind discrimination as the web performs it.
+    // Collection-kind discrimination as the web performs it.
     expect(typeof opened.manifest.kind).not.toBe("string");
     if (typeof opened.manifest.kind !== "string") {
-      expect(opened.manifest.kind.Plate.rows).toStrictEqual(["A", "B"]);
-      expect(opened.manifest.kind.Plate.columns).toStrictEqual(["1", "2", "3"]);
-      expect(opened.manifest.kind.Plate.positioning_mode).toBe("Stage");
-      expect(opened.manifest.kind.Plate.has_stage_positions).toBe(true);
+      expect(opened.manifest.kind.Collection.rows).toStrictEqual(["A", "B"]);
+      expect(opened.manifest.kind.Collection.columns).toStrictEqual(["1", "2", "3"]);
+      expect(opened.manifest.kind.Collection.positioning_mode).toBe("Explicit");
+      expect(opened.manifest.kind.Collection.has_explicit_positions).toBe(true);
     }
     const proxied = "Proxied" in opened.fetch ? opened.fetch.Proxied : null;
     expect(extractDataType(proxied!.images[0].wire_format)).toBe("Uint8");
@@ -1722,8 +1722,8 @@ describe("wire goldens: enum vocabulary", () => {
     const clipModes: NonNullable<ArcballCamera["clip_mode"]>[] = ["plane", "sphere"];
     const blendModes: BlendMode[] = ["alpha", "additive", "max"];
     const renderModes: RenderMode[] = ["translucent", "max_intensity"];
-    const entityKinds: Entity["kind"][] = ["Image", "Well", "Field"];
-    const proxyKinds: ProxyKind[] = ["WellProxy3D", "FieldProxy3D"];
+    const entityKinds: Entity["kind"][] = ["Image", "Group", "Tile"];
+    const proxyKinds: ProxyKind[] = ["GroupProxy3D", "TileProxy3D"];
     const openStages: DatasetOpenStage[] = [
       "request_received",
       "authorization",
@@ -1756,7 +1756,7 @@ describe("wire goldens: enum vocabulary", () => {
       axis_kinds: ["Time", "Channel", "Space"],
       entity_kinds: entityKinds,
       data_types: ["Uint8", "Uint16", "Uint32", "Float32", "Float64"],
-      positioning_modes: ["Stage", "Grid"],
+      positioning_modes: ["Explicit", "Derived"],
       proxy_kinds: proxyKinds,
       dataset_open_stages: openStages,
       // No TS union today: the DebugPanel renders the kind string verbatim.

@@ -131,18 +131,18 @@ describe("handleSliceRenderMultiPass", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("renders a layer backed only by a resident field proxy", () => {
+  it("renders a layer backed only by a resident tile proxy", () => {
     const device = makeDevice();
     const renderTo = vi.fn();
     const composite = vi.fn();
     const state = createInitialState();
-    const fieldProxyTexture = {} as GPUTexture;
+    const tileProxyTexture = {} as GPUTexture;
     const descIndex: EntityDescriptorIndex = {
       buffer: {} as GPUBuffer,
       indexByMember: new Map([["img-a:ch1", 0]]),
-      proxyPoolIndexByKey: new Map([["field-proxy-ch1", 0]]),
+      proxyPoolIndexByKey: new Map([["tile-proxy-ch1", 0]]),
       proxyPoolsByIndex: [{
-        texture: fieldProxyTexture,
+        texture: tileProxyTexture,
         slots: new Map(),
         freeSlots: [],
         capacity: 1,
@@ -151,7 +151,7 @@ describe("handleSliceRenderMultiPass", () => {
         slotsX: 1,
         slotsY: 1,
         slotsZ: 1,
-        kind: "FieldProxy3D",
+        kind: "TileProxy3D",
         channel: 1,
         touchOrder: [],
       }],
@@ -160,8 +160,8 @@ describe("handleSliceRenderMultiPass", () => {
       colormapNameByMember: new Map([["img-a:ch1", "green"]]),
       proxyDescriptorByMember: new Map([
         ["img-a:ch1", {
-          fieldProxyHandle: { poolKey: "field-proxy-ch1", slotIndex: 0 },
-          wellProxyHandle: null,
+          tileProxyHandle: { poolKey: "tile-proxy-ch1", slotIndex: 0 },
+          groupProxyHandle: null,
         }],
       ]),
     };
@@ -210,7 +210,7 @@ describe("handleSliceRenderMultiPass", () => {
     );
 
     expect(renderTo).toHaveBeenCalledTimes(1);
-    expect(setProxyTextures).toHaveBeenCalledWith(fieldProxyTexture, null);
+    expect(setProxyTextures).toHaveBeenCalledWith(tileProxyTexture, null);
     expect(composite).toHaveBeenCalledTimes(1);
   });
 });

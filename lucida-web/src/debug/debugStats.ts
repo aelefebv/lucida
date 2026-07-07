@@ -33,8 +33,8 @@ export interface OrchMemberDebug {
  * full plan() run; replayed onto cache-hit ticks so the panel doesn't
  * blink to zero between non-planning frames.
  *
- * Single datasets and plates use the same shape. For single, `wellsByMode`
- * collapses to a single "fields-with-detail" count; the per-LOD breakdown
+ * Single datasets and collections use the same shape. For single, `groupsByMode`
+ * collapses to a single "tiles-with-detail" count; the per-LOD breakdown
  * carries the heavy lifting (it's the dominant signal for "is my LOD
  * selection sane").
  */
@@ -78,13 +78,13 @@ export interface PlanningDatasetDebug {
     afterZRange: number;
     afterFrustum: number;
   };
-  /** Number of times catalog-aware mode assignment downgraded a well's mode. */
+  /** Number of times catalog-aware mode assignment downgraded a group's mode. */
   catalogDegradations: number;
   /** Active-set entries grouped by tier mode. */
-  wellsByMode: {
-    wellAsProxy: number;
-    fieldsWithProxyFallback: number;
-    fieldsWithDetail: number;
+  groupsByMode: {
+    groupAsProxy: number;
+    tilesWithProxyFallback: number;
+    tilesWithDetail: number;
   };
   /**
    * Entity nearest the viewport center (or null if no visible entities).
@@ -92,7 +92,7 @@ export interface PlanningDatasetDebug {
    */
   focalEntity: {
     entityId: string;
-    parentWellId: string | null;
+    parentGroupId: string | null;
     kind: string;
     projectedDiagonalPx: number;
     projectedAreaPx2: number;
@@ -174,8 +174,8 @@ export interface ProxyResidencyDebug {
   missingFootprintCount: number;
   topDecisions: Array<{
     datasetId: string;
-    wellId: string;
-    representation: "field" | "well";
+    groupId: string;
+    representation: "tile" | "group";
     proxyCount: number;
     bytes: number;
     reason: "admitted" | "over-budget" | "replaced";

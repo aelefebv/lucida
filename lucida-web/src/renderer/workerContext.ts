@@ -14,8 +14,8 @@ import type { RendererState } from "./worker/state.ts";
  * time scrubbing.
  */
 export interface EntityProxyDescriptor {
-  fieldProxyHandle: ProxyHandle | null;
-  wellProxyHandle: ProxyHandle | null;
+  tileProxyHandle: ProxyHandle | null;
+  groupProxyHandle: ProxyHandle | null;
 }
 
 export function proxyDescriptorKey(entityId: string, t: number, c: number): string {

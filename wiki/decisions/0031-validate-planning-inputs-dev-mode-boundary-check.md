@@ -5,14 +5,14 @@ description: "A new function validatePlanningInputs(snapshot, state) is added at
 tags: [lucida, decision]
 source_path: wiki/decisions/0031-validate-planning-inputs-dev-mode-boundary-check.md
 created: 2026-05-15
-modified: 2026-06-25
+modified: 2026-07-06
 ---
 
 # `validatePlanningInputs` as the Dev-Mode Boundary Check
 
 > **Post-ship updates (2026-05-15):**
 > - **PR #587** withdrew check 6 (asset-catalog reference resolution) after a real-app trace surfaced a false positive. The catalog is flattened across all datasets the catalog has ever seen; the snapshot is for one dataset's current tick — they legitimately diverge. See "Checks 6 and 7 — withdrawn" below.
-> - **PR #588** loosened check 9's `FieldEntry` mapping to accept `kind: "Field"` OR `kind: "Image"`. The planner's `groupByWell` synthesizes `__image__${entityId}` groups for `Image` entities (singletons, non-plate datasets), routing them through the same field-mode code path; the active-set entry it produces is therefore a `FieldEntry` even though the entity is an `ImageSnapshot`. Strict `FieldEntry ⇒ Field-only` was a misreading of the planner's actual semantics.
+> - **PR #588** loosened check 9's `TileEntry` mapping to accept `kind: "Tile"` OR `kind: "Image"`. The planner's `groupMembers` synthesizes `__image__${entityId}` groups for `Image` entities (singletons, non-collection datasets), routing them through the same tile-mode code path; the active-set entry it produces is therefore a `TileEntry` even though the entity is an `ImageSnapshot`. Strict `TileEntry ⇒ Tile-only` was a misreading of the planner's actual semantics.
 > - **PR #589** withdrew check 7 (minimapPending keys) as part of a proactive audit triggered by the pattern of two false positives in two production runs. Same root issue as check 6: producer scope (all dataset images) doesn't match snapshot scope (currently visible entities). The audit confirmed the remaining seven checks (1, 2, 3, 4, 5, 8, 9) are sound — each maps to an invariant the producer actually maintains.
 > - The validator now runs **seven** checks; the original nine count (and the structure of the table below) is preserved for stable cross-references.
 
@@ -34,7 +34,7 @@ Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-p
 
 | # | Check |
 |---|---|
-| 1 | Every `FieldSnapshot.parentId` exists in `entities` AND refers to a `WellSnapshot`. |
+| 1 | Every `TileSnapshot.parentId` exists in `entities` AND refers to a `GroupSnapshot`. |
 | 2 | Every `entityId` is unique across `snapshot.entities`. |
 | 3 | Every `imageId` is unique across `snapshot.entities`. |
 | 4 | Every level on every entity has `shape.length === 5` and `chunk_shape.length === 5`. |
@@ -42,7 +42,7 @@ Cited [Principles — Planning Domain](../principles/planning.md#4-planning-is-p
 | ~~6~~ | ~~Every `assetCatalog` proxy reference points to a known `entityId`.~~ Withdrawn post-ship — see below. |
 | ~~7~~ | ~~Every `minimapPending` map key is a valid `imageId` from `snapshot.entities`.~~ Withdrawn post-ship — see below. |
 | 8 | `state.previousActiveSet` has no duplicates by `entityId`. |
-| 9 | For each `state.previousActiveSet` entry whose `entityId` is present in `snapshot.entities`, the `kind` matches (`well-as-proxy` ⇒ `Well`; `field` ⇒ `Field` or `Image`; `invisible` ⇒ permissive). The `field` ⇒ `Image` allowance reflects that singletons go through the field code path via `groupByWell`. |
+| 9 | For each `state.previousActiveSet` entry whose `entityId` is present in `snapshot.entities`, the `kind` matches (`group-as-proxy` ⇒ `Group`; `tile` ⇒ `Tile` or `Image`; `invisible` ⇒ permissive). The `tile` ⇒ `Image` allowance reflects that singletons go through the tile code path via `groupMembers`. |
 
 Cost: O(N) in entities + O(L) in total levels for check 4. Cheap enough for dev-mode invocation on every `plan()` call.
 
@@ -60,7 +60,7 @@ Throwing surfaces the bug at the call site. Degrading (catch + console.error + s
 
 ## Why disappeared `previousActiveSet` entries are NOT a violation
 
-Entities can come and go across ticks (datasets opened/closed, layouts changed, selection shifts). The planner already handles disappeared entities gracefully — `buildPrevModeByWell` simply doesn't find them, and the well's mode decision proceeds without prior-mode context. Surfacing "an entity in `previousActiveSet` is no longer in `entities`" as a violation would generate false positives on every legitimate state transition.
+Entities can come and go across ticks (datasets opened/closed, layouts changed, selection shifts). The planner already handles disappeared entities gracefully — `buildPrevModeByGroup` simply doesn't find them, and the group's mode decision proceeds without prior-mode context. Surfacing "an entity in `previousActiveSet` is no longer in `entities`" as a violation would generate false positives on every legitimate state transition.
 
 ## Why these specific nine checks (and not others)
 
@@ -76,7 +76,7 @@ Both checks were withdrawn post-ship for the same root reason: **producer scope 
 
 ### Check 6 — assetCatalog refs
 
-The original "every `assetCatalog.byEntity` key must be a known `entityId` from `snapshot.entities`" check was withdrawn after PRD #578 / Slice 3 shipped, when a real-app trace produced `Error: validatePlanningInputs: assetCatalog references unknown entityId ds-b5a7a1d65f96a456:well:D/3` (thrown from `checkAssetCatalogRefs` via `plan()`).
+The original "every `assetCatalog.byEntity` key must be a known `entityId` from `snapshot.entities`" check was withdrawn after PRD #578 / Slice 3 shipped, when a real-app trace produced `Error: validatePlanningInputs: assetCatalog references unknown entityId ds-b5a7a1d65f96a456:group:D/3` (thrown from `checkAssetCatalogRefs` via `plan()`).
 
 Investigation traced the cause to a fundamental misreading of `AssetCatalogSnapshot`. The catalog is built by `pipeline/assetCatalog.ts::snapshot()`, which walks `byDataset` (every dataset the catalog has ever seen) and flattens entries into a single cross-dataset `byEntity` map. The planning snapshot, in contrast, carries `entities` for ONE dataset's current tick. The two will routinely diverge — the catalog can hold entries for entities not currently visible in this tick's snapshot, for entities of other datasets, or for entities of datasets that have since been closed.
 
