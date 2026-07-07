@@ -61,15 +61,15 @@ export interface MemberRosterEntry {
   entityId?: string;
   /**
    * Promotion mode from the planning active set entry. Drives the
-   * shader's `renderMode` branch (well-as-proxy direct sample vs
+   * shader's `renderMode` branch (group-as-proxy direct sample vs
    * detail+proxy fallback). Optional for backward compat.
    */
-  mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
+  mode?: "group-as-proxy" | "tiles-with-proxy-fallback" | "tiles-with-detail";
   /**
    * Optional precomputed world-space model matrix for the `[0,1]^3` unit
    * cube that bounds this member. When present, the render path uses it
    * instead of querying `scene.member_model_matrix`. Used by
-   * `well-as-proxy` entries because wells aren't in `derived.members`
+   * `group-as-proxy` entries because groups aren't in `derived.members`
    * and therefore have no native model matrix. Column-major 4×4.
    * `invModelMatrix` is the matching inverse.
    */
@@ -79,8 +79,8 @@ export interface MemberRosterEntry {
    * Optional 2D world-space footprint of the member (in voxel units, the
    * same coordinate frame as `position`). When present, the slice path
    * uses these instead of the dataset's per-image dataW/dataH for layer
-   * sizing — necessary for synthesized `well-as-proxy` entries whose
-   * footprint spans multiple field images.
+   * sizing — necessary for synthesized `group-as-proxy` entries whose
+   * footprint spans multiple tile images.
    */
   dataW?: number;
   dataH?: number;
@@ -162,7 +162,7 @@ function emitViewerInterestHint(
 }
 
 // Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
-export { synthesizeWellRosterEntry } from "./upload/coldState/roster.ts";
+export { synthesizeGroupRosterEntry } from "./upload/coldState/roster.ts";
 
 export class TickCoordinator {
   private readonly uploader: Uploader;
@@ -483,10 +483,10 @@ export class TickCoordinator {
           const activeEntry = result.activeSet.find(
             (a) => a.entityId === entity.entityId,
           );
-          // Only field entries carry `targetLod`; well-as-proxy has
+          // Only tile entries carry `targetLod`; group-as-proxy has
           // no LOD bookkeeping (-1 sentinel), invisibles report coarsest.
           const tl =
-            activeEntry?.kind === "field"
+            activeEntry?.kind === "tile"
               ? activeEntry.targetLod
               : activeEntry?.kind === "invisible"
                 ? activeEntry.coarsestLod
@@ -525,7 +525,7 @@ export class TickCoordinator {
           ...proxyResidency.stats,
           topDecisions: proxyResidency.decisions.slice(0, 20).map((decision) => ({
             datasetId: decision.datasetId,
-            wellId: decision.wellId,
+            groupId: decision.groupId,
             representation: decision.representation,
             proxyCount: decision.proxyKeys.length,
             bytes: decision.bytes,
@@ -556,19 +556,19 @@ export class TickCoordinator {
       // Aggregate per-dataset active sets from `previousActiveSet`
       // (the active set produced by the most recent `plan()` call).
       // ActiveSetEntry is a discriminated union; per-variant LOD columns
-      // are derived from `kind` (well-as-proxy = 0, field reads from entry,
+      // are derived from `kind` (group-as-proxy = 0, tile reads from entry,
       // invisible reports coarsest).
       for (const [, state] of this.planningState) {
         for (const entry of state.previousActiveSet) {
-          if (entry.kind === "well-as-proxy") {
+          if (entry.kind === "group-as-proxy") {
             orchDebug.activeSet.push({
               entityId: entry.entityId,
-              mode: "well-as-proxy",
+              mode: "group-as-proxy",
               targetLod: 0,
               coarsestDetailLod: 0,
               detailOwnedLodRange: [0, 0],
             });
-          } else if (entry.kind === "field") {
+          } else if (entry.kind === "tile") {
             orchDebug.activeSet.push({
               entityId: entry.entityId,
               mode: entry.mode,
@@ -708,7 +708,7 @@ export class TickCoordinator {
     datasetId: string,
     entityId: string,
     imageId: string,
-    kind: "WellProxy3D" | "FieldProxy3D",
+    kind: "GroupProxy3D" | "TileProxy3D",
     t: number,
     c: number,
   ): void {

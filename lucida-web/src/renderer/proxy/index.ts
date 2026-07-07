@@ -2,4 +2,4 @@ export {
   handleProxyUpload,
   type ProxyUploadOutcome,
 } from "./upload.ts";
-export { propagateWellProxyToFields } from "./propagate.ts";
+export { propagateGroupProxyToTiles } from "./propagate.ts";

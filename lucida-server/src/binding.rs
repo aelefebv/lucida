@@ -34,7 +34,7 @@ pub struct ServerBinding {
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
     /// Human-readable non-fatal messages from importing this dataset (e.g.
-    /// skipped collection wells). Retained so the Health tab can surface them
+    /// skipped collection groups). Retained so the Health tab can surface them
     /// durably after the transient open-progress trail has scrolled past.
     pub import_warnings: Vec<String>,
 }

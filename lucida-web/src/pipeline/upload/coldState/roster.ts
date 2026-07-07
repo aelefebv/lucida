@@ -9,46 +9,46 @@ import type {
   ActiveSetEntry,
   EntitySnapshot,
 } from "../../planning/index.ts";
-import { groupByWell } from "../../planning/index.ts";
+import { groupMembers } from "../../planning/index.ts";
 import type { MemberRosterEntry } from "../../tickCoordinator.ts";
 
 /**
- * Synthetic roster entry for a `well-as-proxy` entry.
+ * Synthetic roster entry for a `group-as-proxy` entry.
  *
- * Wells aren't in `derived.members` (so `scene.member_model_matrix`
- * returns identity for them). Instead we compute the well's world-space
- * AABB by unioning each visible field's `[0,1]^3` cube, then build a
+ * Groups aren't in `derived.members` (so `scene.member_model_matrix`
+ * returns identity for them). Instead we compute the group's world-space
+ * AABB by unioning each visible tile's `[0,1]^3` cube, then build a
  * translate+scale matrix mapping `[0,1]^3` onto that AABB. The shader
- * ray-marches this synthetic cube and samples the well's proxy texture.
+ * ray-marches this synthetic cube and samples the group's proxy texture.
  *
- * Returns `null` if no field matrices were available.
+ * Returns `null` if no tile matrices were available.
  */
-export function synthesizeWellRosterEntry(
+export function synthesizeGroupRosterEntry(
   ctx: TickContext,
   dsId: string,
-  wellEntityId: string,
-  childFields: EntitySnapshot[],
+  groupEntityId: string,
+  childTiles: EntitySnapshot[],
 ): MemberRosterEntry | null {
   // 3D AABB (in 3D world-space, post Y-flip + global correction). Drives
-  // the volume path's `modelMatrix` for ray-marching the well as one
+  // the volume path's `modelMatrix` for ray-marching the group as one
   // synthetic cube.
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
   let validCornerCount = 0;
   // 2D AABB (in voxel space). Drives the slice path's `position` and
-  // `dataW/dataH` for rendering the well as a flat quad. Voxel-space is
+  // `dataW/dataH` for rendering the group as a flat quad. Voxel-space is
   // a different frame from the 3D model matrix output (no Y-flip, no
   // global scaling), so we must compute it independently.
   let min2DX = Infinity, min2DY = Infinity;
   let max2DX = -Infinity, max2DY = -Infinity;
   let valid2DCount = 0;
-  for (const field of childFields) {
-    // 2D voxel-space AABB from the field's own position + level0 shape.
+  for (const tile of childTiles) {
+    // 2D voxel-space AABB from the tile's own position + level0 shape.
     // EntitySnapshot.layoutPositionVox is already in voxel coords (from
     // `scene.member_positions`).
-    const fx = field.layoutPositionVox[0];
-    const fy = field.layoutPositionVox[1];
-    const lvl0 = field.levels[0];
+    const fx = tile.layoutPositionVox[0];
+    const fy = tile.layoutPositionVox[1];
+    const lvl0 = tile.levels[0];
     if (lvl0) {
       const fw = lvl0.shape[Axis.X];
       const fh = lvl0.shape[Axis.Y];
@@ -59,8 +59,8 @@ export function synthesizeWellRosterEntry(
       valid2DCount++;
     }
 
-    // 3D world AABB via the field's model matrix.
-    const model = ctx.scene.member_model_matrix(dsId, field.imageId);
+    // 3D world AABB via the tile's model matrix.
+    const model = ctx.scene.member_model_matrix(dsId, tile.imageId);
     if (model.length !== 16) continue;
     for (let i = 0; i < 8; i++) {
       const cx = i & 1;
@@ -103,15 +103,15 @@ export function synthesizeWellRosterEntry(
   ]);
   return {
     // For `MemberRosterEntry` (the render-side roster, separate from
-    // `ColdStateActiveEntry`) we set `imageId = wellEntityId` so the
+    // `ColdStateActiveEntry`) we set `imageId = groupEntityId` so the
     // render path has a non-empty handle. The descriptor lookup uses
     // `entityId` (via `memberIdForColdEntry`), not `imageId`.
-    imageId: wellEntityId,
+    imageId: groupEntityId,
     // 2D voxel-space position + size for the slice path. Independent of
     // the 3D model matrix above (different coordinate frame).
     position: [min2DX, min2DY],
-    entityId: wellEntityId,
-    mode: "well-as-proxy",
+    entityId: groupEntityId,
+    mode: "group-as-proxy",
     modelMatrix: model,
     invModelMatrix: inv,
     dataW: sx2D,
@@ -138,13 +138,13 @@ export function buildRoster(args: {
 }): BuildRosterResult {
   const { activeSet, entities, ctx, datasetId } = args;
 
-  // Use the planning module's canonical well-grouping (ADR 0025) so the
-  // roster builder agrees with `assignModes` on which fields make up
-  // each well group.
-  const fieldsByWell = new Map<string, EntitySnapshot[]>();
-  for (const group of groupByWell(entities)) {
-    if (group.fields.length > 0) {
-      fieldsByWell.set(group.wellId, group.fields);
+  // Use the planning module's canonical grouping (ADR 0025) so the
+  // roster builder agrees with `assignModes` on which tiles make up
+  // each group.
+  const tilesByGroup = new Map<string, EntitySnapshot[]>();
+  for (const group of groupMembers(entities)) {
+    if (group.tiles.length > 0) {
+      tilesByGroup.set(group.groupId, group.tiles);
     }
   }
 
@@ -152,16 +152,16 @@ export function buildRoster(args: {
 
   const entries: MemberRosterEntry[] = [];
   for (const entry of activeSet) {
-    if (entry.kind === "well-as-proxy") {
-      const childFields = fieldsByWell.get(entry.entityId) ?? [];
-      if (childFields.length === 0) continue; // no geometry to render
-      const synth = synthesizeWellRosterEntry(ctx, datasetId, entry.entityId, childFields);
+    if (entry.kind === "group-as-proxy") {
+      const childTiles = tilesByGroup.get(entry.entityId) ?? [];
+      if (childTiles.length === 0) continue; // no geometry to render
+      const synth = synthesizeGroupRosterEntry(ctx, datasetId, entry.entityId, childTiles);
       if (synth) entries.push(synth);
       continue;
     }
     // Invisible entries don't render — skip them in the roster.
     if (entry.kind === "invisible") continue;
-    // Narrowed: entry is FieldEntry below.
+    // Narrowed: entry is TileEntry below.
     const entity = entityById.get(entry.entityId);
     if (entity) {
       entries.push({
@@ -175,7 +175,7 @@ export function buildRoster(args: {
 
   // Build a model-matrix lookup keyed by entityId so cold state includes
   // precomputed model matrices (worker can't query WASM, and
-  // `well-as-proxy` matrices were already synthesised here).
+  // `group-as-proxy` matrices were already synthesised here).
   const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
   for (const r of entries) {
     if (!r.entityId) continue;

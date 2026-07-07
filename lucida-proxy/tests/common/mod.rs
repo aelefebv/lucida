@@ -10,9 +10,9 @@ use lucida_content::{
     EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo, TransformEdge,
     VoxelTransform,
 };
-use lucida_proxy::{FieldVolume, ProxySourceData, SourceError};
+use lucida_proxy::{ProxySourceData, SourceError, TileVolume};
 
-/// Mock source: maps `(image_id, t, c, level) → FieldVolume`.
+/// Mock source: maps `(image_id, t, c, level) → TileVolume`.
 #[derive(Default)]
 pub struct MockSource {
     pub volumes: HashMap<(String, u32, u32, usize), StoredVolume>,
@@ -51,16 +51,16 @@ impl MockSource {
 }
 
 impl ProxySourceData for MockSource {
-    fn read_field_volume(
+    fn read_tile_volume(
         &self,
         image_id: &ImageId,
         t: u32,
         c: u32,
         level: usize,
-    ) -> Result<FieldVolume, SourceError> {
+    ) -> Result<TileVolume, SourceError> {
         self.volumes
             .get(&(image_id.0.clone(), t, c, level))
-            .map(|v| FieldVolume {
+            .map(|v| TileVolume {
                 data: v.data.clone(),
                 dims: v.dims,
                 voxel_to_image: v.voxel_to_image.clone(),
@@ -145,21 +145,21 @@ pub fn single_image_graph(
     )
 }
 
-/// Build a well content graph: one well + N field children. Each field
-/// gets an ImageSpec and a `field → well` translation transform.
-pub fn well_graph_with_fields(
-    well_id: &str,
-    fields: &[FieldSpec],
+/// Build a group content graph: one group + N tile children. Each tile
+/// gets an ImageSpec and a `tile → group` translation transform.
+pub fn group_graph_with_tiles(
+    group_id: &str,
+    tiles: &[TileSpec],
     levels: Vec<LevelGeometry>,
 ) -> DatasetManifest {
-    let well_eid = EntityId(well_id.into());
+    let group_eid = EntityId(group_id.into());
 
     let mut entities = vec![Entity {
-        id: well_eid.clone(),
-        kind: EntityKind::Well,
+        id: group_eid.clone(),
+        kind: EntityKind::Group,
         parent: None,
         labels: EntityLabels {
-            name: Some(well_id.into()),
+            name: Some(group_id.into()),
             row_index: Some(0),
             column_index: Some(0),
             ..Default::default()
@@ -169,24 +169,24 @@ pub fn well_graph_with_fields(
     let mut transforms = Vec::new();
     let mut images = Vec::new();
 
-    for f in fields {
-        let fid = EntityId(f.field_id.into());
+    for f in tiles {
+        let fid = EntityId(f.tile_id.into());
         let img_id = ImageId(f.image_id.into());
 
         entities.push(Entity {
             id: fid.clone(),
-            kind: EntityKind::Field,
-            parent: Some(well_eid.clone()),
+            kind: EntityKind::Tile,
+            parent: Some(group_eid.clone()),
             labels: EntityLabels {
-                name: Some(f.field_id.into()),
-                field_index: Some(f.field_index),
+                name: Some(f.tile_id.into()),
+                tile_index: Some(f.tile_index),
                 ..Default::default()
             },
         });
 
         transforms.push(TransformEdge {
             from: fid.clone(),
-            to: well_eid.clone(),
+            to: group_eid.clone(),
             transform: VoxelTransform::from_voxel_translation_2d(
                 f.translation_xy[0],
                 f.translation_xy[1],
@@ -221,11 +221,11 @@ pub fn well_graph_with_fields(
 }
 
 #[derive(Clone, Copy)]
-pub struct FieldSpec<'a> {
-    pub field_id: &'a str,
+pub struct TileSpec<'a> {
+    pub tile_id: &'a str,
     pub image_id: &'a str,
-    pub field_index: u32,
-    /// XY translation in well coordinate space.
+    pub tile_index: u32,
+    /// XY translation in group coordinate space.
     pub translation_xy: [f64; 2],
 }
 

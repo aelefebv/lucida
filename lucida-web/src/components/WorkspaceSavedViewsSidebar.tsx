@@ -1081,7 +1081,7 @@ function SaveWorkspaceSavedViewModal({
       >
         <h4>Save current view</h4>
         <label className="bookmark-save-field">
-          <span className="bookmark-save-field-label">Name</span>
+          <span className="bookmark-save-tile-label">Name</span>
           <input
             ref={ref}
             type="text"
@@ -1101,7 +1101,7 @@ function SaveWorkspaceSavedViewModal({
         </label>
 
         <fieldset className="bookmark-visibility-fieldset">
-          <legend className="bookmark-save-field-label">Who can see this</legend>
+          <legend className="bookmark-save-tile-label">Who can see this</legend>
           <div className="bookmark-visibility-options" role="radiogroup" aria-label="Who can see this view">
             <label
               className={`bookmark-visibility-option${

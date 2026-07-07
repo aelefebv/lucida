@@ -28,7 +28,7 @@ export { identityMatrix } from "./coldState/identity.ts";
 export { buildDisplayStateByChannel } from "./coldState/displayState.ts";
 export {
   buildRoster,
-  synthesizeWellRosterEntry,
+  synthesizeGroupRosterEntry,
   type BuildRosterResult,
 } from "./coldState/roster.ts";
 export { buildColdState, buildColdActiveEntry } from "./coldState/build.ts";

@@ -28,7 +28,7 @@ pub struct DatasetManifest {
 }
 
 impl DatasetManifest {
-    // All eight args are required identity fields; the manifest is built once
+    // All eight args are required identity tiles; the manifest is built once
     // per dataset, so a builder for a single constructor would only add noise.
     #[allow(clippy::too_many_arguments)]
     pub fn new(

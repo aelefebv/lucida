@@ -13,7 +13,7 @@ export function chunkAllowedByCurrentRenderRadius(
   if (!cold) return true;
   const radiusView = cold.renderRadiusView?.[tier ?? "detail"] ?? RENDER_RADIUS_DISABLED;
   const entry = findEntryForMember(state, memberId);
-  if (!entry || entry.kind === "well-as-proxy") return true;
+  if (!entry || entry.kind === "group-as-proxy") return true;
   const level = entry.levels.find((l) => l.level === chunk.level);
   const level0 = entry.levels.find((l) => l.level === 0) ?? level;
   if (!level || !level0) return true;

@@ -32,18 +32,18 @@ import {
   OFFSET_CONTRAST_MIN,
   OFFSET_DETAIL_SOURCE,
   OFFSET_LABEL_OPACITY,
-  OFFSET_FIELD_PROXY_DIMS,
-  OFFSET_FIELD_PROXY_POOL_INDEX,
-  OFFSET_FIELD_PROXY_SLOT_INDEX,
+  OFFSET_TILE_PROXY_DIMS,
+  OFFSET_TILE_PROXY_POOL_INDEX,
+  OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_LOD_COUNT,
   OFFSET_LODS,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  OFFSET_WELL_PROXY_DIMS,
-  OFFSET_WELL_PROXY_POOL_INDEX,
-  OFFSET_WELL_PROXY_SLOT_INDEX,
+  OFFSET_GROUP_PROXY_DIMS,
+  OFFSET_GROUP_PROXY_POOL_INDEX,
+  OFFSET_GROUP_PROXY_SLOT_INDEX,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -117,7 +117,7 @@ function fieldSize(type: string): number {
   throw new Error(`unknown type: ${type}`);
 }
 
-function fieldAlign(type: string): number {
+function tileAlign(type: string): number {
   if (type === "u32" || type === "f32" || type === "i32") return 4;
   if (type === "mat4x4f" || type === "mat4x4<f32>") return 16;
   if (type.startsWith("vec3")) return 16; // WGSL host-shareable
@@ -131,7 +131,7 @@ function computeOffsets(fields: WgslField[]): Record<string, number> {
   let off = 0;
   const out: Record<string, number> = {};
   for (const f of fields) {
-    const al = fieldAlign(f.type);
+    const al = tileAlign(f.type);
     off = Math.ceil(off / al) * al;
     out[f.name] = off;
     off += fieldSize(f.type);
@@ -171,12 +171,12 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.modelMatrix).toBe(OFFSET_MODEL_MATRIX);
     expect(offsets.invModelMatrix).toBe(OFFSET_INV_MODEL_MATRIX);
     expect(offsets.channelMask).toBe(OFFSET_CHANNEL_MASK);
-    expect(offsets.fieldProxyPoolIndex).toBe(OFFSET_FIELD_PROXY_POOL_INDEX);
-    expect(offsets.fieldProxySlotIndex).toBe(OFFSET_FIELD_PROXY_SLOT_INDEX);
-    expect(offsets.wellProxyPoolIndex).toBe(OFFSET_WELL_PROXY_POOL_INDEX);
-    expect(offsets.wellProxySlotIndex).toBe(OFFSET_WELL_PROXY_SLOT_INDEX);
-    expect(offsets.fieldProxyDims).toBe(OFFSET_FIELD_PROXY_DIMS);
-    expect(offsets.wellProxyDims).toBe(OFFSET_WELL_PROXY_DIMS);
+    expect(offsets.tileProxyPoolIndex).toBe(OFFSET_TILE_PROXY_POOL_INDEX);
+    expect(offsets.tileProxySlotIndex).toBe(OFFSET_TILE_PROXY_SLOT_INDEX);
+    expect(offsets.groupProxyPoolIndex).toBe(OFFSET_GROUP_PROXY_POOL_INDEX);
+    expect(offsets.groupProxySlotIndex).toBe(OFFSET_GROUP_PROXY_SLOT_INDEX);
+    expect(offsets.tileProxyDims).toBe(OFFSET_TILE_PROXY_DIMS);
+    expect(offsets.groupProxyDims).toBe(OFFSET_GROUP_PROXY_DIMS);
     expect(offsets.contrastMin).toBe(OFFSET_CONTRAST_MIN);
     expect(offsets.contrastMax).toBe(OFFSET_CONTRAST_MAX);
     expect(offsets.gamma).toBe(OFFSET_GAMMA);

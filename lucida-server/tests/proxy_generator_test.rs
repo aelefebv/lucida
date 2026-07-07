@@ -15,12 +15,12 @@ use std::time::Duration;
 use lucida_proxy::{ProxyKind, ProxySpec, source_content_hash};
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 
-use crate::common::{SyntheticDataset, build_single_field_dataset};
+use crate::common::{SyntheticDataset, build_single_tile_dataset};
 
 fn proxy_spec_for(ds: &SyntheticDataset) -> ProxySpec {
     ProxySpec {
         entity_id: ds.entity_id.clone(),
-        kind: ProxyKind::FieldProxy3D,
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 4,
@@ -30,7 +30,7 @@ fn proxy_spec_for(ds: &SyntheticDataset) -> ProxySpec {
 #[tokio::test]
 async fn cache_hit_short_circuits_generation() {
     // Single small chunk: shape exactly matches chunk_shape.
-    let ds = build_single_field_dataset([1, 1, 4, 4, 4], [1, 1, 4, 4, 4], 0).await;
+    let ds = build_single_tile_dataset([1, 1, 4, 4, 4], [1, 1, 4, 4, 4], 0).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), [0xCA; 16]));
@@ -78,7 +78,7 @@ async fn cache_hit_short_circuits_generation() {
 async fn in_flight_dedup_runs_one_generation_for_concurrent_requests() {
     // Multi-chunk grid + per-fetch delay so concurrent requests definitely
     // overlap during the pre-fetch phase.
-    let ds = build_single_field_dataset([1, 1, 4, 8, 8], [1, 1, 1, 4, 4], 30).await;
+    let ds = build_single_tile_dataset([1, 1, 4, 8, 8], [1, 1, 1, 4, 4], 30).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), [0xDE; 16]));
@@ -141,7 +141,7 @@ async fn in_flight_dedup_runs_one_generation_for_concurrent_requests() {
 async fn bounded_concurrency_respects_limit() {
     // Two distinct entities so dedup doesn't suppress concurrent work.
     // Each request triggers its own generation.
-    let ds = build_single_field_dataset([1, 1, 4, 8, 8], [1, 1, 1, 4, 4], 50).await;
+    let ds = build_single_tile_dataset([1, 1, 4, 8, 8], [1, 1, 1, 4, 4], 50).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), [0xBC; 16]));
@@ -199,7 +199,7 @@ async fn bounded_concurrency_respects_limit() {
 async fn second_call_after_completion_uses_cache() {
     // Verify that a sequential second call (after the first has fully
     // completed) reads from the persistent cache — no store hits.
-    let ds = build_single_field_dataset([1, 1, 4, 4, 4], [1, 1, 4, 4, 4], 0).await;
+    let ds = build_single_tile_dataset([1, 1, 4, 4, 4], [1, 1, 4, 4, 4], 0).await;
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), [0xAB; 16]));
     let generator = ProxyGenerator::new(

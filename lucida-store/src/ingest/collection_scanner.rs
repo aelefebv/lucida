@@ -1,7 +1,7 @@
 //! Scan a directory of tiled TIFF files and discover collection structure.
 //!
-//! Parses filenames matching `r{row}c{col}f{field}p{plane}-ch{channel}t{timepoint}.tiff`
-//! and builds a `CollectionLayout` describing wells, FOVs, channels, timepoints, and Z planes.
+//! Parses filenames matching `r{row}c{col}f{tile}p{plane}-ch{channel}t{timepoint}.tiff`
+//! and builds a `CollectionLayout` describing groups, tiles, channels, timepoints, and Z planes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -20,7 +20,7 @@ pub struct CollectionLayout {
     pub name: String,
     pub rows: Vec<String>,
     pub columns: Vec<String>,
-    pub wells: Vec<WellLayout>,
+    pub groups: Vec<GroupLayout>,
     pub channels: u32,
     pub timepoints: u32,
     pub z_planes: u32,
@@ -29,19 +29,19 @@ pub struct CollectionLayout {
     pub voxel_size: VoxelSize,
 }
 
-/// A single well in the collection layout.
+/// A single group in the collection layout.
 #[derive(Debug)]
-pub struct WellLayout {
+pub struct GroupLayout {
     pub row_name: String,
     pub col_name: String,
     pub row_index: u32,
     pub col_index: u32,
-    pub fovs: Vec<FovLayout>,
+    pub tiles: Vec<TileLayout>,
 }
 
-/// A single FOV within a well.
+/// A single tile within a group.
 #[derive(Debug)]
-pub struct FovLayout {
+pub struct TileLayout {
     pub index: u32,
     /// Maps (timepoint, channel, z_plane) → file path. All 0-indexed.
     pub files: HashMap<(u32, u32, u32), PathBuf>,
@@ -52,7 +52,7 @@ pub struct FovLayout {
 struct ParsedFilename {
     row: u32,
     col: u32,
-    field: u32,
+    tile: u32,
     plane: u32,
     channel: u32,
     timepoint: u32,
@@ -144,29 +144,29 @@ pub fn scan_collection_directory(
         .map(|(i, &p)| (p, i as u32))
         .collect();
 
-    // Group files by (row, col) → (field) → files.
+    // Group files by (row, col) → (tile) → files.
     // Use BTreeMap for sorted key ordering.
-    let mut well_map: BTreeMap<(u32, u32), BTreeMap<u32, Vec<&ParsedFilename>>> = BTreeMap::new();
+    let mut group_map: BTreeMap<(u32, u32), BTreeMap<u32, Vec<&ParsedFilename>>> = BTreeMap::new();
     for pf in &parsed_files {
-        well_map
+        group_map
             .entry((pf.row, pf.col))
             .or_default()
-            .entry(pf.field)
+            .entry(pf.tile)
             .or_default()
             .push(pf);
     }
 
-    // Build WellLayout structs.
-    let mut wells = Vec::new();
-    for (&(row, col), fov_map) in &well_map {
+    // Build GroupLayout structs.
+    let mut groups = Vec::new();
+    for (&(row, col), tile_map) in &group_map {
         let row_name = row_number_to_letter(row);
         let col_name = col.to_string();
         let ri = row_index_map[&row];
         let ci = col_index_map[&col];
 
-        let mut fovs = Vec::new();
-        for (&field, files) in fov_map {
-            let fov_index = field - 1; // 1-indexed → 0-indexed
+        let mut tiles = Vec::new();
+        for (&tile, files) in tile_map {
+            let tile_index = tile - 1; // 1-indexed → 0-indexed
             let mut file_map = HashMap::new();
             for pf in files {
                 let t = timepoint_index[&pf.timepoint];
@@ -174,19 +174,19 @@ pub fn scan_collection_directory(
                 let z = plane_index[&pf.plane];
                 file_map.insert((t, c, z), pf.path.clone());
             }
-            fovs.push(FovLayout {
-                index: fov_index,
+            tiles.push(TileLayout {
+                index: tile_index,
                 files: file_map,
             });
         }
-        fovs.sort_by_key(|f| f.index);
+        tiles.sort_by_key(|f| f.index);
 
-        wells.push(WellLayout {
+        groups.push(GroupLayout {
             row_name,
             col_name,
             row_index: ri,
             col_index: ci,
-            fovs,
+            tiles,
         });
     }
 
@@ -215,7 +215,7 @@ pub fn scan_collection_directory(
         name,
         rows,
         columns,
-        wells,
+        groups,
         channels,
         timepoints,
         z_planes,
@@ -241,7 +241,7 @@ fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> 
         {
             let row: u32 = caps[1].parse().unwrap();
             let col: u32 = caps[2].parse().unwrap();
-            let field: u32 = caps[3].parse().unwrap();
+            let tile: u32 = caps[3].parse().unwrap();
             let plane: u32 = caps[4].parse().unwrap();
             let channel: u32 = caps[5].parse().unwrap();
             let timepoint: u32 = caps[6].parse().unwrap();
@@ -249,7 +249,7 @@ fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> 
             results.push(ParsedFilename {
                 row,
                 col,
-                field,
+                tile,
                 plane,
                 channel,
                 timepoint,

@@ -424,13 +424,13 @@ export class SessionController {
     // counts so a JS-only debugger can spot Collection vs. Single anomalies
     // without enabling the wasm category.
     const entityIds = new Set(manifest.entities.map(e => e.id));
-    let nWells = 0;
-    let nFields = 0;
+    let nGroups = 0;
+    let nTiles = 0;
     let nOrphans = 0;
     for (const e of manifest.entities) {
-      if (e.kind === "Well") nWells++;
-      else if (e.kind === "Field") {
-        nFields++;
+      if (e.kind === "Group") nGroups++;
+      else if (e.kind === "Tile") {
+        nTiles++;
         if (e.parent !== null && !entityIds.has(e.parent)) nOrphans++;
       }
     }
@@ -441,8 +441,8 @@ export class SessionController {
       fetchVariant,
       nImages: manifest.images.length,
       channelCount,
-      nWells,
-      nFields,
+      nGroups,
+      nTiles,
       nOrphans,
       nLayouts: manifest.source_layouts.length,
       defaultLayoutId: manifest.default_layout_id,

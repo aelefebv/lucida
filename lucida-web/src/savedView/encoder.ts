@@ -11,7 +11,7 @@
 //
 // Both flows are async because `CompressionStream` is stream-based.
 //
-// Defaults stripping is what keeps a 384-well collection share link < 1 KB —
+// Defaults stripping is what keeps a 384-group collection share link < 1 KB —
 // a default `DatasetDisplaySettings` carries a vec of identical channel
 // settings per dataset; emitting only the non-default deltas crushes the
 // payload before gzip even runs.

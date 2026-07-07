@@ -1030,7 +1030,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
       expect(se).toBeTruthy();
 
       // Grab the SE corner and drag it OUTWARD past the box edge, taking longer
-      // than the hysteresis window mid-drag, then RELEASE well OUTSIDE the box.
+      // than the hysteresis window mid-drag, then RELEASE group OUTSIDE the box.
       // The box spans world (10,20)-(60,80) → screen (410,320)-(460,380); a
       // release at client (700,590) → world (300,290) is far off the box.
       fireEvent.pointerDown(se, { pointerId: 1, button: 0, clientX: 460, clientY: 380 });
@@ -1301,7 +1301,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     runFrame();
     expect(dotTransform("p")).toBe("translate(410px, 320px)");
 
-    // Core re-anchored the pin (e.g. its well moved by +[0,50]) → position now
+    // Core re-anchored the pin (e.g. its group moved by +[0,50]) → position now
     // (10,70). A locally-initiated switch that did NOT bump version would leave
     // the overlay stale: it still shows the old position.
     setPins([{ ...before[0], position: [10, 70] }]);
@@ -1317,8 +1317,8 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     expect(dotTransform("p")).toBe("translate(410px, 370px)");
   });
 
-  it("reflects a pin on a non-moving well as unchanged after a version bump", () => {
-    // A pin whose anchor well didn't move: core leaves its position alone, so the
+  it("reflects a pin on a non-moving group as unchanged after a version bump", () => {
+    // A pin whose anchor group didn't move: core leaves its position alone, so the
     // overlay (after re-reading on the bump) shows it in exactly the same place.
     const pins: Annotation[] = [
       { id: "static", position: [100, 5], z: 0, author: String(MY_ID), kind: "point", comments: [] },

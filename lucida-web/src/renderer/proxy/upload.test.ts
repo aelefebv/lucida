@@ -10,10 +10,10 @@
  *      existing slot reused, LRU touched.
  *   3. Pool fills, new upload arrives → oldest LRU evicted, slot reused,
  *      proxyStats.evicted incremented.
- *   4. `WellProxy3D` upload for a well with two child fields → both
- *      children's `wellProxyHandle` populated with same handle.
- *   5. `FieldProxy3D` upload → only field descriptor gets
- *      `fieldProxyHandle`; no fan-out happens to other entities.
+ *   4. `GroupProxy3D` upload for a group with two child tiles → both
+ *      children's `groupProxyHandle` populated with same handle.
+ *   5. `TileProxy3D` upload → only tile descriptor gets
+ *      `tileProxyHandle`; no fan-out happens to other entities.
  *   6. Stale upload (`epochs.selection` < current) → dropped,
  *      proxyStats.dropped incremented, returns no-change outcome.
  *   7. Short-buffer upload (`data.byteLength` < expected) → warned +
@@ -122,7 +122,7 @@ function makeEpochs(opts?: Partial<SceneEpochs>): SceneEpochs {
 function makeMsg(
   opts: Partial<ProxyAssetDataMessage> & {
     entityId: string;
-    kind: "WellProxy3D" | "FieldProxy3D";
+    kind: "GroupProxy3D" | "TileProxy3D";
   },
 ): ProxyAssetDataMessage {
   const dims = opts.dims ?? ([8, 8, 8] as [number, number, number]);
@@ -186,7 +186,7 @@ describe("Suite B — handleProxyUpload", () => {
   // 1. First proxy upload for an entity
   // -------------------------------------------------------------------------
   it("first proxy upload → pool created, slot 0 allocated, descriptor populated", () => {
-    const msg = makeMsg({ entityId: "fieldA", kind: "FieldProxy3D" });
+    const msg = makeMsg({ entityId: "tileA", kind: "TileProxy3D" });
     const outcome = handleProxyUpload(ctx, msg);
 
     // Pool created under the dataset.
@@ -197,15 +197,15 @@ describe("Suite B — handleProxyUpload", () => {
     expect(pool.slots.size).toBe(1);
 
     // Slot 0 was allocated (freeSlots is built [cap-1...0], pop -> 0 first).
-    const compositeKey = proxySlotKey("fieldA", 0, 0);
+    const compositeKey = proxySlotKey("tileA", 0, 0);
     expect(pool.slots.get(compositeKey)).toBe(0);
 
-    // Descriptor populated for the entity (field gets fieldProxyHandle).
-    const desc = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0));
+    // Descriptor populated for the entity (tile gets tileProxyHandle).
+    const desc = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0));
     expect(desc).toBeDefined();
-    expect(desc!.fieldProxyHandle).not.toBeNull();
-    expect(desc!.fieldProxyHandle!.slotIndex).toBe(0);
-    expect(desc!.wellProxyHandle).toBeNull();
+    expect(desc!.tileProxyHandle).not.toBeNull();
+    expect(desc!.tileProxyHandle!.slotIndex).toBe(0);
+    expect(desc!.groupProxyHandle).toBeNull();
 
     // GPU write happened.
     expect(handle.writeTextureMock).toHaveBeenCalledTimes(1);
@@ -221,25 +221,25 @@ describe("Suite B — handleProxyUpload", () => {
   // 2. Same proxy upload again (same composite key)
   // -------------------------------------------------------------------------
   it("repeat upload with same key → no new slot, existing slot reused, LRU touched", () => {
-    const msg = makeMsg({ entityId: "fieldA", kind: "FieldProxy3D" });
+    const msg = makeMsg({ entityId: "tileA", kind: "TileProxy3D" });
     handleProxyUpload(ctx, msg);
 
-    // Allocate a second entity to advance LRU position of fieldA.
-    handleProxyUpload(ctx, makeMsg({ entityId: "fieldB", kind: "FieldProxy3D" }));
+    // Allocate a second entity to advance LRU position of tileA.
+    handleProxyUpload(ctx, makeMsg({ entityId: "tileB", kind: "TileProxy3D" }));
     const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
     expect(pool.touchOrder).toEqual([
-      proxySlotKey("fieldA", 0, 0),
-      proxySlotKey("fieldB", 0, 0),
+      proxySlotKey("tileA", 0, 0),
+      proxySlotKey("tileB", 0, 0),
     ]);
 
-    // Repeat fieldA upload.
+    // Repeat tileA upload.
     const outcome = handleProxyUpload(ctx, msg);
     // Still 2 slots, no new allocation.
     expect(pool.slots.size).toBe(2);
-    // fieldA is now most-recently-used.
+    // tileA is now most-recently-used.
     expect(pool.touchOrder).toEqual([
-      proxySlotKey("fieldB", 0, 0),
-      proxySlotKey("fieldA", 0, 0),
+      proxySlotKey("tileB", 0, 0),
+      proxySlotKey("tileA", 0, 0),
     ]);
     // Stats: uploaded incremented; no eviction.
     expect(ctx.state.proxyStats.uploaded).toBe(3);
@@ -253,63 +253,63 @@ describe("Suite B — handleProxyUpload", () => {
   it("pool full + new key → oldest LRU evicted, slot reused, evicted stat incremented", () => {
     // Seed the pool to capacity by pre-allocating directly. PROXY_POOL_CAPACITY=64;
     // simpler to use a tiny mock by hand-allocating slots through the pool API.
-    const msg0 = makeMsg({ entityId: "fieldA", kind: "FieldProxy3D" });
+    const msg0 = makeMsg({ entityId: "tileA", kind: "TileProxy3D" });
     handleProxyUpload(ctx, msg0);
     const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
-    // Fill the pool. fieldA already used slot 0; allocate 63 more.
+    // Fill the pool. tileA already used slot 0; allocate 63 more.
     for (let i = 0; i < pool.capacity - 1; i++) {
       allocateProxySlot(pool, `seed-${i}`);
     }
     expect(pool.slots.size).toBe(pool.capacity);
     expect(pool.freeSlots).toHaveLength(0);
 
-    // Now upload a brand-new key; should evict the LRU head (fieldA — it
+    // Now upload a brand-new key; should evict the LRU head (tileA — it
     // was the first thing allocated, then everything else after, so it
     // sits at the front of touchOrder).
-    const fieldASlot = pool.slots.get(proxySlotKey("fieldA", 0, 0))!;
+    const tileASlot = pool.slots.get(proxySlotKey("tileA", 0, 0))!;
     const outcome = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldZ", kind: "FieldProxy3D" }),
+      makeMsg({ entityId: "tileZ", kind: "TileProxy3D" }),
     );
     expect(ctx.state.proxyStats.evicted).toBe(1);
-    expect(pool.slots.has(proxySlotKey("fieldA", 0, 0))).toBe(false);
-    expect(pool.slots.get(proxySlotKey("fieldZ", 0, 0))).toBe(fieldASlot);
+    expect(pool.slots.has(proxySlotKey("tileA", 0, 0))).toBe(false);
+    expect(pool.slots.get(proxySlotKey("tileZ", 0, 0))).toBe(tileASlot);
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0))!.tileProxyHandle,
     ).toBeNull();
     expect(outcome).toEqual({ rebuildDescriptor: true, wantedSetChanged: true });
   });
 
   // -------------------------------------------------------------------------
-  // 4. WellProxy3D upload fans out to child fields
+  // 4. GroupProxy3D upload fans out to child tiles
   // -------------------------------------------------------------------------
-  it("WellProxy3D upload for well with two child fields → both child wellProxyHandles set", () => {
-    ctx.state.wellToFields.set("wellA", new Set(["fieldA", "fieldB"]));
+  it("GroupProxy3D upload for group with two child tiles → both child groupProxyHandles set", () => {
+    ctx.state.groupToTiles.set("groupA", new Set(["tileA", "tileB"]));
     const outcome = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "wellA", kind: "WellProxy3D" }),
+      makeMsg({ entityId: "groupA", kind: "GroupProxy3D" }),
     );
-    const wellDesc = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("wellA", 0, 0));
-    expect(wellDesc!.wellProxyHandle).not.toBeNull();
-    const sharedHandle = wellDesc!.wellProxyHandle!;
+    const groupDesc = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("groupA", 0, 0));
+    expect(groupDesc!.groupProxyHandle).not.toBeNull();
+    const sharedHandle = groupDesc!.groupProxyHandle!;
 
-    const descA = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0));
-    const descB = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldB", 0, 0));
-    expect(descA!.wellProxyHandle).toBe(sharedHandle);
-    expect(descB!.wellProxyHandle).toBe(sharedHandle);
-    // Children's fieldProxyHandle stays null (not affected by well upload).
-    expect(descA!.fieldProxyHandle).toBeNull();
-    expect(descB!.fieldProxyHandle).toBeNull();
-    // Well's own fieldProxyHandle stays null too.
-    expect(wellDesc!.fieldProxyHandle).toBeNull();
+    const descA = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0));
+    const descB = ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileB", 0, 0));
+    expect(descA!.groupProxyHandle).toBe(sharedHandle);
+    expect(descB!.groupProxyHandle).toBe(sharedHandle);
+    // Children's tileProxyHandle stays null (not affected by group upload).
+    expect(descA!.tileProxyHandle).toBeNull();
+    expect(descB!.tileProxyHandle).toBeNull();
+    // Group's own tileProxyHandle stays null too.
+    expect(groupDesc!.tileProxyHandle).toBeNull();
     expect(outcome.rebuildDescriptor).toBe(true);
   });
 
-  it("desired-set reconciliation releases resident well proxy and clears fanned-out handles", () => {
-    ctx.state.wellToFields.set("wellA", new Set(["fieldA", "fieldB"]));
+  it("desired-set reconciliation releases resident group proxy and clears fanned-out handles", () => {
+    ctx.state.groupToTiles.set("groupA", new Set(["tileA", "tileB"]));
     handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "wellA", kind: "WellProxy3D" }),
+      makeMsg({ entityId: "groupA", kind: "GroupProxy3D" }),
     );
     const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
     expect(pool.slots.size).toBe(1);
@@ -320,32 +320,32 @@ describe("Suite B — handleProxyUpload", () => {
     expect(pool.slots.size).toBe(0);
     expect(pool.freeSlots).toContain(0);
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("wellA", 0, 0))!.wellProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("groupA", 0, 0))!.groupProxyHandle,
     ).toBeNull();
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.wellProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0))!.groupProxyHandle,
     ).toBeNull();
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldB", 0, 0))!.wellProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileB", 0, 0))!.groupProxyHandle,
     ).toBeNull();
   });
 
   // -------------------------------------------------------------------------
-  // 5. FieldProxy3D upload — no fan-out
+  // 5. TileProxy3D upload — no fan-out
   // -------------------------------------------------------------------------
-  it("FieldProxy3D upload → only field descriptor mutated; no fan-out to other entities", () => {
-    // Preload wellToFields with another well's children (irrelevant to
+  it("TileProxy3D upload → only tile descriptor mutated; no fan-out to other entities", () => {
+    // Preload groupToTiles with another group's children (irrelevant to
     // this upload — should not be touched).
-    ctx.state.wellToFields.set("wellA", new Set(["fieldOther"]));
+    ctx.state.groupToTiles.set("groupA", new Set(["tileOther"]));
     handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldA", kind: "FieldProxy3D" }),
+      makeMsg({ entityId: "tileA", kind: "TileProxy3D" }),
     );
-    // Only fieldA in descriptors.
+    // Only tileA in descriptors.
     expect(ctx.state.proxyDescriptorsByEntity.size).toBe(1);
-    expect(ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle).not.toBeNull();
-    // fieldOther was not touched.
-    expect(ctx.state.proxyDescriptorsByEntity.has(proxyDescriptorKey("fieldOther", 0, 0))).toBe(false);
+    expect(ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0))!.tileProxyHandle).not.toBeNull();
+    // tileOther was not touched.
+    expect(ctx.state.proxyDescriptorsByEntity.has(proxyDescriptorKey("tileOther", 0, 0))).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -357,7 +357,7 @@ describe("Suite B — handleProxyUpload", () => {
     ctx.state.currentEpochs = current;
     const outcome = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldA", kind: "FieldProxy3D", epochs: stale }),
+      makeMsg({ entityId: "tileA", kind: "TileProxy3D", epochs: stale }),
     );
     expect(ctx.state.proxyStats.dropped).toBe(1);
     expect(ctx.state.proxyStats.uploaded).toBe(0);
@@ -375,8 +375,8 @@ describe("Suite B — handleProxyUpload", () => {
     const outcome = handleProxyUpload(
       ctx,
       makeMsg({
-        entityId: "fieldA",
-        kind: "FieldProxy3D",
+        entityId: "tileA",
+        kind: "TileProxy3D",
         epochs: makeEpochs({ request: 1 }),
       }),
     );
@@ -389,14 +389,14 @@ describe("Suite B — handleProxyUpload", () => {
 
   it("upload present in current desiredProxyKeys → accepted", () => {
     ctx.state.currentColdState = makeColdState({
-      desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],
+      desiredProxyKeys: ["ds1|tileA|TileProxy3D|0|0"],
       epochs: makeEpochs({ request: 1 }),
     });
     const outcome = handleProxyUpload(
       ctx,
       makeMsg({
-        entityId: "fieldA",
-        kind: "FieldProxy3D",
+        entityId: "tileA",
+        kind: "TileProxy3D",
         epochs: makeEpochs({ request: 1 }),
       }),
     );
@@ -409,17 +409,17 @@ describe("Suite B — handleProxyUpload", () => {
   it("policy-driven pool capacity tracks desired proxy count for the pool", () => {
     ctx.state.currentColdState = makeColdState({
       desiredProxyKeys: [
-        "ds1|fieldA|FieldProxy3D|0|0",
-        "ds1|fieldB|FieldProxy3D|0|0",
-        "ds1|fieldC|FieldProxy3D|0|0",
+        "ds1|tileA|TileProxy3D|0|0",
+        "ds1|tileB|TileProxy3D|0|0",
+        "ds1|tileC|TileProxy3D|0|0",
       ],
       epochs: makeEpochs({ request: 1 }),
     });
     handleProxyUpload(
       ctx,
       makeMsg({
-        entityId: "fieldA",
-        kind: "FieldProxy3D",
+        entityId: "tileA",
+        kind: "TileProxy3D",
         epochs: makeEpochs({ request: 1 }),
       }),
     );
@@ -430,14 +430,14 @@ describe("Suite B — handleProxyUpload", () => {
 
   it("grows an existing proxy pool when the desired set exceeds prior requested capacity", () => {
     ctx.state.currentColdState = makeColdState({
-      desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],
+      desiredProxyKeys: ["ds1|tileA|TileProxy3D|0|0"],
       epochs: makeEpochs({ request: 1 }),
     });
     handleProxyUpload(
       ctx,
       makeMsg({
-        entityId: "fieldA",
-        kind: "FieldProxy3D",
+        entityId: "tileA",
+        kind: "TileProxy3D",
         epochs: makeEpochs({ request: 1 }),
       }),
     );
@@ -445,21 +445,21 @@ describe("Suite B — handleProxyUpload", () => {
     const firstTexture = firstPool.texture as unknown as MockTexture;
     expect(firstPool.capacity).toBe(1);
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0))!.tileProxyHandle,
     ).not.toBeNull();
 
     ctx.state.currentColdState = makeColdState({
       desiredProxyKeys: [
-        "ds1|fieldA|FieldProxy3D|0|0",
-        "ds1|fieldB|FieldProxy3D|0|0",
+        "ds1|tileA|TileProxy3D|0|0",
+        "ds1|tileB|TileProxy3D|0|0",
       ],
       epochs: makeEpochs({ request: 2 }),
     });
     handleProxyUpload(
       ctx,
       makeMsg({
-        entityId: "fieldB",
-        kind: "FieldProxy3D",
+        entityId: "tileB",
+        kind: "TileProxy3D",
         epochs: makeEpochs({ request: 2 }),
       }),
     );
@@ -468,17 +468,17 @@ describe("Suite B — handleProxyUpload", () => {
     expect(firstTexture.destroyed).toBe(true);
     expect(grownPool.capacity).toBe(2);
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldA", 0, 0))!.fieldProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileA", 0, 0))!.tileProxyHandle,
     ).toBeNull();
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("fieldB", 0, 0))!.fieldProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tileB", 0, 0))!.tileProxyHandle,
     ).not.toBeNull();
   });
 
   it("does not evict while uploading a desired set larger than the old X-only 16-slot limit", () => {
     const desiredKeys = Array.from(
       { length: 40 },
-      (_, i) => `ds1|field-${i}|FieldProxy3D|0|0`,
+      (_, i) => `ds1|tile-${i}|TileProxy3D|0|0`,
     );
     ctx.state.currentColdState = makeColdState({
       desiredProxyKeys: desiredKeys,
@@ -489,8 +489,8 @@ describe("Suite B — handleProxyUpload", () => {
       handleProxyUpload(
         ctx,
         makeMsg({
-          entityId: `field-${i}`,
-          kind: "FieldProxy3D",
+          entityId: `tile-${i}`,
+          kind: "TileProxy3D",
           dims: [1, 128, 128],
           epochs: makeEpochs({ request: 1 }),
         }),
@@ -507,14 +507,14 @@ describe("Suite B — handleProxyUpload", () => {
 
   it("desired upload from stale request epoch → dropped and requests a wanted-set refresh", () => {
     ctx.state.currentColdState = makeColdState({
-      desiredProxyKeys: ["ds1|fieldA|FieldProxy3D|0|0"],
+      desiredProxyKeys: ["ds1|tileA|TileProxy3D|0|0"],
       epochs: makeEpochs({ request: 2 }),
     });
     const outcome = handleProxyUpload(
       ctx,
       makeMsg({
-        entityId: "fieldA",
-        kind: "FieldProxy3D",
+        entityId: "tileA",
+        kind: "TileProxy3D",
         epochs: makeEpochs({ request: 1 }),
       }),
     );
@@ -533,7 +533,7 @@ describe("Suite B — handleProxyUpload", () => {
     const small = new ArrayBuffer(100);
     const outcome = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldA", kind: "FieldProxy3D", data: small }),
+      makeMsg({ entityId: "tileA", kind: "TileProxy3D", data: small }),
     );
     expect(warnSpy).toHaveBeenCalled();
     expect(ctx.state.proxyPoolsByDataset.size).toBe(0);
@@ -550,12 +550,12 @@ describe("Suite B — handleProxyUpload", () => {
   it("outcome.rebuildDescriptor is true for any successful upload (caller gates by dataset)", () => {
     const ok1 = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldA", kind: "FieldProxy3D", datasetId: "ds1" }),
+      makeMsg({ entityId: "tileA", kind: "TileProxy3D", datasetId: "ds1" }),
     );
     expect(ok1.rebuildDescriptor).toBe(true);
     const ok2 = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldB", kind: "FieldProxy3D", datasetId: "ds2" }),
+      makeMsg({ entityId: "tileB", kind: "TileProxy3D", datasetId: "ds2" }),
     );
     expect(ok2.rebuildDescriptor).toBe(true);
   });
@@ -567,7 +567,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(
       handleProxyUpload(
         ctx,
-        makeMsg({ entityId: "fieldA", kind: "FieldProxy3D" }),
+        makeMsg({ entityId: "tileA", kind: "TileProxy3D" }),
       ).wantedSetChanged,
     ).toBe(true);
     // Stale → false. Reset state.
@@ -577,8 +577,8 @@ describe("Suite B — handleProxyUpload", () => {
       handleProxyUpload(
         ctx,
         makeMsg({
-          entityId: "fieldB",
-          kind: "FieldProxy3D",
+          entityId: "tileB",
+          kind: "TileProxy3D",
           epochs: stale,
         }),
       ).wantedSetChanged,
@@ -614,7 +614,7 @@ describe("Suite E — descriptor-rebuild trigger gating (dispatcher policy)", ()
     const currentColdDataset = "ds1";
     const outcome = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldA", kind: "FieldProxy3D", datasetId: "ds1" }),
+      makeMsg({ entityId: "tileA", kind: "TileProxy3D", datasetId: "ds1" }),
     );
     // Dispatcher's policy: act iff outcome.rebuildDescriptor && msg.datasetId === currentColdDataset.
     expect(outcome.rebuildDescriptor && currentColdDataset === "ds1").toBe(true);
@@ -622,7 +622,7 @@ describe("Suite E — descriptor-rebuild trigger gating (dispatcher policy)", ()
 
   it("upload for different dataset → rebuildDescriptor true but dispatcher skips rebuild", () => {
     const currentColdDataset = "ds1";
-    const msg = makeMsg({ entityId: "fieldA", kind: "FieldProxy3D", datasetId: "ds2" });
+    const msg = makeMsg({ entityId: "tileA", kind: "TileProxy3D", datasetId: "ds2" });
     const outcome = handleProxyUpload(ctx, msg);
     // Dispatcher's policy: rebuild only when datasets match. Here they don't.
     const shouldRebuild = outcome.rebuildDescriptor && msg.datasetId === currentColdDataset;
@@ -634,7 +634,7 @@ describe("Suite E — descriptor-rebuild trigger gating (dispatcher policy)", ()
     ctx.state.currentEpochs = makeEpochs({ selection: 5 });
     const outcome = handleProxyUpload(
       ctx,
-      makeMsg({ entityId: "fieldA", kind: "FieldProxy3D", datasetId: "ds1", epochs: stale }),
+      makeMsg({ entityId: "tileA", kind: "TileProxy3D", datasetId: "ds1", epochs: stale }),
     );
     expect(outcome.rebuildDescriptor).toBe(false);
   });

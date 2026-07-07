@@ -79,7 +79,7 @@ describe("computeScissorRect", () => {
     expect(rect).toEqual([0, 0, 800, 600]);
   });
 
-  it("clamps partially-clipped wells to integer canvas bounds", () => {
+  it("clamps partially-clipped groups to integer canvas bounds", () => {
     // Cube extends from world (-0.5, -0.5, 0) to (0.5, 0.5, 1). Identity
     // viewProj → NDC X spans [-0.5, 0.5], NDC Y spans [-0.5, 0.5]. Screen
     // X spans (W * 0.25, W * 0.75), screen Y spans (H * 0.25, H * 0.75).

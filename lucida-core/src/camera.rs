@@ -896,7 +896,7 @@ impl Arcball {
 
         // Clamp Z to volume bounds (members don't have Z offsets).
         // XY bounds are NOT clamped to [0, shape] — for collections, the camera
-        // may be looking at a well at a large XY offset. The per-member AABB
+        // may be looking at a group at a large XY offset. The per-member AABB
         // test in chunk_plan_for handles member-level visibility, and the
         // chunk grid iteration in visible_chunks clamps to valid grid indices.
         voxel_min[2] = voxel_min[2].max(0.0);
@@ -2467,8 +2467,8 @@ mod tests {
     }
 
     #[test]
-    fn slice_fit_handles_large_offset_well() {
-        // A collection well at a large XY offset must still be centered and visible.
+    fn slice_fit_handles_large_offset_group() {
+        // A collection group at a large XY offset must still be centered and visible.
         let min = [100_000.0, 250_000.0];
         let max = [100_500.0, 250_300.0];
         let mut cam = Camera::new_2d([800, 600]);

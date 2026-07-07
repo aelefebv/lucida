@@ -49,14 +49,14 @@ export function pushLabelLayers(
     const sourceLevel0 = source.multiscale.levels[0];
     const labelLevel0 = label.image.multiscale.levels[0];
     const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
-    // Fields can be offset within a collection/layout; place the overlay at the
+    // Tiles can be offset within a collection/layout; place the overlay at the
     // source member's position so it lands on the image it annotates. The
-    // source field is frequently ABSENT from the active-set roster — in a collection
-    // a whole well renders as a single proxy, and off-view fields aren't active
+    // source tile is frequently ABSENT from the active-set roster — in a collection
+    // a whole group renders as a single proxy, and off-view tiles aren't active
     // at all — so fall back to the scene's authoritative per-member layout
     // position (keyed by the source ENTITY id, the same space as the roster's
     // positions). Falling back to the origin instead would stack every
-    // off-roster label on the first well (the bug this repairs).
+    // off-roster label on the first group (the bug this repairs).
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
     const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
     layers.push({
@@ -146,9 +146,9 @@ function uploadAndRenderSlice(
         if (z >= dsShapeL[Axis.Z] || ch >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
 
         for (const m of members) {
-          // Synthesized well-as-proxy entries carry their own dataW/dataH
-          // (the well's world-space AABB footprint). Fall back to the
-          // dataset's full-res image dims for normal field entries.
+          // Synthesized group-as-proxy entries carry their own dataW/dataH
+          // (the group's world-space AABB footprint). Fall back to the
+          // dataset's full-res image dims for normal tile entries.
           const layerDataW = m.dataW ?? fullResWidth;
           const layerDataH = m.dataH ?? fullResHeight;
           const compKey = compositeKey(m.imageId, ch);
@@ -171,8 +171,8 @@ function uploadAndRenderSlice(
       if (z >= dsShapeL[Axis.Z] || c >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
 
       for (const m of members) {
-        // Synthesized well-as-proxy entries carry their own dataW/dataH
-        // (the well's world-space AABB footprint).
+        // Synthesized group-as-proxy entries carry their own dataW/dataH
+        // (the group's world-space AABB footprint).
         const layerDataW = m.dataW ?? fullResWidth;
         const layerDataH = m.dataH ?? fullResHeight;
         const entityIndex = indexByMember.get(m.imageId);
@@ -191,8 +191,8 @@ function uploadAndRenderSlice(
     }
     // Categorical label overlays, composited on top of this dataset's
     // intensity layers. Honors the per-label visible set + opacity; never
-    // affects camera/bounds. A label's source field is often not in the active
-    // roster (collection wells proxy; off-view fields), so hand the scene's full
+    // affects camera/bounds. A label's source tile is often not in the active
+    // roster (collection groups proxy; off-view tiles), so hand the scene's full
     // per-member position map (entity id -> [x, y]) as the placement fallback.
     let labelMemberPositions: Record<string, [number, number]> | undefined;
     if (ds.manifest.labels && ds.manifest.labels.length > 0) {

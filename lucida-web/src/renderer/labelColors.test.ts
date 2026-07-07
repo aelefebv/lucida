@@ -65,7 +65,7 @@ describe("labelColor", () => {
     }
   });
 
-  it("produces distinct colors across a dense id range (well-distributed)", () => {
+  it("produces distinct colors across a dense id range (group-distributed)", () => {
     const seen = new Set<string>();
     let collisions = 0;
     for (let id = 1; id <= 2000; id++) {

@@ -42,17 +42,17 @@ struct EntityDescriptor {
   modelMatrix: mat4x4<f32>,
   invModelMatrix: mat4x4<f32>,
   channelMask: u32,
-  fieldProxyPoolIndex: u32,
-  fieldProxySlotIndex: u32,
-  wellProxyPoolIndex: u32,
-  wellProxySlotIndex: u32,
+  tileProxyPoolIndex: u32,
+  tileProxySlotIndex: u32,
+  groupProxyPoolIndex: u32,
+  groupProxySlotIndex: u32,
   _pad_proxy0: u32,
   _pad_proxy1: u32,
   _pad_proxy2: u32,
-  fieldProxyDims: vec3<u32>,
-  _pad_field: u32,
-  wellProxyDims: vec3<u32>,
-  _pad_well: u32,
+  tileProxyDims: vec3<u32>,
+  _pad_tile: u32,
+  groupProxyDims: vec3<u32>,
+  _pad_group: u32,
   contrastMin: f32,
   contrastMax: f32,
   gamma: f32,
@@ -75,8 +75,8 @@ struct EntityDescriptor {
 @group(0) @binding(6) var<storage, read> coarseIndirection: array<u32>;
 // Proxy textures are 3D (same as volume.wgsl); slice mode reads one Z
 // plane within the slot region.
-@group(0) @binding(7) var fieldProxyTex: texture_3d<u32>;
-@group(0) @binding(8) var wellProxyTex: texture_3d<u32>;
+@group(0) @binding(7) var tileProxyTex: texture_3d<u32>;
+@group(0) @binding(8) var groupProxyTex: texture_3d<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -275,7 +275,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let entity = entityDescriptors[currentEntity.index.x];
 
-  // FOV member border: a gray frame 1.5 px inside the member edge. Skip it
+  // tile member border: a gray frame 1.5 px inside the member edge. Skip it
   // for a label overlay (categorical) — an opaque frame around a sub-footprint
   // mask would sit on top of the intensity image it annotates.
   if (entity.colormapMode != 1u) {
@@ -307,7 +307,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     }
   } else {
     // Legacy semantic fallback chain:
-    //   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
+    //   target detail LOD → coarser detail LODs → tile proxy → group proxy → empty
     let numLods = entity.lodCount;
     let targetIdx = u.lodParams.x;
 
@@ -349,16 +349,16 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     }
 
     if (chunkVal == 0xFFFFFFFFu) {
-      let fieldSlot = entity.fieldProxySlotIndex;
-      if (fieldSlot != 0xFFFFFFFFu) {
-        let v = sampleProxy2D(fieldProxyTex, fieldSlot, entity.fieldProxyDims, texUV);
+      let tileSlot = entity.tileProxySlotIndex;
+      if (tileSlot != 0xFFFFFFFFu) {
+        let v = sampleProxy2D(tileProxyTex, tileSlot, entity.tileProxyDims, texUV);
         if (v != 0xFFFFFFFFu) { chunkVal = v; }
       }
     }
     if (chunkVal == 0xFFFFFFFFu) {
-      let wellSlot = entity.wellProxySlotIndex;
-      if (wellSlot != 0xFFFFFFFFu) {
-        let v = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
+      let groupSlot = entity.groupProxySlotIndex;
+      if (groupSlot != 0xFFFFFFFFu) {
+        let v = sampleProxy2D(groupProxyTex, groupSlot, entity.groupProxyDims, texUV);
         if (v != 0xFFFFFFFFu) { chunkVal = v; }
       }
     }

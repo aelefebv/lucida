@@ -35,7 +35,7 @@ type ThumbDatasetSettings = {
  * Build the minimap-style layer params for `datasetId` from the live scene +
  * display settings — the same per-member model matrices + active-channel
  * contrast/colormap the minimap uses (`tickMinimap`). Returns one entry per
- * visible member (FOV); empty when the dataset is hidden / unknown.
+ * visible member (tile); empty when the dataset is hidden / unknown.
  *
  * These are camera-independent (content + placement), so all of a dataset's
  * thumbnails share them and only the camera matrices differ per candidate.

@@ -1,7 +1,7 @@
 //! Asset catalog protocol types — what proxy products are available for
 //! which entities, and incremental deltas thereof.
 //!
-//! The catalog is *capability* metadata, not content. A well exists
+//! The catalog is *capability* metadata, not content. A group exists
 //! regardless of whether a proxy has been generated for it; the catalog
 //! simply tells Planning which proxy kinds it can request.
 
@@ -88,14 +88,14 @@ mod tests {
         let cat = AssetCatalog {
             entries: vec![
                 ProxyAvailability {
-                    entity_id: EntityId("well-A1".into()),
-                    kinds: vec![ProxyKind::WellProxy3D],
-                    footprints: vec![ProxyFootprint::u16(ProxyKind::WellProxy3D, [1, 64, 64])],
+                    entity_id: EntityId("group-A1".into()),
+                    kinds: vec![ProxyKind::GroupProxy3D],
+                    footprints: vec![ProxyFootprint::u16(ProxyKind::GroupProxy3D, [1, 64, 64])],
                 },
                 ProxyAvailability {
-                    entity_id: EntityId("field-F17".into()),
-                    kinds: vec![ProxyKind::FieldProxy3D, ProxyKind::WellProxy3D],
-                    footprints: vec![ProxyFootprint::u16(ProxyKind::FieldProxy3D, [1, 64, 64])],
+                    entity_id: EntityId("tile-F17".into()),
+                    kinds: vec![ProxyKind::TileProxy3D, ProxyKind::GroupProxy3D],
+                    footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [1, 64, 64])],
                 },
             ],
         };
@@ -106,10 +106,10 @@ mod tests {
 
     #[test]
     fn proxy_availability_deserializes_without_footprints() {
-        let json = r#"{"entity_id":"field-F17","kinds":["FieldProxy3D"]}"#;
+        let json = r#"{"entity_id":"tile-F17","kinds":["TileProxy3D"]}"#;
         let entry: ProxyAvailability = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.entity_id, EntityId("field-F17".into()));
-        assert_eq!(entry.kinds, vec![ProxyKind::FieldProxy3D]);
+        assert_eq!(entry.entity_id, EntityId("tile-F17".into()));
+        assert_eq!(entry.kinds, vec![ProxyKind::TileProxy3D]);
         assert!(entry.footprints.is_empty());
     }
 
@@ -118,8 +118,8 @@ mod tests {
         let delta = AssetCatalogDelta {
             added: vec![ProxyAvailability {
                 entity_id: EntityId("e1".into()),
-                kinds: vec![ProxyKind::FieldProxy3D],
-                footprints: vec![ProxyFootprint::u16(ProxyKind::FieldProxy3D, [1, 32, 32])],
+                kinds: vec![ProxyKind::TileProxy3D],
+                footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [1, 32, 32])],
             }],
         };
         let json = serde_json::to_string(&delta).unwrap();

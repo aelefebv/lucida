@@ -20,7 +20,7 @@ describe("WorkerFeedback residency reconciliation", () => {
       {
         kind: "chunk",
         datasetId: "ds-0",
-        entityId: "field-0",
+        entityId: "tile-0",
         memberId: "img-0:ch2",
         c: 2,
         chunkKey: "0/0/2/0/0/0",
@@ -43,15 +43,15 @@ describe("WorkerFeedback residency reconciliation", () => {
       {
         kind: "proxy",
         datasetId: "ds-0",
-        entityId: "field-0",
-        proxyKind: "FieldProxy3D",
+        entityId: "tile-0",
+        proxyKind: "TileProxy3D",
         t: 1,
         c: 3,
       },
     ], cpuCache);
 
     expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds-0|field-0|FieldProxy3D|1|3",
+      "ds-0|tile-0|TileProxy3D|1|3",
     );
     expect(cpuCache.markChunkMissing).not.toHaveBeenCalled();
   });

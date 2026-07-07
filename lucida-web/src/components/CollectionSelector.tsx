@@ -19,7 +19,7 @@ interface CollectionSelectorProps {
   collectionKind: CollectionKind;
   members: PlacedMember[];
   collectionName: string;
-  onWellClick: (centerX: number, centerY: number) => void;
+  onGroupClick: (centerX: number, centerY: number) => void;
   onPositioningModeToggle?: () => void;
 }
 
@@ -95,12 +95,12 @@ export function CollectionSelector({
   collectionKind,
   members,
   collectionName,
-  onWellClick,
+  onGroupClick,
   onPositioningModeToggle,
 }: CollectionSelectorProps) {
-  // Build a set of populated wells by matching entity IDs to well-like entities.
-  // A well is populated if any member belongs to it (entity parent or label-based).
-  const wellMemberMap = useMemo(() => {
+  // Build a set of populated groups by matching entity IDs to group-like entities.
+  // A group is populated if any member belongs to it (entity parent or label-based).
+  const groupMemberMap = useMemo(() => {
     const map = new Map<string, PlacedMember[]>();
     for (const member of members) {
       if (member.rowIndex != null && member.columnIndex != null) {
@@ -113,8 +113,8 @@ export function CollectionSelector({
     return map;
   }, [members]);
 
-  // Build a well lookup by (row, col) for grid rendering
-  const wellPathMap = useMemo(() => {
+  // Build a group lookup by (row, col) for grid rendering
+  const groupPathMap = useMemo(() => {
     const map = new Map<string, string>();
     for (let r = 0; r < collectionKind.rows.length; r++) {
       for (let c = 0; c < collectionKind.columns.length; c++) {
@@ -124,22 +124,22 @@ export function CollectionSelector({
     return map;
   }, [collectionKind.rows, collectionKind.columns]);
 
-  const handleWellClick = (rowIdx: number, colIdx: number) => {
+  const handleGroupClick = (rowIdx: number, colIdx: number) => {
     const key = `${rowIdx},${colIdx}`;
-    const wellMembers = wellMemberMap.get(key);
-    if (!wellMembers || wellMembers.length === 0) return;
+    const groupMembers = groupMemberMap.get(key);
+    if (!groupMembers || groupMembers.length === 0) return;
 
-    // Compute center as the average position of all members in this well
+    // Compute center as the average position of all members in this group
     let sumX = 0;
     let sumY = 0;
-    for (const m of wellMembers) {
+    for (const m of groupMembers) {
       sumX += m.position[0];
       sumY += m.position[1];
     }
-    const centerX = sumX / wellMembers.length;
-    const centerY = sumY / wellMembers.length;
+    const centerX = sumX / groupMembers.length;
+    const centerY = sumY / groupMembers.length;
 
-    onWellClick(centerX, centerY);
+    onGroupClick(centerX, centerY);
   };
 
   const gridWidth =
@@ -233,17 +233,17 @@ export function CollectionSelector({
             {rowName}
           </div>
 
-          {/* Well cells */}
+          {/* Group cells */}
           {collectionKind.columns.map((_colName, colIdx) => {
             const key = `${rowIdx},${colIdx}`;
-            const populated = wellMemberMap.has(key);
-            const wellExists = wellPathMap.has(key);
+            const populated = groupMemberMap.has(key);
+            const groupExists = groupPathMap.has(key);
 
             return (
               <button
                 key={colIdx}
                 disabled={!populated}
-                onClick={() => populated && handleWellClick(rowIdx, colIdx)}
+                onClick={() => populated && handleGroupClick(rowIdx, colIdx)}
                 style={{
                   width: CELL_SIZE,
                   height: CELL_SIZE,
@@ -260,7 +260,7 @@ export function CollectionSelector({
                   fontSize: 8,
                   cursor: populated ? "pointer" : "default",
                   display: "flex",
-                  visibility: wellExists ? "visible" : "hidden",
+                  visibility: groupExists ? "visible" : "hidden",
                   alignItems: "center",
                   justifyContent: "center",
                   transition: "background 0.1s",

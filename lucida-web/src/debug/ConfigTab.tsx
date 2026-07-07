@@ -27,7 +27,7 @@
  *
  * Cross-constraint warnings (warn but allow):
  *   - `detailThresholdPx <= farThresholdPx + 2*hysteresisPx`: the
- *     middle band collapses; `fields-with-proxy-fallback` becomes
+ *     middle band collapses; `tiles-with-proxy-fallback` becomes
  *     unreachable. Surfaced under the affected field.
  *   - Lane offsets that invert the canonical priority order
  *     (MINIMAP < DETAIL < PROXY < PREFETCH < OVERVIEW). Shown under the
@@ -83,8 +83,8 @@ const PRIORITY_WEIGHTS: TunableSpec[] = [
   { field: "importanceWeight", label: "Importance weight", min: 10, max: 2000, step: 10 },
   { field: "distanceWeight", label: "Distance weight", min: 1, max: 100, step: 1 },
   {
-    field: "wellProxyPriorityBump",
-    label: "Well-proxy priority bump",
+    field: "groupProxyPriorityBump",
+    label: "Group-proxy priority bump",
     min: 0,
     max: 500,
     step: 5,
@@ -145,13 +145,13 @@ const LANE_ORDER: (keyof PlanningConfig)[] = [
 /**
  * Returns a human warning when the middle mode band collapses, i.e. the
  * upper hysteresis band of FAR overlaps the lower band of DETAIL and
- * `fields-with-proxy-fallback` is no longer reachable. Surface under
+ * `tiles-with-proxy-fallback` is no longer reachable. Surface under
  * either contributing field.
  */
 function modeBandWarning(cfg: PlanningConfig): string | null {
   if (cfg.detailThresholdPx <= cfg.farThresholdPx + 2 * cfg.hysteresisPx) {
     return (
-      "Middle band collapsed: fields-with-proxy-fallback unreachable. " +
+      "Middle band collapsed: tiles-with-proxy-fallback unreachable. " +
       "Raise DETAIL or lower FAR/hysteresis."
     );
   }

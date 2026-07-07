@@ -1098,7 +1098,7 @@ mod tests {
                             "id": "entity-1",
                             "kind": "Image",
                             "parent": null,
-                            "labels": { "name": "field-1" }
+                            "labels": { "name": "tile-1" }
                         }
                     ],
                     "transforms": [],

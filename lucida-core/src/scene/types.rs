@@ -372,7 +372,7 @@ pub struct Annotation {
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
     pub comments: Vec<Comment>,
-    /// The **collection entity (well/field) this pin is glued to** (issue #780). Set
+    /// The **collection entity (group/tile) this pin is glued to** (issue #780). Set
     /// once at creation, inside [`DocumentState::apply`] for `AddAnnotation`, to
     /// the nearest placeable entity in the dataset's resolved active layout (see
     /// [`DocumentState::nearest_anchor`]). `None` for a non-collection dataset, when no
@@ -960,7 +960,7 @@ impl DocumentState {
     ///
     /// Returns `None` — leaving the pin unanchored — when the dataset is not a
     /// collection, is unknown, or has no entity with a resolvable position in the active
-    /// layout. Only entities that are actually placed (directly, or as a field via
+    /// layout. Only entities that are actually placed (directly, or as a tile via
     /// a placed parent) are candidates; an unplaceable entity is never treated as
     /// if it sat at the origin (that is the whole point of using
     /// [`resolve_entity_position`] rather than the render-path fallback).
@@ -973,7 +973,7 @@ impl DocumentState {
     fn nearest_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
         let manifest = self.manifests.get(dataset_id)?;
         // Anchoring is collection-only (issue #780): a single-image dataset has no
-        // well/field to glue to, and its lone image doesn't move between layouts.
+        // group/tile to glue to, and its lone image doesn't move between layouts.
         if !matches!(manifest.kind, DatasetKind::Collection { .. }) {
             return None;
         }
@@ -1131,7 +1131,7 @@ impl DocumentState {
                 kind,
                 view,
             } => {
-                // Glue the new pin to the nearest collection well/field in the resolved
+                // Glue the new pin to the nearest collection group/tile in the resolved
                 // active layout (issue #780), so a later layout switch moves it
                 // with that entity. Computed here, inside the canonical apply, from
                 // synced state — so the server and every client derive the SAME

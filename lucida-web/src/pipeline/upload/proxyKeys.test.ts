@@ -19,14 +19,14 @@ import type { ReadyProxyDelivery } from "../fetch/index.ts";
 import type { ProxyRequest } from "../planning/index.ts";
 import type { MissingProxy } from "../../renderer/workerProtocol.ts";
 
-const COMMON_KEY = "ds1|field-0|FieldProxy3D|3|2";
+const COMMON_KEY = "ds1|tile-0|TileProxy3D|3|2";
 
 /** Equivalent input triples; each shape resolves to {@link COMMON_KEY}. */
 const REQ: ProxyRequest = {
   datasetId: "ds1",
-  entityId: "field-0",
+  entityId: "tile-0",
   imageId: "img-0",
-  kind: "FieldProxy3D",
+  kind: "TileProxy3D",
   t: 3,
   c: 2,
   priority: 0,
@@ -34,9 +34,9 @@ const REQ: ProxyRequest = {
 const DELIVERY: ReadyProxyDelivery = {
   kind: "proxy",
   datasetId: "ds1",
-  entityId: "field-0",
+  entityId: "tile-0",
   imageId: "img-0",
-  proxyKind: "FieldProxy3D",
+  proxyKind: "TileProxy3D",
   t: 3,
   c: 2,
   header: {
@@ -51,8 +51,8 @@ const DELIVERY: ReadyProxyDelivery = {
 const MISSING: MissingProxy = {
   kind: "proxy",
   datasetId: "ds1",
-  entityId: "field-0",
-  proxyKind: "FieldProxy3D",
+  entityId: "tile-0",
+  proxyKind: "TileProxy3D",
   t: 3,
   c: 2,
 };

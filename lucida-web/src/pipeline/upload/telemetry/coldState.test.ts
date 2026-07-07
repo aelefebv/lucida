@@ -11,7 +11,7 @@ import {
 // ---------------------------------------------------------------------------
 
 describe("ColdStateTelemetry — basics", () => {
-  it("recordHit bumps cumulative hits + window hits but no rebuild fields", () => {
+  it("recordHit bumps cumulative hits + window hits but no rebuild tiles", () => {
     const tel = new ColdStateTelemetry();
     tel.recordHit(1000);
     tel.recordHit(1100);

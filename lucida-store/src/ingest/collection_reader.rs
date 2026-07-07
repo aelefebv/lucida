@@ -1,6 +1,6 @@
-//! Read individual TIFF files for one FOV and assemble into a Volume.
+//! Read individual TIFF files for one tile and assemble into a Volume.
 //!
-//! Each file in `FovLayout::files` is a single-page TIFF representing one
+//! Each file in `TileLayout::files` is a single-page TIFF representing one
 //! (timepoint, channel, z_plane) slot. Files are decoded in parallel using
 //! rayon and copied into the correct position in a pre-allocated TCZYX buffer.
 
@@ -12,21 +12,21 @@ use rayon::prelude::*;
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
 
-use super::collection_scanner::FovLayout;
+use super::collection_scanner::TileLayout;
 use super::pyramid::VoxelSize;
 use super::tiff_reader::Volume;
 
-/// Read individual TIFF files for one FOV and assemble into a Volume.
+/// Read individual TIFF files for one tile and assemble into a Volume.
 ///
 /// The output buffer is zero-initialized, so any missing `(t, c, z)` slots
-/// (not present in `fov.files`) will contain zeros.
+/// (not present in `tile.files`) will contain zeros.
 ///
 /// # Errors
 ///
 /// Returns an error if any file has mismatched dimensions or an unsupported
 /// color type (anything other than Gray8 or Gray16).
-pub fn read_fov_tiffs(
-    fov: &FovLayout,
+pub fn read_tile_tiffs(
+    tile: &TileLayout,
     channels: u32,
     timepoints: u32,
     z_planes: u32,
@@ -41,7 +41,7 @@ pub fn read_fov_tiffs(
     // Pre-allocate zero-initialized buffer in TCZYX order.
     let mut data: Vec<u16> = vec![0u16; total_pixels];
 
-    let entries: Vec<_> = fov.files.iter().collect();
+    let entries: Vec<_> = tile.files.iter().collect();
     let total_files = entries.len();
     let progress = AtomicUsize::new(0);
 
@@ -162,7 +162,7 @@ pub fn read_fov_tiffs(
 
             let count = progress.fetch_add(1, Ordering::Relaxed) + 1;
             if count.is_multiple_of(100) || count == total_files {
-                eprintln!("  FOV files: {count}/{total_files}");
+                eprintln!("  tile files: {count}/{total_files}");
             }
 
             None
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn read_fov_single_plane() {
+    fn read_tile_single_plane() {
         let dir = std::env::temp_dir()
             .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("single");
@@ -220,9 +220,9 @@ mod tests {
         let mut files = HashMap::new();
         files.insert((0, 0, 0), path);
 
-        let fov = FovLayout { index: 0, files };
-        let vol = read_fov_tiffs(&fov, 1, 1, 1, width, height, VoxelSize::default())
-            .expect("read_fov_tiffs");
+        let tile = TileLayout { index: 0, files };
+        let vol = read_tile_tiffs(&tile, 1, 1, 1, width, height, VoxelSize::default())
+            .expect("read_tile_tiffs");
 
         assert_eq!(vol.width, 4);
         assert_eq!(vol.height, 4);
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn read_fov_multiple_planes() {
+    fn read_tile_multiple_planes() {
         let dir = std::env::temp_dir()
             .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("multi");
@@ -260,9 +260,9 @@ mod tests {
             }
         }
 
-        let fov = FovLayout { index: 0, files };
-        let vol = read_fov_tiffs(
-            &fov,
+        let tile = TileLayout { index: 0, files };
+        let vol = read_tile_tiffs(
+            &tile,
             channels,
             timepoints,
             z_planes,
@@ -270,7 +270,7 @@ mod tests {
             height,
             VoxelSize::default(),
         )
-        .expect("read_fov_tiffs");
+        .expect("read_tile_tiffs");
 
         assert_eq!(vol.width, 4);
         assert_eq!(vol.height, 4);
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn read_fov_missing_slot_is_zero() {
+    fn read_tile_missing_slot_is_zero() {
         let dir = std::env::temp_dir()
             .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("missing");
@@ -313,9 +313,9 @@ mod tests {
         let mut files = HashMap::new();
         files.insert((0, 0, 0), path);
 
-        let fov = FovLayout { index: 0, files };
-        let vol = read_fov_tiffs(&fov, 1, 1, 2, width, height, VoxelSize::default())
-            .expect("read_fov_tiffs");
+        let tile = TileLayout { index: 0, files };
+        let vol = read_tile_tiffs(&tile, 1, 1, 2, width, height, VoxelSize::default())
+            .expect("read_tile_tiffs");
 
         assert_eq!(vol.depth, 2);
         assert_eq!(vol.data.len(), 32);
@@ -327,14 +327,14 @@ mod tests {
     }
 
     #[test]
-    fn read_fov_wrong_dimensions_errors() {
+    fn read_tile_wrong_dimensions_errors() {
         let dir = std::env::temp_dir()
             .join(format!("lucida_collection_reader_{}", std::process::id()))
             .join("wrong_dims");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Write a 2x2 image but tell read_fov_tiffs to expect 4x4.
+        // Write a 2x2 image but tell read_tile_tiffs to expect 4x4.
         let pixels: Vec<u16> = vec![1, 2, 3, 4];
         let path = dir.join("t0c0z0.tiff");
         write_test_tiff(&path, 2, 2, &pixels);
@@ -342,8 +342,8 @@ mod tests {
         let mut files = HashMap::new();
         files.insert((0, 0, 0), path);
 
-        let fov = FovLayout { index: 0, files };
-        let result = read_fov_tiffs(&fov, 1, 1, 1, 4, 4, VoxelSize::default());
+        let tile = TileLayout { index: 0, files };
+        let result = read_tile_tiffs(&tile, 1, 1, 1, 4, 4, VoxelSize::default());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("do not match"));
     }

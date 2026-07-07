@@ -79,7 +79,7 @@ const HANDLE_HASH_WIDTH = 8;
  * even if the hash renders short.
  */
 export function deriveHandle(identity: string): string {
-  // FNV-1a over the UTF-16 code units: tiny, dependency-free, well-distributed
+  // FNV-1a over the UTF-16 code units: tiny, dependency-free, group-distributed
   // for short strings, and identical across runtimes (only `*` and `>>>`), so the
   // handle is the same everywhere. `>>> 0` keeps it an unsigned 32-bit int.
   let hash = 0x811c9dc5;

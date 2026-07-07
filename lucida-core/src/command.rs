@@ -668,8 +668,8 @@ impl Scene {
                             "dataset_id": dataset_id.0,
                             "n_entities": event.manifest.entities().len(),
                             "n_images": event.manifest.images().len(),
-                            "n_wells": shape.n_wells,
-                            "n_fields": shape.n_fields,
+                            "n_groups": shape.n_groups,
+                            "n_tiles": shape.n_tiles,
                             "n_orphans": shape.n_orphans,
                             "n_layouts": shape.n_layouts,
                             "channel_count": channel_count,
@@ -1149,13 +1149,13 @@ impl Scene {
 /// Aggregated counts and collection metadata used by both the
 /// `scene.dataset_opened.applied` log enrichment and the
 /// `manifest.shape_anomaly` check. Single pass over `entities()` so the
-/// extra accounting is cheap even for collections with many fields.
+/// extra accounting is cheap even for collections with many tiles.
 struct ManifestShape {
-    n_wells: usize,
-    n_fields: usize,
+    n_groups: usize,
+    n_tiles: usize,
     n_orphans: usize,
     n_layouts: usize,
-    n_fields_without_image: usize,
+    n_tiles_without_image: usize,
     collection_rows: Option<usize>,
     collection_columns: Option<usize>,
     has_explicit_positions: Option<bool>,
@@ -1181,11 +1181,11 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
     };
 
     let mut shape = ManifestShape {
-        n_wells: 0,
-        n_fields: 0,
+        n_groups: 0,
+        n_tiles: 0,
         n_orphans: 0,
         n_layouts: manifest.source_layouts().len(),
-        n_fields_without_image: 0,
+        n_tiles_without_image: 0,
         collection_rows,
         collection_columns,
         has_explicit_positions,
@@ -1193,16 +1193,16 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
 
     for entity in entities {
         match entity.kind {
-            EntityKind::Well => shape.n_wells += 1,
-            EntityKind::Field => {
-                shape.n_fields += 1;
+            EntityKind::Group => shape.n_groups += 1,
+            EntityKind::Tile => {
+                shape.n_tiles += 1;
                 if let Some(parent) = &entity.parent
                     && !entity_ids.contains(parent)
                 {
                     shape.n_orphans += 1;
                 }
                 if !image_owners.contains(&entity.id) {
-                    shape.n_fields_without_image += 1;
+                    shape.n_tiles_without_image += 1;
                 }
             }
             EntityKind::Image => {}
@@ -1222,21 +1222,21 @@ fn manifest_anomalies(manifest: &DatasetManifest, shape: &ManifestShape) -> Vec<
         if shape.collection_columns == Some(0) {
             issues.push("collection has zero columns".into());
         }
-        if shape.n_fields == 0 {
-            issues.push("collection has wells but no fields".into());
+        if shape.n_tiles == 0 {
+            issues.push("collection has groups but no tiles".into());
         }
     }
 
     if shape.n_orphans > 0 {
         issues.push(format!(
-            "{} field(s) reference a parent entity that doesn't exist",
+            "{} tile(s) reference a parent entity that doesn't exist",
             shape.n_orphans
         ));
     }
-    if shape.n_fields_without_image > 0 {
+    if shape.n_tiles_without_image > 0 {
         issues.push(format!(
-            "{} field(s) have no associated image",
-            shape.n_fields_without_image
+            "{} tile(s) have no associated image",
+            shape.n_tiles_without_image
         ));
     }
 
@@ -3345,7 +3345,7 @@ mod tests {
             delta: AssetCatalogDelta {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("ds1-entity".into()),
-                    kinds: vec![ProxyKind::FieldProxy3D],
+                    kinds: vec![ProxyKind::TileProxy3D],
                     footprints: vec![],
                 }],
             },
@@ -3370,7 +3370,7 @@ mod tests {
         let delta = AssetCatalogDelta {
             added: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("ds1-entity".into()),
-                kinds: vec![ProxyKind::FieldProxy3D],
+                kinds: vec![ProxyKind::TileProxy3D],
                 footprints: vec![],
             }],
         };
@@ -3395,7 +3395,7 @@ mod tests {
         // Catalog contents must be identical — the merge must dedupe.
         assert_eq!(after_first, after_second);
         assert_eq!(after_second.entries.len(), 1);
-        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
+        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::TileProxy3D]);
     }
 
     #[test]
@@ -3411,7 +3411,7 @@ mod tests {
                 delta: AssetCatalogDelta {
                     added: vec![ProxyAvailability {
                         entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::FieldProxy3D],
+                        kinds: vec![ProxyKind::TileProxy3D],
                         footprints: vec![],
                     }],
                 },
@@ -3425,7 +3425,7 @@ mod tests {
                 delta: AssetCatalogDelta {
                     added: vec![ProxyAvailability {
                         entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::WellProxy3D],
+                        kinds: vec![ProxyKind::GroupProxy3D],
                         footprints: vec![],
                     }],
                 },
@@ -3435,8 +3435,8 @@ mod tests {
 
         let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
         assert_eq!(cat.entries.len(), 1);
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::FieldProxy3D));
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::WellProxy3D));
+        assert!(cat.entries[0].kinds.contains(&ProxyKind::TileProxy3D));
+        assert!(cat.entries[0].kinds.contains(&ProxyKind::GroupProxy3D));
     }
 
     #[test]
@@ -3447,7 +3447,7 @@ mod tests {
         reg.catalog = AssetCatalog {
             entries: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("seed".into()),
-                kinds: vec![ProxyKind::WellProxy3D],
+                kinds: vec![ProxyKind::GroupProxy3D],
                 footprints: vec![],
             }],
         };
@@ -3469,7 +3469,7 @@ mod tests {
             delta: AssetCatalogDelta {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::FieldProxy3D],
+                    kinds: vec![ProxyKind::TileProxy3D],
                     footprints: vec![],
                 }],
             },
@@ -3481,7 +3481,7 @@ mod tests {
             DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(delta.added.len(), 1);
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::FieldProxy3D]);
+                assert_eq!(delta.added[0].kinds, vec![ProxyKind::TileProxy3D]);
             }
             _ => panic!("expected ApplyAssetCatalogDelta"),
         }
@@ -4158,9 +4158,9 @@ mod tests {
 
     // --- Collection annotation anchoring (issue #780) ---
 
-    /// A two-well collection driven entirely through `DocumentState::apply` (the
+    /// A two-group collection driven entirely through `DocumentState::apply` (the
     /// server's canonical, persisted path), plus a second registered layout
-    /// "moved" in which well `w1` shifts by `+[0, 50]` and well `w2` stays put.
+    /// "moved" in which group `w1` shifts by `+[0, 50]` and group `w2` stays put.
     /// The base/source layout is "default" (from `make_collection_dataset_opened`),
     /// placing `w1` at `[0, 0]` and `w2` at `[100, 0]`. Returns the populated
     /// document and the dataset id.
@@ -4216,7 +4216,7 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_on_collection_anchors_to_nearest_well() {
+    fn add_annotation_on_collection_anchors_to_nearest_group() {
         // A pin dropped near w1's active-layout position is glued to w1; one near
         // w2 is glued to w2. The anchor is derived inside apply from synced state.
         use lucida_content::EntityId;
@@ -4257,7 +4257,7 @@ mod tests {
 
     #[test]
     fn point_pin_reanchors_across_layout_switch_and_back_is_exact() {
-        // The crux (critical): a point glued to the MOVING well rides the well's
+        // The crux (critical): a point glued to the MOVING group rides the group's
         // +[0,50] delta on switch, and switching back restores the original
         // position exactly.
         let (mut doc, ds) = collection_with_two_layouts();
@@ -4280,8 +4280,8 @@ mod tests {
     }
 
     #[test]
-    fn line_reanchors_both_vertices_by_the_well_delta() {
-        // A line on the moving well: BOTH position and end shift by the same
+    fn line_reanchors_both_vertices_by_the_group_delta() {
+        // A line on the moving group: BOTH position and end shift by the same
         // delta (rigid whole-shape translate), length/angle preserved.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
@@ -4305,9 +4305,9 @@ mod tests {
     }
 
     #[test]
-    fn box_reanchors_both_corners_by_the_well_delta() {
-        // A box on the moving well: both opposite corners shift by the delta, so
-        // the box keeps its size and slides with the well.
+    fn box_reanchors_both_corners_by_the_group_delta() {
+        // A box on the moving group: both opposite corners shift by the delta, so
+        // the box keeps its size and slides with the group.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
             "collection",
@@ -4323,7 +4323,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_on_static_well_does_not_move_across_switch() {
+    fn pin_on_static_group_does_not_move_across_switch() {
         // Per-entity (critical): a pin glued to w2 (which doesn't move between the
         // two layouts) stays exactly where it was after the switch.
         let (mut doc, ds) = collection_with_two_layouts();
@@ -4338,7 +4338,7 @@ mod tests {
     }
 
     #[test]
-    fn two_pins_each_follow_their_own_well() {
+    fn two_pins_each_follow_their_own_group() {
         // Per-entity (critical): in one switch, the w1 pin moves by the w1 delta
         // and the w2 pin doesn't move — each tracks its own anchor independently.
         let (mut doc, ds) = collection_with_two_layouts();
@@ -4433,7 +4433,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_between_three_positions_tracks_well_each_time() {
+    fn switch_between_three_positions_tracks_group_each_time() {
         // Robustness beyond the two-layout contract: a third layout moves w1 to a
         // different delta; the pin tracks w1 across default -> moved -> far ->
         // default, each hop applying the displacement between just those two.

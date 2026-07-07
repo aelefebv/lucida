@@ -146,7 +146,7 @@ pub(crate) fn parse_multiscales(
 }
 
 /// Parse per-channel display info from the OME `omero.channels` block of a
-/// root (or FOV) `zarr.json` value.
+/// root (or tile) `zarr.json` value.
 ///
 /// GENERIC and untrusted-input safe. The omero block is optional rendering
 /// metadata that *any* OME-Zarr producer may emit, omit, or get wrong — this
@@ -374,7 +374,7 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 }
 
 /// Read ArrayMeta for each level in the multiscale pyramid.
-/// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection FOVs).
+/// `base_prefix` is prepended to level paths (empty for root, "A/1/0" for collection tiles).
 pub(crate) async fn read_level_metas(
     store: &Arc<dyn ObjectStore>,
     base_prefix: &str,

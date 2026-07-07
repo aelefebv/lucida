@@ -5,7 +5,7 @@
  * (slice) callers; only chunk-dim arity differs.
  *
  * Skips entries whose `targetLod` is not in `entry.levels[]` — that
- * covers `well-as-proxy` entries (which carry `levels: []` because they
+ * covers `group-as-proxy` entries (which carry `levels: []` because they
  * have no chunks to upload). Those still get registered in
  * `memberToDataset` via {@link iterateColdMembers} in the orchestrator;
  * they just don't appear here because there's no chunk pool to put them
@@ -61,7 +61,7 @@ export function groupEntriesByPool(
       const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
       for (const source of tierSourcesForEntry(entry)) {
         const targetLevel = entry.levels.find(l => l.level === source.level);
-        if (!targetLevel) continue; // well-as-proxy (no levels) skips here
+        if (!targetLevel) continue; // group-as-proxy (no levels) skips here
         const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
         // `chunkTierPoolKey` takes `[X, Y, Z]` for volume / `[X, Y]` for
         // slice. Keep `chunkDims` on the group as `[Z, Y, X]` for
@@ -86,7 +86,7 @@ export function groupEntriesByPool(
 }
 
 function tierSourcesForEntry(entry: ColdStateActiveEntry): Array<{ tier: ChunkTier; level: number }> {
-  if (entry.kind === "well-as-proxy") return [];
+  if (entry.kind === "group-as-proxy") return [];
   const detailLevel = entry.detailLevel ?? entry.targetLod;
   const sources: Array<{ tier: ChunkTier; level: number }> = [
     { tier: "detail", level: detailLevel },

@@ -10,37 +10,37 @@ use crate::id::{EntityId, LayoutId};
 use crate::layout::{EntityPlacement, LayoutSpec};
 use crate::transform::{TransformEdge, VoxelTransform};
 
-/// Gap between FOV fields within a well, as a fraction of FOV width.
-const FIELD_GAP_FRACTION: f64 = 0.08;
+/// Gap between tiles within a group, as a fraction of tile width.
+const TILE_GAP_FRACTION: f64 = 0.08;
 
-/// Gap between wells, as a fraction of FOV width.
-const WELL_GAP_FRACTION: f64 = 0.20;
+/// Gap between groups, as a fraction of tile width.
+const GROUP_GAP_FRACTION: f64 = 0.20;
 
 /// Errors that can occur during collection layout construction.
 #[derive(Debug, Clone)]
 pub enum CollectionLayoutError {
-    MissingFieldIndex { entity_id: EntityId },
-    DuplicateFieldIndex { well_id: EntityId, field_index: u32 },
+    MissingTileIndex { entity_id: EntityId },
+    DuplicateTileIndex { group_id: EntityId, tile_index: u32 },
 }
 
 impl std::fmt::Display for CollectionLayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CollectionLayoutError::MissingFieldIndex { entity_id } => {
+            CollectionLayoutError::MissingTileIndex { entity_id } => {
                 write!(
                     f,
-                    "field entity {:?} is missing field_index label",
+                    "tile entity {:?} is missing tile_index label",
                     entity_id.0
                 )
             }
-            CollectionLayoutError::DuplicateFieldIndex {
-                well_id,
-                field_index,
+            CollectionLayoutError::DuplicateTileIndex {
+                group_id,
+                tile_index,
             } => {
                 write!(
                     f,
-                    "duplicate field_index {} in well {:?}",
-                    field_index, well_id.0
+                    "duplicate tile_index {} in group {:?}",
+                    tile_index, group_id.0
                 )
             }
         }
@@ -49,54 +49,54 @@ impl std::fmt::Display for CollectionLayoutError {
 
 impl std::error::Error for CollectionLayoutError {}
 
-/// Build a source layout that places wells in a grid.
-/// Field positions within wells come from TransformEdges, not from this layout.
+/// Build a source layout that places groups in a grid.
+/// Tile positions within groups come from TransformEdges, not from this layout.
 ///
-/// Only [`EntityKind::Well`] entities receive placements. Field entities are
-/// used solely to derive per-well field counts for spacing calculations.
+/// Only [`EntityKind::Group`] entities receive placements. Tile entities are
+/// used solely to derive per-group tile counts for spacing calculations.
 pub fn build_collection_layout(
     entities: &[Entity],
     _collection_rows: &[String],
     _collection_columns: &[String],
-    fov_shape: [u64; 5], // [T, C, Z, Y, X]
+    tile_shape: [u64; 5], // [T, C, Z, Y, X]
 ) -> LayoutSpec {
-    let wells: Vec<&Entity> = entities
+    let groups: Vec<&Entity> = entities
         .iter()
-        .filter(|e| e.kind == EntityKind::Well)
+        .filter(|e| e.kind == EntityKind::Group)
         .collect();
 
-    let fields: Vec<&Entity> = entities
+    let tiles: Vec<&Entity> = entities
         .iter()
-        .filter(|e| e.kind == EntityKind::Field)
+        .filter(|e| e.kind == EntityKind::Tile)
         .collect();
 
-    // Count fields per well.
-    let mut fields_per_well: HashMap<&EntityId, usize> = HashMap::new();
-    for field in &fields {
-        if let Some(parent) = &field.parent {
-            *fields_per_well.entry(parent).or_insert(0) += 1;
+    // Count tiles per group.
+    let mut tiles_per_group: HashMap<&EntityId, usize> = HashMap::new();
+    for tile in &tiles {
+        if let Some(parent) = &tile.parent {
+            *tiles_per_group.entry(parent).or_insert(0) += 1;
         }
     }
 
-    // Max FOV count across all wells.
-    let max_fov_count = fields_per_well.values().copied().max().unwrap_or(0).max(1);
-    let fields_per_side = (max_fov_count as f64).sqrt().ceil() as u32;
+    // Max tile count across all groups.
+    let max_tile_count = tiles_per_group.values().copied().max().unwrap_or(0).max(1);
+    let tiles_per_side = (max_tile_count as f64).sqrt().ceil() as u32;
 
-    let fov_x = fov_shape[4] as f64;
-    let fov_y = fov_shape[3] as f64;
+    let tile_x = tile_shape[4] as f64;
+    let tile_y = tile_shape[3] as f64;
 
-    let well_cell_w =
-        fields_per_side as f64 * fov_x * (1.0 + FIELD_GAP_FRACTION) + fov_x * WELL_GAP_FRACTION;
-    let well_cell_h =
-        fields_per_side as f64 * fov_y * (1.0 + FIELD_GAP_FRACTION) + fov_y * WELL_GAP_FRACTION;
+    let group_cell_w =
+        tiles_per_side as f64 * tile_x * (1.0 + TILE_GAP_FRACTION) + tile_x * GROUP_GAP_FRACTION;
+    let group_cell_h =
+        tiles_per_side as f64 * tile_y * (1.0 + TILE_GAP_FRACTION) + tile_y * GROUP_GAP_FRACTION;
 
-    let mut placements = Vec::with_capacity(wells.len());
-    for well in &wells {
-        let col_index = well.labels.column_index.unwrap_or(0) as f64;
-        let row_index = well.labels.row_index.unwrap_or(0) as f64;
+    let mut placements = Vec::with_capacity(groups.len());
+    for group in &groups {
+        let col_index = group.labels.column_index.unwrap_or(0) as f64;
+        let row_index = group.labels.row_index.unwrap_or(0) as f64;
         placements.push(EntityPlacement {
-            entity_id: well.id.clone(),
-            position: [col_index * well_cell_w, row_index * well_cell_h],
+            entity_id: group.id.clone(),
+            position: [col_index * group_cell_w, row_index * group_cell_h],
         });
     }
 
@@ -107,67 +107,68 @@ pub fn build_collection_layout(
     }
 }
 
-/// Build field->well [`TransformEdge`]s for grid-positioned collections.
+/// Build tile->group [`TransformEdge`]s for grid-positioned collections.
 ///
-/// Returns an error if any field is missing `field_index` or has duplicate
-/// `field_index` within its well.
-pub fn build_grid_field_transforms(
-    _well_entities: &[Entity],
-    field_entities: &[Entity],
-    fov_shape: [u64; 5],
+/// Returns an error if any tile is missing `tile_index` or has duplicate
+/// `tile_index` within its group.
+pub fn build_grid_tile_transforms(
+    _group_entities: &[Entity],
+    tile_entities: &[Entity],
+    tile_shape: [u64; 5],
 ) -> Result<Vec<TransformEdge>, CollectionLayoutError> {
-    // Group fields by parent well.
-    let mut fields_by_well: HashMap<&EntityId, Vec<&Entity>> = HashMap::new();
-    for field in field_entities {
-        if let Some(parent) = &field.parent {
-            fields_by_well.entry(parent).or_default().push(field);
+    // Group tiles by parent group.
+    let mut tiles_by_group: HashMap<&EntityId, Vec<&Entity>> = HashMap::new();
+    for tile in tile_entities {
+        if let Some(parent) = &tile.parent {
+            tiles_by_group.entry(parent).or_default().push(tile);
         }
     }
 
-    let fov_x = fov_shape[4] as f64;
-    let fov_y = fov_shape[3] as f64;
-    let gap_x = FIELD_GAP_FRACTION * fov_x;
-    let gap_y = FIELD_GAP_FRACTION * fov_y;
+    let tile_x = tile_shape[4] as f64;
+    let tile_y = tile_shape[3] as f64;
+    let gap_x = TILE_GAP_FRACTION * tile_x;
+    let gap_y = TILE_GAP_FRACTION * tile_y;
 
     let mut transforms = Vec::new();
 
-    for (well_id, well_fields) in &fields_by_well {
-        // Validate: each field must have a field_index.
-        let mut indexed: Vec<(u32, &Entity)> = Vec::with_capacity(well_fields.len());
-        for field in well_fields {
-            let fi = field.labels.field_index.ok_or_else(|| {
-                CollectionLayoutError::MissingFieldIndex {
-                    entity_id: field.id.clone(),
-                }
-            })?;
-            indexed.push((fi, field));
+    for (group_id, group_tiles) in &tiles_by_group {
+        // Validate: each tile must have a tile_index.
+        let mut indexed: Vec<(u32, &Entity)> = Vec::with_capacity(group_tiles.len());
+        for tile in group_tiles {
+            let fi =
+                tile.labels
+                    .tile_index
+                    .ok_or_else(|| CollectionLayoutError::MissingTileIndex {
+                        entity_id: tile.id.clone(),
+                    })?;
+            indexed.push((fi, tile));
         }
 
-        // Sort by field_index.
+        // Sort by tile_index.
         indexed.sort_by_key(|(fi, _)| *fi);
 
         // Check for duplicates.
         for window in indexed.windows(2) {
             if window[0].0 == window[1].0 {
-                return Err(CollectionLayoutError::DuplicateFieldIndex {
-                    well_id: (*well_id).clone(),
-                    field_index: window[0].0,
+                return Err(CollectionLayoutError::DuplicateTileIndex {
+                    group_id: (*group_id).clone(),
+                    tile_index: window[0].0,
                 });
             }
         }
 
-        let n_fields = indexed.len();
-        let cols = (n_fields as f64).sqrt().ceil() as usize;
+        let n_tiles = indexed.len();
+        let cols = (n_tiles as f64).sqrt().ceil() as usize;
 
-        for (i, (_, field)) in indexed.iter().enumerate() {
+        for (i, (_, tile)) in indexed.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
-            let tx = col as f64 * (fov_x + gap_x);
-            let ty = row as f64 * (fov_y + gap_y);
+            let tx = col as f64 * (tile_x + gap_x);
+            let ty = row as f64 * (tile_y + gap_y);
 
             transforms.push(TransformEdge {
-                from: field.id.clone(),
-                to: (*well_id).clone(),
+                from: tile.id.clone(),
+                to: (*group_id).clone(),
                 transform: VoxelTransform::from_voxel_translation_2d(tx, ty),
             });
         }
@@ -176,36 +177,36 @@ pub fn build_grid_field_transforms(
     Ok(transforms)
 }
 
-/// Compute the bounding box of a collection from well placements and
-/// field extents within each well. Returns `[width, height]`.
+/// Compute the bounding box of a collection from group placements and
+/// tile extents within each group. Returns `[width, height]`.
 pub fn collection_extent(
     layout: &LayoutSpec,
-    field_transforms: &[TransformEdge],
-    fov_shape: [u64; 5],
+    tile_transforms: &[TransformEdge],
+    tile_shape: [u64; 5],
 ) -> [f64; 2] {
-    let fov_x = fov_shape[4] as f64;
-    let fov_y = fov_shape[3] as f64;
+    let tile_x = tile_shape[4] as f64;
+    let tile_y = tile_shape[3] as f64;
 
     let mut max_x = 0.0_f64;
     let mut max_y = 0.0_f64;
 
     for placement in &layout.placements {
-        // Find field transforms targeting this well.
-        let well_field_transforms: Vec<&TransformEdge> = field_transforms
+        // Find tile transforms targeting this group.
+        let group_tile_transforms: Vec<&TransformEdge> = tile_transforms
             .iter()
             .filter(|t| t.to == placement.entity_id)
             .collect();
 
-        if well_field_transforms.is_empty() {
-            // Well with no fields: extent is well position + fov size.
-            max_x = max_x.max(placement.position[0] + fov_x);
-            max_y = max_y.max(placement.position[1] + fov_y);
+        if group_tile_transforms.is_empty() {
+            // Group with no tiles: extent is group position + tile size.
+            max_x = max_x.max(placement.position[0] + tile_x);
+            max_y = max_y.max(placement.position[1] + tile_y);
         } else {
-            for t in &well_field_transforms {
-                let field_tx = t.transform.matrix()[12];
-                let field_ty = t.transform.matrix()[13];
-                max_x = max_x.max(placement.position[0] + field_tx + fov_x);
-                max_y = max_y.max(placement.position[1] + field_ty + fov_y);
+            for t in &group_tile_transforms {
+                let tile_tx = t.transform.matrix()[12];
+                let tile_ty = t.transform.matrix()[13];
+                max_x = max_x.max(placement.position[0] + tile_tx + tile_x);
+                max_y = max_y.max(placement.position[1] + tile_ty + tile_y);
             }
         }
     }
@@ -218,10 +219,10 @@ mod tests {
     use super::*;
     use crate::entity::EntityLabels;
 
-    fn make_well(id: &str, row: u32, col: u32) -> Entity {
+    fn make_group(id: &str, row: u32, col: u32) -> Entity {
         Entity {
             id: EntityId(id.to_string()),
-            kind: EntityKind::Well,
+            kind: EntityKind::Group,
             parent: None,
             labels: EntityLabels {
                 name: Some(format!("{}/{}", (b'A' + row as u8) as char, col + 1)),
@@ -232,52 +233,52 @@ mod tests {
         }
     }
 
-    fn make_field(id: &str, well_id: &str, field_index: Option<u32>) -> Entity {
+    fn make_tile(id: &str, group_id: &str, tile_index: Option<u32>) -> Entity {
         Entity {
             id: EntityId(id.to_string()),
-            kind: EntityKind::Field,
-            parent: Some(EntityId(well_id.to_string())),
+            kind: EntityKind::Tile,
+            parent: Some(EntityId(group_id.to_string())),
             labels: EntityLabels {
-                field_index,
+                tile_index,
                 ..Default::default()
             },
         }
     }
 
     #[test]
-    fn two_by_three_collection_single_fov() {
-        // 2 rows x 3 columns, 1 FOV per well.
-        let wells = vec![
-            make_well("w-00", 0, 0),
-            make_well("w-01", 0, 1),
-            make_well("w-02", 0, 2),
-            make_well("w-10", 1, 0),
-            make_well("w-11", 1, 1),
-            make_well("w-12", 1, 2),
+    fn two_by_three_collection_single_tile() {
+        // 2 rows x 3 columns, 1 tile per group.
+        let groups = vec![
+            make_group("w-00", 0, 0),
+            make_group("w-01", 0, 1),
+            make_group("w-02", 0, 2),
+            make_group("w-10", 1, 0),
+            make_group("w-11", 1, 1),
+            make_group("w-12", 1, 2),
         ];
-        let fields: Vec<Entity> = wells
+        let tiles: Vec<Entity> = groups
             .iter()
             .enumerate()
-            .map(|(i, w)| make_field(&format!("f-{i}"), &w.id.0, Some(0)))
+            .map(|(i, w)| make_tile(&format!("f-{i}"), &w.id.0, Some(0)))
             .collect();
 
-        let mut entities: Vec<Entity> = wells.clone();
-        entities.extend(fields.clone());
+        let mut entities: Vec<Entity> = groups.clone();
+        entities.extend(tiles.clone());
 
-        let fov_shape: [u64; 5] = [1, 1, 10, 512, 512];
+        let tile_shape: [u64; 5] = [1, 1, 10, 512, 512];
         let rows = vec!["A".into(), "B".into()];
         let cols = vec!["1".into(), "2".into(), "3".into()];
 
-        let layout = build_collection_layout(&entities, &rows, &cols, fov_shape);
+        let layout = build_collection_layout(&entities, &rows, &cols, tile_shape);
         assert_eq!(layout.placements.len(), 6);
 
-        let fov_x = 512.0;
-        let fov_y = 512.0;
-        // 1 field per well => fields_per_side = 1
-        let well_cell_w = 1.0 * fov_x * (1.0 + FIELD_GAP_FRACTION) + fov_x * WELL_GAP_FRACTION;
-        let well_cell_h = 1.0 * fov_y * (1.0 + FIELD_GAP_FRACTION) + fov_y * WELL_GAP_FRACTION;
+        let tile_x = 512.0;
+        let tile_y = 512.0;
+        // 1 tile per group => tiles_per_side = 1
+        let group_cell_w = 1.0 * tile_x * (1.0 + TILE_GAP_FRACTION) + tile_x * GROUP_GAP_FRACTION;
+        let group_cell_h = 1.0 * tile_y * (1.0 + TILE_GAP_FRACTION) + tile_y * GROUP_GAP_FRACTION;
 
-        // Well (0,0) at origin.
+        // Group (0,0) at origin.
         let p00 = layout
             .placements
             .iter()
@@ -286,54 +287,54 @@ mod tests {
         assert!((p00.position[0]).abs() < 1e-9);
         assert!((p00.position[1]).abs() < 1e-9);
 
-        // Well (0,1) at (well_cell_w, 0).
+        // Group (0,1) at (group_cell_w, 0).
         let p01 = layout
             .placements
             .iter()
             .find(|p| p.entity_id.0 == "w-01")
             .unwrap();
-        assert!((p01.position[0] - well_cell_w).abs() < 1e-9);
+        assert!((p01.position[0] - group_cell_w).abs() < 1e-9);
         assert!((p01.position[1]).abs() < 1e-9);
 
-        // Well (0,2) at (2*well_cell_w, 0).
+        // Group (0,2) at (2*group_cell_w, 0).
         let p02 = layout
             .placements
             .iter()
             .find(|p| p.entity_id.0 == "w-02")
             .unwrap();
-        assert!((p02.position[0] - 2.0 * well_cell_w).abs() < 1e-9);
+        assert!((p02.position[0] - 2.0 * group_cell_w).abs() < 1e-9);
         assert!((p02.position[1]).abs() < 1e-9);
 
-        // Well (1,0) at (0, well_cell_h).
+        // Group (1,0) at (0, group_cell_h).
         let p10 = layout
             .placements
             .iter()
             .find(|p| p.entity_id.0 == "w-10")
             .unwrap();
         assert!((p10.position[0]).abs() < 1e-9);
-        assert!((p10.position[1] - well_cell_h).abs() < 1e-9);
+        assert!((p10.position[1] - group_cell_h).abs() < 1e-9);
 
-        // Well (1,1) at (well_cell_w, well_cell_h).
+        // Group (1,1) at (group_cell_w, group_cell_h).
         let p11 = layout
             .placements
             .iter()
             .find(|p| p.entity_id.0 == "w-11")
             .unwrap();
-        assert!((p11.position[0] - well_cell_w).abs() < 1e-9);
-        assert!((p11.position[1] - well_cell_h).abs() < 1e-9);
+        assert!((p11.position[0] - group_cell_w).abs() < 1e-9);
+        assert!((p11.position[1] - group_cell_h).abs() < 1e-9);
 
-        // Well (1,2) at (2*well_cell_w, well_cell_h).
+        // Group (1,2) at (2*group_cell_w, group_cell_h).
         let p12 = layout
             .placements
             .iter()
             .find(|p| p.entity_id.0 == "w-12")
             .unwrap();
-        assert!((p12.position[0] - 2.0 * well_cell_w).abs() < 1e-9);
-        assert!((p12.position[1] - well_cell_h).abs() < 1e-9);
+        assert!((p12.position[0] - 2.0 * group_cell_w).abs() < 1e-9);
+        assert!((p12.position[1] - group_cell_h).abs() < 1e-9);
 
-        // Field transforms: single field per well => all at origin.
-        let well_ents: Vec<Entity> = wells.clone();
-        let transforms = build_grid_field_transforms(&well_ents, &fields, fov_shape).unwrap();
+        // Tile transforms: single tile per group => all at origin.
+        let group_ents: Vec<Entity> = groups.clone();
+        let transforms = build_grid_tile_transforms(&group_ents, &tiles, tile_shape).unwrap();
         assert_eq!(transforms.len(), 6);
 
         for t in &transforms {
@@ -343,48 +344,48 @@ mod tests {
     }
 
     #[test]
-    fn two_by_two_collection_four_fovs() {
-        // 2x2 collection, 4 FOVs per well.
-        let wells = vec![
-            make_well("w-00", 0, 0),
-            make_well("w-01", 0, 1),
-            make_well("w-10", 1, 0),
-            make_well("w-11", 1, 1),
+    fn two_by_two_collection_four_tiles() {
+        // 2x2 collection, 4 tiles per group.
+        let groups = vec![
+            make_group("w-00", 0, 0),
+            make_group("w-01", 0, 1),
+            make_group("w-10", 1, 0),
+            make_group("w-11", 1, 1),
         ];
 
-        let mut fields = Vec::new();
-        for well in &wells {
+        let mut tiles = Vec::new();
+        for group in &groups {
             for fi in 0..4u32 {
-                fields.push(make_field(
-                    &format!("f-{}-{fi}", well.id.0),
-                    &well.id.0,
+                tiles.push(make_tile(
+                    &format!("f-{}-{fi}", group.id.0),
+                    &group.id.0,
                     Some(fi),
                 ));
             }
         }
 
-        let mut entities: Vec<Entity> = wells.clone();
-        entities.extend(fields.clone());
+        let mut entities: Vec<Entity> = groups.clone();
+        entities.extend(tiles.clone());
 
-        let fov_shape: [u64; 5] = [1, 1, 10, 256, 256];
+        let tile_shape: [u64; 5] = [1, 1, 10, 256, 256];
         let rows = vec!["A".into(), "B".into()];
         let cols = vec!["1".into(), "2".into()];
 
-        let layout = build_collection_layout(&entities, &rows, &cols, fov_shape);
+        let layout = build_collection_layout(&entities, &rows, &cols, tile_shape);
         assert_eq!(layout.placements.len(), 4);
 
-        let fov_x = 256.0;
-        let fov_y = 256.0;
-        // 4 fields => fields_per_side = ceil(sqrt(4)) = 2
-        let well_cell_w = 2.0 * fov_x * (1.0 + FIELD_GAP_FRACTION) + fov_x * WELL_GAP_FRACTION;
-        let well_cell_h = 2.0 * fov_y * (1.0 + FIELD_GAP_FRACTION) + fov_y * WELL_GAP_FRACTION;
+        let tile_x = 256.0;
+        let tile_y = 256.0;
+        // 4 tiles => tiles_per_side = ceil(sqrt(4)) = 2
+        let group_cell_w = 2.0 * tile_x * (1.0 + TILE_GAP_FRACTION) + tile_x * GROUP_GAP_FRACTION;
+        let group_cell_h = 2.0 * tile_y * (1.0 + TILE_GAP_FRACTION) + tile_y * GROUP_GAP_FRACTION;
 
         let p01 = layout
             .placements
             .iter()
             .find(|p| p.entity_id.0 == "w-01")
             .unwrap();
-        assert!((p01.position[0] - well_cell_w).abs() < 1e-9);
+        assert!((p01.position[0] - group_cell_w).abs() < 1e-9);
         assert!((p01.position[1]).abs() < 1e-9);
 
         let p10 = layout
@@ -393,73 +394,73 @@ mod tests {
             .find(|p| p.entity_id.0 == "w-10")
             .unwrap();
         assert!((p10.position[0]).abs() < 1e-9);
-        assert!((p10.position[1] - well_cell_h).abs() < 1e-9);
+        assert!((p10.position[1] - group_cell_h).abs() < 1e-9);
 
-        // Field transforms: 2x2 grid per well.
-        let transforms = build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
+        // Tile transforms: 2x2 grid per group.
+        let transforms = build_grid_tile_transforms(&groups, &tiles, tile_shape).unwrap();
         assert_eq!(transforms.len(), 16);
 
-        let gap_x = FIELD_GAP_FRACTION * fov_x;
-        let gap_y = FIELD_GAP_FRACTION * fov_y;
+        let gap_x = TILE_GAP_FRACTION * tile_x;
+        let gap_y = TILE_GAP_FRACTION * tile_y;
 
-        // Check one well's fields in detail (w-00).
+        // Check one group's tiles in detail (w-00).
         let mut w00_transforms: Vec<&TransformEdge> =
             transforms.iter().filter(|t| t.to.0 == "w-00").collect();
         w00_transforms.sort_by(|a, b| a.from.0.cmp(&b.from.0));
         assert_eq!(w00_transforms.len(), 4);
 
-        // field 0 at (0, 0)
+        // tile 0 at (0, 0)
         assert!((w00_transforms[0].transform.matrix()[12]).abs() < 1e-9);
         assert!((w00_transforms[0].transform.matrix()[13]).abs() < 1e-9);
-        // field 1 at (fov_x + gap_x, 0)
-        assert!((w00_transforms[1].transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9);
+        // tile 1 at (tile_x + gap_x, 0)
+        assert!((w00_transforms[1].transform.matrix()[12] - (tile_x + gap_x)).abs() < 1e-9);
         assert!((w00_transforms[1].transform.matrix()[13]).abs() < 1e-9);
-        // field 2 at (0, fov_y + gap_y)
+        // tile 2 at (0, tile_y + gap_y)
         assert!((w00_transforms[2].transform.matrix()[12]).abs() < 1e-9);
-        assert!((w00_transforms[2].transform.matrix()[13] - (fov_y + gap_y)).abs() < 1e-9);
-        // field 3 at (fov_x + gap_x, fov_y + gap_y)
-        assert!((w00_transforms[3].transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9);
-        assert!((w00_transforms[3].transform.matrix()[13] - (fov_y + gap_y)).abs() < 1e-9);
+        assert!((w00_transforms[2].transform.matrix()[13] - (tile_y + gap_y)).abs() < 1e-9);
+        // tile 3 at (tile_x + gap_x, tile_y + gap_y)
+        assert!((w00_transforms[3].transform.matrix()[12] - (tile_x + gap_x)).abs() < 1e-9);
+        assert!((w00_transforms[3].transform.matrix()[13] - (tile_y + gap_y)).abs() < 1e-9);
     }
 
     #[test]
     fn collection_extent_two_by_three() {
         // Same 2x3 collection from test 1.
-        let wells = vec![
-            make_well("w-00", 0, 0),
-            make_well("w-01", 0, 1),
-            make_well("w-02", 0, 2),
-            make_well("w-10", 1, 0),
-            make_well("w-11", 1, 1),
-            make_well("w-12", 1, 2),
+        let groups = vec![
+            make_group("w-00", 0, 0),
+            make_group("w-01", 0, 1),
+            make_group("w-02", 0, 2),
+            make_group("w-10", 1, 0),
+            make_group("w-11", 1, 1),
+            make_group("w-12", 1, 2),
         ];
-        let fields: Vec<Entity> = wells
+        let tiles: Vec<Entity> = groups
             .iter()
             .enumerate()
-            .map(|(i, w)| make_field(&format!("f-{i}"), &w.id.0, Some(0)))
+            .map(|(i, w)| make_tile(&format!("f-{i}"), &w.id.0, Some(0)))
             .collect();
 
-        let mut entities: Vec<Entity> = wells.clone();
-        entities.extend(fields.clone());
+        let mut entities: Vec<Entity> = groups.clone();
+        entities.extend(tiles.clone());
 
-        let fov_shape: [u64; 5] = [1, 1, 10, 512, 512];
+        let tile_shape: [u64; 5] = [1, 1, 10, 512, 512];
         let rows = vec!["A".into(), "B".into()];
         let cols = vec!["1".into(), "2".into(), "3".into()];
 
-        let layout = build_collection_layout(&entities, &rows, &cols, fov_shape);
-        let transforms = build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
+        let layout = build_collection_layout(&entities, &rows, &cols, tile_shape);
+        let transforms = build_grid_tile_transforms(&groups, &tiles, tile_shape).unwrap();
 
-        let extent = collection_extent(&layout, &transforms, fov_shape);
+        let extent = collection_extent(&layout, &transforms, tile_shape);
 
-        let fov_x = 512.0;
-        let fov_y = 512.0;
-        let well_cell_w = 1.0 * fov_x * (1.0 + FIELD_GAP_FRACTION) + fov_x * WELL_GAP_FRACTION;
-        let well_cell_h = 1.0 * fov_y * (1.0 + FIELD_GAP_FRACTION) + fov_y * WELL_GAP_FRACTION;
+        let tile_x = 512.0;
+        let tile_y = 512.0;
+        let group_cell_w = 1.0 * tile_x * (1.0 + TILE_GAP_FRACTION) + tile_x * GROUP_GAP_FRACTION;
+        let group_cell_h = 1.0 * tile_y * (1.0 + TILE_GAP_FRACTION) + tile_y * GROUP_GAP_FRACTION;
 
-        // Rightmost well at col 2: x = 2 * well_cell_w, field at tx=0 => extent_x = 2*well_cell_w + fov_x
-        let expected_x = 2.0 * well_cell_w + fov_x;
-        // Bottom well at row 1: y = well_cell_h, field at ty=0 => extent_y = well_cell_h + fov_y
-        let expected_y = 1.0 * well_cell_h + fov_y;
+        // Rightmost group at col 2: x = 2 * group_cell_w, tile at tx=0 => extent_x = 2*group_cell_w + tile_x
+        let expected_x = 2.0 * group_cell_w + tile_x;
+        // Bottom group at row 1: y = group_cell_h, tile at ty=0 => extent_y = group_cell_h + tile_y
+        let expected_y = 1.0 * group_cell_h + tile_y;
 
         assert!(
             (extent[0] - expected_x).abs() < 1e-9,
@@ -476,39 +477,39 @@ mod tests {
     }
 
     #[test]
-    fn missing_field_index_error() {
-        let wells = vec![make_well("w-00", 0, 0)];
-        let fields = vec![make_field("f-0", "w-00", None)]; // no field_index
+    fn missing_tile_index_error() {
+        let groups = vec![make_group("w-00", 0, 0)];
+        let tiles = vec![make_tile("f-0", "w-00", None)]; // no tile_index
 
-        let result = build_grid_field_transforms(&wells, &fields, [1, 1, 1, 256, 256]);
+        let result = build_grid_tile_transforms(&groups, &tiles, [1, 1, 1, 256, 256]);
         assert!(result.is_err());
         match result.unwrap_err() {
-            CollectionLayoutError::MissingFieldIndex { entity_id } => {
+            CollectionLayoutError::MissingTileIndex { entity_id } => {
                 assert_eq!(entity_id.0, "f-0");
             }
-            other => panic!("expected MissingFieldIndex, got {:?}", other),
+            other => panic!("expected MissingTileIndex, got {:?}", other),
         }
     }
 
     #[test]
-    fn duplicate_field_index_error() {
-        let wells = vec![make_well("w-00", 0, 0)];
-        let fields = vec![
-            make_field("f-0", "w-00", Some(0)),
-            make_field("f-1", "w-00", Some(0)), // duplicate
+    fn duplicate_tile_index_error() {
+        let groups = vec![make_group("w-00", 0, 0)];
+        let tiles = vec![
+            make_tile("f-0", "w-00", Some(0)),
+            make_tile("f-1", "w-00", Some(0)), // duplicate
         ];
 
-        let result = build_grid_field_transforms(&wells, &fields, [1, 1, 1, 256, 256]);
+        let result = build_grid_tile_transforms(&groups, &tiles, [1, 1, 1, 256, 256]);
         assert!(result.is_err());
         match result.unwrap_err() {
-            CollectionLayoutError::DuplicateFieldIndex {
-                well_id,
-                field_index,
+            CollectionLayoutError::DuplicateTileIndex {
+                group_id,
+                tile_index,
             } => {
-                assert_eq!(well_id.0, "w-00");
-                assert_eq!(field_index, 0);
+                assert_eq!(group_id.0, "w-00");
+                assert_eq!(tile_index, 0);
             }
-            other => panic!("expected DuplicateFieldIndex, got {:?}", other),
+            other => panic!("expected DuplicateTileIndex, got {:?}", other),
         }
     }
 }

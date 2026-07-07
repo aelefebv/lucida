@@ -97,10 +97,10 @@ describe("debug category gate", () => {
 
 describe("overlay gate", () => {
   it("reads the persisted overlay set once at module init", async () => {
-    localStorage.setItem("debug.overlays", "chunkGrid,wellModes");
+    localStorage.setItem("debug.overlays", "chunkGrid,groupModes");
     const logging = await importLogging();
     expect(logging.isOverlayEnabled("chunkGrid")).toBe(true);
-    expect(logging.isOverlayEnabled("wellModes")).toBe(true);
+    expect(logging.isOverlayEnabled("groupModes")).toBe(true);
     expect(logging.isOverlayEnabled("renderRadius")).toBe(false);
   });
 

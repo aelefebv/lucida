@@ -60,8 +60,8 @@ fn clear_specific_dataset_removes_only_that_subdir() {
     let tmp = tempfile::tempdir().unwrap();
     let cache_dir = tmp.path().to_path_buf();
 
-    let dir_a = populate_dataset(&cache_dir, URL_A, &[("entity-a1", "field3d")]);
-    let dir_b = populate_dataset(&cache_dir, URL_B, &[("entity-b1", "well3d")]);
+    let dir_a = populate_dataset(&cache_dir, URL_A, &[("entity-a1", "tile3d")]);
+    let dir_b = populate_dataset(&cache_dir, URL_B, &[("entity-b1", "group3d")]);
     assert!(dir_a.exists());
     assert!(dir_b.exists());
 
@@ -83,7 +83,7 @@ fn clear_unknown_dataset_is_zero_outcome() {
 
     // Populate one dataset, then clear a different URL that was never
     // written. Should be a no-op with `datasets = 0`.
-    let dir_a = populate_dataset(&cache_dir, URL_A, &[("entity-a1", "field3d")]);
+    let dir_a = populate_dataset(&cache_dir, URL_A, &[("entity-a1", "tile3d")]);
     let outcome = clear_proxy_cache(&cache_dir, Some(URL_B)).unwrap();
     assert_eq!(outcome.datasets, 0);
     assert_eq!(outcome.files, 0);
@@ -98,9 +98,9 @@ fn clear_all_datasets_removes_every_subdir_but_keeps_root() {
     let dir_a = populate_dataset(
         &cache_dir,
         URL_A,
-        &[("entity-a1", "field3d"), ("entity-a2", "well3d")],
+        &[("entity-a1", "tile3d"), ("entity-a2", "group3d")],
     );
-    let dir_b = populate_dataset(&cache_dir, URL_B, &[("entity-b1", "field3d")]);
+    let dir_b = populate_dataset(&cache_dir, URL_B, &[("entity-b1", "tile3d")]);
 
     let outcome = clear_proxy_cache(&cache_dir, None).unwrap();
     assert_eq!(outcome.datasets, 2);
@@ -135,7 +135,7 @@ fn clear_all_skips_top_level_files() {
     // should ignore it and not count it as a dataset.
     let tmp = tempfile::tempdir().unwrap();
     let cache_dir = tmp.path().to_path_buf();
-    populate_dataset(&cache_dir, URL_A, &[("entity-a1", "field3d")]);
+    populate_dataset(&cache_dir, URL_A, &[("entity-a1", "tile3d")]);
     fs::write(cache_dir.join(".stray"), b"junk").unwrap();
 
     let outcome = clear_proxy_cache(&cache_dir, None).unwrap();

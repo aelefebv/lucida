@@ -33,8 +33,8 @@ export function handleDestroy(ctx: WorkerCtx): void {
   }
   state.proxyPoolsByDataset.clear();
   state.proxyDescriptorsByEntity.clear();
-  state.wellToFields.clear();
-  state.wellsByDataset.clear();
+  state.groupToTiles.clear();
+  state.groupsByDataset.clear();
   // Tear down all entity descriptor buffers.
   for (const desc of state.descriptorBuffersByDataset.values()) {
     destroyDescriptorBuffer(desc);

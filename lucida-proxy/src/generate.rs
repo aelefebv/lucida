@@ -2,16 +2,16 @@
 //!
 //! Two kinds:
 //!
-//! - [`ProxyKind::FieldProxy3D`] — pick a coarse-but-not-too-coarse level
+//! - [`ProxyKind::TileProxy3D`] — pick a coarse-but-not-too-coarse level
 //!   from the entity's image, read it through the source, and box-filter
 //!   down to `target_long_axis` along its longest axis (others scaled
 //!   proportionally, never upsampled).
 //!
-//! - [`ProxyKind::WellProxy3D`] — find the well's child fields, derive a
-//!   common bounding box from each field's `voxel_to_image × field_to_well`
+//! - [`ProxyKind::GroupProxy3D`] — find the group's child tiles, derive a
+//!   common bounding box from each tile's `voxel_to_image × tile_to_group`
 //!   transform, allocate an output volume sized so the longest axis hits
-//!   `target_long_axis`, and for each output voxel sample whichever fields
-//!   contain that point. When multiple fields cover a voxel we average
+//!   `target_long_axis`, and for each output voxel sample whichever tiles
+//!   contain that point. When multiple tiles cover a voxel we average
 //!   them; gaps stay zero.
 
 use lucida_content::{
@@ -33,8 +33,8 @@ pub enum GenerateError {
     MissingImage(EntityId),
     #[error("image has no multiscale levels: {0}")]
     EmptyMultiscale(EntityId),
-    #[error("well has no field children: {0}")]
-    NoFields(EntityId),
+    #[error("group has no tile children: {0}")]
+    NoTiles(EntityId),
     #[error("requested t={t} or c={c} out of bounds for image")]
     OutOfBounds { t: u32, c: u32 },
     #[error("invalid spec: target_long_axis must be > 0")]
@@ -50,8 +50,8 @@ pub enum EstimateError {
     MissingImage(EntityId),
     #[error("image has no multiscale levels: {0}")]
     EmptyMultiscale(EntityId),
-    #[error("well has no field children: {0}")]
-    NoFields(EntityId),
+    #[error("group has no tile children: {0}")]
+    NoTiles(EntityId),
     #[error("invalid spec: target_long_axis must be > 0")]
     InvalidTarget,
     #[error("proxy dimensions are too large for u32: {0}")]
@@ -76,8 +76,8 @@ pub fn generate_proxy(
         .ok_or_else(|| GenerateError::MissingEntity(spec.entity_id.clone()))?;
 
     match spec.kind {
-        ProxyKind::FieldProxy3D => downsample_field(spec, content, entity, source),
-        ProxyKind::WellProxy3D => aggregate_well(spec, content, entity, source),
+        ProxyKind::TileProxy3D => downsample_tile(spec, content, entity, source),
+        ProxyKind::GroupProxy3D => aggregate_group(spec, content, entity, source),
     }
 }
 
@@ -101,12 +101,12 @@ pub fn estimate_proxy_dims(
         .ok_or_else(|| EstimateError::MissingEntity(spec.entity_id.clone()))?;
 
     match spec.kind {
-        ProxyKind::FieldProxy3D => estimate_field_dims(spec, content, entity),
-        ProxyKind::WellProxy3D => estimate_well_dims(spec, content, entity),
+        ProxyKind::TileProxy3D => estimate_tile_dims(spec, content, entity),
+        ProxyKind::GroupProxy3D => estimate_group_dims(spec, content, entity),
     }
 }
 
-fn estimate_field_dims(
+fn estimate_tile_dims(
     spec: &ProxySpec,
     content: &DatasetManifest,
     entity: &Entity,
@@ -126,47 +126,47 @@ fn estimate_field_dims(
     Ok(target_dims_for_long_axis(dims, spec.target_long_axis))
 }
 
-fn estimate_well_dims(
+fn estimate_group_dims(
     spec: &ProxySpec,
     content: &DatasetManifest,
-    well_entity: &Entity,
+    group_entity: &Entity,
 ) -> Result<[u32; 3], EstimateError> {
-    if !matches!(well_entity.kind, EntityKind::Well) {
-        return estimate_field_dims(spec, content, well_entity);
+    if !matches!(group_entity.kind, EntityKind::Group) {
+        return estimate_tile_dims(spec, content, group_entity);
     }
 
-    let fields: Vec<&Entity> = content
+    let tiles: Vec<&Entity> = content
         .entities()
         .iter()
-        .filter(|e| matches!(e.kind, EntityKind::Field))
-        .filter(|e| e.parent.as_ref() == Some(&well_entity.id))
+        .filter(|e| matches!(e.kind, EntityKind::Tile))
+        .filter(|e| e.parent.as_ref() == Some(&group_entity.id))
         .collect();
-    if fields.is_empty() {
-        return Err(EstimateError::NoFields(well_entity.id.clone()));
+    if tiles.is_empty() {
+        return Err(EstimateError::NoTiles(group_entity.id.clone()));
     }
 
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
-    for field in fields {
+    for tile in tiles {
         let image = content
             .images()
             .iter()
-            .find(|img| img.owner == field.id)
-            .ok_or_else(|| EstimateError::MissingImage(field.id.clone()))?;
+            .find(|img| img.owner == tile.id)
+            .ok_or_else(|| EstimateError::MissingImage(tile.id.clone()))?;
         if image.multiscale.levels.is_empty() {
-            return Err(EstimateError::EmptyMultiscale(field.id.clone()));
+            return Err(EstimateError::EmptyMultiscale(tile.id.clone()));
         }
         let level_index = pick_level(&image.multiscale.levels, spec.target_long_axis);
-        let dims = level_spatial_dims(&image.multiscale.levels[level_index], &field.id)?;
+        let dims = level_spatial_dims(&image.multiscale.levels[level_index], &tile.id)?;
         let voxel_to_image = estimate_level_voxel_to_image(content, image, level_index)?;
-        let field_to_well = find_field_to_well(content, &field.id, &well_entity.id);
-        let voxel_to_well = compose(&field_to_well, &voxel_to_image);
+        let tile_to_group = find_tile_to_group(content, &tile.id, &group_entity.id);
+        let voxel_to_group = compose(&tile_to_group, &voxel_to_image);
 
         let [vz, vy, vx] = dims;
         for &z in &[0.0_f64, vz as f64] {
             for &y in &[0.0_f64, vy as f64] {
                 for &x in &[0.0_f64, vx as f64] {
-                    let p = transform_point(&voxel_to_well, [x, y, z]);
+                    let p = transform_point(&voxel_to_group, [x, y, z]);
                     for axis in 0..3 {
                         if p[axis] < min[axis] {
                             min[axis] = p[axis];
@@ -180,10 +180,10 @@ fn estimate_well_dims(
         }
     }
 
-    Ok(well_dims_from_bounds(min, max, spec.target_long_axis))
+    Ok(group_dims_from_bounds(min, max, spec.target_long_axis))
 }
 
-fn downsample_field(
+fn downsample_tile(
     spec: &ProxySpec,
     content: &DatasetManifest,
     entity: &Entity,
@@ -201,7 +201,7 @@ fn downsample_field(
     }
     let level_index = pick_level(levels, spec.target_long_axis);
 
-    let volume = source.read_field_volume(&image.image_id, spec.t, spec.c, level_index)?;
+    let volume = source.read_tile_volume(&image.image_id, spec.t, spec.c, level_index)?;
     let out = box_filter_to_target(&volume.data, volume.dims, spec.target_long_axis);
 
     let header = ProxyHeader {
@@ -304,67 +304,67 @@ fn box_bounds(oi: u32, out_size: u32, in_size: u32) -> (u32, u32) {
     (lo, hi)
 }
 
-fn aggregate_well(
+fn aggregate_group(
     spec: &ProxySpec,
     content: &DatasetManifest,
-    well_entity: &Entity,
+    group_entity: &Entity,
     source: &dyn ProxySourceData,
 ) -> Result<ProxyAsset, GenerateError> {
-    if !matches!(well_entity.kind, EntityKind::Well) {
-        // Treat any non-Well entity dispatch as the field path.
-        return downsample_field(spec, content, well_entity, source);
+    if !matches!(group_entity.kind, EntityKind::Group) {
+        // Treat any non-Group entity dispatch as the tile path.
+        return downsample_tile(spec, content, group_entity, source);
     }
 
-    // Gather field children of this well.
-    let fields: Vec<&Entity> = content
+    // Gather tile children of this group.
+    let tiles: Vec<&Entity> = content
         .entities()
         .iter()
-        .filter(|e| matches!(e.kind, EntityKind::Field))
-        .filter(|e| e.parent.as_ref() == Some(&well_entity.id))
+        .filter(|e| matches!(e.kind, EntityKind::Tile))
+        .filter(|e| e.parent.as_ref() == Some(&group_entity.id))
         .collect();
-    if fields.is_empty() {
-        return Err(GenerateError::NoFields(well_entity.id.clone()));
+    if tiles.is_empty() {
+        return Err(GenerateError::NoTiles(group_entity.id.clone()));
     }
 
-    // Build per-field metadata: image, level chosen, field-to-well transform.
-    let mut field_data: Vec<FieldEntry> = Vec::with_capacity(fields.len());
-    for field in &fields {
+    // Build per-tile metadata: image, level chosen, tile-to-group transform.
+    let mut tile_data: Vec<TileEntry> = Vec::with_capacity(tiles.len());
+    for tile in &tiles {
         let image = content
             .images()
             .iter()
-            .find(|img| img.owner == field.id)
-            .ok_or_else(|| GenerateError::MissingImage(field.id.clone()))?;
+            .find(|img| img.owner == tile.id)
+            .ok_or_else(|| GenerateError::MissingImage(tile.id.clone()))?;
         if image.multiscale.levels.is_empty() {
-            return Err(GenerateError::EmptyMultiscale(field.id.clone()));
+            return Err(GenerateError::EmptyMultiscale(tile.id.clone()));
         }
         let level_index = pick_level(&image.multiscale.levels, spec.target_long_axis);
 
-        let field_to_well = find_field_to_well(content, &field.id, &well_entity.id);
-        let volume = source.read_field_volume(&image.image_id, spec.t, spec.c, level_index)?;
+        let tile_to_group = find_tile_to_group(content, &tile.id, &group_entity.id);
+        let volume = source.read_tile_volume(&image.image_id, spec.t, spec.c, level_index)?;
 
-        // Compose voxel→image and image→well into voxel→well so we can
-        // bound and sample in well space directly.
-        let voxel_to_well = compose(&field_to_well, &volume.voxel_to_image);
-        let well_to_voxel = invert(&voxel_to_well).unwrap_or_else(VoxelTransform::identity);
+        // Compose voxel→image and image→group into voxel→group so we can
+        // bound and sample in group space directly.
+        let voxel_to_group = compose(&tile_to_group, &volume.voxel_to_image);
+        let group_to_voxel = invert(&voxel_to_group).unwrap_or_else(VoxelTransform::identity);
 
-        field_data.push(FieldEntry {
+        tile_data.push(TileEntry {
             image: image.clone(),
             volume,
-            voxel_to_well,
-            well_to_voxel,
+            voxel_to_group,
+            group_to_voxel,
         });
     }
 
-    // Compute the well bounding box by walking each field's 8 voxel-corners
-    // through `voxel_to_well` and tracking the AABB.
+    // Compute the group bounding box by walking each tile's 8 voxel-corners
+    // through `voxel_to_group` and tracking the AABB.
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
-    for entry in &field_data {
+    for entry in &tile_data {
         let [vz, vy, vx] = entry.volume.dims;
         for &z in &[0.0_f64, vz as f64] {
             for &y in &[0.0_f64, vy as f64] {
                 for &x in &[0.0_f64, vx as f64] {
-                    let p = transform_point(&entry.voxel_to_well, [x, y, z]);
+                    let p = transform_point(&entry.voxel_to_group, [x, y, z]);
                     for axis in 0..3 {
                         if p[axis] < min[axis] {
                             min[axis] = p[axis];
@@ -378,11 +378,11 @@ fn aggregate_well(
         }
     }
 
-    let out_dims = well_dims_from_bounds(min, max, spec.target_long_axis);
+    let out_dims = group_dims_from_bounds(min, max, spec.target_long_axis);
     let [out_z, out_y, out_x] = out_dims;
     let span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
 
-    // Per-output-voxel size in well units.
+    // Per-output-voxel size in group units.
     let voxel_w_x = span[0] / out_x as f64;
     let voxel_w_y = span[1] / out_y as f64;
     let voxel_w_z = span[2] / out_z as f64;
@@ -390,17 +390,17 @@ fn aggregate_well(
     let mut acc = vec![0u64; (out_z as usize) * (out_y as usize) * (out_x as usize)];
     let mut count = vec![0u32; acc.len()];
 
-    for entry in &field_data {
+    for entry in &tile_data {
         for oz in 0..out_z {
-            // Center of the output voxel along Z in well coords.
+            // Center of the output voxel along Z in group coords.
             let wz = min[2] + (oz as f64 + 0.5) * voxel_w_z;
             for oy in 0..out_y {
                 let wy = min[1] + (oy as f64 + 0.5) * voxel_w_y;
                 for ox in 0..out_x {
                     let wx = min[0] + (ox as f64 + 0.5) * voxel_w_x;
 
-                    // Project well point back into this field's voxel grid.
-                    let v = transform_point(&entry.well_to_voxel, [wx, wy, wz]);
+                    // Project group point back into this tile's voxel grid.
+                    let v = transform_point(&entry.group_to_voxel, [wx, wy, wz]);
                     let [fz, fy, fx] = [
                         entry.volume.dims[0] as f64,
                         entry.volume.dims[1] as f64,
@@ -416,8 +416,8 @@ fn aggregate_well(
                         continue;
                     }
 
-                    // Box-sample the field around (in_z, in_y, in_x). We use
-                    // the per-output voxel extent in field-voxel units.
+                    // Box-sample the tile around (in_z, in_y, in_x). We use
+                    // the per-output voxel extent in tile-voxel units.
                     let scale_x = entry.volume.dims[2] as f64 / span[0] * voxel_w_x;
                     let scale_y = entry.volume.dims[1] as f64 / span[1] * voxel_w_y;
                     let scale_z = entry.volume.dims[0] as f64 / span[2] * voxel_w_z;
@@ -502,7 +502,7 @@ fn target_dims_for_long_axis(dims: [u32; 3], target_long_axis: u32) -> [u32; 3] 
     ]
 }
 
-fn well_dims_from_bounds(min: [f64; 3], max: [f64; 3], target_long_axis: u32) -> [u32; 3] {
+fn group_dims_from_bounds(min: [f64; 3], max: [f64; 3], target_long_axis: u32) -> [u32; 3] {
     let span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
     let mut max_span = span[0].max(span[1]).max(span[2]);
     if !max_span.is_finite() || max_span <= 0.0 {
@@ -518,25 +518,25 @@ fn well_dims_from_bounds(min: [f64; 3], max: [f64; 3], target_long_axis: u32) ->
     ]
 }
 
-struct FieldEntry {
+struct TileEntry {
     #[allow(dead_code)]
     image: ImageSpec,
-    volume: crate::source::FieldVolume,
-    voxel_to_well: VoxelTransform,
-    well_to_voxel: VoxelTransform,
+    volume: crate::source::TileVolume,
+    voxel_to_group: VoxelTransform,
+    group_to_voxel: VoxelTransform,
 }
 
-/// Find an `EntityKind::Field → Well` transform. Returns identity if no
-/// edge exists (a well with a single field at origin behaves correctly).
-fn find_field_to_well(
+/// Find an `EntityKind::Tile → Group` transform. Returns identity if no
+/// edge exists (a group with a single tile at origin behaves correctly).
+fn find_tile_to_group(
     content: &DatasetManifest,
-    field_id: &EntityId,
-    well_id: &EntityId,
+    tile_id: &EntityId,
+    group_id: &EntityId,
 ) -> VoxelTransform {
     content
         .transforms()
         .iter()
-        .find(|edge| &edge.from == field_id && &edge.to == well_id)
+        .find(|edge| &edge.from == tile_id && &edge.to == group_id)
         .map(|edge| edge.transform.clone())
         .unwrap_or_else(VoxelTransform::identity)
 }

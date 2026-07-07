@@ -92,7 +92,7 @@ describe("pushLabelVolumeLayers", () => {
     expect(scene.inv_member_model_matrix).toHaveBeenCalledWith("ds-0", "img-0");
   });
 
-  it("uses a synthesized member's own matrices when present (well-as-proxy path)", () => {
+  it("uses a synthesized member's own matrices when present (group-as-proxy path)", () => {
     const scene = makeScene();
     const ownModel = new Float32Array([3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1]);
     const ownInv = new Float32Array([5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1]);

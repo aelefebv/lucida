@@ -22,7 +22,7 @@ use crate::framing::{Aabb, FIT_PADDING, orbit_overview_framing};
 /// currently shown.
 ///
 /// Frames the **visible** members so a single shown dataset isn't dwarfed by
-/// hidden ones (e.g. a large multi-field collection left in the workspace). If
+/// hidden ones (e.g. a large multi-tile collection left in the workspace). If
 /// nothing is visible it falls back to framing all members rather than going
 /// blank; with no members it returns the neutral default.
 pub fn minimap_framing_boxes(members: &[([f32; 16], bool)]) -> ([f64; 3], f64) {

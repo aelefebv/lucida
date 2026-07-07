@@ -77,7 +77,7 @@ function makeChunkDelivery(
 ): ReadyChunkDelivery {
   return {
     kind: "chunk",
-    entityId: "field-0",
+    entityId: "tile-0",
     imageId: "img-0",
     level: 1,
     t: 0,
@@ -100,9 +100,9 @@ function makeProxyDelivery(
   return {
     kind: "proxy",
     datasetId: "ds1",
-    entityId: "field-0",
+    entityId: "tile-0",
     imageId: "img-0",
-    proxyKind: "FieldProxy3D",
+    proxyKind: "TileProxy3D",
     t: 0,
     c: 0,
     header: {
@@ -240,7 +240,7 @@ describe("dispatchChunk", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatchProxy", () => {
-  it("calls proxyAssetData with destructured delivery fields", () => {
+  it("calls proxyAssetData with destructured delivery tiles", () => {
     const delivery = makeProxyDelivery();
     const { client, proxyAssetData } = makeMockClient();
 
@@ -249,9 +249,9 @@ describe("dispatchProxy", () => {
     expect(proxyAssetData).toHaveBeenCalledTimes(1);
     expect(proxyAssetData).toHaveBeenCalledWith(
       "ds1",
-      "field-0",
+      "tile-0",
       "img-0",
-      "FieldProxy3D",
+      "TileProxy3D",
       0,
       0,
       [4, 4, 4],
@@ -260,13 +260,13 @@ describe("dispatchProxy", () => {
     );
   });
 
-  it("forwards WellProxy3D kind as-is", () => {
-    const delivery = makeProxyDelivery({ proxyKind: "WellProxy3D", entityId: "well-1" });
+  it("forwards GroupProxy3D kind as-is", () => {
+    const delivery = makeProxyDelivery({ proxyKind: "GroupProxy3D", entityId: "group-1" });
     const { client, proxyAssetData } = makeMockClient();
 
     dispatchProxy(client, delivery, EPOCHS);
 
-    expect(proxyAssetData.mock.calls[0][1]).toBe("well-1");
-    expect(proxyAssetData.mock.calls[0][3]).toBe("WellProxy3D");
+    expect(proxyAssetData.mock.calls[0][1]).toBe("group-1");
+    expect(proxyAssetData.mock.calls[0][3]).toBe("GroupProxy3D");
   });
 });

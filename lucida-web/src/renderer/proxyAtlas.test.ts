@@ -76,13 +76,13 @@ describe("proxyAtlas", () => {
 
   describe("createProxyAtlas", () => {
     it("creates pool with capacity slots and 3-D grid texture layout", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [16, 32, 64], 0, 4);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [16, 32, 64], 0, 4);
       expect(atlas.capacity).toBe(4);
       expect(atlas.requestedCapacity).toBe(4);
       expect(atlas.slots.size).toBe(0);
       expect(atlas.freeSlots).toHaveLength(4);
       expect(atlas.touchOrder).toHaveLength(0);
-      expect(atlas.kind).toBe("FieldProxy3D");
+      expect(atlas.kind).toBe("TileProxy3D");
       expect(atlas.channel).toBe(0);
       expect(atlas.slotDims).toEqual([16, 32, 64]);
       expect(atlas.slotsX * atlas.slotsY * atlas.slotsZ).toBeGreaterThanOrEqual(4);
@@ -94,7 +94,7 @@ describe("proxyAtlas", () => {
     });
 
     it("uses the Z/Y axes instead of clamping to the X-only limit", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [1, 128, 128], 0, 64);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [1, 128, 128], 0, 64);
       expect(atlas.capacity).toBe(64);
       expect(atlas.slotsX * atlas.slotsY * atlas.slotsZ).toBeGreaterThanOrEqual(64);
       const [texW, texH, texD] = (atlas.texture as unknown as MockTexture).size;
@@ -105,7 +105,7 @@ describe("proxyAtlas", () => {
 
     it("clamps capacity only when the 3-D grid cannot fit under maxTextureDimension3D", () => {
       const lowLimitDevice = makeMockDevice(16);
-      const atlas = createProxyAtlas(lowLimitDevice, "WellProxy3D", [8, 8, 8], 0, 16);
+      const atlas = createProxyAtlas(lowLimitDevice, "GroupProxy3D", [8, 8, 8], 0, 16);
       expect(atlas.capacity).toBe(8);
       expect(atlas.requestedCapacity).toBe(16);
       expect(atlas.freeSlots).toHaveLength(8);
@@ -122,7 +122,7 @@ describe("proxyAtlas", () => {
   describe("allocateProxySlot", () => {
     let atlas: ProxyAtlasState;
     beforeEach(() => {
-      atlas = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 3);
+      atlas = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 3);
     });
 
     it("returns 0 on first allocation in empty atlas; slots map updated", () => {
@@ -187,14 +187,14 @@ describe("proxyAtlas", () => {
 
   describe("lookupProxySlot", () => {
     it("returns slot index for resident key, undefined otherwise", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 4);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 4);
       const s = allocateProxySlot(atlas, "alpha");
       expect(lookupProxySlot(atlas, "alpha")).toBe(s);
       expect(lookupProxySlot(atlas, "missing")).toBeUndefined();
     });
 
     it("does not affect LRU touch order", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 3);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 3);
       allocateProxySlot(atlas, "k1");
       allocateProxySlot(atlas, "k2");
       lookupProxySlot(atlas, "k1");
@@ -204,7 +204,7 @@ describe("proxyAtlas", () => {
 
   describe("touchProxySlot", () => {
     it("moves resident key to end of touchOrder", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 3);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 3);
       allocateProxySlot(atlas, "k1");
       allocateProxySlot(atlas, "k2");
       allocateProxySlot(atlas, "k3");
@@ -213,7 +213,7 @@ describe("proxyAtlas", () => {
     });
 
     it("is a no-op for missing key", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 3);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 3);
       allocateProxySlot(atlas, "k1");
       touchProxySlot(atlas, "missing");
       expect(atlas.touchOrder).toEqual(["k1"]);
@@ -222,7 +222,7 @@ describe("proxyAtlas", () => {
 
   describe("proxySlotOrigin", () => {
     it("returns the 3-D grid origin for a slot index", () => {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", [16, 32, 64], 0, 4);
+      const atlas = createProxyAtlas(device, "TileProxy3D", [16, 32, 64], 0, 4);
       expect(proxySlotOrigin(atlas, 0)).toEqual([0, 0, 0]);
       expect(proxySlotOrigin(atlas, 1)).toEqual([0, 0, 16]);
       expect(proxySlotOrigin(atlas, 3)).toEqual([0, 0, 48]);
@@ -231,11 +231,11 @@ describe("proxyAtlas", () => {
 
   describe("proxyPoolKey", () => {
     it("encodes datasetId, kind, dims, channel into a stable key", () => {
-      expect(proxyPoolKey("ds-A", "FieldProxy3D", [16, 32, 64], 0)).toBe(
-        "ds-A|proxy|FieldProxy3D|64x32x16|ch0",
+      expect(proxyPoolKey("ds-A", "TileProxy3D", [16, 32, 64], 0)).toBe(
+        "ds-A|proxy|TileProxy3D|64x32x16|ch0",
       );
-      expect(proxyPoolKey("ds-A", "WellProxy3D", [16, 32, 64], 2)).toBe(
-        "ds-A|proxy|WellProxy3D|64x32x16|ch2",
+      expect(proxyPoolKey("ds-A", "GroupProxy3D", [16, 32, 64], 2)).toBe(
+        "ds-A|proxy|GroupProxy3D|64x32x16|ch2",
       );
     });
   });
@@ -249,26 +249,26 @@ describe("proxyAtlas", () => {
 
   describe("multi-pool independence", () => {
     it("different (kind, channel) -> independent pools, no slot collisions", () => {
-      const fieldCh0 = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 2);
-      const wellCh0 = createProxyAtlas(device, "WellProxy3D", [8, 8, 8], 0, 2);
-      const fieldCh1 = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 1, 2);
+      const tileCh0 = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 2);
+      const groupCh0 = createProxyAtlas(device, "GroupProxy3D", [8, 8, 8], 0, 2);
+      const tileCh1 = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 1, 2);
 
       // Same composite key in three pools — each gets its own slot.
       const key = proxySlotKey("entity-X", 0, 0);
-      const s1 = allocateProxySlot(fieldCh0, key);
-      const s2 = allocateProxySlot(wellCh0, key);
-      const s3 = allocateProxySlot(fieldCh1, key);
+      const s1 = allocateProxySlot(tileCh0, key);
+      const s2 = allocateProxySlot(groupCh0, key);
+      const s3 = allocateProxySlot(tileCh1, key);
 
-      expect(fieldCh0.slots.get(key)).toBe(s1);
-      expect(wellCh0.slots.get(key)).toBe(s2);
-      expect(fieldCh1.slots.get(key)).toBe(s3);
+      expect(tileCh0.slots.get(key)).toBe(s1);
+      expect(groupCh0.slots.get(key)).toBe(s2);
+      expect(tileCh1.slots.get(key)).toBe(s3);
 
       // Filling pool A doesn't affect B or C.
-      allocateProxySlot(fieldCh0, "other-1");
-      allocateProxySlot(fieldCh0, "other-2"); // evicts the oldest in fieldCh0
-      // wellCh0 still has the original key.
-      expect(wellCh0.slots.get(key)).toBe(s2);
-      expect(fieldCh1.slots.get(key)).toBe(s3);
+      allocateProxySlot(tileCh0, "other-1");
+      allocateProxySlot(tileCh0, "other-2"); // evicts the oldest in tileCh0
+      // groupCh0 still has the original key.
+      expect(groupCh0.slots.get(key)).toBe(s2);
+      expect(tileCh1.slots.get(key)).toBe(s3);
     });
   });
 });

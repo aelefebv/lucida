@@ -36,7 +36,7 @@ export interface LabelVolumeScene {
  * fetches in `volume` mode, so both resolve through the shared
  * {@link resolveVisibleLabels}. A label overlays its source image's physical
  * extent, so it renders in the SOURCE member's world placement (its model
- * matrix + inverse) — a coarser label still covers the same field of view,
+ * matrix + inverse) — a coarser label still covers the same region of the view,
  * aligned by its own scale in the shader. Declared `image-label.colors` are
  * forwarded so authored palettes render exactly. Labels never change the
  * camera or bounds.
@@ -59,7 +59,7 @@ export function pushLabelVolumeLayers(
     const { label, source, opacity } = resolved;
     const sourceImageId = label.source_image_id;
     // Anchor to the source member's world placement so the overlay lands on
-    // the image it annotates (well-as-proxy entries carry their own matrices).
+    // the image it annotates (group-as-proxy entries carry their own matrices).
     const sourceMember = members.find((m) => m.imageId === sourceImageId);
     const sourceModel = sourceMember?.modelMatrix
       ?? new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
@@ -167,12 +167,12 @@ function uploadAndRenderVolume(
           const compKey = compositeKey(m.imageId, ch);
           // Model matrix is in the descriptor; CPU side still needs it
           // for the scissor rect projection. Same source as cold state
-          // (synthesised for well-as-proxy, scene query for fields).
+          // (synthesised for group-as-proxy, scene query for tiles).
           const model = m.modelMatrix
             ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
           const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
-          if (!scissorRect) continue; // well fully off-screen
+          if (!scissorRect) continue; // group fully off-screen
 
           const entityIndex = indexByMember.get(compKey);
           if (entityIndex === undefined) continue;
@@ -196,7 +196,7 @@ function uploadAndRenderVolume(
           ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
         const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
-        if (!scissorRect) continue; // well fully off-screen
+        if (!scissorRect) continue; // group fully off-screen
 
         const entityIndex = indexByMember.get(m.imageId);
         if (entityIndex === undefined) continue;

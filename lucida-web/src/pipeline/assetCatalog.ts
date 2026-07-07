@@ -11,7 +11,7 @@
  *      can read via `snapshot()` without paying a JSON round-trip per tick.
  */
 
-export type ProxyKind = "WellProxy3D" | "FieldProxy3D";
+export type ProxyKind = "GroupProxy3D" | "TileProxy3D";
 
 export interface ProxyFootprint {
   kind: ProxyKind;
@@ -61,7 +61,7 @@ export class AssetCatalog {
   }
 
   /**
-   * Apply an initial catalog snapshot for a dataset (the `catalog` field
+   * Apply an initial catalog snapshot for a dataset (the `catalog` tile
    * of `DatasetOpened`). Implemented as a delta apply so that the WASM
    * side bumps `epochs.asset` and the local mirror grows monotonically.
    *

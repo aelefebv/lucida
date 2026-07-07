@@ -196,7 +196,7 @@ describe("useBookmarks — loading lifecycle", () => {
 describe("useBookmarks — filter logic", () => {
   it("substring matches against name + created_by_name + created_by", async () => {
     const items = [
-      makeBm({ id: "b1", name: "Apoptosis well B7", created_by_name: "Alice", created_by: "alice@x" }),
+      makeBm({ id: "b1", name: "Apoptosis group B7", created_by_name: "Alice", created_by: "alice@x" }),
       makeBm({ id: "b2", name: "CYP7A1 stain", created_by_name: "Bob", created_by: "bob@x" }),
       makeBm({ id: "b3", name: "Random", created_by_name: "Carol", created_by: "carol@x" }),
     ];

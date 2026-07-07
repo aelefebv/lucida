@@ -85,7 +85,7 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
       [8, 8, 8] as [number, number, number],
       [4, 16, 128] as [number, number, number],
     ]) {
-      const atlas = createProxyAtlas(device, "FieldProxy3D", slotDims, 0, 4);
+      const atlas = createProxyAtlas(device, "TileProxy3D", slotDims, 0, 4);
       const textureSize = (atlas.texture as unknown as MockTexture).size;
       for (let slot = 0; slot < atlas.capacity; slot++) {
         const tsOrigin = proxySlotOrigin(atlas, slot);
@@ -101,7 +101,7 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
     // upload origin, so the first voxel uploaded reads back at slot frac
     // (0,0,0).
     const device = makeMockDevice();
-    const atlas = createProxyAtlas(device, "WellProxy3D", [16, 32, 64], 0, 8);
+    const atlas = createProxyAtlas(device, "GroupProxy3D", [16, 32, 64], 0, 8);
     const slot = allocateProxySlot(atlas, proxySlotKey("entity-0", 0, 0));
     const uploadOrigin = proxySlotOrigin(atlas, slot);
     const shaderReadAtFracZero = shaderOrigin(

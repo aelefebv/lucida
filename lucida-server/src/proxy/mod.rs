@@ -17,7 +17,7 @@
 //!
 //! ## Async/sync boundary
 //!
-//! `ProxySourceData::read_field_volume` is **synchronous** by design — the
+//! `ProxySourceData::read_tile_volume` is **synchronous** by design — the
 //! generation algorithm in `lucida-proxy` is pure compute and async-free.
 //! Production reads need async I/O against `CachedStore`. We resolve this
 //! by having [`ProxyGenerator::request`] **pre-fetch** all chunks the

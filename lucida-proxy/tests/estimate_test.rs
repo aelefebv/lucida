@@ -4,12 +4,12 @@ use lucida_content::{EntityId, VoxelTransform};
 use lucida_proxy::{ProxyKind, ProxySpec, estimate_proxy_dims, generate_proxy};
 
 use crate::common::{
-    FieldSpec, MockSource, fill_volume, level5, single_image_graph, well_graph_with_fields,
+    MockSource, TileSpec, fill_volume, group_graph_with_tiles, level5, single_image_graph,
 };
 
 #[test]
-fn field_estimate_matches_generated_proxy_dims() {
-    let content = single_image_graph("field-1", "img-1", vec![level5(0, [1, 1, 4, 16, 32])]);
+fn tile_estimate_matches_generated_proxy_dims() {
+    let content = single_image_graph("tile-1", "img-1", vec![level5(0, [1, 1, 4, 16, 32])]);
     let mut source = MockSource::default();
     source.insert(
         "img-1",
@@ -21,8 +21,8 @@ fn field_estimate_matches_generated_proxy_dims() {
         VoxelTransform::identity(),
     );
     let spec = ProxySpec {
-        entity_id: EntityId("field-1".into()),
-        kind: ProxyKind::FieldProxy3D,
+        entity_id: EntityId("tile-1".into()),
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 8,
@@ -36,20 +36,20 @@ fn field_estimate_matches_generated_proxy_dims() {
 }
 
 #[test]
-fn well_estimate_matches_generated_proxy_dims() {
-    let content = well_graph_with_fields(
-        "well-A1",
+fn group_estimate_matches_generated_proxy_dims() {
+    let content = group_graph_with_tiles(
+        "group-A1",
         &[
-            FieldSpec {
-                field_id: "field-1",
+            TileSpec {
+                tile_id: "tile-1",
                 image_id: "img-1",
-                field_index: 0,
+                tile_index: 0,
                 translation_xy: [0.0, 0.0],
             },
-            FieldSpec {
-                field_id: "field-2",
+            TileSpec {
+                tile_id: "tile-2",
                 image_id: "img-2",
-                field_index: 1,
+                tile_index: 1,
                 translation_xy: [16.0, 0.0],
             },
         ],
@@ -68,8 +68,8 @@ fn well_estimate_matches_generated_proxy_dims() {
         );
     }
     let spec = ProxySpec {
-        entity_id: EntityId("well-A1".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group-A1".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 8,

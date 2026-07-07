@@ -156,25 +156,25 @@ async fn import_single_image(
 /// the backing store.
 const METADATA_FETCH_CONCURRENCY: usize = 32;
 
-/// One well's parsed metadata: its collection path, grid coordinates, and the fields
+/// One group's parsed metadata: its collection path, grid coordinates, and the tiles
 /// it declares. Produced concurrently, then assembled in declared order.
-struct WellParsed {
+struct GroupParsed {
     path: String,
     row_index: u32,
     column_index: u32,
-    fovs: Vec<FovParsed>,
+    tiles: Vec<TileParsed>,
 }
 
-/// One field-of-view within a well: its store prefix and any stage translation.
-struct FovParsed {
+/// One tile within a group: its store prefix and any stage translation.
+struct TileParsed {
     store_prefix: String,
     translation: Option<Vec<f64>>,
 }
 
-/// The collection path used to name a well in warnings and diagnostics. Prefers the
+/// The collection path used to name a group in warnings and diagnostics. Prefers the
 /// declared `path`; falls back to the row/column labels (then indices) when the
-/// entry omits it, so a skipped well is still identifiable.
-fn well_collection_path(
+/// entry omits it, so a skipped group is still identifiable.
+fn group_collection_path(
     path: Option<&str>,
     row_index: u32,
     column_index: u32,
@@ -195,83 +195,83 @@ fn well_collection_path(
     format!("{row}/{column}")
 }
 
-fn skipped_well_warning(target: &str, reason: String) -> ImportWarning {
+fn skipped_group_warning(target: &str, reason: String) -> ImportWarning {
     ImportWarning {
-        kind: ImportWarningKind::SkippedWell,
+        kind: ImportWarningKind::SkippedGroup,
         target: target.to_string(),
-        message: format!("skipped well {target:?}: {reason}"),
+        message: format!("skipped group {target:?}: {reason}"),
     }
 }
 
-/// Fetch and parse a single well's `zarr.json`, extracting its fields.
+/// Fetch and parse a single group's `zarr.json`, extracting its tiles.
 ///
 /// Tolerant by design: a missing collection `path`, an unreadable or malformed
 /// `zarr.json`, or a missing `ome.well.images` list yields a [`ImportWarning`]
 /// the caller records and skips, rather than aborting the whole collection. Only the
-/// object-store GET is awaited here so callers can fan many wells out at once.
-/// `target` is the well's collection path used in any warning, computed by the caller
+/// object-store GET is awaited here so callers can fan many groups out at once.
+/// `target` is the group's collection path used in any warning, computed by the caller
 /// so this future owns all of its inputs.
-async fn parse_one_well(
+async fn parse_one_group(
     store: Arc<dyn ObjectStore>,
     path: Option<String>,
     row_index: u32,
     column_index: u32,
     target: String,
-) -> Result<WellParsed, ImportWarning> {
-    let Some(well_path) = path else {
-        return Err(skipped_well_warning(
+) -> Result<GroupParsed, ImportWarning> {
+    let Some(group_path) = path else {
+        return Err(skipped_group_warning(
             &target,
             "collection entry is missing 'path'".to_string(),
         ));
     };
 
-    let well_meta_path = Path::from(format!("{well_path}/zarr.json"));
-    let well_bytes = match store.get(&well_meta_path).await {
+    let group_meta_path = Path::from(format!("{group_path}/zarr.json"));
+    let group_bytes = match store.get(&group_meta_path).await {
         Ok(response) => match response.bytes().await {
             Ok(bytes) => bytes,
             Err(e) => {
-                return Err(skipped_well_warning(
+                return Err(skipped_group_warning(
                     &target,
-                    format!("well metadata is unreadable: {e}"),
+                    format!("group metadata is unreadable: {e}"),
                 ));
             }
         },
         Err(e) => {
-            return Err(skipped_well_warning(
+            return Err(skipped_group_warning(
                 &target,
-                format!("well metadata is unreadable: {e}"),
+                format!("group metadata is unreadable: {e}"),
             ));
         }
     };
 
-    let well_json: serde_json::Value = match serde_json::from_slice(&well_bytes) {
+    let group_json: serde_json::Value = match serde_json::from_slice(&group_bytes) {
         Ok(value) => value,
         Err(e) => {
-            return Err(skipped_well_warning(
+            return Err(skipped_group_warning(
                 &target,
-                format!("well metadata is not valid JSON: {e}"),
+                format!("group metadata is not valid JSON: {e}"),
             ));
         }
     };
 
-    let Some(images) = well_json
+    let Some(images) = group_json
         .pointer("/attributes/ome/well/images")
         .and_then(|v| v.as_array())
     else {
-        return Err(skipped_well_warning(
+        return Err(skipped_group_warning(
             &target,
-            "well metadata has no ome.well.images list".to_string(),
+            "group metadata has no ome.well.images list".to_string(),
         ));
     };
 
-    let mut fovs: Vec<FovParsed> = Vec::new();
+    let mut tiles: Vec<TileParsed> = Vec::new();
     for image_entry in images {
-        let fov_path = image_entry
+        let tile_path = image_entry
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("0")
             .to_string();
-        let store_prefix = format!("{well_path}/{fov_path}");
+        let store_prefix = format!("{group_path}/{tile_path}");
 
         let translation = image_entry
             .get("coordinateTransformations")
@@ -288,17 +288,17 @@ async fn parse_one_well(
                 })
             });
 
-        fovs.push(FovParsed {
+        tiles.push(TileParsed {
             store_prefix,
             translation,
         });
     }
 
-    Ok(WellParsed {
-        path: well_path,
+    Ok(GroupParsed {
+        path: group_path,
         row_index,
         column_index,
-        fovs,
+        tiles,
     })
 }
 
@@ -333,41 +333,46 @@ async fn import_collection(
         })
         .unwrap_or_default();
 
-    let wells_json = collection_json
+    let groups_json = collection_json
         .get("wells")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| StoreError::Metadata("collection has no wells array".into()))?;
+        .ok_or_else(|| StoreError::Metadata("collection has no groups array".into()))?;
 
-    // Fetch every well's `zarr.json` with bounded concurrency, keyed by its
+    // Fetch every group's `zarr.json` with bounded concurrency, keyed by its
     // declared position, then re-order the results so downstream assembly runs
-    // in declared well order regardless of completion order.
-    let well_outcomes: Vec<Result<WellParsed, ImportWarning>> = {
-        // Extract each well's declared fields (owned) up front so the concurrent
+    // in declared group order regardless of completion order.
+    let group_outcomes: Vec<Result<GroupParsed, ImportWarning>> = {
+        // Extract each group's declared tiles (owned) up front so the concurrent
         // futures borrow nothing from the collection JSON, rows, or columns.
-        struct WellRequest {
+        struct GroupRequest {
             path: Option<String>,
             row_index: u32,
             column_index: u32,
             target: String,
         }
-        let requests: Vec<WellRequest> = wells_json
+        let requests: Vec<GroupRequest> = groups_json
             .iter()
-            .map(|well_entry| {
-                let path = well_entry
+            .map(|group_entry| {
+                let path = group_entry
                     .get("path")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let row_index = well_entry
+                let row_index = group_entry
                     .get("rowIndex")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
-                let column_index = well_entry
+                let column_index = group_entry
                     .get("columnIndex")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
-                let target =
-                    well_collection_path(path.as_deref(), row_index, column_index, &rows, &columns);
-                WellRequest {
+                let target = group_collection_path(
+                    path.as_deref(),
+                    row_index,
+                    column_index,
+                    &rows,
+                    &columns,
+                );
+                GroupRequest {
                     path,
                     row_index,
                     column_index,
@@ -376,13 +381,13 @@ async fn import_collection(
             })
             .collect();
 
-        let mut slots: Vec<Option<Result<WellParsed, ImportWarning>>> =
+        let mut slots: Vec<Option<Result<GroupParsed, ImportWarning>>> =
             (0..requests.len()).map(|_| None).collect();
         let mut stream =
             futures_util::stream::iter(requests.into_iter().enumerate().map(|(index, req)| {
                 let store = store.clone();
                 async move {
-                    let outcome = parse_one_well(
+                    let outcome = parse_one_group(
                         store,
                         req.path,
                         req.row_index,
@@ -399,54 +404,54 @@ async fn import_collection(
         }
         slots
             .into_iter()
-            .map(|slot| slot.expect("every well index is filled by the fetch loop"))
+            .map(|slot| slot.expect("every group index is filled by the fetch loop"))
             .collect()
     };
 
     // Assemble in declared order: survivors keep their declared sequence and
-    // skipped wells become warnings (never a hard failure while any well
-    // parses), so representative-FOV selection and ordering are computed over
+    // skipped groups become warnings (never a hard failure while any group
+    // parses), so representative-tile selection and ordering are computed over
     // the survivors exactly as the sequential importer would.
-    let mut parsed_wells: Vec<WellParsed> = Vec::new();
+    let mut parsed_groups: Vec<GroupParsed> = Vec::new();
     let mut warnings: Vec<ImportWarning> = Vec::new();
-    for outcome in well_outcomes {
+    for outcome in group_outcomes {
         match outcome {
-            Ok(well) => parsed_wells.push(well),
+            Ok(group) => parsed_groups.push(group),
             Err(warning) => warnings.push(warning),
         }
     }
 
-    if parsed_wells.is_empty() {
+    if parsed_groups.is_empty() {
         return Err(StoreError::Metadata(
-            "collection has no readable wells".into(),
+            "collection has no readable groups".into(),
         ));
     }
 
-    let mut representative_fov_path: Option<String> = None;
+    let mut representative_tile_path: Option<String> = None;
     let mut has_explicit_positions = false;
-    for well in &parsed_wells {
-        for fov in &well.fovs {
-            if fov.translation.is_some() {
+    for group in &parsed_groups {
+        for tile in &group.tiles {
+            if tile.translation.is_some() {
                 has_explicit_positions = true;
             }
-            if representative_fov_path.is_none() {
-                representative_fov_path = Some(fov.store_prefix.clone());
+            if representative_tile_path.is_none() {
+                representative_tile_path = Some(tile.store_prefix.clone());
             }
         }
     }
 
-    // Read representative FOV multiscales.
-    let rep_path = representative_fov_path
-        .ok_or_else(|| StoreError::Metadata("collection has no FOVs".into()))?;
+    // Read representative tile multiscales.
+    let rep_path = representative_tile_path
+        .ok_or_else(|| StoreError::Metadata("collection has no tiles".into()))?;
 
     let rep_json = parse::read_zarr_json(store, &format!("{rep_path}/zarr.json")).await?;
     let rep_parsed = parse::parse_multiscales(&rep_json, &format!("{rep_path}: "))?;
     let axes_names = rep_parsed.axes_names;
     let level_entries = rep_parsed.level_entries;
 
-    // Channel display names from the representative FOV's omero block. OME-Zarr
-    // collections require all FOVs to share one multiscale, so the representative
-    // FOV's channels apply to every field (generic; optional).
+    // Channel display names from the representative tile's omero block. OME-Zarr
+    // collections require all tiles to share one multiscale, so the representative
+    // tile's channels apply to every tile (generic; optional).
     let channel_infos = parse::parse_omero_channels(&rep_json);
 
     let level_metas = parse::read_level_metas(store, &rep_path, &level_entries).await?;
@@ -473,7 +478,7 @@ async fn import_collection(
 
     // For stage-positioned collections, OME-Zarr translations are in physical units
     // (e.g., microns), but the rest of lucida composes them with voxel-unit
-    // well placements. Convert translations to voxel units here using the
+    // group placements. Convert translations to voxel units here using the
     // level-0 scale. Defensive: a missing or invalid scale falls back to 1.0
     // (pass-through) and emits a single warning per dataset.
     let (scale_x, scale_y) = {
@@ -492,7 +497,7 @@ async fn import_collection(
         (sx, sy)
     };
 
-    // Determine row/column labels for each well from row_index/column_index.
+    // Determine row/column labels for each group from row_index/column_index.
     let find_row_label = |ri: u32| -> String {
         rows.get(ri as usize)
             .cloned()
@@ -511,24 +516,24 @@ async fn import_collection(
     let mut transforms: Vec<TransformEdge> = Vec::new();
     let mut fetch_images: Vec<ProxiedImageSpec> = Vec::new();
     let mut binding_images: Vec<ImageBindingSeed> = Vec::new();
-    // Label overlays discovered per-field, flattened across the whole collection.
-    // The budget is shared across fields so aggregate label/color memory is
-    // bounded no matter how many fields carry labels.
+    // Label overlays discovered per-tile, flattened across the whole collection.
+    // The budget is shared across tiles so aggregate label/color memory is
+    // bounded no matter how many tiles carry labels.
     let mut label_specs: Vec<LabelSpec> = Vec::new();
     let mut label_budget = LabelBudget::new();
 
-    // Probe every field's `labels/` group index with bounded concurrency — the
-    // only per-field label I/O safe to fan out, since it reads one small index
-    // object and holds only names, never built specs — keyed by declared field
+    // Probe every tile's `labels/` group index with bounded concurrency — the
+    // only per-tile label I/O safe to fan out, since it reads one small index
+    // object and holds only names, never built specs — keyed by declared tile
     // order.
-    let field_prefixes: Vec<String> = parsed_wells
+    let tile_prefixes: Vec<String> = parsed_groups
         .iter()
-        .flat_map(|well| well.fovs.iter().map(|fov| fov.store_prefix.clone()))
+        .flat_map(|group| group.tiles.iter().map(|tile| tile.store_prefix.clone()))
         .collect();
     let mut probed_labels: Vec<Option<ProbedLabels>> =
-        (0..field_prefixes.len()).map(|_| None).collect();
+        (0..tile_prefixes.len()).map(|_| None).collect();
     let mut probe_stream =
-        futures_util::stream::iter(field_prefixes.iter().cloned().enumerate().map(
+        futures_util::stream::iter(tile_prefixes.iter().cloned().enumerate().map(
             |(index, prefix)| {
                 let store = store.clone();
                 async move {
@@ -542,54 +547,55 @@ async fn import_collection(
         probed_labels[index] = Some(probed);
     }
 
-    // Build the probed labels serially, in declared field order, gated by the
+    // Build the probed labels serially, in declared tile order, gated by the
     // shared running budget: `build_label`'s expensive per-label reads and
     // allocations only run while the budget has room and stop the instant it is
     // exhausted. This keeps peak label memory/IO O(budget) and reproduces the
     // sequential importer's retention exactly — the same labels and colors are
     // kept, and the same ones dropped, in the same order.
-    let mut field_labels = Vec::with_capacity(field_prefixes.len());
-    for (prefix, probed) in field_prefixes.iter().zip(probed_labels) {
-        let probed = probed.expect("every field index is filled by the probe loop");
+    let mut tile_labels = Vec::with_capacity(tile_prefixes.len());
+    for (prefix, probed) in tile_prefixes.iter().zip(probed_labels) {
+        let probed = probed.expect("every tile index is filled by the probe loop");
         let image_id = ImageId(format!("{id}:image:{prefix}"));
-        let owner = EntityId(format!("{id}:field:{prefix}"));
+        let owner = EntityId(format!("{id}:tile:{prefix}"));
         let imported =
             build_labels_within_budget(&mut label_budget, store, id, &image_id, &owner, probed)
                 .await;
-        field_labels.push(imported);
+        tile_labels.push(imported);
     }
-    let mut field_labels = field_labels.into_iter();
+    let mut tile_labels = tile_labels.into_iter();
 
-    for well in &parsed_wells {
-        let well_entity_id = EntityId(format!("{id}:well:{}", well.path));
+    for group in &parsed_groups {
+        let group_entity_id = EntityId(format!("{id}:group:{}", group.path));
 
         entities.push(Entity {
-            id: well_entity_id.clone(),
-            kind: EntityKind::Well,
+            id: group_entity_id.clone(),
+            kind: EntityKind::Group,
             parent: None,
             labels: EntityLabels {
                 name: Some(format!(
                     "{}/{}",
-                    find_row_label(well.row_index),
-                    find_col_label(well.column_index),
+                    find_row_label(group.row_index),
+                    find_col_label(group.column_index),
                 )),
-                well_row: Some(find_row_label(well.row_index)),
-                well_column: Some(find_col_label(well.column_index)),
-                row_index: Some(well.row_index),
-                column_index: Some(well.column_index),
+                group_row: Some(find_row_label(group.row_index)),
+                group_column: Some(find_col_label(group.column_index)),
+                row_index: Some(group.row_index),
+                column_index: Some(group.column_index),
                 ..Default::default()
             },
         });
 
-        // Collect stage translations for this well's FOVs to normalize them.
+        // Collect stage translations for this group's tiles to normalize them.
         // Translations are stored in OME-Zarr in physical units (e.g. microns);
         // convert to voxel units here so downstream consumers see consistent
         // units across grid- and stage-positioned collections.
         let stage_positions: Vec<Option<[f64; 2]>> = if has_explicit_positions {
-            well.fovs
+            group
+                .tiles
                 .iter()
-                .map(|fov| {
-                    fov.translation.as_ref().map(|t| {
+                .map(|tile| {
+                    tile.translation.as_ref().map(|t| {
                         let len = t.len();
                         if len >= 2 {
                             // Last value is X, second-to-last is Y
@@ -601,10 +607,10 @@ async fn import_collection(
                 })
                 .collect()
         } else {
-            vec![None; well.fovs.len()]
+            vec![None; group.tiles.len()]
         };
 
-        // Find minimum for normalization within this well.
+        // Find minimum for normalization within this group.
         let (min_x, min_y) = if has_explicit_positions {
             let mut mx = f64::MAX;
             let mut my = f64::MAX;
@@ -623,50 +629,50 @@ async fn import_collection(
             (0.0, 0.0)
         };
 
-        for (fi, fov) in well.fovs.iter().enumerate() {
-            let field_entity_id = EntityId(format!("{id}:field:{}", fov.store_prefix));
-            let image_id = ImageId(format!("{id}:image:{}", fov.store_prefix));
+        for (fi, tile) in group.tiles.iter().enumerate() {
+            let tile_entity_id = EntityId(format!("{id}:tile:{}", tile.store_prefix));
+            let image_id = ImageId(format!("{id}:image:{}", tile.store_prefix));
 
             entities.push(Entity {
-                id: field_entity_id.clone(),
-                kind: EntityKind::Field,
-                parent: Some(well_entity_id.clone()),
+                id: tile_entity_id.clone(),
+                kind: EntityKind::Tile,
+                parent: Some(group_entity_id.clone()),
                 labels: EntityLabels {
-                    name: Some(format!("Field {}", fi)),
-                    field_index: Some(fi as u32),
+                    name: Some(format!("Tile {}", fi)),
+                    tile_index: Some(fi as u32),
                     ..Default::default()
                 },
             });
 
-            // Build field->well transform.
+            // Build tile->group transform.
             if has_explicit_positions {
                 if let Some([x, y]) = stage_positions[fi] {
                     transforms.push(TransformEdge {
-                        from: field_entity_id.clone(),
-                        to: well_entity_id.clone(),
+                        from: tile_entity_id.clone(),
+                        to: group_entity_id.clone(),
                         transform: VoxelTransform::from_voxel_translation_2d(x - min_x, y - min_y),
                     });
                 } else {
                     transforms.push(TransformEdge {
-                        from: field_entity_id.clone(),
-                        to: well_entity_id.clone(),
+                        from: tile_entity_id.clone(),
+                        to: group_entity_id.clone(),
                         transform: VoxelTransform::from_voxel_translation_2d(0.0, 0.0),
                     });
                 }
             }
             // Grid transforms are built after all entities are created.
 
-            // This field's `labels/` group was probed concurrently above and
+            // This tile's `labels/` group was probed concurrently above and
             // its budget charged in declared order; take the prepared overlays
-            // so they interleave after the field's own image entries exactly as
+            // so they interleave after the tile's own image entries exactly as
             // a sequential probe would place them.
-            let fov_labels = field_labels
+            let tile_labels = tile_labels
                 .next()
-                .expect("one prepared label set per field, in declared order");
+                .expect("one prepared label set per tile, in declared order");
 
             images.push(ImageSpec {
                 image_id: image_id.clone(),
-                owner: field_entity_id,
+                owner: tile_entity_id,
                 multiscale: MultiscaleInfo {
                     axes: axes.clone(),
                     levels: levels.clone(),
@@ -690,35 +696,35 @@ async fn import_collection(
             binding_images.push(ImageBindingSeed {
                 image_id,
                 axes_names: axes_names.clone(),
-                store_prefix: Some(fov.store_prefix.clone()),
+                store_prefix: Some(tile.store_prefix.clone()),
                 levels: level_bindings.clone(),
             });
 
-            // Append the field's labels after its own image entries.
-            label_specs.extend(fov_labels.specs);
-            fetch_images.extend(fov_labels.fetch);
-            binding_images.extend(fov_labels.bindings);
+            // Append the tile's labels after its own image entries.
+            label_specs.extend(tile_labels.specs);
+            fetch_images.extend(tile_labels.fetch);
+            binding_images.extend(tile_labels.bindings);
         }
     }
 
-    // Build grid field transforms if not stage-positioned.
+    // Build grid tile transforms if not stage-positioned.
     if !has_explicit_positions {
-        let well_entities: Vec<&Entity> = entities
+        let group_entities: Vec<&Entity> = entities
             .iter()
-            .filter(|e| e.kind == EntityKind::Well)
+            .filter(|e| e.kind == EntityKind::Group)
             .collect();
-        let field_entities: Vec<Entity> = entities
+        let tile_entities: Vec<Entity> = entities
             .iter()
-            .filter(|e| e.kind == EntityKind::Field)
+            .filter(|e| e.kind == EntityKind::Tile)
             .cloned()
             .collect();
 
-        let grid_transforms = lucida_content::collection::build_grid_field_transforms(
-            &well_entities
+        let grid_transforms = lucida_content::collection::build_grid_tile_transforms(
+            &group_entities
                 .iter()
                 .map(|e| (*e).clone())
                 .collect::<Vec<_>>(),
-            &field_entities,
+            &tile_entities,
             full_shape_5d,
         )
         .map_err(|e| StoreError::Metadata(e.to_string()))?;
@@ -726,7 +732,7 @@ async fn import_collection(
         transforms = grid_transforms;
     }
 
-    // Build collection layout (places wells, not fields).
+    // Build collection layout (places groups, not tiles).
     let source_layout = lucida_content::collection::build_collection_layout(
         &entities,
         &rows,
@@ -792,7 +798,7 @@ fn data_type_size(dt: DataType) -> u8 {
 }
 
 /// Build per-level [`LevelBindingInfo`] for a single image (or for the
-/// representative FOV of a collection, since OME-Zarr collections require all FOVs to
+/// representative tile of a collection, since OME-Zarr collections require all tiles to
 /// share the same multiscale shape and codec chain).
 ///
 /// Each level is validated independently with [`parse_codec_chain`] and
@@ -899,7 +905,7 @@ fn build_level_geometries(
 }
 
 /// Dataset-wide ceiling on retained labels. The per-group name cap bounds one
-/// `labels` list; this bounds the total kept across every field of a collection so
+/// `labels` list; this bounds the total kept across every tile of a collection so
 /// an adversarial dataset can't accumulate unbounded label specs in memory.
 const MAX_LABELS_PER_DATASET: usize = 1 << 16;
 
@@ -909,7 +915,7 @@ const MAX_LABELS_PER_DATASET: usize = 1 << 16;
 const MAX_LABEL_COLORS_PER_DATASET: usize = 1 << 20;
 
 /// Remaining dataset-wide budget for retained labels and color entries, carried
-/// across every source image / collection field so aggregate memory is bounded even
+/// across every source image / collection tile so aggregate memory is bounded even
 /// when per-label caps are individually satisfied.
 struct LabelBudget {
     labels_remaining: usize,
@@ -937,7 +943,7 @@ struct ImportedLabels {
 /// One source image's `labels/` group after its index has been read but before
 /// any label is built. Holds the group prefix (for the per-label reads and
 /// diagnostics) and the declared label names in order — never the built
-/// multiscale specs, so holding one of these for every field of a wide collection at
+/// multiscale specs, so holding one of these for every tile of a wide collection at
 /// once costs no per-label memory.
 #[derive(Default)]
 struct ProbedLabels {
@@ -949,7 +955,7 @@ struct ProbedLabels {
 /// every well-formed label it lists, up to the shared dataset budget.
 ///
 /// `base_prefix` is the source image group's store prefix (`""` for a
-/// standalone image, `"{well}/{fov}"` for a collection field); labels live under
+/// standalone image, `"{group}/{tile}"` for a collection tile); labels live under
 /// `{base_prefix}/labels`. A missing `labels/` group — the common case —
 /// returns empty. Each label is built through the same multiscale pipeline as
 /// an ordinary image and attached to `source_image_id`; a label that fails to
@@ -982,7 +988,7 @@ async fn import_labels_for_image(
 /// the common case — yields an empty list.
 ///
 /// This reads exactly one small index object and holds only names, so it is the
-/// only per-field label I/O safe to fan out concurrently: probing every field of
+/// only per-tile label I/O safe to fan out concurrently: probing every tile of
 /// a wide collection at once costs no per-label memory. The expensive per-label reads
 /// happen later in [`build_labels_within_budget`], gated by the shared budget.
 async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str) -> ProbedLabels {
@@ -1181,15 +1187,15 @@ mod tests {
         collection_name: &str,
         rows: &[&str],
         columns: &[&str],
-        wells: &[(
+        groups: &[(
             /*row*/ &str,
             /*col*/ &str,
             /*row_idx*/ u32,
             /*col_idx*/ u32,
-            /*num_fovs*/ u32,
+            /*num_tiles*/ u32,
         )],
-        fov_shape: [u64; 5],
-        fov_chunk: [u64; 5],
+        tile_shape: [u64; 5],
+        tile_chunk: [u64; 5],
         num_levels: usize,
     ) {
         fs::create_dir_all(dir).unwrap();
@@ -1202,7 +1208,7 @@ mod tests {
             .iter()
             .map(|c| serde_json::json!({"name": c}))
             .collect();
-        let wells_json: Vec<serde_json::Value> = wells
+        let groups_json: Vec<serde_json::Value> = groups
             .iter()
             .map(|(row, col, ri, ci, _)| {
                 serde_json::json!({
@@ -1224,8 +1230,8 @@ mod tests {
                         "name": collection_name,
                         "rows": rows_json,
                         "columns": cols_json,
-                        "wells": wells_json,
-                        "field_count": wells.iter().map(|w| w.4).max().unwrap_or(1),
+                        "wells": groups_json,
+                        "field_count": groups.iter().map(|w| w.4).max().unwrap_or(1),
                     }
                 }
             }
@@ -1236,9 +1242,9 @@ mod tests {
         )
         .unwrap();
 
-        for (row, col, _ri, _ci, num_fovs) in wells {
-            let well_dir = dir.join(row).join(col);
-            fs::create_dir_all(&well_dir).unwrap();
+        for (row, col, _ri, _ci, num_tiles) in groups {
+            let group_dir = dir.join(row).join(col);
+            fs::create_dir_all(&group_dir).unwrap();
 
             let row_dir = dir.join(row);
             let row_meta = serde_json::json!({"zarr_format": 3, "node_type": "group"});
@@ -1248,11 +1254,11 @@ mod tests {
             )
             .unwrap();
 
-            let images: Vec<serde_json::Value> = (0..*num_fovs)
+            let images: Vec<serde_json::Value> = (0..*num_tiles)
                 .map(|i| serde_json::json!({"path": i.to_string()}))
                 .collect();
 
-            let well_meta = serde_json::json!({
+            let group_meta = serde_json::json!({
                 "zarr_format": 3,
                 "node_type": "group",
                 "attributes": {
@@ -1263,14 +1269,14 @@ mod tests {
                 }
             });
             fs::write(
-                well_dir.join("zarr.json"),
-                serde_json::to_string_pretty(&well_meta).unwrap(),
+                group_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&group_meta).unwrap(),
             )
             .unwrap();
 
-            for i in 0..*num_fovs {
-                let fov_dir = well_dir.join(i.to_string());
-                fs::create_dir_all(&fov_dir).unwrap();
+            for i in 0..*num_tiles {
+                let tile_dir = group_dir.join(i.to_string());
+                fs::create_dir_all(&tile_dir).unwrap();
 
                 // Build multiscale datasets for each level.
                 let mut datasets = Vec::new();
@@ -1285,7 +1291,7 @@ mod tests {
                     }));
                 }
 
-                let fov_root = serde_json::json!({
+                let tile_root = serde_json::json!({
                     "zarr_format": 3,
                     "node_type": "group",
                     "attributes": {
@@ -1307,21 +1313,21 @@ mod tests {
                     }
                 });
                 fs::write(
-                    fov_dir.join("zarr.json"),
-                    serde_json::to_string_pretty(&fov_root).unwrap(),
+                    tile_dir.join("zarr.json"),
+                    serde_json::to_string_pretty(&tile_root).unwrap(),
                 )
                 .unwrap();
 
                 for lvl in 0..num_levels {
-                    let level_dir = fov_dir.join(lvl.to_string());
+                    let level_dir = tile_dir.join(lvl.to_string());
                     fs::create_dir_all(&level_dir).unwrap();
                     let scale = 1u64 << lvl;
                     let level_shape = [
-                        fov_shape[0],
-                        fov_shape[1],
-                        fov_shape[2],
-                        fov_shape[3].div_ceil(scale),
-                        fov_shape[4].div_ceil(scale),
+                        tile_shape[0],
+                        tile_shape[1],
+                        tile_shape[2],
+                        tile_shape[3].div_ceil(scale),
+                        tile_shape[4].div_ceil(scale),
                     ];
                     let arr = serde_json::json!({
                         "zarr_format": 3,
@@ -1330,7 +1336,7 @@ mod tests {
                         "data_type": "uint16",
                         "chunk_grid": {
                             "name": "regular",
-                            "configuration": { "chunk_shape": fov_chunk }
+                            "configuration": { "chunk_shape": tile_chunk }
                         },
                         "codecs": [
                             {"name": "bytes", "configuration": {"endian": "little"}},
@@ -1460,58 +1466,58 @@ mod tests {
             DatasetKind::Collection { .. }
         ));
 
-        // Should have well entities and field entities.
-        let wells: Vec<_> = result
+        // Should have group entities and tile entities.
+        let groups: Vec<_> = result
             .manifest
             .entities()
             .iter()
-            .filter(|e| e.kind == EntityKind::Well)
+            .filter(|e| e.kind == EntityKind::Group)
             .collect();
-        let fields: Vec<_> = result
+        let tiles: Vec<_> = result
             .manifest
             .entities()
             .iter()
-            .filter(|e| e.kind == EntityKind::Field)
+            .filter(|e| e.kind == EntityKind::Tile)
             .collect();
-        assert_eq!(wells.len(), 3, "expected 3 wells");
-        assert_eq!(fields.len(), 4, "expected 4 fields total (2+1+1)");
+        assert_eq!(groups.len(), 3, "expected 3 groups");
+        assert_eq!(tiles.len(), 4, "expected 4 tiles total (2+1+1)");
 
-        // Every field should have a parent that is a well.
-        for field in &fields {
-            assert!(field.parent.is_some());
-            let parent_id = field.parent.as_ref().unwrap();
+        // Every tile should have a parent that is a group.
+        for tile in &tiles {
+            assert!(tile.parent.is_some());
+            let parent_id = tile.parent.as_ref().unwrap();
             assert!(
-                wells.iter().any(|w| &w.id == parent_id),
-                "field parent {:?} should be a well",
+                groups.iter().any(|w| &w.id == parent_id),
+                "tile parent {:?} should be a group",
                 parent_id,
             );
         }
 
-        // Should have transforms (field->well).
+        // Should have transforms (tile->group).
         assert!(!result.manifest.transforms().is_empty());
 
-        // Should have one image per field.
-        assert_eq!(result.manifest.images().len(), fields.len());
+        // Should have one image per tile.
+        assert_eq!(result.manifest.images().len(), tiles.len());
 
         // Fetch should be Proxied with one spec per image.
         if let FetchSource::Proxied(ref proxied) = result.fetch {
-            assert_eq!(proxied.images.len(), fields.len());
+            assert_eq!(proxied.images.len(), tiles.len());
         } else {
             panic!("Expected Proxied fetch descriptor");
         }
 
         // Binding seed should have one entry per image, each with store_prefix.
-        assert_eq!(result.binding_seed.images.len(), fields.len());
+        assert_eq!(result.binding_seed.images.len(), tiles.len());
         for img in &result.binding_seed.images {
             assert!(img.store_prefix.is_some());
         }
 
-        // Verify source layout places wells, not fields.
+        // Verify source layout places groups, not tiles.
         let layout = &result.manifest.source_layouts()[0];
         for placement in &layout.placements {
             assert!(
-                wells.iter().any(|w| w.id == placement.entity_id),
-                "Layout should only place wells, not fields",
+                groups.iter().any(|w| w.id == placement.entity_id),
+                "Layout should only place groups, not tiles",
             );
         }
 
@@ -1555,12 +1561,12 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A single hollow/unreadable well is skipped with a recorded warning while
-    /// the rest of the collection imports. The representative FOV is drawn from the
-    /// first surviving well in declared order.
+    /// A single hollow/unreadable group is skipped with a recorded warning while
+    /// the rest of the collection imports. The representative tile is drawn from the
+    /// first surviving group in declared order.
     #[tokio::test]
-    async fn skipped_well_does_not_fail_collection_import() {
-        let dir = temp_dir("skipped_well");
+    async fn skipped_group_does_not_fail_collection_import() {
+        let dir = temp_dir("skipped_group");
         create_collection_fixture(
             &dir,
             "skip_collection",
@@ -1576,7 +1582,7 @@ mod tests {
             1,
         );
 
-        // Corrupt one well's metadata so it cannot be parsed.
+        // Corrupt one group's metadata so it cannot be parsed.
         fs::write(dir.join("A").join("2").join("zarr.json"), b"{ not json").unwrap();
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
@@ -1584,38 +1590,38 @@ mod tests {
             .await
             .unwrap();
 
-        // Exactly one warning, naming the skipped well by its collection path.
+        // Exactly one warning, naming the skipped group by its collection path.
         assert_eq!(
             result.warnings.len(),
             1,
-            "expected one skipped-well warning"
+            "expected one skipped-group warning"
         );
         let warning = &result.warnings[0];
-        assert_eq!(warning.kind, ImportWarningKind::SkippedWell);
+        assert_eq!(warning.kind, ImportWarningKind::SkippedGroup);
         assert_eq!(warning.target, "A/2");
         assert!(
             warning.message.contains("A/2"),
-            "message should name the well, got {:?}",
+            "message should name the group, got {:?}",
             warning.message,
         );
 
-        // Two wells survive; the collection still opens.
-        let wells: Vec<_> = result
+        // Two groups survive; the collection still opens.
+        let groups: Vec<_> = result
             .manifest
             .entities()
             .iter()
-            .filter(|e| e.kind == EntityKind::Well)
+            .filter(|e| e.kind == EntityKind::Group)
             .collect();
-        assert_eq!(wells.len(), 2, "expected 2 surviving wells");
+        assert_eq!(groups.len(), 2, "expected 2 surviving groups");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A collection where no well parses is a genuinely broken dataset and still
+    /// A collection where no group parses is a genuinely broken dataset and still
     /// fails the import loudly.
     #[tokio::test]
-    async fn collection_with_no_readable_wells_fails() {
-        let dir = temp_dir("all_bad_wells");
+    async fn collection_with_no_readable_groups_fails() {
+        let dir = temp_dir("all_bad_groups");
         create_collection_fixture(
             &dir,
             "broken_collection",
@@ -1647,7 +1653,7 @@ mod tests {
         let dir = temp_dir("import_collection_stage");
         fs::create_dir_all(&dir).unwrap();
 
-        // Build collection root with stage translations on the FOVs.
+        // Build collection root with stage translations on the tiles.
         let root = serde_json::json!({
             "zarr_format": 3,
             "node_type": "group",
@@ -1670,10 +1676,10 @@ mod tests {
         )
         .unwrap();
 
-        // Well with stage-positioned FOVs.
-        let well_dir = dir.join("A").join("1");
-        fs::create_dir_all(&well_dir).unwrap();
-        let well_meta = serde_json::json!({
+        // Group with stage-positioned tiles.
+        let group_dir = dir.join("A").join("1");
+        fs::create_dir_all(&group_dir).unwrap();
+        let group_meta = serde_json::json!({
             "zarr_format": 3,
             "node_type": "group",
             "attributes": {
@@ -1701,16 +1707,16 @@ mod tests {
             }
         });
         fs::write(
-            well_dir.join("zarr.json"),
-            serde_json::to_string_pretty(&well_meta).unwrap(),
+            group_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&group_meta).unwrap(),
         )
         .unwrap();
 
-        // Write FOV multiscale metadata.
+        // Write tile multiscale metadata.
         for i in 0..2u32 {
-            let fov_dir = well_dir.join(i.to_string());
-            fs::create_dir_all(&fov_dir).unwrap();
-            let fov_root = serde_json::json!({
+            let tile_dir = group_dir.join(i.to_string());
+            fs::create_dir_all(&tile_dir).unwrap();
+            let tile_root = serde_json::json!({
                 "zarr_format": 3,
                 "node_type": "group",
                 "attributes": {
@@ -1738,12 +1744,12 @@ mod tests {
                 }
             });
             fs::write(
-                fov_dir.join("zarr.json"),
-                serde_json::to_string_pretty(&fov_root).unwrap(),
+                tile_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&tile_root).unwrap(),
             )
             .unwrap();
 
-            let level_dir = fov_dir.join("0");
+            let level_dir = tile_dir.join("0");
             fs::create_dir_all(&level_dir).unwrap();
             let arr = serde_json::json!({
                 "zarr_format": 3,
@@ -1784,38 +1790,38 @@ mod tests {
 
         // Transforms should reflect normalized stage positions.
         assert_eq!(result.manifest.transforms().len(), 2);
-        // FOV 0 translation [y=100, x=200] => position [x=200, y=100], normalized min.
-        // FOV 1 translation [y=300, x=600] => position [x=600, y=300].
-        // min_x=200, min_y=100 => FOV 0 at (0,0), FOV 1 at (400,200).
+        // tile 0 translation [y=100, x=200] => position [x=200, y=100], normalized min.
+        // tile 1 translation [y=300, x=600] => position [x=600, y=300].
+        // min_x=200, min_y=100 => tile 0 at (0,0), tile 1 at (400,200).
         let t0 = &result.manifest.transforms()[0];
         let t1 = &result.manifest.transforms()[1];
         assert!(
             (t0.transform.matrix()[12]).abs() < 1e-9,
-            "FOV 0 tx should be 0"
+            "tile 0 tx should be 0"
         );
         assert!(
             (t0.transform.matrix()[13]).abs() < 1e-9,
-            "FOV 0 ty should be 0"
+            "tile 0 ty should be 0"
         );
         assert!(
             (t1.transform.matrix()[12] - 400.0).abs() < 1e-9,
-            "FOV 1 tx should be 400, got {}",
+            "tile 1 tx should be 400, got {}",
             t1.transform.matrix()[12],
         );
         assert!(
             (t1.transform.matrix()[13] - 200.0).abs() < 1e-9,
-            "FOV 1 ty should be 200, got {}",
+            "tile 1 ty should be 200, got {}",
             t1.transform.matrix()[13],
         );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Build a single-well stage-positioned collection fixture.
+    /// Build a single-group stage-positioned collection fixture.
     ///
-    /// `translations[i]` is written verbatim as the FOV's
+    /// `translations[i]` is written verbatim as the tile's
     /// `coordinateTransformations.translation` (5-element TCZYX). Pass `None`
-    /// to omit the entry, producing a grid-positioned well.
+    /// to omit the entry, producing a grid-positioned group.
     /// `scale` is the level-0 [T, C, Z, Y, X] scale; pass `None` to omit the
     /// `scale` coordinate transform entirely (so default scale of 1.0 applies).
     fn create_stage_collection_fixture(
@@ -1847,8 +1853,8 @@ mod tests {
         )
         .unwrap();
 
-        let well_dir = dir.join("A").join("1");
-        fs::create_dir_all(&well_dir).unwrap();
+        let group_dir = dir.join("A").join("1");
+        fs::create_dir_all(&group_dir).unwrap();
 
         let row_dir = dir.join("A");
         let row_meta = serde_json::json!({"zarr_format": 3, "node_type": "group"});
@@ -1873,7 +1879,7 @@ mod tests {
             })
             .collect();
 
-        let well_meta = serde_json::json!({
+        let group_meta = serde_json::json!({
             "zarr_format": 3,
             "node_type": "group",
             "attributes": {
@@ -1884,14 +1890,14 @@ mod tests {
             }
         });
         fs::write(
-            well_dir.join("zarr.json"),
-            serde_json::to_string_pretty(&well_meta).unwrap(),
+            group_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&group_meta).unwrap(),
         )
         .unwrap();
 
         for i in 0..translations.len() {
-            let fov_dir = well_dir.join(i.to_string());
-            fs::create_dir_all(&fov_dir).unwrap();
+            let tile_dir = group_dir.join(i.to_string());
+            fs::create_dir_all(&tile_dir).unwrap();
 
             // Optionally include the scale coordinate transform.
             let mut dataset = serde_json::json!({"path": "0"});
@@ -1902,7 +1908,7 @@ mod tests {
                 }]);
             }
 
-            let fov_root = serde_json::json!({
+            let tile_root = serde_json::json!({
                 "zarr_format": 3,
                 "node_type": "group",
                 "attributes": {
@@ -1924,12 +1930,12 @@ mod tests {
                 }
             });
             fs::write(
-                fov_dir.join("zarr.json"),
-                serde_json::to_string_pretty(&fov_root).unwrap(),
+                tile_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&tile_root).unwrap(),
             )
             .unwrap();
 
-            let level_dir = fov_dir.join("0");
+            let level_dir = tile_dir.join("0");
             fs::create_dir_all(&level_dir).unwrap();
             let arr = serde_json::json!({
                 "zarr_format": 3,
@@ -1951,14 +1957,14 @@ mod tests {
         }
     }
 
-    /// Find the field->well TransformEdge for a given field index. Field IDs
-    /// follow the pattern `{dataset}:field:A/1/{i}` per the import code.
-    fn find_field_transform<'a>(
+    /// Find the tile->group TransformEdge for a given tile index. Tile IDs
+    /// follow the pattern `{dataset}:tile:A/1/{i}` per the import code.
+    fn find_tile_transform<'a>(
         result: &'a ImportResult,
         dataset_id: &str,
-        fov_index: usize,
+        tile_index: usize,
     ) -> &'a TransformEdge {
-        let target = format!("{dataset_id}:field:A/1/{fov_index}");
+        let target = format!("{dataset_id}:tile:A/1/{tile_index}");
         result
             .manifest
             .transforms()
@@ -1978,13 +1984,13 @@ mod tests {
     }
 
     /// Stage translations stored in microns must be converted to voxel
-    /// units before forming the field->well transform.
-    /// FOV 0 at (0, 0); FOV 1 at (100 µm, 200 µm). With Y/X scale of
-    /// 0.5 µm/voxel the second FOV ends up at (200, 400) voxels.
+    /// units before forming the tile->group transform.
+    /// tile 0 at (0, 0); tile 1 at (100 µm, 200 µm). With Y/X scale of
+    /// 0.5 µm/voxel the second tile ends up at (200, 400) voxels.
     #[tokio::test]
     async fn stage_translations_normalized_to_voxel_units() {
         let dir = temp_dir("stage_translations_voxel_units");
-        // Translations are TCZYX. The test puts X=100 µm, Y=200 µm on FOV 1.
+        // Translations are TCZYX. The test puts X=100 µm, Y=200 µm on tile 1.
         let translations = vec![
             Some([0.0, 0.0, 0.0, 0.0, 0.0]),
             Some([0.0, 0.0, 0.0, 200.0, 100.0]),
@@ -2010,27 +2016,27 @@ mod tests {
             panic!("expected Collection kind");
         }
 
-        // FOV 0 is the per-well origin.
-        let t0 = find_field_transform(&result, "stage-vox", 0);
+        // tile 0 is the per-group origin.
+        let t0 = find_tile_transform(&result, "stage-vox", 0);
         assert!(
             (t0.transform.matrix()[12]).abs() < 1e-9,
-            "FOV 0 tx should be 0"
+            "tile 0 tx should be 0"
         );
         assert!(
             (t0.transform.matrix()[13]).abs() < 1e-9,
-            "FOV 0 ty should be 0"
+            "tile 0 ty should be 0"
         );
 
-        // FOV 1: 100 µm / 0.5 = 200 voxels in X, 200 µm / 0.5 = 400 voxels in Y.
-        let t1 = find_field_transform(&result, "stage-vox", 1);
+        // tile 1: 100 µm / 0.5 = 200 voxels in X, 200 µm / 0.5 = 400 voxels in Y.
+        let t1 = find_tile_transform(&result, "stage-vox", 1);
         assert!(
             (t1.transform.matrix()[12] - 200.0).abs() < 1e-9,
-            "FOV 1 tx should be 200 voxels, got {}",
+            "tile 1 tx should be 200 voxels, got {}",
             t1.transform.matrix()[12],
         );
         assert!(
             (t1.transform.matrix()[13] - 400.0).abs() < 1e-9,
-            "FOV 1 ty should be 400 voxels, got {}",
+            "tile 1 ty should be 400 voxels, got {}",
             t1.transform.matrix()[13],
         );
 
@@ -2042,7 +2048,7 @@ mod tests {
     #[tokio::test]
     async fn grid_collections_unaffected() {
         let dir = temp_dir("grid_collections_unaffected");
-        // Two FOVs, neither with a translation -> grid-positioned collection.
+        // Two tiles, neither with a translation -> grid-positioned collection.
         let translations = vec![None, None];
         // Choose a non-trivial scale so the wrong code path would be visible.
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
@@ -2066,24 +2072,24 @@ mod tests {
             panic!("expected Collection kind");
         }
 
-        // The grid formula: for n=2 fields, cols = ceil(sqrt(2)) = 2,
-        // gap = 0.08 * 128 = 10.24, so field 0 at (0, 0), field 1 at
-        // (128 + 10.24, 0). FOV size is 128x128 (level 0 shape).
-        let fov_x = 128.0_f64;
-        let gap_x = 0.08 * fov_x;
+        // The grid formula: for n=2 tiles, cols = ceil(sqrt(2)) = 2,
+        // gap = 0.08 * 128 = 10.24, so tile 0 at (0, 0), tile 1 at
+        // (128 + 10.24, 0). tile size is 128x128 (level 0 shape).
+        let tile_x = 128.0_f64;
+        let gap_x = 0.08 * tile_x;
 
-        let t0 = find_field_transform(&result, "grid-collection", 0);
-        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "field 0 tx");
-        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "field 0 ty");
+        let t0 = find_tile_transform(&result, "grid-collection", 0);
+        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "tile 0 tx");
+        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "tile 0 ty");
 
-        let t1 = find_field_transform(&result, "grid-collection", 1);
+        let t1 = find_tile_transform(&result, "grid-collection", 1);
         assert!(
-            (t1.transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9,
-            "field 1 tx should be {} voxels, got {}",
-            fov_x + gap_x,
+            (t1.transform.matrix()[12] - (tile_x + gap_x)).abs() < 1e-9,
+            "tile 1 tx should be {} voxels, got {}",
+            tile_x + gap_x,
             t1.transform.matrix()[12],
         );
-        assert!((t1.transform.matrix()[13]).abs() < 1e-9, "field 1 ty");
+        assert!((t1.transform.matrix()[13]).abs() < 1e-9, "tile 1 ty");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2094,7 +2100,7 @@ mod tests {
     #[tokio::test]
     async fn missing_voxel_scale_falls_back_to_unit_scale() {
         let dir = temp_dir("missing_voxel_scale");
-        // FOV 1 at translation (100 µm, 200 µm) — but with scale=1.0 (the
+        // tile 1 at translation (100 µm, 200 µm) — but with scale=1.0 (the
         // default), the conversion is a no-op and the voxel translation
         // matches the raw value.
         let translations = vec![
@@ -2109,21 +2115,21 @@ mod tests {
             .await
             .unwrap();
 
-        // FOV 0 at origin.
-        let t0 = find_field_transform(&result, "missing-scale", 0);
+        // tile 0 at origin.
+        let t0 = find_tile_transform(&result, "missing-scale", 0);
         assert!((t0.transform.matrix()[12]).abs() < 1e-9);
         assert!((t0.transform.matrix()[13]).abs() < 1e-9);
 
-        // FOV 1: pass-through (raw 100 -> 100 voxels in X, 200 -> 200 in Y).
-        let t1 = find_field_transform(&result, "missing-scale", 1);
+        // tile 1: pass-through (raw 100 -> 100 voxels in X, 200 -> 200 in Y).
+        let t1 = find_tile_transform(&result, "missing-scale", 1);
         assert!(
             (t1.transform.matrix()[12] - 100.0).abs() < 1e-9,
-            "FOV 1 tx should be 100 voxels (pass-through), got {}",
+            "tile 1 tx should be 100 voxels (pass-through), got {}",
             t1.transform.matrix()[12],
         );
         assert!(
             (t1.transform.matrix()[13] - 200.0).abs() < 1e-9,
-            "FOV 1 ty should be 200 voxels (pass-through), got {}",
+            "tile 1 ty should be 200 voxels (pass-through), got {}",
             t1.transform.matrix()[13],
         );
 
@@ -2149,27 +2155,27 @@ mod tests {
             .await
             .unwrap();
 
-        // FOV 0 at origin.
-        let t0 = find_field_transform(&result, "zero-scale", 0);
+        // tile 0 at origin.
+        let t0 = find_tile_transform(&result, "zero-scale", 0);
         assert!((t0.transform.matrix()[12]).abs() < 1e-9);
         assert!((t0.transform.matrix()[13]).abs() < 1e-9);
 
-        // FOV 1: X falls back to scale=1 (raw 100 -> 100). Y uses real
+        // tile 1: X falls back to scale=1 (raw 100 -> 100). Y uses real
         // scale=0.5 (raw 200 -> 400). Verify no NaN/Inf.
-        let t1 = find_field_transform(&result, "zero-scale", 1);
+        let t1 = find_tile_transform(&result, "zero-scale", 1);
         assert!(
             t1.transform.matrix()[12].is_finite(),
-            "FOV 1 tx must be finite (no division by zero), got {}",
+            "tile 1 tx must be finite (no division by zero), got {}",
             t1.transform.matrix()[12],
         );
         assert!(
             (t1.transform.matrix()[12] - 100.0).abs() < 1e-9,
-            "FOV 1 tx should be 100 (X scale fell back to 1.0), got {}",
+            "tile 1 tx should be 100 (X scale fell back to 1.0), got {}",
             t1.transform.matrix()[12],
         );
         assert!(
             (t1.transform.matrix()[13] - 400.0).abs() < 1e-9,
-            "FOV 1 ty should be 400 (Y scale 0.5 still applied), got {}",
+            "tile 1 ty should be 400 (Y scale 0.5 still applied), got {}",
             t1.transform.matrix()[13],
         );
 
@@ -2808,7 +2814,7 @@ mod tests {
 
     // --- Label import fixtures ---
 
-    /// Write a `labels/` group listing `names` into an existing image or FOV
+    /// Write a `labels/` group listing `names` into an existing image or tile
     /// directory (`group_dir/labels/zarr.json`).
     fn write_labels_index(group_dir: &std::path::Path, names: &[&str]) {
         let labels_dir = group_dir.join("labels");
@@ -3087,11 +3093,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Labels nested under a single collection field attach to that field's image,
-    /// with a field-nested store prefix, and leave DatasetKind and the field
+    /// Labels nested under a single collection tile attach to that tile's image,
+    /// with a tile-nested store prefix, and leave DatasetKind and the tile
     /// image set unchanged.
     #[tokio::test]
-    async fn import_collection_with_labels_on_field() {
+    async fn import_collection_with_labels_on_tile() {
         let dir = temp_dir("import_collection_labels");
         create_collection_fixture(
             &dir,
@@ -3108,11 +3114,11 @@ mod tests {
             2,
         );
 
-        // Attach a "cells" label to field A/1/0 only.
-        let fov_dir = dir.join("A").join("1").join("0");
-        write_labels_index(&fov_dir, &["cells"]);
+        // Attach a "cells" label to tile A/1/0 only.
+        let tile_dir = dir.join("A").join("1").join("0");
+        write_labels_index(&tile_dir, &["cells"]);
         write_label_multiscale(
-            &fov_dir,
+            &tile_dir,
             "cells",
             &["t", "z", "y", "x"],
             &[1, 10, 256, 256],
@@ -3130,7 +3136,7 @@ mod tests {
             .await
             .unwrap();
 
-        // DatasetKind and field image set are unchanged (4 fields: 2+1+1).
+        // DatasetKind and tile image set are unchanged (4 tiles: 2+1+1).
         assert!(matches!(
             result.manifest.kind,
             DatasetKind::Collection { .. }
@@ -3143,7 +3149,7 @@ mod tests {
         assert_eq!(label.name, "cells");
         assert_eq!(label.data_type, DataType::Uint32);
         assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
-        // Attached to the A/1/0 field image specifically.
+        // Attached to the A/1/0 tile image specifically.
         let expected_source = ImageId("collection-lbl:image:A/1/0".to_string());
         assert_eq!(label.source_image_id, expected_source);
         // That source image really exists in the manifest.
@@ -3155,7 +3161,7 @@ mod tests {
                 .any(|i| i.image_id == expected_source),
         );
 
-        // Streamable with a field-nested store prefix.
+        // Streamable with a tile-nested store prefix.
         let binding = result
             .binding_seed
             .images
@@ -3286,7 +3292,7 @@ mod tests {
     }
 
     /// The same guard applies on the collection path: a zero chunk dimension in the
-    /// representative field's array fails loudly rather than panicking.
+    /// representative tile's array fails loudly rather than panicking.
     #[tokio::test]
     async fn collection_source_with_zero_chunk_fails_without_panic() {
         let dir = temp_dir("import_collection_zero_chunk");
@@ -3304,7 +3310,7 @@ mod tests {
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let err = import_dataset(&store, "pzc", "Collection Zero Chunk")
             .await
-            .expect_err("a zero-chunk collection field array must fail the import");
+            .expect_err("a zero-chunk collection tile array must fail the import");
         assert!(matches!(err, StoreError::Metadata(_)));
         assert!(
             err.to_string().contains("zero"),

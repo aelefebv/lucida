@@ -100,12 +100,12 @@ describe("pushLabelLayers", () => {
     expect(layers).toHaveLength(0);
   });
 
-  it("MAJOR (collection): places a label whose source field is OFF the active roster at its scene position, not the origin", () => {
-    // A collection with labels on two different fields. The near field (D/3/0) is in
-    // the active roster; the far field (M/13/0) is not — it renders as a well
-    // proxy or is off-view, so its field member is absent from `members`.
-    const near = image("collection:image:D/3/0", [340, 348], [1, 1], "Uint32", "collection:field:D/3/0");
-    const far = image("collection:image:M/13/0", [340, 348], [1, 1], "Uint32", "collection:field:M/13/0");
+  it("MAJOR (collection): places a label whose source tile is OFF the active roster at its scene position, not the origin", () => {
+    // A collection with labels on two different tiles. The near tile (D/3/0) is in
+    // the active roster; the far tile (M/13/0) is not — it renders as a group
+    // proxy or is off-view, so its tile member is absent from `members`.
+    const near = image("collection:image:D/3/0", [340, 348], [1, 1], "Uint32", "collection:tile:D/3/0");
+    const far = image("collection:image:M/13/0", [340, 348], [1, 1], "Uint32", "collection:tile:M/13/0");
     const dsm: DatasetManifest = {
       dataset_id: "collection", name: "collection",
       kind: { Collection: { rows: ["D", "M"], columns: ["3", "13"], positioning_mode: "Derived", has_explicit_positions: false } },
@@ -116,12 +116,12 @@ describe("pushLabelLayers", () => {
         { name: "cells", source_image_id: "collection:image:M/13/0", image: image("collection:image:M/13/0:label:cells", [85, 87], [4, 4]) },
       ],
     };
-    // Only the near field is active; the far field's placement must come from
+    // Only the near tile is active; the far tile's placement must come from
     // the scene position map (keyed by the source ENTITY id).
     const roster: MemberRosterEntry[] = [{ imageId: "collection:image:D/3/0", position: [0, 0] }];
     const memberPositions: Record<string, [number, number]> = {
-      "collection:field:D/3/0": [0, 0],
-      "collection:field:M/13/0": [5000, 6000],
+      "collection:tile:D/3/0": [0, 0],
+      "collection:tile:M/13/0": [5000, 6000],
     };
     const layers: SliceLayerParams[] = [];
     pushLabelLayers(
@@ -135,7 +135,7 @@ describe("pushLabelLayers", () => {
     const d3 = layers.find((l) => l.datasetId === "collection:image:D/3/0:label:cells");
     const m13 = layers.find((l) => l.datasetId === "collection:image:M/13/0:label:cells");
     // In-roster label uses its roster position; off-roster label uses the scene
-    // position — NOT [0, 0], which would stack it on the first well (the bug).
+    // position — NOT [0, 0], which would stack it on the first group (the bug).
     expect([d3?.offsetX, d3?.offsetY]).toEqual([0, 0]);
     expect([m13?.offsetX, m13?.offsetY]).toEqual([5000, 6000]);
   });

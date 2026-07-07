@@ -5,11 +5,11 @@
  *   - `memberToDataset` / `memberToPool` — routing registries used by
  *     chunk + render handlers to look up which dataset / pool a
  *     memberId belongs to.
- *   - `wellToFields` — well → child-field set, used so a `WellProxy3D`
- *     upload can fan out to its child fields' descriptors.
- *   - `wellsByDataset` — dataset → wells currently referenced in
- *     wellToFields; tracked so `removeLayerResources` can drop a
- *     dataset's entries without scanning every well.
+ *   - `groupToTiles` — group → child-tile set, used so a `GroupProxy3D`
+ *     upload can fan out to its child tiles' descriptors.
+ *   - `groupsByDataset` — dataset → groups currently referenced in
+ *     groupToTiles; tracked so `removeLayerResources` can drop a
+ *     dataset's entries without scanning every group.
  *   - `currentEntityMetasByDataset` — per-dataset entity-metas snapshot
  *     for the most recent cold state. The descriptor buffer build pulls
  *     from this so it doesn't pick up stale offsets from pools that
@@ -46,7 +46,7 @@ import { computeEntityTierMeta } from "./entityMetas.ts";
 import { memberTierKey } from "../poolKeys.ts";
 
 /**
- * Apply a cold-state message: refresh well→fields, register
+ * Apply a cold-state message: refresh group→tiles, register
  * member→dataset mappings, build pool groups, allocate atlases, compute
  * + write entityMetas, resize + remap indirection, capture per-dataset
  * entity-metas snapshot, rebuild the descriptor buffer.
@@ -57,31 +57,31 @@ import { memberTierKey } from "../poolKeys.ts";
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
 
-  // 1. Refresh well→fields map so well-proxy uploads can fan out to
-  // child fields' descriptors. Cold state is the source of truth for
+  // 1. Refresh group→tiles map so group-proxy uploads can fan out to
+  // child tiles' descriptors. Cold state is the source of truth for
   // active set membership; we rebuild this dataset's contribution
   // fully each tick. Other datasets' entries stay untouched so the
   // worker can hold multiple datasets concurrently.
-  const prevWells = state.wellsByDataset.get(msg.datasetId);
-  if (prevWells) {
-    for (const wellId of prevWells) state.wellToFields.delete(wellId);
+  const prevGroups = state.groupsByDataset.get(msg.datasetId);
+  if (prevGroups) {
+    for (const groupId of prevGroups) state.groupToTiles.delete(groupId);
   }
-  const wellsForDataset = new Set<string>();
+  const groupsForDataset = new Set<string>();
   for (const entry of msg.activeSet) {
-    if (entry.parentWellId) {
-      let set = state.wellToFields.get(entry.parentWellId);
+    if (entry.parentGroupId) {
+      let set = state.groupToTiles.get(entry.parentGroupId);
       if (!set) {
         set = new Set();
-        state.wellToFields.set(entry.parentWellId, set);
+        state.groupToTiles.set(entry.parentGroupId, set);
       }
       set.add(entry.entityId);
-      wellsForDataset.add(entry.parentWellId);
+      groupsForDataset.add(entry.parentGroupId);
     }
   }
-  if (wellsForDataset.size > 0) {
-    state.wellsByDataset.set(msg.datasetId, wellsForDataset);
+  if (groupsForDataset.size > 0) {
+    state.groupsByDataset.set(msg.datasetId, groupsForDataset);
   } else {
-    state.wellsByDataset.delete(msg.datasetId);
+    state.groupsByDataset.delete(msg.datasetId);
   }
 
   if (msg.desiredProxyKeys !== undefined) {
@@ -100,14 +100,14 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   // 2. Register member→dataset mappings for every (entry, channel)
   // combo. Canonical iteration walks activeSet × visibleChannels and
   // produces the same memberId scheme used elsewhere in the pipeline
-  // (imageId for fields, entityId for well-as-proxy).
+  // (imageId for tiles, entityId for group-as-proxy).
   for (const { memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
   }
 
   // 3. Build pool groups (volume or slice) — partitions activeSet by
   // (channel, chunkDims). Entries without a targetLevel (e.g.
-  // well-as-proxy with empty `levels[]`) are skipped here; they're
+  // group-as-proxy with empty `levels[]`) are skipped here; they're
   // still in memberToDataset from step 2.
   const mode: "volume" | "slice" = msg.viewMode;
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;

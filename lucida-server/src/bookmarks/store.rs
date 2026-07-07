@@ -539,7 +539,7 @@ mod tests {
         let view = sample_view([800, 600]);
         let b = store
             .create(
-                "Apoptotic morphology — well B7",
+                "Apoptotic morphology — group B7",
                 "alice@calicolabs.com",
                 "Alice Example",
                 vec!["gs://bucket/a.zarr".to_string()],
@@ -547,7 +547,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(b.name, "Apoptotic morphology — well B7");
+        assert_eq!(b.name, "Apoptotic morphology — group B7");
         assert_eq!(b.created_by, "alice@calicolabs.com");
         assert_eq!(b.datasets, vec!["gs://bucket/a.zarr".to_string()]);
         assert_eq!(b.view.v, view.v);

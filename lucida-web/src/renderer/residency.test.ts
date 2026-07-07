@@ -6,7 +6,7 @@ import type { ViewHotStateMessage } from "./workerProtocol.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
 
-/** Build a minimal ctx whose only populated field is `state`. The
+/** Build a minimal ctx whose only populated tile is `state`. The
  * applyViewHotState handler only touches `ctx.state.rayHitPerEntity`. */
 function makeStubCtx(): WorkerCtx {
   return { state: createInitialState() } as unknown as WorkerCtx;

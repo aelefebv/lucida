@@ -100,9 +100,9 @@ pub fn read_header<R: Read>(r: &mut R) -> io::Result<ProxyHeader> {
 ///
 /// Inputs hashed (in order):
 /// - The entity ID and its kind.
-/// - For a Well: each child Field's ID (sorted), parent transform matrices,
-///   and full multiscale geometry of each field's image.
-/// - For a Field/Image: its own (self → self) transform if any, plus the
+/// - For a Group: each child Tile's ID (sorted), parent transform matrices,
+///   and full multiscale geometry of each tile's image.
+/// - For a Tile/Image: its own (self → self) transform if any, plus the
 ///   image multiscale geometry.
 /// - The `(t, c)` selectors.
 ///
@@ -126,24 +126,24 @@ pub fn source_content_hash(
     let entity = content.entities().iter().find(|e| &e.id == entity_id);
     let entity_kind_tag: u8 = match entity.map(|e| &e.kind) {
         Some(EntityKind::Image) => 0,
-        Some(EntityKind::Well) => 1,
-        Some(EntityKind::Field) => 2,
+        Some(EntityKind::Group) => 1,
+        Some(EntityKind::Tile) => 2,
         None => 0xFF,
     };
     hasher.update(&[entity_kind_tag]);
 
     // Collect the set of "contributing" entities in a deterministic order:
-    // - For Well: all Field children (sorted by id), then the well itself.
-    // - For Field/Image: just the entity itself.
+    // - For Group: all Tile children (sorted by id), then the group itself.
+    // - For Tile/Image: just the entity itself.
     let mut contributors: Vec<&EntityId> = Vec::new();
     if let Some(e) = entity
-        && matches!(e.kind, EntityKind::Well)
+        && matches!(e.kind, EntityKind::Group)
     {
         let mut child_ids: Vec<&EntityId> = content
             .entities()
             .iter()
             .filter(|c| c.parent.as_ref() == Some(entity_id))
-            .filter(|c| matches!(c.kind, EntityKind::Field))
+            .filter(|c| matches!(c.kind, EntityKind::Tile))
             .map(|c| &c.id)
             .collect();
         child_ids.sort_by(|a, b| a.0.cmp(&b.0));

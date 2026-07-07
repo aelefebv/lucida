@@ -606,7 +606,7 @@ export class CpuCache {
   getCachedProxy(
     datasetId: string,
     entityId: string,
-    kind: "WellProxy3D" | "FieldProxy3D",
+    kind: "GroupProxy3D" | "TileProxy3D",
     t: number,
     c: number,
   ): ReadyProxyDelivery | null {
@@ -618,7 +618,7 @@ export class CpuCache {
   isProxyInFlight(
     datasetId: string,
     entityId: string,
-    kind: "WellProxy3D" | "FieldProxy3D",
+    kind: "GroupProxy3D" | "TileProxy3D",
     t: number,
     c: number,
   ): boolean {
@@ -661,7 +661,7 @@ export class CpuCache {
   getProxyCacheDump(): Array<{
     datasetId: string;
     entityId: string;
-    proxyKind: "WellProxy3D" | "FieldProxy3D";
+    proxyKind: "GroupProxy3D" | "TileProxy3D";
     t: number;
     c: number;
     bytes: number;

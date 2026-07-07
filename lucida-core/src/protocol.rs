@@ -1263,7 +1263,7 @@ mod tests {
             delta: AssetCatalogDelta {
                 added: vec![ProxyAvailability {
                     entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::WellProxy3D],
+                    kinds: vec![ProxyKind::GroupProxy3D],
                     footprints: vec![],
                 }],
             },
@@ -1279,7 +1279,7 @@ mod tests {
                     delta.added[0].entity_id,
                     lucida_content::EntityId("e1".into())
                 );
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::WellProxy3D]);
+                assert_eq!(delta.added[0].kinds, vec![ProxyKind::GroupProxy3D]);
             }
             _ => panic!("expected AssetCatalogUpdate"),
         }

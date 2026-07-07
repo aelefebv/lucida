@@ -25,7 +25,7 @@ import {
 interface VisibleEntityRow {
   entity_id: string;
   image_id: string;
-  kind: "Image" | "Well" | "Field";
+  kind: "Image" | "Group" | "Tile";
   visible: boolean;
   projected_diagonal_px: number;
   projected_area_px2: number;
@@ -56,9 +56,9 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
   const config: StubSceneConfig = {
     visibleEntities: [
       {
-        entity_id: "field-0",
+        entity_id: "tile-0",
         image_id: "img-0",
-        kind: "Field",
+        kind: "Tile",
         visible: true,
         projected_diagonal_px: 100,
         projected_area_px2: 10000,
@@ -67,7 +67,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
         importance: 0.7,
       },
     ],
-    positions: { "field-0": [256, 512] },
+    positions: { "tile-0": [256, 512] },
     visibleRegion: {
       xy_bounds: [0, 0, 1024, 1024],
       z_range: [0, 1],
@@ -134,13 +134,13 @@ function makeDataset(
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    // The default stub scene returns `field-0` as a Field, so the
+    // The default stub scene returns `tile-0` as a Tile, so the
     // default manifest must carry the matching parent edge or
     // `buildPlanningSnapshot` throws. Tests that exercise the
     // missing-edge throw branch override `entities` with `[]`.
     entities: [
-      { id: "well-0", kind: "Well", parent: null, labels: {} },
-      { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
+      { id: "group-0", kind: "Group", parent: null, labels: {} },
+      { id: "tile-0", kind: "Tile", parent: "group-0", labels: {} },
     ],
     transforms: [],
     images: [makeImageSpec("img-0")],
@@ -206,9 +206,9 @@ describe("buildPlanningSnapshot — typical case", () => {
     expect(built).not.toBeNull();
     const { snapshot, entities } = built!;
     expect(entities).toHaveLength(1);
-    expect(entities[0].entityId).toBe("field-0");
+    expect(entities[0].entityId).toBe("tile-0");
     expect(entities[0].imageId).toBe("img-0");
-    expect(entities[0].kind).toBe("Field");
+    expect(entities[0].kind).toBe("Tile");
     expect(entities[0].levels).toHaveLength(2);
     expect(entities[0].layoutPositionVox).toEqual([256, 512]);
     // Snapshot embeds the same entities as a freshly-built array.
@@ -219,7 +219,7 @@ describe("buildPlanningSnapshot — typical case", () => {
     const scene = makeStubScene({ visibleEntities: [] });
     // visible_entities present but empty array → still a list, not missing.
     // To exercise the null-payload branch we need view_query to omit the
-    // field entirely.
+    // tile entirely.
     const stub = {
       ...(scene as unknown as Record<string, unknown>),
       view_query: () => JSON.stringify(null),
@@ -230,7 +230,7 @@ describe("buildPlanningSnapshot — typical case", () => {
 });
 
 describe("buildPlanningSnapshot — snake_case → camelCase", () => {
-  it("renames every wire field to its camelCase counterpart", () => {
+  it("renames every wire tile to its camelCase counterpart", () => {
     const scene = makeStubScene({
       visibleEntities: [
         {
@@ -261,13 +261,13 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
 });
 
 describe("buildPlanningSnapshot — parent-id stitching", () => {
-  it("populates parentId for fields with a manifest parent edge", () => {
+  it("populates parentId for tiles with a manifest parent edge", () => {
     const scene = makeStubScene({
       visibleEntities: [
         {
-          entity_id: "field-A",
+          entity_id: "tile-A",
           image_id: "img-A",
-          kind: "Field",
+          kind: "Tile",
           visible: true,
           projected_diagonal_px: 90,
           projected_area_px2: 9000,
@@ -276,36 +276,36 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           importance: 1,
         },
       ],
-      positions: { "field-A": [0, 0] },
+      positions: { "tile-A": [0, 0] },
     });
     const dataset = makeDataset({
       images: [makeImageSpec("img-A")],
       entities: [
-        { id: "well-1", kind: "Well", parent: null, labels: {} },
-        { id: "field-A", kind: "Field", parent: "well-1", labels: {} },
+        { id: "group-1", kind: "Group", parent: null, labels: {} },
+        { id: "tile-A", kind: "Tile", parent: "group-1", labels: {} },
       ],
     });
     const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
     const ent = built!.entities[0];
-    // Narrow on `kind === "Field"` to read parentId.
-    expect(ent.kind).toBe("Field");
-    if (ent.kind === "Field") {
-      expect(ent.parentId).toBe("well-1");
+    // Narrow on `kind === "Tile"` to read parentId.
+    expect(ent.kind).toBe("Tile");
+    if (ent.kind === "Tile") {
+      expect(ent.parentId).toBe("group-1");
     }
   });
 
-  it("throws when a Field-kind entity has no manifest parent edge", () => {
-    // A Field without a parent is an invariant violation; the
+  it("throws when a Tile-kind entity has no manifest parent edge", () => {
+    // A Tile without a parent is an invariant violation; the
     // builder surfaces it explicitly rather than silently coercing
     // to null. Override the dataset to drop the parent edge for the
-    // default `field-0` scene entity.
+    // default `tile-0` scene entity.
     const dataset = makeDataset({ entities: [] });
     expect(() =>
       buildPlanningSnapshot(makeArgs({ dataset })),
-    ).toThrow(/FieldSnapshot\.parentId is required/);
+    ).toThrow(/TileSnapshot\.parentId is required/);
   });
 
-  it("Image and Well variants do not declare a parentId field", () => {
+  it("Image and Group variants do not declare a parentId tile", () => {
     // Sanity check: the snake_case→camelCase translator branches on
     // `kind` and the resulting object is the matching variant.
     const scene = makeStubScene({
@@ -328,7 +328,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
     const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
     const ent = built!.entities[0];
     expect(ent.kind).toBe("Image");
-    // No `parentId` key on Image / Well variants — confirm absence
+    // No `parentId` key on Image / Group variants — confirm absence
     // structurally so future regressions surface here.
     expect(Object.prototype.hasOwnProperty.call(ent, "parentId")).toBe(false);
   });
@@ -409,7 +409,7 @@ describe("buildPlanningSnapshot — selection state", () => {
     expect(built!.selection.visibleChannels).toEqual([5]);
   });
 
-  it("threads renderMode from the args mode field", () => {
+  it("threads renderMode from the args mode tile", () => {
     const builtSlice = buildPlanningSnapshot(makeArgs({ mode: "slice" }));
     const builtVolume = buildPlanningSnapshot(makeArgs({ mode: "volume" }));
     expect(builtSlice!.selection.renderMode).toBe("slice");
@@ -422,11 +422,11 @@ describe("buildPlanningSnapshot — selection state", () => {
   });
 });
 
-describe("buildPlanningSnapshot — pass-through fields", () => {
+describe("buildPlanningSnapshot — pass-through tiles", () => {
   it("threads the asset catalog through into the snapshot", () => {
     const catalog: AssetCatalogSnapshot = {
       byEntity: new Map([
-        ["field-0", { kinds: new Set(["WellProxy3D"]), footprints: new Map() }],
+        ["tile-0", { kinds: new Set(["GroupProxy3D"]), footprints: new Map() }],
       ]),
     };
     const built = buildPlanningSnapshot(makeArgs({ assetCatalog: catalog }));
@@ -527,7 +527,7 @@ describe("buildPlanningSnapshot — coarse/detail metadata", () => {
   });
 });
 
-describe("buildPlanningSnapshot — minimapPending field", () => {
+describe("buildPlanningSnapshot — minimapPending tile", () => {
   it("threads a non-empty minimapPending through into the snapshot unchanged", () => {
     const minimapPending = new Map([
       [

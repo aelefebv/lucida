@@ -6,7 +6,7 @@ export type DatasetKind =
 
 export interface Entity {
   id: string;
-  kind: "Image" | "Well" | "Field";
+  kind: "Image" | "Group" | "Tile";
   parent: string | null;
   labels: Record<string, unknown>;
 }

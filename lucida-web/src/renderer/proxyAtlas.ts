@@ -2,8 +2,8 @@
  * GPU residency for proxy assets.
  *
  * Proxies are small, generated 3-D textures (`r16uint`, single channel)
- * representing either a whole well (`WellProxy3D`) or a single field
- * (`FieldProxy3D`). They live in dedicated atlas pools so they don't
+ * representing either a whole group (`GroupProxy3D`) or a single tile
+ * (`TileProxy3D`). They live in dedicated atlas pools so they don't
  * compete with detail-chunk slots.
  *
  * Slot layout (3-D grid)
@@ -21,7 +21,7 @@
  *   size   = slotDims
  * ```
  *
- * Why 3-D grid: common field proxies such as `128x128x1` can fit only
+ * Why 3-D grid: common tile proxies such as `128x128x1` can fit only
  * 16 slots in an X-only layout on devices with
  * `maxTextureDimension3D = 2048`. A 3-D grid uses the Y/Z texture axes
  * too, so pool capacity tracks the proxy residency budget instead of

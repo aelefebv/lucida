@@ -163,7 +163,7 @@ mod tests {
         event.catalog = AssetCatalog {
             entries: vec![ProxyAvailability {
                 entity_id: EntityId("img-0".into()),
-                kinds: vec![ProxyKind::FieldProxy3D],
+                kinds: vec![ProxyKind::TileProxy3D],
                 footprints: vec![],
             }],
         };
@@ -171,7 +171,7 @@ mod tests {
         let back: DatasetOpened = serde_json::from_str(&json).unwrap();
         assert_eq!(back.catalog.entries.len(), 1);
         assert_eq!(back.catalog.entries[0].entity_id, EntityId("img-0".into()));
-        assert_eq!(back.catalog.entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
+        assert_eq!(back.catalog.entries[0].kinds, vec![ProxyKind::TileProxy3D]);
     }
 
     #[test]

@@ -12,8 +12,8 @@ export {
   type ChunkRequest,
   type EntityMode,
   type EntitySnapshot,
-  type FieldEntry,
-  type FieldSnapshot,
+  type TileEntry,
+  type TileSnapshot,
   type ImageSnapshot,
   type InvisibleEntry,
   type MinimapChunkCoord,
@@ -26,18 +26,18 @@ export {
   type RequestPlan,
   type ResolvedMode,
   type SelectionState,
-  type WellAsProxyEntry,
-  type WellGroup,
-  type WellSnapshot,
+  type GroupAsProxyEntry,
+  type MemberGroup,
+  type GroupSnapshot,
 } from "./types.ts";
 
 export {
   assignCoarseDetailModes,
   assignModes,
-  buildPrevModeByWell,
+  buildPrevModeByGroup,
   chooseEntityMode,
   degradeForCatalog,
-  groupByWell,
+  groupMembers,
 } from "./modes.ts";
 
 export {
@@ -75,7 +75,7 @@ export {
   PREFETCH_LANE_OFFSET,
   PROXY_LANE_OFFSET,
   RENDER_RADIUS_DISABLED_VIEW,
-  WELL_PROXY_PRIORITY_BUMP,
+  GROUP_PROXY_PRIORITY_BUMP,
   mergeConfig,
   type PlanningConfig,
 } from "./config.ts";

@@ -154,7 +154,7 @@ interface PendingLocalCommand {
  *  OR from the standing retry timer armed with every request, so a
  *  residual hole in an idle workspace (zero further inbound traffic)
  *  still recovers, and a request eaten by the server's per-client
- *  throttle (~1s) is re-issued well outside that window. Keeps a gap
+ *  throttle (~1s) is re-issued group outside that window. Keeps a gap
  *  storm at worst one request per interval instead of one per message. */
 const RESYNC_RETRY_MS = 5000;
 

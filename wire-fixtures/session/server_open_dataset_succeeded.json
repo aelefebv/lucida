@@ -324,11 +324,11 @@
         {
           "entity_id": "img-0",
           "kinds": [
-            "FieldProxy3D"
+            "TileProxy3D"
           ],
           "footprints": [
             {
-              "kind": "FieldProxy3D",
+              "kind": "TileProxy3D",
               "dims": [
                 50,
                 128,

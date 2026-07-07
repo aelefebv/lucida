@@ -16,12 +16,12 @@ pub const ALGORITHM_VERSION: u32 = 1;
 /// What kind of proxy to build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProxyKind {
-    /// Aggregate all child fields of a well into a single low-res volume in
-    /// well coordinate space.
-    WellProxy3D,
-    /// Downsample a single field's image into a low-res volume in voxel
+    /// Aggregate all child tiles of a group into a single low-res volume in
+    /// group coordinate space.
+    GroupProxy3D,
+    /// Downsample a single tile's image into a low-res volume in voxel
     /// space.
-    FieldProxy3D,
+    TileProxy3D,
 }
 
 /// Request spec for a proxy build. This is the input to [`crate::generate_proxy`].

@@ -31,7 +31,7 @@ export type { MinimapChunkCoord } from "./index.ts";
 interface VisibleEntityRow {
   entity_id: string;
   image_id: string;
-  kind: "Image" | "Well" | "Field";
+  kind: "Image" | "Group" | "Tile";
   visible: boolean;
   projected_diagonal_px: number;
   projected_area_px2: number;
@@ -126,7 +126,7 @@ export interface SnapshotDatasetEntry {
 
 /**
  * Inputs to {@link buildPlanningSnapshot}. Options-object signature so
- * callers can drop new fields in without churning every test stub.
+ * callers can drop new tiles in without churning every test stub.
  */
 export interface BuildPlanningSnapshotArgs {
   /** Live WASM scene — queried for view, positions, visible region, selection. */
@@ -225,8 +225,8 @@ export function buildPlanningSnapshot(
 
   // 3. Build helper maps from the dataset manifest:
   //   - imageSpecById: per-image multiscale levels
-  //   - parentByEntityId: stitches `Field.parent === wellId` so promotion
-  //     can group fields by their parent well (ADR 0025).
+  //   - parentByEntityId: stitches `Tile.parent === groupId` so promotion
+  //     can group tiles by their parent group (ADR 0025).
   const imageSpecById = new Map<string, ImageSpec>();
   for (const img of dataset.manifest.images) {
     imageSpecById.set(img.image_id, img);
@@ -241,11 +241,11 @@ export function buildPlanningSnapshot(
   //    `parentId` (neither of which are part of `view_query`).
   //
   //    {@link EntitySnapshot} is a discriminated union. Branch on the
-  //    WASM-reported `kind` and construct the matching variant. Field
+  //    WASM-reported `kind` and construct the matching variant. Tile
   //    entities require a non-null parent edge in the manifest — we
   //    throw on the missing-edge case rather than silently coercing,
   //    so producer bugs surface during snapshot assembly rather than
-  //    later in `groupByWell`.
+  //    later in `groupMembers`.
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
@@ -267,18 +267,18 @@ export function buildPlanningSnapshot(
       layoutPositionVox,
       levels,
     };
-    if (e.kind === "Field") {
+    if (e.kind === "Tile") {
       const parentId = parentByEntityId.get(e.entity_id);
       if (parentId === undefined || parentId === null) {
         throw new Error(
-          `[planning] Field entity "${e.entity_id}" has no parent edge ` +
-            `in the manifest — FieldSnapshot.parentId is required (non-null).`,
+          `[planning] Tile entity "${e.entity_id}" has no parent edge ` +
+            `in the manifest — TileSnapshot.parentId is required (non-null).`,
         );
       }
-      return { kind: "Field", parentId, ...base } satisfies EntitySnapshot;
+      return { kind: "Tile", parentId, ...base } satisfies EntitySnapshot;
     }
-    if (e.kind === "Well") {
-      return { kind: "Well", ...base } satisfies EntitySnapshot;
+    if (e.kind === "Group") {
+      return { kind: "Group", ...base } satisfies EntitySnapshot;
     }
     return { kind: "Image", ...base } satisfies EntitySnapshot;
   });

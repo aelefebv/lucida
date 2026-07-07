@@ -6,11 +6,11 @@ import type { SceneEpochs } from "../epochs.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
-  FieldSnapshot,
+  TileSnapshot,
   PlanningSnapshot,
   ProxyKind,
   ProxyRequest,
-  WellSnapshot,
+  GroupSnapshot,
 } from "./types.ts";
 import { DEFAULT_PLANNING_CONFIG, mergeConfig } from "./config.ts";
 import { planProxyResidency, proxyRequestKey } from "./proxyResidency.ts";
@@ -32,9 +32,9 @@ const EPOCHS: SceneEpochs = {
   request: 0,
 };
 
-function well(id: string, x: number, importance = 0.5): WellSnapshot {
+function group(id: string, x: number, importance = 0.5): GroupSnapshot {
   return {
-    kind: "Well",
+    kind: "Group",
     entityId: id,
     imageId: "",
     visible: true,
@@ -50,9 +50,9 @@ function well(id: string, x: number, importance = 0.5): WellSnapshot {
   };
 }
 
-function field(id: string, parentId: string, x: number, importance = 0.5): FieldSnapshot {
+function tile(id: string, parentId: string, x: number, importance = 0.5): TileSnapshot {
   return {
-    kind: "Field",
+    kind: "Tile",
     entityId: id,
     imageId: `img-${id}`,
     parentId,
@@ -109,24 +109,24 @@ function catalog(entries: Array<[string, ProxyKind, number]>): AssetCatalogSnaps
   return { byEntity };
 }
 
-function fieldEntry(entityId: string): ActiveSetEntry {
+function tileEntry(entityId: string): ActiveSetEntry {
   return {
-    kind: "field",
+    kind: "tile",
     entityId,
     imageId: `img-${entityId}`,
-    mode: "fields-with-detail",
+    mode: "tiles-with-detail",
     targetLod: 0,
     coarsestDetailLod: 0,
     detailOwnedLodRange: [0, 0],
     proxyAvailable: true,
-    proxyKind: "FieldProxy3D",
-    wellProxyAvailable: false,
+    proxyKind: "TileProxy3D",
+    groupProxyAvailable: false,
   };
 }
 
-function wellEntry(entityId: string): ActiveSetEntry {
+function groupEntry(entityId: string): ActiveSetEntry {
   return {
-    kind: "well-as-proxy",
+    kind: "group-as-proxy",
     entityId,
   };
 }
@@ -140,7 +140,7 @@ function proxy(
   return {
     datasetId,
     entityId,
-    imageId: kind === "FieldProxy3D" ? `img-${entityId}` : "",
+    imageId: kind === "TileProxy3D" ? `img-${entityId}` : "",
     kind,
     t: 0,
     c,
@@ -149,66 +149,66 @@ function proxy(
 }
 
 describe("planProxyResidency", () => {
-  it("admits or skips field bundles atomically at whole-well granularity", () => {
-    const f1 = field("field-1", "well-A", 0);
-    const f2 = field("field-2", "well-A", 8);
-    const reqs = [proxy("field-1", "FieldProxy3D"), proxy("field-2", "FieldProxy3D")];
+  it("admits or skips tile bundles atomically at whole-group granularity", () => {
+    const f1 = tile("tile-1", "group-A", 0);
+    const f2 = tile("tile-2", "group-A", 8);
+    const reqs = [proxy("tile-1", "TileProxy3D"), proxy("tile-2", "TileProxy3D")];
     const result = planProxyResidency({
       snapshot: snapshot(
-        [well("well-A", 0), f1, f2],
+        [group("group-A", 0), f1, f2],
         catalog([
-          ["field-1", "FieldProxy3D", 10],
-          ["field-2", "FieldProxy3D", 10],
+          ["tile-1", "TileProxy3D", 10],
+          ["tile-2", "TileProxy3D", 10],
         ]),
       ),
-      activeSet: [fieldEntry("field-1"), fieldEntry("field-2")],
+      activeSet: [tileEntry("tile-1"), tileEntry("tile-2")],
       proxyRequests: reqs,
       config: mergeConfig({ proxyResidencyBudgetBytes: 15 }),
     });
 
     expect(result.desiredProxyKeys.size).toBe(0);
     expect(result.skippedProxyRequests).toHaveLength(2);
-    expect(result.decisions[0]).toMatchObject({ wellId: "well-A", reason: "over-budget" });
+    expect(result.decisions[0]).toMatchObject({ groupId: "group-A", reason: "over-budget" });
   });
 
-  it("falls back to a well bundle when the field bundle does not fit", () => {
-    const f1 = field("field-1", "well-A", 0);
-    const f2 = field("field-2", "well-A", 8);
-    const fieldReqs = [proxy("field-1", "FieldProxy3D"), proxy("field-2", "FieldProxy3D")];
-    const wellReq = proxy("well-A", "WellProxy3D");
+  it("falls back to a group bundle when the tile bundle does not fit", () => {
+    const f1 = tile("tile-1", "group-A", 0);
+    const f2 = tile("tile-2", "group-A", 8);
+    const tileReqs = [proxy("tile-1", "TileProxy3D"), proxy("tile-2", "TileProxy3D")];
+    const groupReq = proxy("group-A", "GroupProxy3D");
     const result = planProxyResidency({
       snapshot: snapshot(
-        [well("well-A", 0), f1, f2],
+        [group("group-A", 0), f1, f2],
         catalog([
-          ["field-1", "FieldProxy3D", 20],
-          ["field-2", "FieldProxy3D", 20],
-          ["well-A", "WellProxy3D", 10],
+          ["tile-1", "TileProxy3D", 20],
+          ["tile-2", "TileProxy3D", 20],
+          ["group-A", "GroupProxy3D", 10],
         ]),
       ),
-      activeSet: [fieldEntry("field-1"), fieldEntry("field-2")],
-      proxyRequests: [...fieldReqs, wellReq],
+      activeSet: [tileEntry("tile-1"), tileEntry("tile-2")],
+      proxyRequests: [...tileReqs, groupReq],
       config: mergeConfig({ proxyResidencyBudgetBytes: 30 }),
     });
 
-    expect(result.desiredProxyKeys).toEqual(new Set([proxyRequestKey(wellReq)]));
-    expect(result.admittedProxyRequests).toEqual([wellReq]);
+    expect(result.desiredProxyKeys).toEqual(new Set([proxyRequestKey(groupReq)]));
+    expect(result.admittedProxyRequests).toEqual([groupReq]);
     expect(result.decisions.map((d) => d.reason)).toEqual(["over-budget", "admitted"]);
   });
 
-  it("prioritizes nearby high-importance field bundles before far well bundles", () => {
-    const near = field("near-field", "near-well", 0, 1);
-    const farWell = well("far-well", 500, 0);
-    const nearReq = proxy("near-field", "FieldProxy3D");
-    const farReq = proxy("far-well", "WellProxy3D");
+  it("prioritizes nearby high-importance tile bundles before far group bundles", () => {
+    const near = tile("near-tile", "near-group", 0, 1);
+    const farGroup = group("far-group", 500, 0);
+    const nearReq = proxy("near-tile", "TileProxy3D");
+    const farReq = proxy("far-group", "GroupProxy3D");
     const result = planProxyResidency({
       snapshot: snapshot(
-        [well("near-well", 0), near, farWell],
+        [group("near-group", 0), near, farGroup],
         catalog([
-          ["near-field", "FieldProxy3D", 20],
-          ["far-well", "WellProxy3D", 10],
+          ["near-tile", "TileProxy3D", 20],
+          ["far-group", "GroupProxy3D", 10],
         ]),
       ),
-      activeSet: [fieldEntry("near-field"), wellEntry("far-well")],
+      activeSet: [tileEntry("near-tile"), groupEntry("far-group")],
       proxyRequests: [farReq, nearReq],
       config: mergeConfig({ proxyResidencyBudgetBytes: 20 }),
     });
@@ -218,15 +218,15 @@ describe("planProxyResidency", () => {
   });
 
   it("accounts for every channel in a bundle before admitting it", () => {
-    const f1 = field("field-1", "well-A", 0);
-    const c0 = proxy("field-1", "FieldProxy3D", 0);
-    const c1 = proxy("field-1", "FieldProxy3D", 1);
+    const f1 = tile("tile-1", "group-A", 0);
+    const c0 = proxy("tile-1", "TileProxy3D", 0);
+    const c1 = proxy("tile-1", "TileProxy3D", 1);
     const result = planProxyResidency({
       snapshot: snapshot(
-        [well("well-A", 0), f1],
-        catalog([["field-1", "FieldProxy3D", 10]]),
+        [group("group-A", 0), f1],
+        catalog([["tile-1", "TileProxy3D", 10]]),
       ),
-      activeSet: [fieldEntry("field-1")],
+      activeSet: [tileEntry("tile-1")],
       proxyRequests: [c0, c1],
       config: mergeConfig({ proxyResidencyBudgetBytes: 15 }),
     });
@@ -237,20 +237,20 @@ describe("planProxyResidency", () => {
   });
 
   it("uses deterministic tie-breaking under a worker-global budget", () => {
-    const reqA = proxy("well-A", "WellProxy3D", 0, "ds-a");
-    const reqB = proxy("well-B", "WellProxy3D", 0, "ds-b");
+    const reqA = proxy("group-A", "GroupProxy3D", 0, "ds-a");
+    const reqB = proxy("group-B", "GroupProxy3D", 0, "ds-b");
     const result = planProxyResidency({
       snapshot: {
         ...snapshot(
-          [well("well-A", 0), well("well-B", 0)],
+          [group("group-A", 0), group("group-B", 0)],
           catalog([
-            ["well-A", "WellProxy3D", 10],
-            ["well-B", "WellProxy3D", 10],
+            ["group-A", "GroupProxy3D", 10],
+            ["group-B", "GroupProxy3D", 10],
           ]),
         ),
         datasetId: "mixed",
       },
-      activeSet: [wellEntry("well-A"), wellEntry("well-B")],
+      activeSet: [groupEntry("group-A"), groupEntry("group-B")],
       proxyRequests: [reqB, reqA],
       config: mergeConfig({ proxyResidencyBudgetBytes: 10 }),
     });

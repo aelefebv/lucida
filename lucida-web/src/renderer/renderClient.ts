@@ -297,7 +297,7 @@ export class RenderClient implements UploadClient {
     datasetId: string,
     entityId: string,
     imageId: string,
-    kind: "WellProxy3D" | "FieldProxy3D",
+    kind: "GroupProxy3D" | "TileProxy3D",
     t: number,
     c: number,
     dims: [number, number, number],

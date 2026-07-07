@@ -44,7 +44,7 @@ function idiv(a: number, b: number): number {
 }
 
 /**
- * Deterministic, well-distributed fallback color for a label id.
+ * Deterministic, group-distributed fallback color for a label id.
  *
  * Distinct across the whole uint32 range: the id is hashed twice (a
  * second round decorrelates the bits feeding hue vs. saturation/value),

@@ -827,7 +827,7 @@ function App({
         datasetId: string,
         entityId: string,
         imageId: string,
-        kind: "WellProxy3D" | "FieldProxy3D",
+        kind: "GroupProxy3D" | "TileProxy3D",
         t = 0,
         c = 0,
       ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
@@ -1357,12 +1357,12 @@ function App({
                   collectionKind={collectionData.collectionKind}
                   members={collectionData.members}
                   collectionName={ds.name}
-                  onWellClick={(cx, cy) => {
+                  onGroupClick={(cx, cy) => {
                     const ws = scene.wasmSceneRef.current;
                     if (!ws) return;
                     applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
                     emitPresenceWithUrl();
-                    requestRender(render.loopRef.current, "collection_well_click");
+                    requestRender(render.loopRef.current, "collection_group_click");
                   }}
                 />
               );

@@ -43,7 +43,7 @@ function makeEntry(
     ],
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
-    wellProxyAvailable: opts.wellProxyAvailable ?? false,
+    groupProxyAvailable: opts.groupProxyAvailable ?? false,
     detailLevel: opts.detailLevel,
     coarseLevel: opts.coarseLevel,
     wantedLodLevels: opts.wantedLodLevels,
@@ -51,27 +51,27 @@ function makeEntry(
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
   };
-  if (opts.mode === "well-as-proxy") {
+  if (opts.mode === "group-as-proxy") {
     return {
       ...base,
-      kind: "well-as-proxy",
-      mode: "well-as-proxy",
-      parentWellId: null,
+      kind: "group-as-proxy",
+      mode: "group-as-proxy",
+      parentGroupId: null,
     };
   }
   return {
     ...base,
-    kind: "field",
+    kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
-    parentWellId: opts.parentWellId ?? null,
+    parentGroupId: opts.parentGroupId ?? null,
   };
 }
 
 describe("computeEntityMetas — volume (3D arity)", () => {
   it("single LOD that matches → one meta + nextOffset by gridX*gridY*gridZ", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [0, 0],
       levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
     });
@@ -84,7 +84,7 @@ describe("computeEntityMetas — volume (3D arity)", () => {
 
   it("multi-LOD all matching → sequential offsets", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [0, 1],
       levels: [
         { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
@@ -100,7 +100,7 @@ describe("computeEntityMetas — volume (3D arity)", () => {
 
   it("wantedLodLevels allocates only selected detail/coarse levels", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [0, 2],
       wantedLodLevels: [0, 2],
       levels: [
@@ -118,7 +118,7 @@ describe("computeEntityMetas — volume (3D arity)", () => {
 
   it("LODs with mismatched chunk dims are skipped", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [0, 1],
       levels: [
         { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
@@ -132,7 +132,7 @@ describe("computeEntityMetas — volume (3D arity)", () => {
 
   it("no matching LODs → fallback to target LOD with pool's chunk dims", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [1, 1],
       targetLod: 1,
       levels: [
@@ -152,7 +152,7 @@ describe("computeEntityMetas — volume (3D arity)", () => {
 describe("computeEntityMetas — slice (2D arity)", () => {
   it("matches on chunkX/chunkY only; nextOffset by gridX*gridY", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [0, 0],
       levels: [{ level: 0, chunkShape: [8, 128, 128], gridShape: [4, 2, 2], levelDims: [32, 256, 256] }],
     });
@@ -167,7 +167,7 @@ describe("computeEntityMetas — slice (2D arity)", () => {
 
   it("multi-LOD slice, all matching → sequential 2D offsets", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [0, 1],
       levels: [
         { level: 0, chunkShape: [8, 128, 128], gridShape: [4, 2, 2], levelDims: [32, 256, 256] },
@@ -183,7 +183,7 @@ describe("computeEntityMetas — slice (2D arity)", () => {
 
   it("slice fallback uses target level's own chunkDims (not the pool's [1,Y,X])", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
       detailOwnedLodRange: [1, 1],
       targetLod: 1,
       levels: [
@@ -200,7 +200,7 @@ describe("computeEntityMetas — slice (2D arity)", () => {
 describe("computeEntityMetas — degenerate inputs", () => {
   it("entry with empty levels[] → empty metas, nextOffset unchanged", () => {
     const entry = makeEntry({
-      entityId: "wellA", imageId: "", mode: "well-as-proxy",
+      entityId: "groupA", imageId: "", mode: "group-as-proxy",
       detailOwnedLodRange: [0, 0],
       levels: [],
     });

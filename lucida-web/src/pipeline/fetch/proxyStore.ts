@@ -1,5 +1,5 @@
 /**
- * ProxyStore — per-dataset cache of decoded proxy assets (Well/Field).
+ * ProxyStore — per-dataset cache of decoded proxy assets (Group/Tile).
  *
  * Wraps `Map<datasetId, Map<innerKey, ProxyCacheEntry>>` plus a bytes
  * counter, a budget, and an {@link EvictionPolicy}. The two-level Map
@@ -30,7 +30,7 @@ export interface ProxyCacheEntry {
   datasetId: string;
   entityId: string;
   imageId: string;
-  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  proxyKind: "GroupProxy3D" | "TileProxy3D";
   t: number;
   c: number;
   insertedAt: number;
@@ -67,7 +67,7 @@ export interface ProxyStoreOptions {
 export interface ProxyStoreDumpEntry {
   datasetId: string;
   entityId: string;
-  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  proxyKind: "GroupProxy3D" | "TileProxy3D";
   t: number;
   c: number;
   bytes: number;
@@ -128,9 +128,9 @@ export class ProxyStore {
     // Flatten into an adapter shape that exposes `sizeBytes` to the
     // policy while keeping the back-references needed to remove
     // entries from the two-level Map. The proxy entry's own `bytes`
-    // field is mapped to `sizeBytes` so {@link LRUPolicy} can serve
+    // tile is mapped to `sizeBytes` so {@link LRUPolicy} can serve
     // both cache shapes without ProxyCacheEntry having to rename its
-    // field.
+    // tile.
     const evictables: ProxyEvictable[] = [];
     for (const [datasetId, inner] of this.store) {
       for (const [k, e] of inner) {

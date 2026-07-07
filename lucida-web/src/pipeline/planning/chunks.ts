@@ -81,8 +81,8 @@ export function chunkWorldDims(
  * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
  *
  * Accepts the full {@link ActiveSetEntry} union so callers don't have to
- * pre-narrow. Short-circuits to an empty list for non-field entries:
- *   - `well-as-proxy` — the well is served by a single proxy asset,
+ * pre-narrow. Short-circuits to an empty list for non-tile entries:
+ *   - `group-as-proxy` — the group is served by a single proxy asset,
  *     not by chunk requests.
  *   - `invisible` — pass-through entry; no chunk requests apply.
  *
@@ -93,7 +93,7 @@ export function chunkWorldDims(
  * `priority`/`lane` per lane before they leave the planner.
  *
  * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
- * for non-field entries and reads the LOD range from the field entry.
+ * for non-tile entries and reads the LOD range from the tile entry.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -103,7 +103,7 @@ export function iterateChunks(
   stats: PlanStats | null = null,
   datasetId = "",
 ): ChunkRequest[] {
-  if (entry.kind !== "field") return [];
+  if (entry.kind !== "tile") return [];
   return iterateChunksAtLodRange(
     entity,
     entry.detailOwnedLodRange,

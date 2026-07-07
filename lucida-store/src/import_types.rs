@@ -13,7 +13,7 @@ pub struct ImportResult {
     pub binding_seed: ServerBindingSeed,
     /// Non-fatal problems encountered while importing, in the order they were
     /// discovered. Empty for a fully valid dataset. A collection whose individual
-    /// wells fail to parse records one entry per skipped well here rather than
+    /// groups fail to parse records one entry per skipped group here rather than
     /// aborting the whole import.
     pub warnings: Vec<ImportWarning>,
 }
@@ -24,7 +24,7 @@ pub struct ImportResult {
 pub struct ImportWarning {
     pub kind: ImportWarningKind,
     /// The store-relative identifier of what the warning is about, e.g. a
-    /// well's collection path `"B/2"`.
+    /// group's collection path `"B/2"`.
     pub target: String,
     /// Human-readable description naming the affected target and the reason.
     pub message: String,
@@ -33,9 +33,9 @@ pub struct ImportWarning {
 /// The category of an [`ImportWarning`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImportWarningKind {
-    /// A collection well was dropped from the import because its metadata was
+    /// A collection group was dropped from the import because its metadata was
     /// missing, unreadable, or malformed. The rest of the collection still opens.
-    SkippedWell,
+    SkippedGroup,
 }
 
 /// Everything the server needs to build its operational binding.

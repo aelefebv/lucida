@@ -135,21 +135,21 @@ function clearProxyDescriptorHandle(
   proxyKind: ProxyKind,
   expectedHandle: ProxyHandle,
 ): boolean {
-  if (proxyKind === "FieldProxy3D") {
-    return clearDescriptorFieldHandle(state, entityId, t, c, expectedHandle);
+  if (proxyKind === "TileProxy3D") {
+    return clearDescriptorTileHandle(state, entityId, t, c, expectedHandle);
   }
 
-  let changed = clearDescriptorWellHandle(state, entityId, t, c, expectedHandle);
-  const childFields = state.wellToFields.get(entityId);
-  if (childFields) {
-    for (const fieldId of childFields) {
-      changed = clearDescriptorWellHandle(state, fieldId, t, c, expectedHandle) || changed;
+  let changed = clearDescriptorGroupHandle(state, entityId, t, c, expectedHandle);
+  const childTiles = state.groupToTiles.get(entityId);
+  if (childTiles) {
+    for (const tileId of childTiles) {
+      changed = clearDescriptorGroupHandle(state, tileId, t, c, expectedHandle) || changed;
     }
   }
   return changed;
 }
 
-function clearDescriptorFieldHandle(
+function clearDescriptorTileHandle(
   state: RendererState,
   entityId: string,
   t: number,
@@ -157,12 +157,12 @@ function clearDescriptorFieldHandle(
   expectedHandle: ProxyHandle,
 ): boolean {
   const desc = state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c));
-  if (!desc || !handleMatches(desc.fieldProxyHandle, expectedHandle)) return false;
-  desc.fieldProxyHandle = null;
+  if (!desc || !handleMatches(desc.tileProxyHandle, expectedHandle)) return false;
+  desc.tileProxyHandle = null;
   return true;
 }
 
-function clearDescriptorWellHandle(
+function clearDescriptorGroupHandle(
   state: RendererState,
   entityId: string,
   t: number,
@@ -170,8 +170,8 @@ function clearDescriptorWellHandle(
   expectedHandle: ProxyHandle,
 ): boolean {
   const desc = state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c));
-  if (!desc || !handleMatches(desc.wellProxyHandle, expectedHandle)) return false;
-  desc.wellProxyHandle = null;
+  if (!desc || !handleMatches(desc.groupProxyHandle, expectedHandle)) return false;
+  desc.groupProxyHandle = null;
   return true;
 }
 
@@ -210,7 +210,7 @@ function parseProxyResidencyKey(
   const datasetId = parts.shift()!;
   const c = Number(cRaw);
   const t = Number(tRaw);
-  if ((kindRaw !== "WellProxy3D" && kindRaw !== "FieldProxy3D") || !Number.isInteger(t) || !Number.isInteger(c)) {
+  if ((kindRaw !== "GroupProxy3D" && kindRaw !== "TileProxy3D") || !Number.isInteger(t) || !Number.isInteger(c)) {
     return null;
   }
   return {

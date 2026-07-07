@@ -10,7 +10,7 @@ import type { DatasetManifest, ImageSpec, LayoutSpec } from "../manifestTypes.ts
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function makeImage(image_id: string, owner: string, fovY = 256, fovX = 256): ImageSpec {
+function makeImage(image_id: string, owner: string, footprintY = 256, footprintX = 256): ImageSpec {
   return {
     image_id,
     owner,
@@ -25,8 +25,8 @@ function makeImage(image_id: string, owner: string, fovY = 256, fovX = 256): Ima
       levels: [
         {
           level_index: 0,
-          shape: [1, 1, 1, fovY, fovX],
-          chunk_shape: [1, 1, 1, fovY, fovX],
+          shape: [1, 1, 1, footprintY, footprintX],
+          chunk_shape: [1, 1, 1, footprintY, footprintX],
           grid_shape: [1, 1, 1, 1, 1],
           scale: [1, 1, 1, 1, 1],
         },
@@ -50,7 +50,7 @@ function singleImageGraph(): DatasetManifest {
   };
 }
 
-/** 2x2 collection, all 4 wells populated (each entity gets its own corner). */
+/** 2x2 collection, all 4 groups populated (each entity gets its own corner). */
 function collection2x2Graph(): DatasetManifest {
   const W = 256;
   const H = 256;
@@ -72,7 +72,7 @@ function collection2x2Graph(): DatasetManifest {
   };
 }
 
-/** Sparse collection: 3 entities placed (one well empty). */
+/** Sparse collection: 3 entities placed (one group empty). */
 function collectionSparseGraph(): DatasetManifest {
   const W = 256;
   const H = 256;
@@ -121,12 +121,12 @@ describe("buildDenseSquareLayout", () => {
     expect(buildDenseSquareLayout(singleImageGraph())).toBeNull();
   });
 
-  it("packs 4 image-level entities into a 2x2 square with one-field gap", () => {
+  it("packs 4 image-level entities into a 2x2 square with one-tile gap", () => {
     const spec = buildDenseSquareLayout(collection2x2Graph());
     expect(spec).not.toBeNull();
     expect(spec!.id).toBe("derived:dense-square");
     expect(spec!.name).toBe("Dense (square)");
-    // cols = ceil(sqrt(4)) = 2; footprint = 256 (image FOV); gap = 256;
+    // cols = ceil(sqrt(4)) = 2; footprint = 256 (image tile); gap = 256;
     // stride = 256 + 256 = 512.
     expect(spec!.placements).toEqual([
       { entity_id: "e0", position: [0, 0] },
@@ -157,16 +157,16 @@ describe("buildDenseSquareLayout", () => {
   });
 });
 
-/** Collection with 2 wells, each containing a 2x2 grid of 256x256 fields.
- *  Source layout places wells at (0,0) and (1000,0). Field offsets within
- *  each well are (0,0), (256,0), (0,256), (256,256) → well bbox is 512x512. */
-function collectionWithFieldsGraph(): DatasetManifest {
-  const wells = ["W1", "W2"];
-  const wellPositions: Record<string, [number, number]> = {
+/** Collection with 2 groups, each containing a 2x2 grid of 256x256 tiles.
+ *  Source layout places groups at (0,0) and (1000,0). Tile offsets within
+ *  each group are (0,0), (256,0), (0,256), (256,256) → group bbox is 512x512. */
+function collectionWithTilesGraph(): DatasetManifest {
+  const groups = ["W1", "W2"];
+  const groupPositions: Record<string, [number, number]> = {
     W1: [0, 0],
     W2: [1000, 0],
   };
-  const fieldOffsets: [number, number][] = [
+  const tileOffsets: [number, number][] = [
     [0, 0],
     [256, 0],
     [0, 256],
@@ -177,15 +177,15 @@ function collectionWithFieldsGraph(): DatasetManifest {
   const transforms: DatasetManifest["transforms"] = [];
   const images: ImageSpec[] = [];
 
-  for (const well of wells) {
-    entities.push({ id: well, kind: "Well", parent: null, labels: {} });
-    fieldOffsets.forEach(([fx, fy], i) => {
-      const fieldId = `${well}-F${i}`;
-      entities.push({ id: fieldId, kind: "Field", parent: well, labels: {} });
-      images.push(makeImage(`${fieldId}-img`, fieldId, 256, 256));
+  for (const group of groups) {
+    entities.push({ id: group, kind: "Group", parent: null, labels: {} });
+    tileOffsets.forEach(([fx, fy], i) => {
+      const tileId = `${group}-F${i}`;
+      entities.push({ id: tileId, kind: "Tile", parent: group, labels: {} });
+      images.push(makeImage(`${tileId}-img`, tileId, 256, 256));
       transforms.push({
-        from: fieldId,
-        to: well,
+        from: tileId,
+        to: group,
         // column-major matrix; tx at [12], ty at [13]
         transform: { matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, fx, fy, 0, 1] },
       });
@@ -193,8 +193,8 @@ function collectionWithFieldsGraph(): DatasetManifest {
   }
 
   return {
-    dataset_id: "collection-with-fields",
-    name: "collection-with-fields",
+    dataset_id: "collection-with-tiles",
+    name: "collection-with-tiles",
     kind: { Collection: { rows: ["A"], columns: ["1", "2"], positioning_mode: "Derived", has_explicit_positions: false } },
     entities,
     transforms,
@@ -203,19 +203,19 @@ function collectionWithFieldsGraph(): DatasetManifest {
       {
         id: "default",
         name: "Default",
-        placements: wells.map((w) => ({ entity_id: w, position: wellPositions[w] })),
+        placements: groups.map((w) => ({ entity_id: w, position: groupPositions[w] })),
       },
     ],
     default_layout_id: "default",
   };
 }
 
-describe("buildDenseSquareLayout — well/field hierarchy", () => {
-  it("uses well bbox + one-field gap as packing stride", () => {
-    const spec = buildDenseSquareLayout(collectionWithFieldsGraph());
+describe("buildDenseSquareLayout — group/tile hierarchy", () => {
+  it("uses group bbox + one-tile gap as packing stride", () => {
+    const spec = buildDenseSquareLayout(collectionWithTilesGraph());
     expect(spec).not.toBeNull();
-    // 2 wells, cols=ceil(sqrt(2))=2, single-row layout.
-    // Well bbox = 512x512; field FOV = 256; stride = 512 + 256 = 768.
+    // 2 groups, cols=ceil(sqrt(2))=2, single-row layout.
+    // Group bbox = 512x512; tile size = 256; stride = 512 + 256 = 768.
     expect(spec!.placements).toEqual([
       { entity_id: "W1", position: [0, 0] },
       { entity_id: "W2", position: [768, 0] },

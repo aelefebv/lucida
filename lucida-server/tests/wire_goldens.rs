@@ -435,10 +435,10 @@ fn enum_vocabulary() -> EnumVocabulary {
         clip_modes: vocab!(ClipMode::{ Plane, Sphere }),
         annotation_kinds: vocab!(AnnotationKind::{ Point, Line, Box }),
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
-        entity_kinds: vocab!(EntityKind::{ Image, Well, Field }),
+        entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
         data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Float32, Float64 }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
-        proxy_kinds: vocab!(ProxyKind::{ WellProxy3D, FieldProxy3D }),
+        proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,
             BindingBuild, GeneratedCoarsePlanning, WorkspacePersist, Broadcast, Complete,
@@ -660,8 +660,8 @@ fn single_catalog() -> AssetCatalog {
     AssetCatalog {
         entries: vec![ProxyAvailability {
             entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::FieldProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::FieldProxy3D, [50, 128, 128])],
+            kinds: vec![ProxyKind::TileProxy3D],
+            footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [50, 128, 128])],
         }],
     }
 }
@@ -675,12 +675,12 @@ fn single_dataset_opened() -> DatasetOpened {
     }
 }
 
-/// A collection manifest: well/field entity hierarchy, explicit positioning, and a
-/// field-owned image.
+/// A collection manifest: group/tile entity hierarchy, explicit positioning, and a
+/// tile-owned image.
 fn collection_dataset_opened() -> DatasetOpened {
-    let well_id = EntityId("well-A1".into());
-    let field_id = EntityId("field-A1-f0".into());
-    let image_id = ImageId("field-A1-f0-image".into());
+    let group_id = EntityId("group-A1".into());
+    let tile_id = EntityId("tile-A1-f0".into());
+    let image_id = ImageId("tile-A1-f0-image".into());
 
     let manifest = DatasetManifest::new(
         DatasetId("wds-collection-77".into()),
@@ -693,37 +693,37 @@ fn collection_dataset_opened() -> DatasetOpened {
         },
         vec![
             Entity {
-                id: well_id.clone(),
-                kind: EntityKind::Well,
+                id: group_id.clone(),
+                kind: EntityKind::Group,
                 parent: None,
                 labels: EntityLabels {
                     name: Some("A1".into()),
-                    well_row: Some("A".into()),
-                    well_column: Some("1".into()),
+                    group_row: Some("A".into()),
+                    group_column: Some("1".into()),
                     row_index: Some(0),
                     column_index: Some(0),
-                    field_index: None,
+                    tile_index: None,
                 },
             },
             Entity {
-                id: field_id.clone(),
-                kind: EntityKind::Field,
-                parent: Some(well_id.clone()),
+                id: tile_id.clone(),
+                kind: EntityKind::Tile,
+                parent: Some(group_id.clone()),
                 labels: EntityLabels {
                     name: Some("A1/0".into()),
-                    field_index: Some(0),
+                    tile_index: Some(0),
                     ..Default::default()
                 },
             },
         ],
         vec![TransformEdge {
-            from: field_id.clone(),
-            to: well_id.clone(),
+            from: tile_id.clone(),
+            to: group_id.clone(),
             transform: VoxelTransform::from_voxel_translation_2d(2048.0, 1024.0),
         }],
         vec![ImageSpec {
             image_id: image_id.clone(),
-            owner: field_id.clone(),
+            owner: tile_id.clone(),
             multiscale: MultiscaleInfo {
                 axes: vec![
                     Axis {
@@ -771,11 +771,11 @@ fn collection_dataset_opened() -> DatasetOpened {
             name: "Stage positions".into(),
             placements: vec![
                 EntityPlacement {
-                    entity_id: well_id,
+                    entity_id: group_id,
                     position: [0.0, 0.0],
                 },
                 EntityPlacement {
-                    entity_id: field_id,
+                    entity_id: tile_id,
                     position: [2048.0, 1024.0],
                 },
             ],
@@ -1154,8 +1154,8 @@ fn asset_catalog_delta() -> AssetCatalogDelta {
     AssetCatalogDelta {
         added: vec![ProxyAvailability {
             entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::WellProxy3D, ProxyKind::FieldProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::WellProxy3D, [50, 256, 256])],
+            kinds: vec![ProxyKind::GroupProxy3D, ProxyKind::TileProxy3D],
+            footprints: vec![ProxyFootprint::u16(ProxyKind::GroupProxy3D, [50, 256, 256])],
         }],
     }
 }
@@ -1999,8 +1999,8 @@ fn chunk_request_golden() -> ChunkMessage {
 fn asset_request_golden() -> AssetMessage {
     AssetMessage::AssetRequest {
         dataset_id: DatasetId("wds-collection-77".into()),
-        entity_id: EntityId("field-A1-f0".into()),
-        kind: ProxyKind::FieldProxy3D,
+        entity_id: EntityId("tile-A1-f0".into()),
+        kind: ProxyKind::TileProxy3D,
         t: 0,
         c: 2,
     }

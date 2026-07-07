@@ -124,7 +124,7 @@ async fn full_crud_happy_path_lifecycle() {
 
     // POST as Alice
     let body = json!({
-        "name": "Apoptotic morphology — well B7",
+        "name": "Apoptotic morphology — group B7",
         "datasets": ["gs://bucket/a.zarr"],
         "view": {
             "v": 1,

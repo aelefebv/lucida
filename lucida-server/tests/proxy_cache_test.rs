@@ -22,8 +22,8 @@ const URL_HASH_B: [u8; 16] = [0xBB; 16];
 
 fn sample_spec() -> ProxySpec {
     ProxySpec {
-        entity_id: EntityId("well-A1".into()),
-        kind: ProxyKind::WellProxy3D,
+        entity_id: EntityId("group-A1".into()),
+        kind: ProxyKind::GroupProxy3D,
         t: 0,
         c: 0,
         target_long_axis: 64,
@@ -301,16 +301,16 @@ fn distinct_t_c_get_distinct_files() {
 fn distinct_kinds_get_distinct_files() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = ProxyCache::new(tmp.path().to_path_buf(), URL_HASH_A);
-    let mut spec_well = sample_spec();
-    spec_well.kind = ProxyKind::WellProxy3D;
-    let mut spec_field = sample_spec();
-    spec_field.kind = ProxyKind::FieldProxy3D;
+    let mut spec_group = sample_spec();
+    spec_group.kind = ProxyKind::GroupProxy3D;
+    let mut spec_tile = sample_spec();
+    spec_tile.kind = ProxyKind::TileProxy3D;
 
-    cache.put(&spec_well, &sample_asset([1u8; 32])).unwrap();
-    cache.put(&spec_field, &sample_asset([2u8; 32])).unwrap();
+    cache.put(&spec_group, &sample_asset([1u8; 32])).unwrap();
+    cache.put(&spec_tile, &sample_asset([2u8; 32])).unwrap();
 
-    let well = cache.get(&spec_well, &[1u8; 32]).unwrap().unwrap();
-    let field = cache.get(&spec_field, &[2u8; 32]).unwrap().unwrap();
-    assert_eq!(well.header.source_content_hash, [1u8; 32]);
+    let group = cache.get(&spec_group, &[1u8; 32]).unwrap().unwrap();
+    let field = cache.get(&spec_tile, &[2u8; 32]).unwrap().unwrap();
+    assert_eq!(group.header.source_content_hash, [1u8; 32]);
     assert_eq!(field.header.source_content_hash, [2u8; 32]);
 }

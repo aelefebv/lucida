@@ -1,7 +1,7 @@
 /**
  * Telemetry counters and burst-rate-limited debug loggers for CpuCache.
  *
- * `TelemetryCounters` owns the scattered counter fields the cache used
+ * `TelemetryCounters` owns the scattered counter tiles the cache used
  * to mutate inline (totalRequests, totalHits, decode latency window,
  * eviction counts per tier, failure counts, average decoded bytes,
  * etc.). Mutation sites in CpuCache become verb calls; the read path

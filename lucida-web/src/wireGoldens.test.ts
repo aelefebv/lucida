@@ -344,9 +344,9 @@ const expectedCatalogSingle: WireAssetCatalog = {
   entries: [
     {
       entity_id: "img-0",
-      kinds: ["FieldProxy3D"],
+      kinds: ["TileProxy3D"],
       footprints: [
-        { kind: "FieldProxy3D", dims: [50, 128, 128], bytes: 1638400 },
+        { kind: "TileProxy3D", dims: [50, 128, 128], bytes: 1638400 },
       ],
     },
   ],
@@ -380,35 +380,35 @@ const expectedManifestCollection: DatasetManifest = {
   },
   entities: [
     {
-      id: "well-A1",
-      kind: "Well",
+      id: "group-A1",
+      kind: "Group",
       parent: null,
       labels: {
         name: "A1",
-        well_row: "A",
-        well_column: "1",
+        group_row: "A",
+        group_column: "1",
         row_index: 0,
         column_index: 0,
       },
     },
     {
-      id: "field-A1-f0",
-      kind: "Field",
-      parent: "well-A1",
-      labels: { name: "A1/0", field_index: 0 },
+      id: "tile-A1-f0",
+      kind: "Tile",
+      parent: "group-A1",
+      labels: { name: "A1/0", tile_index: 0 },
     },
   ],
   transforms: [
     {
-      from: "field-A1-f0",
-      to: "well-A1",
+      from: "tile-A1-f0",
+      to: "group-A1",
       transform: { matrix: IDENTITY_TRANSLATION(2048, 1024) },
     },
   ],
   images: [
     {
-      image_id: "field-A1-f0-image",
-      owner: "field-A1-f0",
+      image_id: "tile-A1-f0-image",
+      owner: "tile-A1-f0",
       multiscale: {
         axes: [
           { name: "c", kind: "Channel" },
@@ -442,8 +442,8 @@ const expectedManifestCollection: DatasetManifest = {
       id: "layout-stage",
       name: "Stage positions",
       placements: [
-        { entity_id: "well-A1", position: [0, 0] },
-        { entity_id: "field-A1-f0", position: [2048, 1024] },
+        { entity_id: "group-A1", position: [0, 0] },
+        { entity_id: "tile-A1-f0", position: [2048, 1024] },
       ],
     },
   ],
@@ -455,7 +455,7 @@ const expectedDatasetOpenedCollection: WireDatasetOpened = {
   fetch: {
     Proxied: {
       images: [
-        { image_id: "field-A1-f0-image", wire_format: { Lz4: { data_type: "Uint8" } } },
+        { image_id: "tile-A1-f0-image", wire_format: { Lz4: { data_type: "Uint8" } } },
       ],
     },
   },
@@ -808,9 +808,9 @@ const expectedAssetCatalogDelta: WireAssetCatalogDelta = {
   added: [
     {
       entity_id: "img-0",
-      kinds: ["WellProxy3D", "FieldProxy3D"],
+      kinds: ["GroupProxy3D", "TileProxy3D"],
       footprints: [
-        { kind: "WellProxy3D", dims: [50, 256, 256], bytes: 6553600 },
+        { kind: "GroupProxy3D", dims: [50, 256, 256], bytes: 6553600 },
       ],
     },
   ],
@@ -1136,9 +1136,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     ).toStrictEqual({ dataset_id: "wds-0f3a", delta: expectedAssetCatalogDelta });
     const entity = catalog.snapshot().byEntity.get("img-0");
     expect(entity).toBeDefined();
-    expect([...entity!.kinds].sort()).toStrictEqual(["FieldProxy3D", "WellProxy3D"]);
-    expect(entity!.footprints.get("WellProxy3D")).toStrictEqual({
-      kind: "WellProxy3D",
+    expect([...entity!.kinds].sort()).toStrictEqual(["GroupProxy3D", "TileProxy3D"]);
+    expect(entity!.footprints.get("GroupProxy3D")).toStrictEqual({
+      kind: "GroupProxy3D",
       dims: [50, 256, 256],
       bytes: 6553600,
     });
@@ -1531,8 +1531,8 @@ describe("wire goldens: content-source request envelopes", () => {
     const pending = source.fetchProxy(
       {
         datasetId: "wds-collection-77",
-        entityId: "field-A1-f0",
-        kind: "FieldProxy3D",
+        entityId: "tile-A1-f0",
+        kind: "TileProxy3D",
         t: 0,
         c: 2,
       },
@@ -1722,8 +1722,8 @@ describe("wire goldens: enum vocabulary", () => {
     const clipModes: NonNullable<ArcballCamera["clip_mode"]>[] = ["plane", "sphere"];
     const blendModes: BlendMode[] = ["alpha", "additive", "max"];
     const renderModes: RenderMode[] = ["translucent", "max_intensity"];
-    const entityKinds: Entity["kind"][] = ["Image", "Well", "Field"];
-    const proxyKinds: ProxyKind[] = ["WellProxy3D", "FieldProxy3D"];
+    const entityKinds: Entity["kind"][] = ["Image", "Group", "Tile"];
+    const proxyKinds: ProxyKind[] = ["GroupProxy3D", "TileProxy3D"];
     const openStages: DatasetOpenStage[] = [
       "request_received",
       "authorization",

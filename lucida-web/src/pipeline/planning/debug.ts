@@ -100,38 +100,38 @@ export function buildPlanningDatasetDebug(
       inFlight: inFlight[level] ?? 0,
     }));
 
-  // Wells by mode. Field-mode entries are deduped by parent well so
-  // counts represent *wells* in each mode, not active-set entries.
-  // Image-only datasets fall through with each image as its own "well"
-  // (no parent edge → wellId == entityId), so a single dataset shows
+  // Groups by mode. Tile-mode entries are deduped by parent group so
+  // counts represent *groups* in each mode, not active-set entries.
+  // Image-only datasets fall through with each image as its own "group"
+  // (no parent edge → groupId == entityId), so a single dataset shows
   // up as one count without special-casing. Invisible entries are
   // excluded — they have no promotion mode.
   //
   // ActiveSetEntry and EntitySnapshot are both discriminated unions:
   // narrow on `kind` before classifying entries, and on
-  // `ent.kind === "Field"` before reading `parentId` (Image and Well
+  // `ent.kind === "Tile"` before reading `parentId` (Image and Group
   // entities have no parent and fall back to their own entityId as
-  // the wellId).
-  const wellsByMode = {
-    wellAsProxy: 0,
-    fieldsWithProxyFallback: 0,
-    fieldsWithDetail: 0,
+  // the groupId).
+  const groupsByMode = {
+    groupAsProxy: 0,
+    tilesWithProxyFallback: 0,
+    tilesWithDetail: 0,
   };
-  const wellsSeen = new Set<string>();
+  const groupsSeen = new Set<string>();
   for (const e of result.activeSet) {
-    if (e.kind === "well-as-proxy") {
-      wellsByMode.wellAsProxy++;
+    if (e.kind === "group-as-proxy") {
+      groupsByMode.groupAsProxy++;
       continue;
     }
     if (e.kind === "invisible") continue;
-    // Narrowed: e is FieldEntry.
+    // Narrowed: e is TileEntry.
     const ent = entityById.get(e.entityId);
-    const wellId =
-      ent !== undefined && ent.kind === "Field" ? ent.parentId : e.entityId;
-    if (wellsSeen.has(wellId)) continue;
-    wellsSeen.add(wellId);
-    if (e.mode === "fields-with-proxy-fallback") wellsByMode.fieldsWithProxyFallback++;
-    else if (e.mode === "fields-with-detail") wellsByMode.fieldsWithDetail++;
+    const groupId =
+      ent !== undefined && ent.kind === "Tile" ? ent.parentId : e.entityId;
+    if (groupsSeen.has(groupId)) continue;
+    groupsSeen.add(groupId);
+    if (e.mode === "tiles-with-proxy-fallback") groupsByMode.tilesWithProxyFallback++;
+    else if (e.mode === "tiles-with-detail") groupsByMode.tilesWithDetail++;
   }
 
   // Focal entity: visible entity with centroid nearest viewport-center
@@ -162,8 +162,8 @@ export function buildPlanningDatasetDebug(
       chunkCount++;
       if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
     }
-    // Derive `mode` and `detailOwnedRange` per variant: only field
-    // entries carry a real LOD range. Well-as-proxy and invisibles
+    // Derive `mode` and `detailOwnedRange` per variant: only tile
+    // entries carry a real LOD range. Group-as-proxy and invisibles
     // synthesise a defensible placeholder so the panel doesn't render
     // `unknown`.
     let displayMode: string;
@@ -171,8 +171,8 @@ export function buildPlanningDatasetDebug(
     if (entry === undefined) {
       displayMode = "unknown";
       detailOwnedRange = [0, 0];
-    } else if (entry.kind === "well-as-proxy") {
-      displayMode = "well-as-proxy";
+    } else if (entry.kind === "group-as-proxy") {
+      displayMode = "group-as-proxy";
       detailOwnedRange = [0, 0];
     } else if (entry.kind === "invisible") {
       displayMode = "invisible";
@@ -181,13 +181,13 @@ export function buildPlanningDatasetDebug(
       displayMode = entry.mode;
       detailOwnedRange = entry.detailOwnedLodRange;
     }
-    // Only `FieldSnapshot` carries a `parentId`; narrow before
-    // reading. `Image` and `Well` focal entities surface as having no
-    // parent well.
-    const parentWellId = focal.kind === "Field" ? focal.parentId : null;
+    // Only `TileSnapshot` carries a `parentId`; narrow before
+    // reading. `Image` and `Group` focal entities surface as having no
+    // parent group.
+    const parentGroupId = focal.kind === "Tile" ? focal.parentId : null;
     focalEntity = {
       entityId: focal.entityId,
-      parentWellId,
+      parentGroupId,
       kind: focal.kind,
       projectedDiagonalPx: focal.projectedDiagonalPx,
       projectedAreaPx2: focal.projectedAreaPx2,
@@ -210,7 +210,7 @@ export function buildPlanningDatasetDebug(
     lodBreakdown,
     culling: result.stats.culling,
     catalogDegradations: result.stats.catalogDegradations,
-    wellsByMode,
+    groupsByMode,
     focalEntity,
   };
 }

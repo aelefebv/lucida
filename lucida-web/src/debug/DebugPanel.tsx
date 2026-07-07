@@ -40,11 +40,11 @@ const CACHE_CONFIG_EDITABLE: boolean = import.meta.env.DEV;
 /** Short label for an EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
   switch (mode) {
-    case "well-as-proxy":
+    case "group-as-proxy":
       return "WP";
-    case "fields-with-proxy-fallback":
+    case "tiles-with-proxy-fallback":
       return "FP";
-    case "fields-with-detail":
+    case "tiles-with-detail":
       return "FD";
     default:
       return mode;
@@ -54,11 +54,11 @@ function modeLabel(mode: string): string {
 /** Color for an EntityMode in the active-set rendering. */
 function modeColor(mode: string): string {
   switch (mode) {
-    case "well-as-proxy":
+    case "group-as-proxy":
       return "#88f";
-    case "fields-with-proxy-fallback":
+    case "tiles-with-proxy-fallback":
       return "#fb4";
-    case "fields-with-detail":
+    case "tiles-with-detail":
       return "#4f4";
     default:
       return "#aaa";
@@ -76,9 +76,9 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  wellModes: "Per-well badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
-  chunkGrid: "LOD chunk grid for every visible field, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
-  chunkTier: "Sub-color field chunks by displayed render tier (detail = green, coarse = yellow, missing = red). Requires chunkGrid.",
+  groupModes: "Per-group badge over the canvas: detail/coarse chunks available from the worker or CPU cache (Davailable/wanted Cavailable/wanted).",
+  chunkGrid: "LOD chunk grid for every visible tile, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
+  chunkTier: "Sub-color tile chunks by displayed render tier (detail = green, coarse = yellow, missing = red). Requires chunkGrid.",
   renderRadius: "Draw the active detail/coarse render-radius boundary. 2D shows circles; 3D shows projected sphere/ellipsoid rings.",
   cachedTier: "Sub-color cached chunks by eviction tier (active = bright green, demoted = pale sage, prefetch = teal). Requires chunkGrid.",
   plannedRank: "Sub-color planned chunks by queue rank (top of queue = bright orange, bottom = dim red, gray = not in pending). Requires chunkGrid.",
@@ -89,8 +89,8 @@ interface CatalogSnap {
   perDataset: Array<{
     datasetId: string;
     name: string;
-    wellsWithProxy: number;
-    fieldsWithProxy: number;
+    groupsWithProxy: number;
+    tilesWithProxy: number;
     totalEntries: number;
     sampleEntries: Array<{ entityId: string; kinds: string[] }>;
   }>;
@@ -297,22 +297,22 @@ function PlanningTabBody({
     const plans = coord.getLastPlans();
     console.group("[DebugPanel] last active sets");
     // ActiveSetEntry is a discriminated union; each variant exposes a
-    // different field shape. Render the table with per-variant
+    // different tile shape. Render the table with per-variant
     // defaults so the columns line up across rows.
     for (const [dsId, plan] of plans) {
       console.groupCollapsed(`${dsId}: ${plan.activeSet.length} entries`);
       console.table(
         plan.activeSet.map(e => {
-          if (e.kind === "well-as-proxy") {
+          if (e.kind === "group-as-proxy") {
             return {
               entityId: e.entityId,
               kind: e.kind,
-              mode: "well-as-proxy",
+              mode: "group-as-proxy",
               targetLod: "",
               range: "",
-              proxyKind: "WellProxy3D",
+              proxyKind: "GroupProxy3D",
               proxyAvailable: true,
-              wellProxyAvailable: true,
+              groupProxyAvailable: true,
             };
           }
           if (e.kind === "invisible") {
@@ -324,7 +324,7 @@ function PlanningTabBody({
               range: `${e.coarsestLod}-${e.coarsestLod}`,
               proxyKind: "",
               proxyAvailable: false,
-              wellProxyAvailable: false,
+              groupProxyAvailable: false,
             };
           }
           return {
@@ -335,7 +335,7 @@ function PlanningTabBody({
             range: `${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`,
             proxyKind: e.proxyKind ?? "",
             proxyAvailable: e.proxyAvailable,
-            wellProxyAvailable: e.wellProxyAvailable,
+            groupProxyAvailable: e.groupProxyAvailable,
           };
         }),
       );
@@ -370,10 +370,10 @@ function PlanningDatasetSection({
   p: import("./debugStats.ts").PlanningDatasetDebug;
   name: string;
 }) {
-  const wellsTotal =
-    p.wellsByMode.wellAsProxy +
-    p.wellsByMode.fieldsWithProxyFallback +
-    p.wellsByMode.fieldsWithDetail;
+  const groupsTotal =
+    p.groupsByMode.groupAsProxy +
+    p.groupsByMode.tilesWithProxyFallback +
+    p.groupsByMode.tilesWithDetail;
   const cull = p.culling;
   // Avoid divide-by-zero when no cells were considered (no visible
   // entities at all). Show the percentage retained at each stage so
@@ -403,20 +403,20 @@ function PlanningDatasetSection({
         )}
       </div>
 
-      {wellsTotal > 0 && (
+      {groupsTotal > 0 && (
         <div className="debug-section">
-          <div className="debug-title">Wells by mode ({wellsTotal} wells)</div>
+          <div className="debug-title">Groups by mode ({groupsTotal} groups)</div>
           <div>
-            <span style={{ color: modeColor("well-as-proxy") }}>
-              well-proxy: {p.wellsByMode.wellAsProxy}
+            <span style={{ color: modeColor("group-as-proxy") }}>
+              group-proxy: {p.groupsByMode.groupAsProxy}
             </span>{" "}
             ·{" "}
-            <span style={{ color: modeColor("fields-with-proxy-fallback") }}>
-              fallback: {p.wellsByMode.fieldsWithProxyFallback}
+            <span style={{ color: modeColor("tiles-with-proxy-fallback") }}>
+              fallback: {p.groupsByMode.tilesWithProxyFallback}
             </span>{" "}
             ·{" "}
-            <span style={{ color: modeColor("fields-with-detail") }}>
-              detail: {p.wellsByMode.fieldsWithDetail}
+            <span style={{ color: modeColor("tiles-with-detail") }}>
+              detail: {p.groupsByMode.tilesWithDetail}
             </span>
           </div>
         </div>
@@ -462,11 +462,11 @@ function PlanningDatasetSection({
             <span className="debug-member-id">{shortId(p.focalEntity.entityId, 24)}</span>{" "}
             <span style={{ color: "#888" }}>
               ({p.focalEntity.kind}
-              {p.focalEntity.parentWellId && (
+              {p.focalEntity.parentGroupId && (
                 <>
                   {" / parent "}
-                  <span title={p.focalEntity.parentWellId}>
-                    {shortId(p.focalEntity.parentWellId, 18)}
+                  <span title={p.focalEntity.parentGroupId}>
+                    {shortId(p.focalEntity.parentGroupId, 18)}
                   </span>
                 </>
               )}
@@ -583,17 +583,17 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 const cat = json ? JSON.parse(json) : { entries: [] };
                 const entries: Array<{ entity_id: string; kinds: string[] }> =
                   Array.isArray(cat.entries) ? cat.entries : [];
-                let wells = 0;
-                let fields = 0;
+                let groups = 0;
+                let tiles = 0;
                 for (const e of entries) {
-                  if (e.kinds?.includes("WellProxy3D")) wells++;
-                  if (e.kinds?.includes("FieldProxy3D")) fields++;
+                  if (e.kinds?.includes("GroupProxy3D")) groups++;
+                  if (e.kinds?.includes("TileProxy3D")) tiles++;
                 }
                 perDataset.push({
                   datasetId: dsId,
                   name: dsEntry.manifest?.name ?? dsId,
-                  wellsWithProxy: wells,
-                  fieldsWithProxy: fields,
+                  groupsWithProxy: groups,
+                  tilesWithProxy: tiles,
                   totalEntries: entries.length,
                   sampleEntries: entries.slice(0, 5).map(e => ({
                     entityId: e.entity_id,
@@ -1512,9 +1512,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div className="debug-section">
                     <div className="debug-title">
                       Active Set (
-                      {snap.orch.activeSet.filter(e => e.mode === "well-as-proxy").length} well-proxy /
-                      {" "}{snap.orch.activeSet.filter(e => e.mode === "fields-with-proxy-fallback").length} fields+proxy /
-                      {" "}{snap.orch.activeSet.filter(e => e.mode === "fields-with-detail").length} fields-detail)
+                      {snap.orch.activeSet.filter(e => e.mode === "group-as-proxy").length} group-proxy /
+                      {" "}{snap.orch.activeSet.filter(e => e.mode === "tiles-with-proxy-fallback").length} tiles+proxy /
+                      {" "}{snap.orch.activeSet.filter(e => e.mode === "tiles-with-detail").length} tiles-detail)
                     </div>
                     <div className="debug-member-list">
                       {snap.orch.activeSet.slice(0, 10).map((e) => (
@@ -1818,13 +1818,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   {ds.datasetId}
                 </div>
                 <div style={{ marginTop: 4 }}>
-                  WellProxy3D:{" "}
-                  <span style={{ color: ds.wellsWithProxy > 0 ? "#6f6" : "#666" }}>
-                    {ds.wellsWithProxy}
+                  GroupProxy3D:{" "}
+                  <span style={{ color: ds.groupsWithProxy > 0 ? "#6f6" : "#666" }}>
+                    {ds.groupsWithProxy}
                   </span>{" "}
-                  · FieldProxy3D:{" "}
-                  <span style={{ color: ds.fieldsWithProxy > 0 ? "#6f6" : "#666" }}>
-                    {ds.fieldsWithProxy}
+                  · TileProxy3D:{" "}
+                  <span style={{ color: ds.tilesWithProxy > 0 ? "#6f6" : "#666" }}>
+                    {ds.tilesWithProxy}
                   </span>{" "}
                   · total entries: {ds.totalEntries}
                 </div>

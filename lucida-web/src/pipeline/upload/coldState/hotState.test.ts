@@ -6,7 +6,7 @@
  * Cases:
  *   1. Per-member fan-out — one rayHit entry per cold-state member.
  *   2. Composite member id dedup — if two entries produce the same
- *      `memberId` (e.g. well-as-proxy with entityId X and a field with
+ *      `memberId` (e.g. group-as-proxy with entityId X and a tile with
  *      imageId X), only the first emits a rayHit.
  *   3. Empty cold msg → empty rayHitsByEntity.
  */
@@ -26,28 +26,28 @@ function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdState
     levels: over.levels ?? [],
     proxyKind: over.proxyKind,
     proxyAvailable: over.proxyAvailable ?? false,
-    wellProxyAvailable: over.wellProxyAvailable ?? false,
+    groupProxyAvailable: over.groupProxyAvailable ?? false,
     modelMatrix: over.modelMatrix ?? new Float32Array(16),
     invModelMatrix: over.invModelMatrix ?? new Float32Array(16),
     displayStateByChannel: over.displayStateByChannel ?? {},
   };
   // Discriminate via `mode` so existing call sites that pass
-  // `mode: "well-as-proxy"` (with `imageId: ""`) keep working.
-  const mode = over.mode ?? "fields-with-detail";
-  if (mode === "well-as-proxy") {
+  // `mode: "group-as-proxy"` (with `imageId: ""`) keep working.
+  const mode = over.mode ?? "tiles-with-detail";
+  if (mode === "group-as-proxy") {
     return {
       ...base,
-      kind: "well-as-proxy",
-      mode: "well-as-proxy",
-      parentWellId: null,
+      kind: "group-as-proxy",
+      mode: "group-as-proxy",
+      parentGroupId: null,
     };
   }
   return {
     ...base,
-    kind: "field",
+    kind: "tile",
     imageId: over.imageId ?? "img",
     mode,
-    parentWellId: over.parentWellId ?? null,
+    parentGroupId: over.parentGroupId ?? null,
   };
 }
 
@@ -81,9 +81,9 @@ describe("buildViewHotState", () => {
     const cold = makeColdMsg(
       [0], // single channel
       [
-        makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "fields-with-detail" }),
-        makeEntry({ entityId: "ent-b", imageId: "img-b", mode: "fields-with-detail" }),
-        makeEntry({ entityId: "well-c", imageId: "", mode: "well-as-proxy" }),
+        makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "ent-b", imageId: "img-b", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "group-c", imageId: "", mode: "group-as-proxy" }),
       ],
     );
     const rayHit: [number, number, number] = [10, 20, 30];
@@ -102,21 +102,21 @@ describe("buildViewHotState", () => {
     // 3 members → 3 entries, each with the same rayHit.
     expect(msg.rayHitsByEntity).toHaveLength(3);
     const memberIds = msg.rayHitsByEntity.map(([id]) => id);
-    expect(memberIds).toEqual(["img-a", "img-b", "well-c"]);
+    expect(memberIds).toEqual(["img-a", "img-b", "group-c"]);
     for (const [, hit] of msg.rayHitsByEntity) {
       expect(hit).toEqual([10, 20, 30]);
     }
   });
 
   it("dedupes when two entries produce the same memberId", () => {
-    // well-as-proxy entityId="dup", field imageId="dup" → both yield
+    // group-as-proxy entityId="dup", tile imageId="dup" → both yield
     // memberId "dup" in single-channel mode. Only the first one emits.
     const cold = makeColdMsg(
       [0],
       [
-        makeEntry({ entityId: "dup", imageId: "", mode: "well-as-proxy" }),
-        makeEntry({ entityId: "other-ent", imageId: "dup", mode: "fields-with-detail" }),
-        makeEntry({ entityId: "ent-c", imageId: "img-c", mode: "fields-with-detail" }),
+        makeEntry({ entityId: "dup", imageId: "", mode: "group-as-proxy" }),
+        makeEntry({ entityId: "other-ent", imageId: "dup", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "ent-c", imageId: "img-c", mode: "tiles-with-detail" }),
       ],
     );
 

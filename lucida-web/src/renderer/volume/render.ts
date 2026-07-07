@@ -104,7 +104,7 @@ function ensureLabelVolumePalette(
  * A label pool is a single-tile 3D texture covering the label's chosen level,
  * so a single-LOD transient descriptor (grid 1×1×1) reads it directly. It is
  * placed by the SOURCE member's model matrix (a label overlays its source's
- * physical extent), so a coarser label still covers the same field of view.
+ * physical extent), so a coarser label still covers the same region of the view.
  * Declared OME colors are honored via the palette buffer; the rest use the
  * glasbey hash. Composited OVER the intensity (alpha blend, not first layer).
  * Returns true when a draw was issued, false when the pool has no resident
@@ -241,29 +241,29 @@ export function handleVolumeRenderMultiPass(
     // the dense `proxyPoolsByIndex` array (resolved via the member's
     // time/channel-specific proxy descriptor mirror).
     const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
-    let fieldProxyTexture: GPUTexture | null = null;
-    let fieldProxySlotResident = false;
-    let wellProxyTexture: GPUTexture | null = null;
-    let wellProxySlotResident = false;
+    let tileProxyTexture: GPUTexture | null = null;
+    let tileProxySlotResident = false;
+    let groupProxyTexture: GPUTexture | null = null;
+    let groupProxySlotResident = false;
     let proxySlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
 
     if (desc) {
-      if (desc.fieldProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
+      if (desc.tileProxyHandle) {
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
         if (poolIdx !== undefined) {
           const pool = descIndex.proxyPoolsByIndex[poolIdx];
-          fieldProxyTexture = pool.texture;
-          fieldProxySlotResident = true;
+          tileProxyTexture = pool.texture;
+          tileProxySlotResident = true;
           proxySlotDimsForVolumeFallback = pool.slotDims;
         }
       }
-      if (desc.wellProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.wellProxyHandle.poolKey);
+      if (desc.groupProxyHandle) {
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
         if (poolIdx !== undefined) {
           const pool = descIndex.proxyPoolsByIndex[poolIdx];
-          wellProxyTexture = pool.texture;
-          wellProxySlotResident = true;
-          if (!fieldProxySlotResident) {
+          groupProxyTexture = pool.texture;
+          groupProxySlotResident = true;
+          if (!tileProxySlotResident) {
             proxySlotDimsForVolumeFallback = pool.slotDims;
           }
         }
@@ -273,11 +273,11 @@ export function handleVolumeRenderMultiPass(
     // Skip when the layer has nothing renderable: no detail/coarse chunks
     // AND no resident proxy. Entities with either chunk tier or a resident
     // proxy continue rendering; the shader fallback chain handles the rest.
-    if (!hasDetail && !hasCoarse && !fieldProxySlotResident && !wellProxySlotResident) {
+    if (!hasDetail && !hasCoarse && !tileProxySlotResident && !groupProxySlotResident) {
       continue;
     }
 
-    renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
+    renderer.setProxyTextures(tileProxyTexture, groupProxyTexture);
 
     const dimsMeta = detailMetas?.[0] ?? coarseMetas?.[0] ?? null;
     const volumeDims: [number, number, number] = dimsMeta

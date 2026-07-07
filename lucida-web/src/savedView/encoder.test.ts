@@ -299,8 +299,8 @@ describe("SavedView encoder", () => {
 
   describe("size budget", () => {
     /**
-     * Synthesize a 384-well collection scenario:
-     *   - 1 dataset (384 wells, but they're members not separate datasets)
+     * Synthesize a 384-group collection scenario:
+     *   - 1 dataset (384 groups, but they're members not separate datasets)
      *   - active layout pointing at a 24x16 collection spec
      *   - default channel settings, default contrast/gamma
      *   - typical slice camera position
@@ -309,7 +309,7 @@ describe("SavedView encoder", () => {
      * gzip+base64. The dataset side is one URL; the wire-cost driver
      * is the per-channel display defaults — which the encoder strips.
      */
-    it("384-well collection share link fits under 1 KB", async () => {
+    it("384-group collection share link fits under 1 KB", async () => {
       const v = emptySliceView([1280, 720]);
       v.datasets = ["gs://bucket/big-collection-screen-2024.zarr"];
       v.dataset_order = ["ds-7777aaaabbbbcccc"];

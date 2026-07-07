@@ -73,7 +73,7 @@ impl VisibleContentBounds2D {
 /// sizes across datasets, plus a Y translation (`top_align`) that top-aligns
 /// volumes of different heights in 3D. Kept in `f64`; consumers that build
 /// `f32` matrices cast at application time ([`Self::apply`]), consumers that
-/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the fields directly.
+/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the tiles directly.
 #[derive(Debug, Clone, Copy)]
 struct PlacementCorrection {
     correction: f64,
@@ -512,8 +512,8 @@ impl Scene {
             }
 
             let level0 = &member.levels[0];
-            let fov_w = level0.shape[4] as f64; // X
-            let fov_h = level0.shape[3] as f64; // Y
+            let tile_w = level0.shape[4] as f64; // X
+            let tile_h = level0.shape[3] as f64; // Y
 
             // Compute visible region using the member's volume transform.
             let vol_shape = [
@@ -530,8 +530,8 @@ impl Scene {
             // AABB culling (same logic as current but using member.position)
             let pos_x = member.position[0];
             let pos_y = member.position[1];
-            let member_max_x = pos_x + fov_w;
-            let member_max_y = pos_y + fov_h;
+            let member_max_x = pos_x + tile_w;
+            let member_max_y = pos_y + tile_h;
 
             let [vis_min_x, vis_min_y, vis_max_x, vis_max_y] = region.xy_bounds;
 
@@ -712,7 +712,7 @@ impl Scene {
     ///
     /// For a dataset whose first member has layout position `[0, 0]` this
     /// equals [`Self::member_world_matrix`]; for an offset member (e.g. a collection
-    /// well) the two differ only by the corrected XY translation.
+    /// group) the two differ only by the corrected XY translation.
     ///
     /// Returns the identity for an unknown dataset or one with no members, so
     /// consumers degrade to an uncorrected unit cube rather than a special
@@ -779,13 +779,13 @@ impl Scene {
                 // Slice mode: ray and member positions are both in voxel space.
                 let pos_x = member.position[0];
                 let pos_y = member.position[1];
-                let fov_w = level0.shape[4] as f64;
-                let fov_h = level0.shape[3] as f64;
+                let tile_w = level0.shape[4] as f64;
+                let tile_h = level0.shape[3] as f64;
 
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
 
-                if rx >= pos_x && rx <= pos_x + fov_w && ry >= pos_y && ry <= pos_y + fov_h {
+                if rx >= pos_x && rx <= pos_x + tile_w && ry >= pos_y && ry <= pos_y + tile_h {
                     Some(([rx, ry, 0.0], 0.0))
                 } else {
                     None
@@ -1083,7 +1083,7 @@ impl Scene {
             let pos = member.position;
 
             // Compute screen-space bounding box.
-            // 2D: corners in voxel space (pos to pos+fov_size).
+            // 2D: corners in voxel space (pos to pos+tile_size).
             // 3D: corners from rendering_transform (includes position, Y-flip, global correction).
             let mut screen_min = [f64::MAX, f64::MAX];
             let mut screen_max = [f64::MIN, f64::MIN];
@@ -1308,7 +1308,7 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
 
 /// Find the position of an entity in the layout.
 /// For Image entities: look up directly in layout placements.
-/// For Field entities: look up parent well's placement + field->well transform translation.
+/// For Tile entities: look up parent group's placement + tile->group transform translation.
 ///
 /// Returns `[0.0, 0.0]` as a last-resort fallback for an entity with no resolvable
 /// placement, so render-path callers always get *some* position. Annotation
@@ -1351,8 +1351,8 @@ pub(crate) fn resolve_entity_position(
         return Some(p.position);
     }
 
-    // Otherwise, compose a field's position from its parent well's placement plus
-    // the field->well transform translation. Only resolvable if the parent is
+    // Otherwise, compose a tile's position from its parent group's placement plus
+    // the tile->group transform translation. Only resolvable if the parent is
     // itself placed in this layout.
     let entity = entities.iter().find(|e| &e.id == entity_id)?;
     let parent_id = entity.parent.as_ref()?;
@@ -1913,7 +1913,7 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        // Serialize, then strip optional fields
+        // Serialize, then strip optional tiles
         let json = serde_json::to_string(&scene).unwrap();
         let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
         val.as_object_mut().unwrap().remove("dataset_order");
@@ -2376,9 +2376,9 @@ mod tests {
 
     #[test]
     fn dataset_world_bounds_frames_each_dataset_not_the_union() {
-        // A single image at the origin plus a 2-well collection offset along X. The
+        // A single image at the origin plus a 2-group collection offset along X. The
         // single dataset's box must be its OWN footprint, never the union that
-        // would also include the offset collection well.
+        // would also include the offset collection group.
         let mut scene = Scene::new([800, 600]);
         scene.apply(
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("a", "a", 1)).into(),
@@ -2402,7 +2402,7 @@ mod tests {
             a_min != b_min || a_max != b_max,
             "per-dataset bounds must differ for differently-placed datasets"
         );
-        // The collection spans two wells along X, so it is wider than the single image.
+        // The collection spans two groups along X, so it is wider than the single image.
         let a_width = a_max[0] - a_min[0];
         let b_width = b_max[0] - b_min[0];
         assert!(
@@ -2410,7 +2410,7 @@ mod tests {
             "collection width {b_width} should exceed single-image width {a_width}"
         );
         // Crucially, "a" must NOT have grown to the union: its max-x stays near
-        // its own footprint, well short of the offset collection's far edge.
+        // its own footprint, group short of the offset collection's far edge.
         assert!(
             a_max[0] < b_max[0] - 1e-9,
             "dataset_world_bounds('a') leaked the union (max-x {} vs collection max-x {})",
@@ -2469,7 +2469,7 @@ mod tests {
             DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("solo", "solo", 1))
                 .into(),
         );
-        // Config 2 + 3: a second, multi-member dataset — one well at the origin
+        // Config 2 + 3: a second, multi-member dataset — one group at the origin
         // and one with a non-trivial XY offset + anisotropic footprint.
         scene.apply(
             DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
@@ -2574,8 +2574,8 @@ mod tests {
         }
     }
 
-    /// Open a 512-voxel-cube dataset ("big") next to a two-well collection whose
-    /// wells are 256 voxels across ("collection", first well at the layout origin,
+    /// Open a 512-voxel-cube dataset ("big") next to a two-group collection whose
+    /// groups are 256 voxels across ("collection", first group at the layout origin,
     /// second offset). With isotropic unit spacing the collection's global
     /// correction is a real 0.5 and its top-align term is (512-200)/512 —
     /// non-trivial placement on every axis this module corrects.

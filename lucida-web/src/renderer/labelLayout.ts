@@ -5,7 +5,7 @@
  * coarser than the intensity image it overlays (segmentations are often
  * downsampled). Rendering a label at its raw pixel dimensions would shrink
  * it to 1/downsample of the image and misalign it. Instead the label quad
- * must cover the same physical field of view as the source image, so it is
+ * must cover the same physical region of the view as the source image, so it is
  * sized in the SOURCE's full-resolution voxel units.
  *
  * The 5D axis order is the canonical `[T, C, Z, Y, X]`, so X is index 4

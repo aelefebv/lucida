@@ -2,8 +2,8 @@
  * Suite A — cold-state ingestion characterization.
  *
  * Locks the behavior of `applyColdState`. Covers single + multi
- * channel volume cold state, mixed `fields-with-detail` +
- * `well-as-proxy` entries, fields sharing chunk dims, fields with
+ * channel volume cold state, mixed `tiles-with-detail` +
+ * `group-as-proxy` entries, tiles sharing chunk dims, tiles with
  * different chunk dims, slice mode with mixed LODs + Z retargeting,
  * cold-state churn (replace), and empty active-set cold state.
  *
@@ -142,25 +142,25 @@ function makeEntry(
     ],
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
-    wellProxyAvailable: opts.wellProxyAvailable ?? false,
+    groupProxyAvailable: opts.groupProxyAvailable ?? false,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
   };
-  if (opts.mode === "well-as-proxy") {
+  if (opts.mode === "group-as-proxy") {
     return {
       ...base,
-      kind: "well-as-proxy",
-      mode: "well-as-proxy",
-      parentWellId: null,
+      kind: "group-as-proxy",
+      mode: "group-as-proxy",
+      parentGroupId: null,
     };
   }
   return {
     ...base,
-    kind: "field",
+    kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
-    parentWellId: opts.parentWellId ?? null,
+    parentGroupId: opts.parentGroupId ?? null,
   };
 }
 
@@ -208,7 +208,7 @@ describe("Suite A — applyColdState", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -244,7 +244,7 @@ describe("Suite A — applyColdState", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+          entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
           levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
           displayStateByChannel: { 0: defaultDisplay(), 1: defaultDisplay(), 2: defaultDisplay() },
         }),
@@ -267,18 +267,18 @@ describe("Suite A — applyColdState", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 3. Mixed `fields-with-detail` + `well-as-proxy`
+  // 3. Mixed `tiles-with-detail` + `group-as-proxy`
   // -------------------------------------------------------------------------
-  it("mixed fields + well-as-proxy → only fields register a chunk pool; well registers in memberToDataset only", () => {
+  it("mixed tiles + group-as-proxy → only tiles register a chunk pool; group registers in memberToDataset only", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
       makeEntry({
-        entityId: "wellA", imageId: "", mode: "well-as-proxy",
-        // well-as-proxy carries no levels[] because it has no chunks
+        entityId: "groupA", imageId: "", mode: "group-as-proxy",
+        // group-as-proxy carries no levels[] because it has no chunks
         // to upload.
         levels: [],
       }),
@@ -286,28 +286,28 @@ describe("Suite A — applyColdState", () => {
     applyColdState(ctx, cold);
 
     // Both entries land in memberToDataset (iterateColdMembers walks
-    // both — well-as-proxy resolves to entityId).
+    // both — group-as-proxy resolves to entityId).
     expect(ctx.state.memberToDataset.get("imgA")).toBe("ds1");
-    expect(ctx.state.memberToDataset.get("wellA")).toBe("ds1");
-    // Only the field registers a pool (groupEntriesByPool skips
+    expect(ctx.state.memberToDataset.get("groupA")).toBe("ds1");
+    // Only the tile registers a pool (groupEntriesByPool skips
     // entries with no targetLevel).
     expect(ctx.state.memberToPool.has("imgA")).toBe(true);
-    expect(ctx.state.memberToPool.has("wellA")).toBe(false);
+    expect(ctx.state.memberToPool.has("groupA")).toBe(false);
     expect(vol(ctx.state).size).toBe(1);
   });
 
   // -------------------------------------------------------------------------
-  // 4. Fields sharing chunk dims → one pool
+  // 4. Tiles sharing chunk dims → one pool
   // -------------------------------------------------------------------------
-  it("two fields with the same chunk dims → ONE pool group with sequential entityMetas offsets", () => {
+  it("two tiles with the same chunk dims → ONE pool group with sequential entityMetas offsets", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
       makeEntry({
-        entityId: "imgB", imageId: "imgB", mode: "fields-with-detail",
+        entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -325,17 +325,17 @@ describe("Suite A — applyColdState", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 5. Fields with different chunk dims → multiple pools per dataset
+  // 5. Tiles with different chunk dims → multiple pools per dataset
   // -------------------------------------------------------------------------
-  it("two fields with different chunk dims → TWO pool groups + separate entityMetas", () => {
+  it("two tiles with different chunk dims → TWO pool groups + separate entityMetas", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
       makeEntry({
-        entityId: "imgB", imageId: "imgB", mode: "fields-with-detail",
+        entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [16, 32, 32], gridShape: [4, 8, 8], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -356,7 +356,7 @@ describe("Suite A — applyColdState", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         targetLod: 0,
         detailLevel: 0,
         coarseLevel: 2,
@@ -389,7 +389,7 @@ describe("Suite A — applyColdState", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         targetLod: 1,
         detailOwnedLodRange: [1, 1],
         detailLevel: 1,
@@ -424,7 +424,7 @@ describe("Suite A — applyColdState", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+          entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
           detailOwnedLodRange: [0, 1],
           levels: [
             { level: 0, chunkShape: [8, 128, 128], gridShape: [4, 2, 2], levelDims: [32, 256, 256] },
@@ -453,7 +453,7 @@ describe("Suite A — applyColdState", () => {
     const ctx = makeCtx(makeMockDevice());
     const coldA = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -465,7 +465,7 @@ describe("Suite A — applyColdState", () => {
     // Second cold state — different active set.
     const coldB = makeCold([
       makeEntry({
-        entityId: "imgB", imageId: "imgB", mode: "fields-with-detail",
+        entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
         levels: [{ level: 0, chunkShape: [16, 32, 32], gridShape: [4, 8, 8], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -503,49 +503,49 @@ describe("Suite A — applyColdState", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Bonus: well→fields fan-out gets populated from parentWellId
+  // Bonus: group→tiles fan-out gets populated from parentGroupId
   // -------------------------------------------------------------------------
-  it("populates wellToFields from entries' parentWellId", () => {
+  it("populates groupToTiles from entries' parentGroupId", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
       makeEntry({
-        entityId: "field1", imageId: "img1", mode: "fields-with-detail",
-        parentWellId: "wellA",
+        entityId: "tile1", imageId: "img1", mode: "tiles-with-detail",
+        parentGroupId: "groupA",
       }),
       makeEntry({
-        entityId: "field2", imageId: "img2", mode: "fields-with-detail",
-        parentWellId: "wellA",
+        entityId: "tile2", imageId: "img2", mode: "tiles-with-detail",
+        parentGroupId: "groupA",
       }),
       makeEntry({
-        entityId: "field3", imageId: "img3", mode: "fields-with-detail",
-        parentWellId: "wellB",
+        entityId: "tile3", imageId: "img3", mode: "tiles-with-detail",
+        parentGroupId: "groupB",
       }),
     ]);
     applyColdState(ctx, cold);
-    expect(ctx.state.wellToFields.get("wellA")).toEqual(new Set(["field1", "field2"]));
-    expect(ctx.state.wellToFields.get("wellB")).toEqual(new Set(["field3"]));
-    // wellsByDataset tracks which wells came from this dataset so
+    expect(ctx.state.groupToTiles.get("groupA")).toEqual(new Set(["tile1", "tile2"]));
+    expect(ctx.state.groupToTiles.get("groupB")).toEqual(new Set(["tile3"]));
+    // groupsByDataset tracks which groups came from this dataset so
     // removeLayerResources can clear them cheaply.
-    expect(ctx.state.wellsByDataset.get("ds1")).toEqual(new Set(["wellA", "wellB"]));
+    expect(ctx.state.groupsByDataset.get("ds1")).toEqual(new Set(["groupA", "groupB"]));
   });
 
   it("reconciles resident proxies against desiredProxyKeys before rebuilding descriptors", () => {
     const device = makeMockDevice();
     const ctx = makeCtx(device);
-    const poolKey = proxyPoolKey("ds1", "FieldProxy3D", [8, 8, 8], 0);
-    const pool = createProxyAtlas(device, "FieldProxy3D", [8, 8, 8], 0, 4);
-    const slotIndex = allocateProxySlot(pool, proxySlotKey("field1", 0, 0));
+    const poolKey = proxyPoolKey("ds1", "TileProxy3D", [8, 8, 8], 0);
+    const pool = createProxyAtlas(device, "TileProxy3D", [8, 8, 8], 0, 4);
+    const slotIndex = allocateProxySlot(pool, proxySlotKey("tile1", 0, 0));
     ctx.state.proxyPoolsByDataset.set("ds1", new Map([[poolKey, pool]]));
-    ctx.state.proxyDescriptorsByEntity.set(proxyDescriptorKey("field1", 0, 0), {
-      fieldProxyHandle: { poolKey, slotIndex },
-      wellProxyHandle: null,
+    ctx.state.proxyDescriptorsByEntity.set(proxyDescriptorKey("tile1", 0, 0), {
+      tileProxyHandle: { poolKey, slotIndex },
+      groupProxyHandle: null,
     });
 
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "field1", imageId: "img1", mode: "fields-with-detail",
-          proxyKind: "FieldProxy3D",
+          entityId: "tile1", imageId: "img1", mode: "tiles-with-detail",
+          proxyKind: "TileProxy3D",
           proxyAvailable: true,
         }),
       ],
@@ -553,10 +553,10 @@ describe("Suite A — applyColdState", () => {
     );
     applyColdState(ctx, cold);
 
-    expect(pool.slots.has(proxySlotKey("field1", 0, 0))).toBe(false);
+    expect(pool.slots.has(proxySlotKey("tile1", 0, 0))).toBe(false);
     expect(pool.freeSlots).toContain(slotIndex);
     expect(
-      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("field1", 0, 0))!.fieldProxyHandle,
+      ctx.state.proxyDescriptorsByEntity.get(proxyDescriptorKey("tile1", 0, 0))!.tileProxyHandle,
     ).toBeNull();
     expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });

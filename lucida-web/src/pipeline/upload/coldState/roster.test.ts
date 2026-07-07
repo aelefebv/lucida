@@ -4,13 +4,13 @@
  * entityId-keyed model+inverse matrices map consumed by `buildColdState`.
  *
  * Behaviour under test:
- *   - `well-as-proxy` entries are synthesised; their entityId appears in
+ *   - `group-as-proxy` entries are synthesised; their entityId appears in
  *     `matricesByEntity` with the synthetic matrices.
  *   - `invisible` entries are skipped (no roster entry, no matrices).
- *   - `field` entries forward `imageId`, `position`, `mode`; their
+ *   - `tile` entries forward `imageId`, `position`, `mode`; their
  *     matrices come from `scene.member_model_matrix`.
  *   - Empty active set → empty roster + empty matrices map.
- *   - Wells with zero visible fields are skipped (no synth, no
+ *   - Groups with zero visible tiles are skipped (no synth, no
  *     matrices).
  */
 import { describe, it, expect } from "vitest";
@@ -67,8 +67,8 @@ function makeCtx(
   } as unknown as TickContext;
 }
 
-/** Construct a `FieldSnapshot` with the minimum surface buildRoster reads. */
-function makeField(
+/** Construct a `TileSnapshot` with the minimum surface buildRoster reads. */
+function makeTile(
   entityId: string,
   imageId: string,
   parentId: string,
@@ -76,7 +76,7 @@ function makeField(
   lvl0Shape: [number, number, number, number, number] = [1, 1, 1, 100, 100],
 ): EntitySnapshot {
   return {
-    kind: "Field",
+    kind: "Tile",
     entityId,
     imageId,
     parentId,
@@ -104,7 +104,7 @@ function makeField(
 // ---------------------------------------------------------------------------
 
 describe("buildRoster", () => {
-  it("emits roster entries for visible field entries and looks up their matrices", () => {
+  it("emits roster entries for visible tile entries and looks up their matrices", () => {
     const ctx = makeCtx({
       "img-a": {
         model: translateScaleMatrix(1, 2, 3, 10, 10, 10),
@@ -117,32 +117,32 @@ describe("buildRoster", () => {
     });
 
     const entities: EntitySnapshot[] = [
-      makeField("ent-a", "img-a", "well-0", [0, 0]),
-      makeField("ent-b", "img-b", "well-0", [100, 100]),
+      makeTile("ent-a", "img-a", "group-0", [0, 0]),
+      makeTile("ent-b", "img-b", "group-0", [100, 100]),
     ];
 
     const activeSet: ActiveSetEntry[] = [
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: false,
-        wellProxyAvailable: false,
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
       {
-        kind: "field",
+        kind: "tile",
         entityId: "ent-b",
         imageId: "img-b",
-        mode: "fields-with-detail",
+        mode: "tiles-with-detail",
         targetLod: 0,
         coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyAvailable: false,
-        wellProxyAvailable: false,
+        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
 
@@ -151,9 +151,9 @@ describe("buildRoster", () => {
     });
 
     expect(entries).toHaveLength(2);
-    expect(entries[0]).toMatchObject({ imageId: "img-a", entityId: "ent-a", mode: "fields-with-detail" });
+    expect(entries[0]).toMatchObject({ imageId: "img-a", entityId: "ent-a", mode: "tiles-with-detail" });
     expect(entries[0].position).toEqual([0, 0]);
-    expect(entries[1]).toMatchObject({ imageId: "img-b", entityId: "ent-b", mode: "fields-with-detail" });
+    expect(entries[1]).toMatchObject({ imageId: "img-b", entityId: "ent-b", mode: "tiles-with-detail" });
     expect(entries[1].position).toEqual([100, 100]);
 
     // matricesByEntity populated for both entries.
@@ -164,8 +164,8 @@ describe("buildRoster", () => {
     expect(mB.model[0]).toBe(5); expect(mB.model[12]).toBe(20);
   });
 
-  it("synthesises well-as-proxy entries and records their matrices", () => {
-    // Two fields under the same well — well's AABB is union of the two.
+  it("synthesises group-as-proxy entries and records their matrices", () => {
+    // Two tiles under the same group — group's AABB is union of the two.
     const ctx = makeCtx({
       "img-1": {
         model: translateScaleMatrix(0, 0, 0, 10, 10, 10),
@@ -178,31 +178,31 @@ describe("buildRoster", () => {
     });
 
     const entities: EntitySnapshot[] = [
-      makeField("ent-1", "img-1", "well-0", [0, 0],     [1, 1, 1, 100, 100]),
-      makeField("ent-2", "img-2", "well-0", [100, 100], [1, 1, 1, 100, 100]),
+      makeTile("ent-1", "img-1", "group-0", [0, 0],     [1, 1, 1, 100, 100]),
+      makeTile("ent-2", "img-2", "group-0", [100, 100], [1, 1, 1, 100, 100]),
     ];
 
     const activeSet: ActiveSetEntry[] = [
-      { kind: "well-as-proxy", entityId: "well-0" } as ActiveSetEntry,
+      { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry,
     ];
 
     const { entries, matricesByEntity } = buildRoster({
       activeSet, entities, ctx, datasetId: "ds1",
     });
 
-    // Synthetic well member.
+    // Synthetic group member.
     expect(entries).toHaveLength(1);
-    expect(entries[0].entityId).toBe("well-0");
-    expect(entries[0].mode).toBe("well-as-proxy");
-    expect(entries[0].imageId).toBe("well-0");
+    expect(entries[0].entityId).toBe("group-0");
+    expect(entries[0].mode).toBe("group-as-proxy");
+    expect(entries[0].imageId).toBe("group-0");
     // Synthetic 3D matrix: span 30 in each axis, translate 0,0,0.
     expect(entries[0].modelMatrix![0]).toBe(30);
     expect(entries[0].modelMatrix![5]).toBe(30);
     expect(entries[0].modelMatrix![10]).toBe(30);
 
-    // matricesByEntity has the synthesised matrices keyed by well entityId.
+    // matricesByEntity has the synthesised matrices keyed by group entityId.
     expect(matricesByEntity.size).toBe(1);
-    const m = matricesByEntity.get("well-0")!;
+    const m = matricesByEntity.get("group-0")!;
     expect(m.model[0]).toBe(30);
     expect(m.inv[0]).toBeCloseTo(1 / 30);
   });
@@ -210,7 +210,7 @@ describe("buildRoster", () => {
   it("skips invisible entries — no roster entry, no matrices entry", () => {
     const ctx = makeCtx({});
     const entities: EntitySnapshot[] = [
-      makeField("ent-x", "img-x", "well-0", [0, 0]),
+      makeTile("ent-x", "img-x", "group-0", [0, 0]),
     ];
     const activeSet: ActiveSetEntry[] = [
       { kind: "invisible", entityId: "ent-x", imageId: "img-x", coarsestLod: 3 } as ActiveSetEntry,
@@ -233,11 +233,11 @@ describe("buildRoster", () => {
     expect(matricesByEntity.size).toBe(0);
   });
 
-  it("skips well-as-proxy entries whose well has zero visible fields", () => {
+  it("skips group-as-proxy entries whose group has zero visible tiles", () => {
     const ctx = makeCtx({});
-    // No fields at all in `entities` for this well.
+    // No tiles at all in `entities` for this group.
     const activeSet: ActiveSetEntry[] = [
-      { kind: "well-as-proxy", entityId: "well-empty" } as ActiveSetEntry,
+      { kind: "group-as-proxy", entityId: "group-empty" } as ActiveSetEntry,
     ];
 
     const { entries, matricesByEntity } = buildRoster({

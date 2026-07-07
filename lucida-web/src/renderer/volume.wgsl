@@ -50,17 +50,17 @@ struct EntityDescriptor {
   modelMatrix: mat4x4<f32>,
   invModelMatrix: mat4x4<f32>,
   channelMask: u32,
-  fieldProxyPoolIndex: u32,
-  fieldProxySlotIndex: u32,
-  wellProxyPoolIndex: u32,
-  wellProxySlotIndex: u32,
+  tileProxyPoolIndex: u32,
+  tileProxySlotIndex: u32,
+  groupProxyPoolIndex: u32,
+  groupProxySlotIndex: u32,
   _pad_proxy0: u32,
   _pad_proxy1: u32,
   _pad_proxy2: u32,
-  fieldProxyDims: vec3<u32>,
-  _pad_field: u32,
-  wellProxyDims: vec3<u32>,
-  _pad_well: u32,
+  tileProxyDims: vec3<u32>,
+  _pad_tile: u32,
+  groupProxyDims: vec3<u32>,
+  _pad_group: u32,
   contrastMin: f32,
   contrastMax: f32,
   gamma: f32,
@@ -85,8 +85,8 @@ struct EntityDescriptor {
 // a 3-D grid in the texture; the grid shape is derived from
 // textureDimensions(tex) / slot dims, matching `proxySlotOrigin()` in
 // proxyAtlas.ts.
-@group(0) @binding(7) var fieldProxyTex: texture_3d<u32>;
-@group(0) @binding(8) var wellProxyTex: texture_3d<u32>;
+@group(0) @binding(7) var tileProxyTex: texture_3d<u32>;
+@group(0) @binding(8) var groupProxyTex: texture_3d<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -265,15 +265,15 @@ fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
 //   selected detail → configured coarse → empty
 //
 // Legacy fallback chain when no tier sources are present:
-//   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
+//   target detail LOD → coarser detail LODs → tile proxy → group proxy → empty
 //
-// Well-proxy sample uses the field's local `pos` (no field-to-well
-// transform yet). The well-proxy fallback in field entries displays
-// proxy voxels at field-local coordinates — spatially incorrect but
-// produces a non-blank result while detail chunks load. Well-as-proxy
+// Group-proxy sample uses the tile's local `pos` (no tile-to-group
+// transform yet). The group-proxy fallback in tile entries displays
+// proxy voxels at tile-local coordinates — spatially incorrect but
+// produces a non-blank result while detail chunks load. Group-as-proxy
 // entries don't need the transform — `lodCount == 0` makes the detail
-// loop a no-op, the field proxy step is also a no-op (no field handle),
-// and the well-proxy step samples the well's own proxy at well-local
+// loop a no-op, the tile proxy step is also a no-op (no tile handle),
+// and the group-proxy step samples the group's own proxy at group-local
 // coords.
 fn sampleWithFallback(pos: vec3f) -> u32 {
   let hasTierSources = activeEntity.detailSource.valid != 0u || activeEntity.coarseSource.valid != 0u;
@@ -332,14 +332,14 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
     }
   }
 
-  let fieldSlot = activeEntity.fieldProxySlotIndex;
-  if (fieldSlot != 0xFFFFFFFFu) {
-    let v = sampleProxy(fieldProxyTex, fieldSlot, activeEntity.fieldProxyDims, pos);
+  let tileSlot = activeEntity.tileProxySlotIndex;
+  if (tileSlot != 0xFFFFFFFFu) {
+    let v = sampleProxy(tileProxyTex, tileSlot, activeEntity.tileProxyDims, pos);
     if (v != 0xFFFFFFFFu) { return v; }
   }
-  let wellSlot = activeEntity.wellProxySlotIndex;
-  if (wellSlot != 0xFFFFFFFFu) {
-    let v = sampleProxy(wellProxyTex, wellSlot, activeEntity.wellProxyDims, pos);
+  let groupSlot = activeEntity.groupProxySlotIndex;
+  if (groupSlot != 0xFFFFFFFFu) {
+    let v = sampleProxy(groupProxyTex, groupSlot, activeEntity.groupProxyDims, pos);
     if (v != 0xFFFFFFFFu) { return v; }
   }
 
