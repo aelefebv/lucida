@@ -39,7 +39,7 @@ use crate::generated::{
 };
 use crate::open_diagnostics::{
     backend_kind_for_url, backend_open_failure, import_failure, open_failure, open_progress,
-    open_success,
+    open_success, open_warning,
 };
 use crate::proxy::{
     PROXY_TARGET_LONG_AXIS, ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest,
@@ -478,7 +478,7 @@ pub async fn open_dataset(
         );
         emit(
             progress,
-            open_progress(
+            open_warning(
                 DatasetOpenStage::MetadataImport,
                 warning.message.clone(),
                 Some(dataset_id_key.clone()),

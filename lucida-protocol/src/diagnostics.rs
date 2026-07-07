@@ -64,6 +64,12 @@ pub struct DatasetOpenProgressDiagnostic {
     pub dataset_source_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// `true` when this entry reports a non-fatal problem (e.g. an import
+    /// warning) rather than an ordinary stage transition, so clients can keep
+    /// it visible after the open completes instead of treating it as
+    /// transient progress. Absent on the wire when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

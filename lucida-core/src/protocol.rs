@@ -1147,6 +1147,7 @@ mod tests {
                 workspace_dataset_id: Some(DatasetId("wds-1".into())),
                 dataset_source_id: Some("source-1".into()),
                 detail: Some("2 derived levels".into()),
+                warning: false,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1166,6 +1167,55 @@ mod tests {
                     diagnostic.workspace_dataset_id,
                     Some(DatasetId("wds-1".into()))
                 );
+            }
+            _ => panic!("expected DatasetOpenProgress"),
+        }
+    }
+
+    #[test]
+    fn dataset_open_progress_warning_flag_round_trips() {
+        use lucida_protocol::{DatasetOpenProgressDiagnostic, DatasetOpenStage};
+
+        let msg = ServerMessage::DatasetOpenProgress {
+            request_id: "req-1".into(),
+            url: "/mnt/data/experiment.zarr".into(),
+            diagnostic: DatasetOpenProgressDiagnostic {
+                stage: DatasetOpenStage::MetadataImport,
+                message: "label discovery was sampled".into(),
+                workspace_dataset_id: Some(DatasetId("wds-1".into())),
+                dataset_source_id: Some("source-1".into()),
+                detail: None,
+                warning: true,
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"warning\":true"));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DatasetOpenProgress { diagnostic, .. } => {
+                assert!(diagnostic.warning);
+            }
+            _ => panic!("expected DatasetOpenProgress"),
+        }
+
+        // Payloads without the flag (every ordinary stage transition, and
+        // any sender predating it) parse as non-warnings, and non-warnings
+        // omit the key on the wire.
+        let without_flag = serde_json::json!({
+            "type": "dataset_open_progress",
+            "request_id": "req-1",
+            "url": "/mnt/data/experiment.zarr",
+            "diagnostic": {
+                "stage": "metadata_import",
+                "message": "metadata import complete"
+            }
+        });
+        let parsed: ServerMessage = serde_json::from_value(without_flag).unwrap();
+        match parsed {
+            ServerMessage::DatasetOpenProgress { diagnostic, .. } => {
+                assert!(!diagnostic.warning);
+                let json = serde_json::to_string(&diagnostic).unwrap();
+                assert!(!json.contains("warning"));
             }
             _ => panic!("expected DatasetOpenProgress"),
         }

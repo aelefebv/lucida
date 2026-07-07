@@ -1534,6 +1534,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     workspace_dataset_id: Some(DatasetId(SINGLE_DATASET_ID.into())),
                     dataset_source_id: Some("source-9b31".into()),
                     detail: Some("1 derived level over 2 source levels".into()),
+                    warning: false,
                 },
             },
             req(

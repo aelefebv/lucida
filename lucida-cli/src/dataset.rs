@@ -325,8 +325,9 @@ impl DatasetWorkspaceClient {
 
 pub fn format_dataset_open_human(output: &DatasetOpenOutput) -> String {
     let progress = format_dataset_open_progress_trail(&output.dataset.progress);
+    let warnings = format_dataset_open_warning_lines(&output.dataset.progress);
     format!(
-        "Opened dataset: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nURL: {}{}",
+        "Opened dataset: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nURL: {}{}{}",
         output.dataset.name,
         output.workspace.name,
         output.dataset.workspace_id,
@@ -336,6 +337,7 @@ pub fn format_dataset_open_human(output: &DatasetOpenOutput) -> String {
         output.dataset.seq,
         output.target.web_url,
         progress,
+        warnings,
     )
 }
 
@@ -351,6 +353,19 @@ fn format_dataset_open_progress_trail(progress: &[DatasetOpenProgressDiagnostic]
             .collect::<Vec<_>>()
             .join(" -> ")
     )
+}
+
+/// One `warning:` line per progress diagnostic the server flagged as a
+/// non-fatal problem (e.g. skipped collection groups or curtailed label
+/// discovery). The stage trail above shows only stage labels, so without
+/// these lines the warning text would never reach the person who opened the
+/// dataset.
+fn format_dataset_open_warning_lines(progress: &[DatasetOpenProgressDiagnostic]) -> String {
+    progress
+        .iter()
+        .filter(|diagnostic| diagnostic.warning)
+        .map(|diagnostic| format!("\nwarning: {}", diagnostic.message))
+        .collect()
 }
 
 pub fn format_dataset_browse_human(output: &DatasetBrowseOutput) -> String {
@@ -488,8 +503,9 @@ pub fn format_dataset_health_human(output: &DatasetHealthOutput) -> String {
 
 pub fn format_dataset_retry_human(output: &DatasetRetryOutput) -> String {
     let progress = format_dataset_open_progress_trail(&output.dataset.progress);
+    let warnings = format_dataset_open_warning_lines(&output.dataset.progress);
     format!(
-        "Retried dataset binding: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nSource: {}\nURL: {}{}",
+        "Retried dataset binding: {}\nWorkspace: {} ({})\nDataset ID: {}\nImages: {}\nEntities: {}\nSequence: {}\nSource: {}\nURL: {}{}{}",
         output.dataset.name,
         output.workspace.name,
         output.dataset.workspace_id,
@@ -500,6 +516,7 @@ pub fn format_dataset_retry_human(output: &DatasetRetryOutput) -> String {
         output.dataset.source,
         output.target.web_url,
         progress,
+        warnings,
     )
 }
 
@@ -1061,6 +1078,22 @@ mod tests {
         .to_string()
     }
 
+    fn dataset_open_warning_message(request_id: &str, message: &str) -> String {
+        serde_json::json!({
+            "type": "dataset_open_progress",
+            "request_id": request_id,
+            "url": "/data/demo.zarr",
+            "diagnostic": {
+                "stage": "metadata_import",
+                "message": message,
+                "workspace_dataset_id": "wds-test",
+                "dataset_source_id": "source-test",
+                "warning": true
+            }
+        })
+        .to_string()
+    }
+
     fn snapshot_message(seq: u64) -> String {
         serde_json::json!({
             "type": "snapshot",
@@ -1228,6 +1261,126 @@ mod tests {
                 DatasetOpenStage::MetadataImport
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn collects_warning_flag_from_progress_messages() {
+        let result = wait_for_dataset_open_result(
+            text_messages(vec![
+                dataset_open_warning_message("req-1", "label discovery was sampled"),
+                dataset_open_succeeded_message("req-1", 19),
+            ]),
+            "req-1",
+            "/data/demo.zarr",
+            "workspace-1",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.progress.len(), 1);
+        assert!(result.progress[0].warning);
+        assert_eq!(result.progress[0].message, "label discovery was sampled");
+    }
+
+    fn open_output_with_progress(
+        progress: Vec<DatasetOpenProgressDiagnostic>,
+    ) -> DatasetOpenOutput {
+        DatasetOpenOutput {
+            server: EffectiveServer {
+                url: "http://localhost:9876".into(),
+                source: crate::config::ServerSource::Default,
+            },
+            workspace: WorkspaceRecord {
+                id: "workspace-1".into(),
+                name: "Workspace".into(),
+                role: WorkspaceRole::Owner,
+                created_by: "dev@local".into(),
+                created_at: "2026-06-10T00:00:00Z".into(),
+                updated_at: "2026-06-10T00:00:00Z".into(),
+                archived_at: None,
+                seq: 1,
+                default_saved_view_id: None,
+                last_opened_at: None,
+                pinned_at: None,
+            },
+            target: WorkspaceTarget {
+                id: "workspace-1".into(),
+                name: "Workspace".into(),
+                role: WorkspaceRole::Owner,
+                archived: false,
+                server_url: "http://localhost:9876".into(),
+                web_url: "http://localhost:9876/w/workspace-1".into(),
+                ws_url: "ws://localhost:9876/ws/workspaces/workspace-1".into(),
+            },
+            dataset: DatasetOpenSummary {
+                workspace_id: "workspace-1".into(),
+                workspace_dataset_id: "wds-test".into(),
+                name: "demo.zarr".into(),
+                image_count: 1,
+                entity_count: 1,
+                seq: 7,
+                source: "/data/demo.zarr".into(),
+                diagnostic: None,
+                progress,
+            },
+        }
+    }
+
+    #[test]
+    fn open_human_output_prints_warning_lines_after_success() {
+        let output = open_output_with_progress(vec![
+            DatasetOpenProgressDiagnostic {
+                stage: DatasetOpenStage::MetadataImport,
+                message: "metadata import complete".into(),
+                workspace_dataset_id: None,
+                dataset_source_id: None,
+                detail: None,
+                warning: false,
+            },
+            DatasetOpenProgressDiagnostic {
+                stage: DatasetOpenStage::MetadataImport,
+                message: "label discovery was sampled: probed 12 of 360 tiles. \
+                          Set LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY=1 to probe every tile."
+                    .into(),
+                workspace_dataset_id: None,
+                dataset_source_id: None,
+                detail: None,
+                warning: true,
+            },
+        ]);
+
+        let human = format_dataset_open_human(&output);
+
+        assert!(human.starts_with("Opened dataset: demo.zarr"));
+        assert!(
+            human.contains("\nwarning: label discovery was sampled: probed 12 of 360 tiles"),
+            "warning message must survive into the human output: {human}"
+        );
+        assert!(
+            human.contains("LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY"),
+            "the override pointer must reach the user: {human}"
+        );
+        // Only flagged entries become warning lines; ordinary progress stays
+        // in the stage trail.
+        assert_eq!(human.matches("\nwarning: ").count(), 1, "{human}");
+        assert!(human.contains("Progress: metadata_import -> metadata_import"));
+    }
+
+    #[test]
+    fn open_human_output_has_no_warning_lines_without_warnings() {
+        let output = open_output_with_progress(vec![DatasetOpenProgressDiagnostic {
+            stage: DatasetOpenStage::Complete,
+            message: "dataset opened".into(),
+            workspace_dataset_id: None,
+            dataset_source_id: None,
+            detail: None,
+            warning: false,
+        }]);
+
+        let human = format_dataset_open_human(&output);
+
+        assert!(!human.contains("warning:"), "{human}");
     }
 
     #[tokio::test]
