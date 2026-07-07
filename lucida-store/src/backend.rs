@@ -18,12 +18,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use lucida_content::url::{is_local_dataset_url, normalize_dataset_url};
-use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
+use object_store::{ClientOptions, ObjectStore};
 
 /// Errors from storage backend operations.
 #[derive(Debug)]
@@ -118,7 +118,9 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 ///   `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE
 ///   metadata server (Workload Identity / GCE instance default).
 /// - `s3://bucket/path` URLs use Amazon S3 with environment/instance credentials.
-/// - `http://` and `https://` URLs use an HTTP static file server.
+/// - `http://` and `https://` URLs use an HTTP static file server. Plain
+///   `http://` is explicitly enabled on the client (the default is
+///   https-only, which would reject every plain-http request).
 /// - Anything else → [`StoreError::UnsupportedScheme`].
 pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
     // Normalize once at entry: drive-letter case, slash direction, UNC
@@ -154,7 +156,15 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
             None => Ok(Arc::new(store)),
         }
     } else if canonical.starts_with("http://") || canonical.starts_with("https://") {
-        let store = HttpBuilder::new().with_url(&canonical).build()?;
+        // The underlying HTTP client defaults to https-only; a plain `http://`
+        // endpoint (a static file server on localhost or a LAN) must opt in
+        // explicitly or every request fails with a scheme error before it is
+        // even sent. `https://` URLs need no opt-in and keep the default.
+        let client_options = ClientOptions::new().with_allow_http(canonical.starts_with("http://"));
+        let store = HttpBuilder::new()
+            .with_url(&canonical)
+            .with_client_options(client_options)
+            .build()?;
         Ok(Arc::new(store))
     } else {
         Err(StoreError::UnsupportedScheme(canonical))
@@ -260,10 +270,28 @@ mod tests {
     }
 
     // --- HTTP tests ---
+    //
+    // Construction-path only: whether plain-http requests actually go through
+    // is a property of the built client (https-only vs. allow-http) that only
+    // surfaces on a real request, so these tests pin down that every http(s)
+    // URL shape builds a store — including plain `http://`, which requires
+    // the explicit allow-http opt-in wired in `open`.
 
     #[test]
     fn open_http_constructs_store() {
         let store = open("http://localhost:8080/data/store.zarr");
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn open_http_ip_and_port_constructs_store() {
+        let store = open("http://192.168.1.20:9000/shared/collection.zarr");
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn open_http_bare_host_constructs_store() {
+        let store = open("http://fileserver.internal/store.zarr");
         assert!(store.is_ok());
     }
 
