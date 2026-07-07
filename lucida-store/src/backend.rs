@@ -106,7 +106,10 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 /// any [`StoreError::UnsupportedScheme`] — uses the canonical form. See
 /// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
 ///
-/// Dispatch on the canonical form:
+/// Dispatch on the canonical form. Normalization lowercases a leading URI
+/// scheme (schemes are case-insensitive per RFC 3986), so `HTTP://…` and
+/// `S3://…` spellings dispatch like their lowercase forms while bucket and
+/// object paths keep their case.
 ///
 /// - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
 ///   classified by [`lucida_content::url::is_local_dataset_url`] → local
@@ -299,6 +302,34 @@ mod tests {
     fn open_https_constructs_store() {
         let store = open("https://data.example.com/store.zarr");
         assert!(store.is_ok());
+    }
+
+    // Scheme case-insensitivity (RFC 3986): uppercase and mixed-case scheme
+    // spellings must dispatch exactly like their lowercase forms instead of
+    // falling through to UnsupportedScheme.
+
+    #[test]
+    fn open_uppercase_http_scheme_constructs_store() {
+        let store = open("HTTP://localhost:8080/data/store.zarr");
+        assert!(store.is_ok(), "{:?}", store.err());
+    }
+
+    #[test]
+    fn open_mixed_case_https_scheme_constructs_store() {
+        let store = open("HtTpS://data.example.com/store.zarr");
+        assert!(store.is_ok(), "{:?}", store.err());
+    }
+
+    #[test]
+    fn open_uppercase_s3_scheme_constructs_store() {
+        let store = open("S3://test-bucket/some/prefix");
+        assert!(store.is_ok(), "{:?}", store.err());
+    }
+
+    #[test]
+    fn open_uppercase_gs_scheme_constructs_store() {
+        let store = open("GS://test-bucket/some/prefix");
+        assert!(store.is_ok(), "{:?}", store.err());
     }
 
     // --- GCS tests ---
