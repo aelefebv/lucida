@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { intersectSliceViewWithMember, minimapCoarseLevelIndex, resolveMinimapLayerContrast, resolveMinimapLayerColormap } from "./minimapPath.ts";
+import type { WasmScene } from "lucida-core";
+import { identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, resolveMinimapLayerContrast, resolveMinimapLayerColormap } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 
 function multiscale(coarseLevelIndex?: number | null): Pick<MultiscaleInfo, "levels" | "coarse_level_index"> {
@@ -166,5 +167,51 @@ describe("intersectSliceViewWithMember", () => {
     );
 
     expect(viewport).toBeNull();
+  });
+});
+
+describe("readMemberRenderMatrices", () => {
+  /** Flat 32-floats-per-member payload: member i gets model filled with
+   *  `i + 1` and inverse filled with `-(i + 1)`, so tests can tell blocks
+   *  (and halves of blocks) apart. */
+  function sceneWith(ids: string[], idsJson?: string): WasmScene {
+    const flat = new Float32Array(ids.length * 32);
+    for (let i = 0; i < ids.length; i++) {
+      flat.fill(i + 1, i * 32, i * 32 + 16);
+      flat.fill(-(i + 1), i * 32 + 16, i * 32 + 32);
+    }
+    return {
+      member_render_ids: () => idsJson ?? JSON.stringify(ids),
+      member_render_matrices: () => flat,
+    } as unknown as WasmScene;
+  }
+
+  it("maps each id to its own 16+16 float block", () => {
+    const matrices = readMemberRenderMatrices(sceneWith(["a", "b"]), "ds");
+    expect([...matrices.keys()]).toEqual(["a", "b"]);
+    expect(Array.from(matrices.get("b")!.model)).toEqual(Array(16).fill(2));
+    expect(Array.from(matrices.get("b")!.invModel)).toEqual(Array(16).fill(-2));
+    // Blocks are independent copies, not views that alias each other.
+    expect(matrices.get("a")!.model).toHaveLength(16);
+    expect(Array.from(matrices.get("a")!.invModel)).toEqual(Array(16).fill(-1));
+  });
+
+  it("keeps the first block for a duplicated id, like the per-id lookup", () => {
+    const matrices = readMemberRenderMatrices(sceneWith(["dup", "dup"]), "ds");
+    expect(matrices.size).toBe(1);
+    expect(Array.from(matrices.get("dup")!.model)).toEqual(Array(16).fill(1));
+  });
+
+  it("returns an empty map when the id payload is malformed", () => {
+    const matrices = readMemberRenderMatrices(sceneWith(["a"], "not json"), "ds");
+    expect(matrices.size).toBe(0);
+  });
+});
+
+describe("identityModelMatrix", () => {
+  it("is the 4x4 identity, fresh per call", () => {
+    const a = identityModelMatrix();
+    expect(Array.from(a)).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    expect(identityModelMatrix()).not.toBe(a);
   });
 });
