@@ -29,10 +29,32 @@ pub async fn import_dataset(
     id: &str,
     name: &str,
 ) -> Result<ImportResult, StoreError> {
+    // The environment override is the import's only ambient input. It is
+    // read exactly once, here at the entry point, and threaded down as a
+    // plain argument so every inner path is a pure function of its inputs.
+    let force_exhaustive = exhaustive_label_discovery_forced();
+    import_dataset_with_label_discovery(store, id, name, force_exhaustive).await
+}
+
+/// [`import_dataset`] with the exhaustive-label-discovery decision passed
+/// explicitly instead of read from the environment.
+async fn import_dataset_with_label_discovery(
+    store: &Arc<dyn ObjectStore>,
+    id: &str,
+    name: &str,
+    force_exhaustive_label_discovery: bool,
+) -> Result<ImportResult, StoreError> {
     let root_json = parse::read_zarr_json(store, "zarr.json").await?;
 
     if root_json.pointer("/attributes/ome/plate").is_some() {
-        import_collection(store, id, name, &root_json).await
+        import_collection(
+            store,
+            id,
+            name,
+            &root_json,
+            force_exhaustive_label_discovery,
+        )
+        .await
     } else {
         import_single_image(store, id, name, &root_json).await
     }
@@ -156,24 +178,32 @@ async fn import_single_image(
 /// the backing store.
 const METADATA_FETCH_CONCURRENCY: usize = 32;
 
-/// Collections with at most this many tiles probe every tile for a `labels/`
-/// child group. Larger collections sample each group's first and last tile
-/// and only probe a group's remaining tiles when a sampled tile carries
-/// labels, so label-discovery metadata traffic scales with the number of
-/// groups (plus labeled tiles) rather than with total tiles. Without this, a
-/// wide remote collection pays one round-trip per tile — nearly always a
-/// 404 — and that fan-out dominates the whole open.
+/// Sampled label discovery engages only when it would skip at least this
+/// many per-tile probes; otherwise the whole collection is probed
+/// exhaustively. Sampling probes each group's first and last tile and only
+/// probes a group's remaining tiles when a sampled tile signals labels, so
+/// label-discovery metadata traffic scales with the number of groups (plus
+/// labeled tiles) rather than with total tiles. Without this, a wide remote
+/// collection pays one round-trip per tile — nearly always a 404 — and that
+/// fan-out dominates the whole open.
 ///
-/// Trade-off this heuristic accepts: above the limit, a group whose labels
-/// sit only on tiles that are neither first nor last is never expanded, so
-/// those labels go undiscovered. Whenever any tile goes unprobed the import
-/// records an [`ImportWarning`] naming [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`],
-/// which restores full per-tile probing.
-const EXHAUSTIVE_LABEL_PROBE_MAX_TILES: usize = 64;
+/// Measuring the threshold against the savings (total tiles minus sampled
+/// tiles) rather than a flat tile count means a collection only slightly
+/// wider than its own sample keeps complete discovery: curtailing it would
+/// save fewer than this many reads, which is not worth the completeness
+/// loss.
+///
+/// Trade-off sampling accepts: a group whose labels sit only on tiles that
+/// are neither first nor last — with clean misses on both sampled tiles — is
+/// never expanded, so those labels go undiscovered. Whenever any tile goes
+/// unprobed the import records an [`ImportWarning`] naming
+/// [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`], which restores full per-tile probing.
+const LABEL_PROBE_SAMPLING_MIN_SKIPPED: usize = 64;
 
 /// Environment variable that forces per-tile label probing on collections of
 /// every size (one metadata read per tile, full discovery). Any value other
-/// than empty or `"0"` enables it.
+/// than empty or `"0"` enables it. Read once per import, at the
+/// [`import_dataset`] entry point.
 const EXHAUSTIVE_LABEL_DISCOVERY_ENV: &str = "LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY";
 
 /// Whether [`EXHAUSTIVE_LABEL_DISCOVERY_ENV`] requests exhaustive discovery.
@@ -184,9 +214,15 @@ fn exhaustive_label_discovery_forced() -> bool {
 }
 
 /// Whether every tile of a collection should be probed for labels, given the
-/// total tile count and the operator override.
-fn use_exhaustive_label_probes(total_tiles: usize, force_exhaustive: bool) -> bool {
-    force_exhaustive || total_tiles <= EXHAUSTIVE_LABEL_PROBE_MAX_TILES
+/// total tile count, the number of tiles sampling would probe, and the
+/// operator override. Exhaustive unless sampling skips at least
+/// [`LABEL_PROBE_SAMPLING_MIN_SKIPPED`] tiles.
+fn use_exhaustive_label_probes(
+    total_tiles: usize,
+    sample_count: usize,
+    force_exhaustive: bool,
+) -> bool {
+    force_exhaustive || total_tiles < sample_count.saturating_add(LABEL_PROBE_SAMPLING_MIN_SKIPPED)
 }
 
 /// The tile indices sampled per group when label discovery is not exhaustive:
@@ -357,6 +393,7 @@ async fn import_collection(
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
+    force_exhaustive_label_discovery: bool,
 ) -> Result<ImportResult, StoreError> {
     let collection_json = root_json
         .pointer("/attributes/ome/plate")
@@ -574,11 +611,12 @@ async fn import_collection(
 
     // Discover per-tile `labels/` groups. This is the only remaining per-tile
     // metadata I/O, so it must not fan out one read per tile on a wide
-    // collection: small collections probe every tile exhaustively, while
-    // collections above EXHAUSTIVE_LABEL_PROBE_MAX_TILES sample each group's
-    // first and last tile and expand to the whole group when a sample carries
-    // labels. Tiles left unprobed are treated as label-free and the import
-    // records a warning naming the exhaustive-discovery override.
+    // collection: collections within LABEL_PROBE_SAMPLING_MIN_SKIPPED tiles
+    // of their own sample size probe every tile exhaustively, while wider
+    // ones sample each group's first and last tile and expand to the whole
+    // group when a sample signals labels. Tiles left unprobed are treated as
+    // label-free and the import records a warning naming the
+    // exhaustive-discovery override.
     let mut tile_prefixes: Vec<String> = Vec::new();
     let mut group_spans: Vec<std::ops::Range<usize>> = Vec::with_capacity(parsed_groups.len());
     for group in &parsed_groups {
@@ -588,22 +626,31 @@ async fn import_collection(
     }
     let mut probed_labels: Vec<Option<ProbedLabels>> =
         (0..tile_prefixes.len()).map(|_| None).collect();
-    if use_exhaustive_label_probes(tile_prefixes.len(), exhaustive_label_discovery_forced()) {
+    let samples = sample_probe_indices(&group_spans);
+    if use_exhaustive_label_probes(
+        tile_prefixes.len(),
+        samples.len(),
+        force_exhaustive_label_discovery,
+    ) {
         let all: Vec<usize> = (0..tile_prefixes.len()).collect();
         probe_labels_for_tiles(store, &tile_prefixes, all, &mut probed_labels).await;
     } else {
-        let samples = sample_probe_indices(&group_spans);
         probe_labels_for_tiles(store, &tile_prefixes, samples, &mut probed_labels).await;
 
-        // Expand to every tile of any group whose sampled tiles carry labels,
-        // so a labeled group's discovery stays complete (its cost scales with
-        // its own tile count, not the whole collection's).
+        // Expand to every tile of any group whose sampled tiles signal
+        // labels, so a labeled group's discovery stays complete (its cost
+        // scales with its own tile count, not the whole collection's). A
+        // signal is either a usable labels index (names found) or an index
+        // that exists but yielded nothing usable — a broken index means
+        // someone wrote a labels group there, so the rest of the group is
+        // probed rather than written off on the strength of one bad object.
+        // Only a clean NotFound on both sampled tiles is a definitive miss.
         let mut follow_up: Vec<usize> = Vec::new();
         for span in &group_spans {
             let sampled_hit = span.clone().any(|index| {
                 probed_labels[index]
                     .as_ref()
-                    .is_some_and(|probed| !probed.names.is_empty())
+                    .is_some_and(|probed| probed.index != LabelIndexState::Absent)
             });
             if sampled_hit {
                 follow_up.extend(span.clone().filter(|index| probed_labels[*index].is_none()));
@@ -644,6 +691,7 @@ async fn import_collection(
         let probed = probed.unwrap_or_else(|| ProbedLabels {
             labels_prefix: format!("{prefix}/labels"),
             names: Vec::new(),
+            index: LabelIndexState::Absent,
         });
         let image_id = ImageId(format!("{id}:image:{prefix}"));
         let owner = EntityId(format!("{id}:tile:{prefix}"));
@@ -1039,6 +1087,27 @@ struct ImportedLabels {
 struct ProbedLabels {
     labels_prefix: String,
     names: Vec<String>,
+    /// What the probe learned about the labels index object itself, kept
+    /// separate from `names` so sampled discovery can tell a definitive miss
+    /// from an index that exists but could not be used.
+    index: LabelIndexState,
+}
+
+/// What probing a source image's `labels/` index object established.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LabelIndexState {
+    /// A clean NotFound: no index object exists, so the image is
+    /// definitively label-free.
+    #[default]
+    Absent,
+    /// The index exists and lists at least one usable label name.
+    Listed,
+    /// Something is there but nothing usable came back: the read failed
+    /// short of a clean NotFound, the object was not valid JSON, or the JSON
+    /// carried no usable `attributes.ome.labels` names. Under sampled
+    /// discovery this marks the group label-suspect, so its remaining tiles
+    /// are probed instead of being assumed label-free.
+    Unusable,
 }
 
 /// Detect an OME-NGFF `labels/` child group on a source image group and import
@@ -1075,7 +1144,9 @@ async fn import_labels_for_image(
 
 /// Read a source image's `labels/` group index and return the label names it
 /// declares, in order, without building any of them. A missing `labels/` group —
-/// the common case — yields an empty list.
+/// the common case — yields an empty list, marked [`LabelIndexState::Absent`];
+/// an index that exists but yields no usable names is marked
+/// [`LabelIndexState::Unusable`] so callers can treat the anomaly as a signal.
 ///
 /// This reads exactly one small index object and holds only names, so it is the
 /// only per-tile label I/O safe to fan out concurrently: probing every tile of
@@ -1088,19 +1159,35 @@ async fn probe_labels_for_image(store: &Arc<dyn ObjectStore>, base_prefix: &str)
         format!("{base_prefix}/labels")
     };
 
-    let Some(labels_json) =
-        parse::read_optional_zarr_json(store, &format!("{labels_prefix}/zarr.json")).await
-    else {
-        return ProbedLabels {
-            labels_prefix,
-            names: Vec::new(),
+    let labels_json =
+        match parse::read_optional_zarr_json(store, &format!("{labels_prefix}/zarr.json")).await {
+            parse::OptionalZarrJson::Parsed(value) => value,
+            parse::OptionalZarrJson::Absent => {
+                return ProbedLabels {
+                    labels_prefix,
+                    names: Vec::new(),
+                    index: LabelIndexState::Absent,
+                };
+            }
+            parse::OptionalZarrJson::Unusable => {
+                return ProbedLabels {
+                    labels_prefix,
+                    names: Vec::new(),
+                    index: LabelIndexState::Unusable,
+                };
+            }
         };
-    };
 
     let names = parse::parse_labels_names(&labels_json);
+    let index = if names.is_empty() {
+        LabelIndexState::Unusable
+    } else {
+        LabelIndexState::Listed
+    };
     ProbedLabels {
         labels_prefix,
         names,
+        index,
     }
 }
 
@@ -1150,6 +1237,9 @@ async fn build_labels_within_budget(
     let ProbedLabels {
         labels_prefix,
         names,
+        // Build cost is driven purely by the names; how the index responded
+        // matters only to discovery scheduling.
+        index: _,
     } = probed;
     let mut imported = ImportedLabels::default();
     for name in names {
@@ -2945,6 +3035,27 @@ mod tests {
         .unwrap();
     }
 
+    /// Write a `labels/zarr.json` whose bytes are not valid JSON into an
+    /// existing image or tile directory.
+    fn write_corrupt_labels_index(group_dir: &std::path::Path) {
+        let labels_dir = group_dir.join("labels");
+        fs::create_dir_all(&labels_dir).unwrap();
+        fs::write(labels_dir.join("zarr.json"), b"{ this is not json").unwrap();
+    }
+
+    /// Write a `labels/zarr.json` that parses as JSON but carries no
+    /// `attributes.ome.labels` names at all.
+    fn write_nameless_labels_index(group_dir: &std::path::Path) {
+        let labels_dir = group_dir.join("labels");
+        fs::create_dir_all(&labels_dir).unwrap();
+        let json = serde_json::json!({"zarr_format": 3, "node_type": "group"});
+        fs::write(
+            labels_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// Write a single-level label multiscale group at
     /// `group_dir/labels/{name}`. `image_label` is spliced verbatim as
     /// `ome.image-label`; pass `Value::Null` to omit the block entirely.
@@ -3616,22 +3727,28 @@ mod tests {
     }
 
     #[test]
-    fn exhaustive_probe_threshold_and_override() {
-        // At the limit: every tile is probed.
+    fn exhaustive_probe_decision_boundary_and_override() {
+        // Single-group collection: two samples (first + last tile). Sampling
+        // engages only once it skips at least
+        // LABEL_PROBE_SAMPLING_MIN_SKIPPED tiles.
+        let samples = 2;
+        // One tile short of the minimum savings: exhaustive.
         assert!(use_exhaustive_label_probes(
-            EXHAUSTIVE_LABEL_PROBE_MAX_TILES,
+            samples + LABEL_PROBE_SAMPLING_MIN_SKIPPED - 1,
+            samples,
             false
         ));
-        // One past the limit: sampling kicks in.
+        // Exactly the minimum savings: sampling engages.
         assert!(!use_exhaustive_label_probes(
-            EXHAUSTIVE_LABEL_PROBE_MAX_TILES + 1,
+            samples + LABEL_PROBE_SAMPLING_MIN_SKIPPED,
+            samples,
             false
         ));
+        // A sample that already covers every tile (many one- and two-tile
+        // groups) is exhaustive by construction, at any collection width.
+        assert!(use_exhaustive_label_probes(500, 500, false));
         // The operator override restores exhaustive probing at any size.
-        assert!(use_exhaustive_label_probes(
-            EXHAUSTIVE_LABEL_PROBE_MAX_TILES + 1,
-            true
-        ));
+        assert!(use_exhaustive_label_probes(10_000, 4, true));
     }
 
     #[test]
@@ -3642,7 +3759,7 @@ mod tests {
         assert_eq!(sample_probe_indices(&spans), vec![0, 1, 3, 4, 8]);
     }
 
-    /// A label-free collection wider than the exhaustive-probe limit imports
+    /// A label-free collection wide enough for sampled discovery imports
     /// with metadata read traffic proportional to its GROUPS, never one read
     /// per tile: 6 groups x 60 tiles = 360 tiles must cost on the order of
     /// dozens of reads (root + one per group + the representative tile's
@@ -3670,7 +3787,9 @@ mod tests {
         );
 
         let (store, reads) = recording_store(&dir);
-        let result = import_dataset(&store, "wide-id", "Wide").await.unwrap();
+        let result = import_dataset_with_label_discovery(&store, "wide-id", "Wide", false)
+            .await
+            .unwrap();
 
         assert_eq!(result.manifest.images().len(), 360, "one image per tile");
         assert!(result.manifest.labels().is_empty());
@@ -3713,10 +3832,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Above the exhaustive-probe limit, a group whose sampled tile carries
-    /// labels is expanded to a full per-tile probe, so every labeled tile of
-    /// that group is discovered — including interior ones the sample missed —
-    /// while the label-free sibling group still costs only its two samples.
+    /// Under sampled discovery, a group whose sampled tile carries labels is
+    /// expanded to a full per-tile probe, so every labeled tile of that group
+    /// is discovered — including interior ones the sample missed — while the
+    /// label-free sibling group still costs only its two samples.
     #[tokio::test]
     async fn sampled_discovery_expands_labeled_group_and_finds_all_labels() {
         let dir = temp_dir("sampled_labeled_group");
@@ -3748,7 +3867,7 @@ mod tests {
         }
 
         let (store, reads) = recording_store(&dir);
-        let result = import_dataset(&store, "pl", "Partially Labeled")
+        let result = import_dataset_with_label_discovery(&store, "pl", "Partially Labeled", false)
             .await
             .unwrap();
 
@@ -3841,6 +3960,139 @@ mod tests {
             result.warnings.is_empty(),
             "exhaustive discovery must not warn: {:?}",
             result.warnings,
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Build a two-group collection (2 x 40 tiles — wide enough that sampled
+    /// discovery engages) whose only label sits on the interior tile
+    /// `A/1/17`, a position first/last-tile sampling never probes directly.
+    fn two_group_fixture_with_interior_label(dir: &std::path::Path) {
+        create_collection_fixture(
+            dir,
+            "p",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 40), ("A", "2", 0, 1, 40)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        let tile_dir = dir.join("A").join("1").join("17");
+        write_labels_index(&tile_dir, &["mask"]);
+        write_label_multiscale(
+            &tile_dir,
+            "mask",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+    }
+
+    /// The exhaustive override, passed down from the entry point, reaches
+    /// collection discovery: with it, an interior-only label of a collection
+    /// wide enough for sampling is still found, every tile's index is
+    /// probed, and no bounded-discovery warning is recorded.
+    #[tokio::test]
+    async fn forced_exhaustive_discovery_finds_interior_label_without_warning() {
+        let dir = temp_dir("forced_exhaustive_interior");
+        two_group_fixture_with_interior_label(&dir);
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_label_discovery(&store, "fx", "Forced", true)
+            .await
+            .unwrap();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1, "labels: {labels:?}");
+        assert_eq!(
+            labels[0].source_image_id,
+            ImageId("fx:image:A/1/17".to_string()),
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.kind == ImportWarningKind::SampledLabelDiscovery),
+            "exhaustive discovery must not record a sampling warning: {:?}",
+            result.warnings,
+        );
+
+        // Decisive: every tile's labels index was probed (80 of 80).
+        let reads = reads.lock().unwrap();
+        let probes = reads
+            .iter()
+            .filter(|p| p.ends_with("labels/zarr.json"))
+            .count();
+        assert_eq!(probes, 80, "expected one index probe per tile");
+        drop(reads);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A labels index that EXISTS on both of a group's sampled tiles but is
+    /// unusable (corrupt JSON) marks the group label-suspect: the group is
+    /// probed in full, so its interior label is still discovered, while a
+    /// sibling group with clean misses costs only its two samples.
+    #[tokio::test]
+    async fn corrupt_sampled_labels_index_expands_group_and_finds_interior_label() {
+        let dir = temp_dir("corrupt_sampled_index");
+        two_group_fixture_with_interior_label(&dir);
+        write_corrupt_labels_index(&dir.join("A").join("1").join("0"));
+        write_corrupt_labels_index(&dir.join("A").join("1").join("39"));
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_label_discovery(&store, "cx", "Corrupt Endpoints", false)
+            .await
+            .unwrap();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1, "labels: {labels:?}");
+        assert_eq!(
+            labels[0].source_image_id,
+            ImageId("cx:image:A/1/17".to_string()),
+        );
+
+        let reads = reads.lock().unwrap();
+        let a1 = reads
+            .iter()
+            .filter(|p| p.starts_with("A/1/") && p.ends_with("labels/zarr.json"))
+            .count();
+        let a2 = reads
+            .iter()
+            .filter(|p| p.starts_with("A/2/") && p.ends_with("labels/zarr.json"))
+            .count();
+        assert_eq!(a1, 40, "suspect group must be probed exhaustively");
+        assert_eq!(a2, 2, "clean-miss group must cost only its samples");
+        drop(reads);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Same expansion when the sampled tiles' labels index parses as JSON but
+    /// declares no usable names: the anomaly still expands the group, so the
+    /// interior label is discovered.
+    #[tokio::test]
+    async fn nameless_sampled_labels_index_expands_group_and_finds_interior_label() {
+        let dir = temp_dir("nameless_sampled_index");
+        two_group_fixture_with_interior_label(&dir);
+        write_nameless_labels_index(&dir.join("A").join("1").join("0"));
+        write_nameless_labels_index(&dir.join("A").join("1").join("39"));
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset_with_label_discovery(&store, "nx", "Nameless Endpoints", false)
+            .await
+            .unwrap();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1, "labels: {labels:?}");
+        assert_eq!(
+            labels[0].source_image_id,
+            ImageId("nx:image:A/1/17".to_string()),
         );
 
         let _ = fs::remove_dir_all(&dir);

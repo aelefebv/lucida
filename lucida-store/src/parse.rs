@@ -225,37 +225,52 @@ pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<Channel
         .collect()
 }
 
-/// Read and parse a zarr.json that may not exist, without treating absence as
-/// an error.
+/// The outcome of reading an optional zarr.json, distinguishing a clean
+/// NotFound from an object that exists (or errored) but yielded no usable
+/// JSON. Absence is a definitive answer — the object is not there — while an
+/// unusable object is an anomaly the caller may want to react to (e.g. by
+/// probing further) instead of silently equating it with absence.
+pub(crate) enum OptionalZarrJson {
+    /// The object does not exist (a clean NotFound).
+    Absent,
+    /// The object was read and parsed.
+    Parsed(serde_json::Value),
+    /// The object could not be used: the read failed with an error other
+    /// than NotFound, or the bytes were not valid JSON. Logged, never fatal.
+    Unusable,
+}
+
+/// Read and parse a zarr.json that may not exist, without treating absence or
+/// corruption as an error.
 ///
-/// Detects optional child groups (e.g. a `labels/` group). A missing
-/// object is the common case and yields `None` silently; a present-but-corrupt
-/// object (bad JSON) also yields `None` but with a warning, and any other
-/// storage error yields `None` with a warning. Optional metadata must never
-/// fail the whole import — the caller simply proceeds as if the group is
-/// absent.
+/// Detects optional child groups (e.g. a `labels/` group). A missing object
+/// is the common case and yields [`OptionalZarrJson::Absent`] silently; a
+/// present-but-corrupt object (bad JSON) or any other storage error yields
+/// [`OptionalZarrJson::Unusable`] with a logged warning. Optional metadata
+/// must never fail the whole import — the caller proceeds either way, but can
+/// tell a definitive miss from an anomaly.
 pub(crate) async fn read_optional_zarr_json(
     store: &Arc<dyn ObjectStore>,
     path: &str,
-) -> Option<serde_json::Value> {
+) -> OptionalZarrJson {
     match store.get(&Path::from(path)).await {
         Ok(response) => match response.bytes().await {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(value) => Some(value),
+                Ok(value) => OptionalZarrJson::Parsed(value),
                 Err(e) => {
                     eprintln!("[lucida-store] ignoring malformed optional metadata {path}: {e}");
-                    None
+                    OptionalZarrJson::Unusable
                 }
             },
             Err(e) => {
                 eprintln!("[lucida-store] ignoring unreadable optional metadata {path}: {e}");
-                None
+                OptionalZarrJson::Unusable
             }
         },
-        Err(object_store::Error::NotFound { .. }) => None,
+        Err(object_store::Error::NotFound { .. }) => OptionalZarrJson::Absent,
         Err(e) => {
             eprintln!("[lucida-store] ignoring optional metadata {path}: {e}");
-            None
+            OptionalZarrJson::Unusable
         }
     }
 }
