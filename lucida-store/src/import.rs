@@ -222,6 +222,9 @@ const EXHAUSTIVE_LABEL_DISCOVERY_ENV: &str = "LUCIDA_EXHAUSTIVE_LABEL_DISCOVERY"
 /// labels index — one whose read failed short of a clean NotFound, or whose
 /// content held no usable names. A usable index that actually listed names
 /// is never subject to this cap: real labels always expand their group.
+/// Only expansions that would add reads are charged: a group whose samples
+/// already cover all of its tiles is fully probed as-is, so its expansion
+/// costs nothing and consumes no allowance.
 ///
 /// Trade-off: a genuinely labeled group hiding behind a broken index is
 /// probed in full only while this budget lasts (charged in declared group
@@ -685,7 +688,9 @@ async fn import_collection(
         // - An index that exists (or errored) without yielding names is only
         //   a suspicion, and it expands at most
         //   MAX_UNUSABLE_GROUP_EXPANSIONS groups per import, in declared
-        //   order. When the cause is store-wide — throttling, timeouts, a
+        //   order, counting only groups whose expansion adds reads (a group
+        //   the samples already fully probed costs — and charges — nothing).
+        //   When the cause is store-wide — throttling, timeouts, a
         //   permission setup in which missing keys error instead of
         //   returning NotFound — every group looks suspect at once, and
         //   uncapped expansion would recreate the per-tile fan-out sampling
@@ -708,8 +713,18 @@ async fn import_collection(
             } else if sampled_state(LabelIndexState::Unusable)
                 && unusable_expansions < MAX_UNUSABLE_GROUP_EXPANSIONS
             {
-                unusable_expansions += 1;
-                true
+                // The cap bounds extra reads, so a slot is charged only when
+                // this group's expansion actually adds unprobed tiles. A
+                // group whose samples already covered every tile (one or two
+                // tiles) is fully probed as it stands: expanding it reads
+                // nothing, and charging it would spend allowance that a later
+                // group's real expansion needs. Its unusable indexes still
+                // reach the aggregated warning below.
+                let adds_reads = span.clone().any(|index| probed_labels[index].is_none());
+                if adds_reads {
+                    unusable_expansions += 1;
+                }
+                adds_reads
             } else {
                 false
             };
@@ -4411,6 +4426,236 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.kind == ImportWarningKind::UnusableLabelIndex),
+            "warnings: {:?}",
+            result.warnings,
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A group whose samples already cover all of its tiles expands nothing,
+    /// so an unusable index there must not consume an expansion slot: four
+    /// two-tile all-corrupt groups declared first leave the whole allowance
+    /// for a later 40-tile group with corrupt sampled endpoints, whose
+    /// interior label is therefore still discovered.
+    #[tokio::test]
+    async fn fully_sampled_unusable_groups_do_not_consume_expansion_allowance() {
+        let dir = temp_dir("fully_sampled_unusable_free");
+        let mut groups: Vec<(&str, &str, u32, u32, u32)> = Vec::new();
+        // MAX_UNUSABLE_GROUP_EXPANSIONS two-tile groups whose samples (first
+        // and last tile) are the whole group: expanding them adds no reads.
+        for (ci, column) in ["1", "2", "3", "4"].iter().enumerate() {
+            groups.push(("A", column, 0, ci as u32, 2));
+        }
+        // Label-free filler wide enough that sampled discovery engages.
+        groups.push(("B", "1", 1, 0, 40));
+        groups.push(("B", "2", 1, 1, 40));
+        // The group that needs the allowance, declared last.
+        groups.push(("Z", "1", 2, 0, 40));
+        create_collection_fixture(
+            &dir,
+            "fs",
+            &["A", "B", "Z"],
+            &["1", "2", "3", "4"],
+            &groups,
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        for column in ["1", "2", "3", "4"] {
+            for tile in ["0", "1"] {
+                write_corrupt_labels_index(&dir.join("A").join(column).join(tile));
+            }
+        }
+        write_corrupt_labels_index(&dir.join("Z").join("1").join("0"));
+        write_corrupt_labels_index(&dir.join("Z").join("1").join("39"));
+        let tile_dir = dir.join("Z").join("1").join("20");
+        write_labels_index(&tile_dir, &["mask"]);
+        write_label_multiscale(
+            &tile_dir,
+            "mask",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_label_discovery(&store, "fs-id", "Fully Sampled", false)
+            .await
+            .unwrap();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1, "labels: {labels:?}");
+        assert_eq!(
+            labels[0].source_image_id,
+            ImageId("fs-id:image:Z/1/20".to_string()),
+        );
+
+        // 14 samples (4 x 2 + 2 x 2 + 2) plus Z/1's 38 remaining tiles; the
+        // two-tile groups added no follow-up reads.
+        assert_eq!(count_label_probes(&reads), 14 + 38);
+
+        // The fully-sampled groups' unusable indexes still reach the
+        // aggregated warning (8 of them, plus Z/1's two endpoints).
+        let unusable: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::UnusableLabelIndex)
+            .collect();
+        assert_eq!(unusable.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            unusable[0].message.starts_with("10 label indexes"),
+            "{}",
+            unusable[0].message,
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mixed costs: fully-sampled all-corrupt groups alongside large
+    /// corrupt-endpoint groups. Only the large groups' expansions add reads,
+    /// so only they are charged, and a later large group with an interior
+    /// label still fits within the allowance.
+    #[tokio::test]
+    async fn only_expansions_that_add_reads_are_charged_against_the_cap() {
+        let dir = temp_dir("mixed_cost_expansions");
+        let groups: Vec<(&str, &str, u32, u32, u32)> = vec![
+            // Two zero-cost groups: two tiles each, both corrupt.
+            ("A", "1", 0, 0, 2),
+            ("A", "2", 0, 1, 2),
+            // Two costly label-free groups with corrupt sampled endpoints.
+            ("B", "1", 1, 0, 40),
+            ("B", "2", 1, 1, 40),
+            // The recoverable group, declared last.
+            ("Z", "1", 2, 0, 40),
+        ];
+        create_collection_fixture(
+            &dir,
+            "mx",
+            &["A", "B", "Z"],
+            &["1", "2"],
+            &groups,
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        for column in ["1", "2"] {
+            for tile in ["0", "1"] {
+                write_corrupt_labels_index(&dir.join("A").join(column).join(tile));
+            }
+            for tile in ["0", "39"] {
+                write_corrupt_labels_index(&dir.join("B").join(column).join(tile));
+            }
+        }
+        write_corrupt_labels_index(&dir.join("Z").join("1").join("0"));
+        write_corrupt_labels_index(&dir.join("Z").join("1").join("39"));
+        let tile_dir = dir.join("Z").join("1").join("20");
+        write_labels_index(&tile_dir, &["mask"]);
+        write_label_multiscale(
+            &tile_dir,
+            "mask",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_label_discovery(&store, "mx-id", "Mixed Cost", false)
+            .await
+            .unwrap();
+
+        let labels = result.manifest.labels();
+        assert_eq!(labels.len(), 1, "labels: {labels:?}");
+        assert_eq!(
+            labels[0].source_image_id,
+            ImageId("mx-id:image:Z/1/20".to_string()),
+        );
+
+        // 10 samples plus three 38-tile expansions (B/1, B/2, Z/1): three
+        // charged slots, still within MAX_UNUSABLE_GROUP_EXPANSIONS.
+        assert_eq!(count_label_probes(&reads), 10 + 3 * 38);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The documented trade-off past the cap still holds: when the allowance
+    /// is spent on expansions that DID add reads, a later costly group is
+    /// left unexpanded and its interior label goes undiscovered, with both
+    /// the anomaly and sampling warnings recorded.
+    #[tokio::test]
+    async fn costly_group_beyond_the_cap_stays_unexpanded() {
+        let dir = temp_dir("beyond_cap_unexpanded");
+        let columns = ["1", "2", "3", "4", "5"];
+        let groups: Vec<(&str, &str, u32, u32, u32)> = columns
+            .iter()
+            .enumerate()
+            .map(|(ci, column)| ("A", *column, 0, ci as u32, 40))
+            .collect();
+        create_collection_fixture(
+            &dir,
+            "bc",
+            &["A"],
+            &columns,
+            &groups,
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        // Every group's sampled endpoints are corrupt, so each expansion adds
+        // 38 reads and is charged; the fifth group arrives after the
+        // allowance is spent.
+        for column in columns {
+            for tile in ["0", "39"] {
+                write_corrupt_labels_index(&dir.join("A").join(column).join(tile));
+            }
+        }
+        let tile_dir = dir.join("A").join("5").join("20");
+        write_labels_index(&tile_dir, &["mask"]);
+        write_label_multiscale(
+            &tile_dir,
+            "mask",
+            &["t", "z", "y", "x"],
+            &[1, 1, 16, 16],
+            &[1, 1, 16, 16],
+            &[1.0, 1.0, 1.0, 1.0],
+            "uint32",
+            serde_json::json!({"colors": [{"label-value": 1, "rgba": [1, 2, 3, 4]}]}),
+        );
+
+        let (store, reads) = recording_store(&dir);
+        let result = import_dataset_with_label_discovery(&store, "bc-id", "Beyond Cap", false)
+            .await
+            .unwrap();
+
+        assert!(
+            result.manifest.labels().is_empty(),
+            "a costly group past the cap is not expanded, so its interior \
+             label stays undiscovered: {:?}",
+            result.manifest.labels(),
+        );
+        assert_eq!(
+            count_label_probes(&reads),
+            10 + 38 * MAX_UNUSABLE_GROUP_EXPANSIONS,
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.kind == ImportWarningKind::UnusableLabelIndex),
+            "warnings: {:?}",
+            result.warnings,
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.kind == ImportWarningKind::SampledLabelDiscovery),
             "warnings: {:?}",
             result.warnings,
         );
