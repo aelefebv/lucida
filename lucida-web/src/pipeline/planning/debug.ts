@@ -4,9 +4,9 @@
  * every cold-state rebuild.
  */
 
-import type { CpuCache } from "../fetch/index.ts";
 import type { PlanningDatasetDebug } from "../../debug/debugStats.ts";
 import type {
+  CacheStateSnapshot,
   EntitySnapshot,
   RequestPlan,
 } from "./index.ts";
@@ -40,10 +40,15 @@ export function modeReason(diagPx: number, config: PlanningConfig): string {
  * derives everything from the plan, the entity list, and the current
  * cache snapshot. No internal state.
  *
- * Cross-references `plan.requests` with `cpuCache.snapshot()` to
- * compute cached / in-flight counts per LOD; consumes `plan.stats` for
- * catalog degradations and culling counters; picks a focal entity
- * from the visible entities by viewport-center proximity.
+ * Cross-references `plan.requests` with `cacheSnap` to compute cached /
+ * in-flight counts per LOD; consumes `plan.stats` for catalog
+ * degradations and culling counters; picks a focal entity from the
+ * visible entities by viewport-center proximity.
+ *
+ * `cacheSnap` is the caller's per-rebuild {@link CacheStateSnapshot} —
+ * taking one is O(resident entities), so the coordinator captures it
+ * once per rebuild and shares it across every dataset rather than
+ * letting this function re-snapshot per call.
  *
  * `config` is forwarded to {@link modeReason} so the focal-entity
  * explanation matches whatever thresholds {@link plan} was running
@@ -55,7 +60,7 @@ export function buildPlanningDatasetDebug(
   entities: EntitySnapshot[],
   entityById: Map<string, EntitySnapshot>,
   visibleRegion: VisibleRegion,
-  cpuCache: CpuCache,
+  cacheSnap: CacheStateSnapshot,
   config: PlanningConfig,
 ): PlanningDatasetDebug {
   const lanes = { minimap: 0, detail: 0, coarse: 0, proxy: 0, prefetch: 0, overview: 0 };
@@ -66,7 +71,6 @@ export function buildPlanningDatasetDebug(
   }
 
   // Per-LOD breakdown: planned (from plan), cached + in-flight (from cache).
-  const cacheSnap = cpuCache.snapshot();
   const cached: Record<number, number> = {};
   const inFlight: Record<number, number> = {};
   const activeEntityIds = new Set(result.activeSet.map(e => e.entityId));
