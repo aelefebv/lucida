@@ -3,7 +3,7 @@ type: Gotcha
 title: "Explicit Translations Are in Physical Units; Lucida Composes in Voxels"
 description: "OME-Zarr stores explicitly-positioned tile translations in physical units inside coordinateTransformations.translation, while lucida composes everything in voxel units."
 tags: [lucida, gotcha]
-source_path: wiki/gotchas/stage-translations-are-microns.md
+source_path: wiki/gotchas/explicit-translations-are-physical-units.md
 created: 2026-04-18
 modified: 2026-07-06
 ---
@@ -29,7 +29,7 @@ A defensive check: if `scale_x` or `scale_y` is missing or non-finite (`!isfinit
 
 ## Tests covering the conversion
 
-- `stage_translations_normalized_to_voxel_units` — the happy path.
+- `explicit_translations_normalized_to_voxel_units` — the happy path.
 - `missing_voxel_scale_falls_back_to_unit_scale` — defensive case.
 - `zero_voxel_scale_falls_back_with_warning` — defensive case for divide-by-zero.
 - `grid_collections_unaffected` — derived-positioned collections (no translations) shouldn't be affected by the scale-conversion code path.
@@ -48,6 +48,4 @@ The downstream layers ([Planning Domain](../systems/subsystems/planning-domain.m
 
 - [lucida-store](../systems/crates/lucida-store.md)
 - [lucida-content](../systems/crates/lucida-content.md) — the downstream `VoxelTransform` consumers
-- The `import_collection_with_stage_positions` test in `lucida-store/src/import.rs`
-</content>
-</invoke>
+- The `import_collection_with_explicit_positions` test in `lucida-store/src/import.rs`

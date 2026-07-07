@@ -439,15 +439,15 @@ const expectedManifestCollection: DatasetManifest = {
   ],
   source_layouts: [
     {
-      id: "layout-stage",
-      name: "Stage positions",
+      id: "layout-explicit",
+      name: "Explicit positions",
       placements: [
         { entity_id: "group-A1", position: [0, 0] },
         { entity_id: "tile-A1-f0", position: [2048, 1024] },
       ],
     },
   ],
-  default_layout_id: "layout-stage",
+  default_layout_id: "layout-explicit",
 };
 
 const expectedDatasetOpenedCollection: WireDatasetOpened = {

@@ -490,7 +490,7 @@ async fn import_collection(
         if has_explicit_positions && (!valid(raw_x) || !valid(raw_y)) {
             eprintln!(
                 "[lucida-store] dataset {id:?} has missing or invalid voxel \
-                 scale (scale_x={raw_x}, scale_y={raw_y}); stage translations \
+                 scale (scale_x={raw_x}, scale_y={raw_y}); explicit translations \
                  are passed through unchanged",
             );
         }
@@ -590,7 +590,7 @@ async fn import_collection(
         // Translations are stored in OME-Zarr in physical units;
         // convert to voxel units here so downstream consumers see consistent
         // units across derived- and explicitly-positioned collections.
-        let stage_positions: Vec<Option<[f64; 2]>> = if has_explicit_positions {
+        let explicit_positions: Vec<Option<[f64; 2]>> = if has_explicit_positions {
             group
                 .tiles
                 .iter()
@@ -614,7 +614,7 @@ async fn import_collection(
         let (min_x, min_y) = if has_explicit_positions {
             let mut mx = f64::MAX;
             let mut my = f64::MAX;
-            for [x, y] in stage_positions.iter().flatten() {
+            for [x, y] in explicit_positions.iter().flatten() {
                 mx = mx.min(*x);
                 my = my.min(*y);
             }
@@ -646,7 +646,7 @@ async fn import_collection(
 
             // Build tile->group transform.
             if has_explicit_positions {
-                if let Some([x, y]) = stage_positions[fi] {
+                if let Some([x, y]) = explicit_positions[fi] {
                     transforms.push(TransformEdge {
                         from: tile_entity_id.clone(),
                         to: group_entity_id.clone(),
@@ -1649,8 +1649,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_collection_with_stage_positions() {
-        let dir = temp_dir("import_collection_stage");
+    async fn import_collection_with_explicit_positions() {
+        let dir = temp_dir("import_collection_explicit");
         fs::create_dir_all(&dir).unwrap();
 
         // Build collection root with explicit translations on the tiles.
@@ -1662,7 +1662,7 @@ mod tests {
                     "version": "0.5",
                     "plate": {
                         "version": "0.5",
-                        "name": "stage_collection",
+                        "name": "explicit_collection",
                         "rows": [{"name": "A"}],
                         "columns": [{"name": "1"}],
                         "wells": [{"path": "A/1", "rowIndex": 0, "columnIndex": 0}]
@@ -1771,7 +1771,7 @@ mod tests {
         }
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "stage-id", "Stage Collection")
+        let result = import_dataset(&store, "explicit-id", "Explicit Collection")
             .await
             .unwrap();
 
@@ -1824,7 +1824,7 @@ mod tests {
     /// to omit the entry, producing a derived-positioned group.
     /// `scale` is the level-0 [T, C, Z, Y, X] scale; pass `None` to omit the
     /// `scale` coordinate transform entirely (so default scale of 1.0 applies).
-    fn create_stage_collection_fixture(
+    fn create_explicit_collection_fixture(
         dir: &std::path::Path,
         translations: &[Option<[f64; 5]>],
         scale: Option<[f64; 5]>,
@@ -1988,18 +1988,18 @@ mod tests {
     /// tile 0 at (0, 0); tile 1 at (100 µm, 200 µm). With Y/X scale of
     /// 0.5 µm/voxel the second tile ends up at (200, 400) voxels.
     #[tokio::test]
-    async fn stage_translations_normalized_to_voxel_units() {
-        let dir = temp_dir("stage_translations_voxel_units");
+    async fn explicit_translations_normalized_to_voxel_units() {
+        let dir = temp_dir("explicit_translations_voxel_units");
         // Translations are TCZYX. The test puts X=100 µm, Y=200 µm on tile 1.
         let translations = vec![
             Some([0.0, 0.0, 0.0, 0.0, 0.0]),
             Some([0.0, 0.0, 0.0, 200.0, 100.0]),
         ];
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
-        create_stage_collection_fixture(&dir, &translations, scale);
+        create_explicit_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "stage-vox", "Stage Voxel")
+        let result = import_dataset(&store, "explicit-vox", "Explicit Voxel")
             .await
             .unwrap();
 
@@ -2017,7 +2017,7 @@ mod tests {
         }
 
         // tile 0 is the per-group origin.
-        let t0 = find_tile_transform(&result, "stage-vox", 0);
+        let t0 = find_tile_transform(&result, "explicit-vox", 0);
         assert!(
             (t0.transform.matrix()[12]).abs() < 1e-9,
             "tile 0 tx should be 0"
@@ -2028,7 +2028,7 @@ mod tests {
         );
 
         // tile 1: 100 µm / 0.5 = 200 voxels in X, 200 µm / 0.5 = 400 voxels in Y.
-        let t1 = find_tile_transform(&result, "stage-vox", 1);
+        let t1 = find_tile_transform(&result, "explicit-vox", 1);
         assert!(
             (t1.transform.matrix()[12] - 200.0).abs() < 1e-9,
             "tile 1 tx should be 200 voxels, got {}",
@@ -2052,7 +2052,7 @@ mod tests {
         let translations = vec![None, None];
         // Choose a non-trivial scale so the wrong code path would be visible.
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
-        create_stage_collection_fixture(&dir, &translations, scale);
+        create_explicit_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "grid-collection", "Grid Collection")
@@ -2108,7 +2108,7 @@ mod tests {
             Some([0.0, 0.0, 0.0, 200.0, 100.0]),
         ];
         // No explicit scale entry -> default of 1.0 in parse.rs.
-        create_stage_collection_fixture(&dir, &translations, None);
+        create_explicit_collection_fixture(&dir, &translations, None);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "missing-scale", "Missing Scale")
@@ -2148,7 +2148,7 @@ mod tests {
         ];
         // X scale (last value) is zero — invalid. Y scale is fine.
         let scale = Some([1.0, 1.0, 1.0, 0.5, 0.0]);
-        create_stage_collection_fixture(&dir, &translations, scale);
+        create_explicit_collection_fixture(&dir, &translations, scale);
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
         let result = import_dataset(&store, "zero-scale", "Zero Scale")

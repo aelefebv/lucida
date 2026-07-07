@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use lucida_store::ingest::pyramid::VoxelSize;
 use lucida_store::ingest::tiff_reader::{DimensionHints, DimensionOrder};
 
-/// Convert microscopy data to OME-Zarr v2 multiscale stores.
+/// Convert image data to OME-Zarr v2 multiscale stores.
 #[derive(Parser)]
 #[command(name = "lucida-store")]
 struct Cli {

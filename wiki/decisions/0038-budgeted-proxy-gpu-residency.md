@@ -47,7 +47,7 @@ fetching is not the bottleneck.
 Memory is the binding constraint here, so the system needs a positive decision
 about which proxies deserve GPU residency, not a reactive eviction loop after
 everything has already been declared wanted. Whole-group bundles preserve the
-collection invariant from [Groups Are the Planning Unit in Collections](0025-wells-as-planning-unit.md): tiles within a
+collection invariant from [Groups Are the Planning Unit in Collections](0025-groups-as-planning-unit.md): tiles within a
 group should not diverge arbitrarily because of slot-level eviction.
 
 Keeping the policy in planning follows [Principles — Planning Domain](../principles/planning.md#4-planning-is-pure-carry-forward-state-is-explicit):
@@ -94,7 +94,7 @@ updates, and stale upload rejection, but it no longer invents residency policy.
 
 - [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](0004-multi-pool-atlases.md)
 - [Catalog Degradation Steps One Tier at a Time](0024-catalog-degrade-one-tier-at-a-time.md)
-- [Groups Are the Planning Unit in Collections](0025-wells-as-planning-unit.md)
+- [Groups Are the Planning Unit in Collections](0025-groups-as-planning-unit.md)
 - [Delivery state as a CpuCache sidecar](0037-delivery-state-as-cpucache-sidecar.md)
 - [Principles — Planning Domain](../principles/planning.md#2-memory-is-the-binding-constraint)
 - [Principles — Planning Domain](../principles/planning.md#3-groups-are-coherent-visual-units)

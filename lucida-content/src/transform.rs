@@ -7,7 +7,7 @@ use crate::id::EntityId;
 ///
 /// Translations and scales in the `transform` matrix are interpreted as
 /// counts of source-entity full-res voxels. Producers reading from
-/// physical-unit metadata (e.g., OME-Zarr stage coordinates in microns)
+/// physical-unit metadata (e.g., OME-Zarr coordinate translations in physical units)
 /// **must** convert at the call site before constructing the
 /// [`VoxelTransform`]. The canonical constructor is
 /// [`VoxelTransform::from_voxel_translation_2d`].

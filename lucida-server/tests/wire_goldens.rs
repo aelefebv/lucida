@@ -767,8 +767,8 @@ fn collection_dataset_opened() -> DatasetOpened {
             },
         }],
         vec![LayoutSpec {
-            id: LayoutId("layout-stage".into()),
-            name: "Stage positions".into(),
+            id: LayoutId("layout-explicit".into()),
+            name: "Explicit positions".into(),
             placements: vec![
                 EntityPlacement {
                     entity_id: group_id,
@@ -780,7 +780,7 @@ fn collection_dataset_opened() -> DatasetOpened {
                 },
             ],
         }],
-        Some(LayoutId("layout-stage".into())),
+        Some(LayoutId("layout-explicit".into())),
     );
 
     DatasetOpened {

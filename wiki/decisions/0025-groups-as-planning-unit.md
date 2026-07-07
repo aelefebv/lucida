@@ -3,7 +3,7 @@ type: Decision
 title: "Groups Are the Planning Unit in Collections"
 description: "On collections, planning assigns one promotion mode per group, never per tile."
 tags: [lucida, decision]
-source_path: wiki/decisions/0025-wells-as-planning-unit.md
+source_path: wiki/decisions/0025-groups-as-planning-unit.md
 created: 2026-05-14
 modified: 2026-07-06
 ---
@@ -52,4 +52,3 @@ This decision honors [Principles — Planning Domain](../principles/planning.md#
 - [Planning Domain](../systems/subsystems/planning-domain.md) — subsystem article; the "Invariants" section
 - [Flow: Chunk Lifecycle](../flows/chunk-lifecycle.md) — section 1c (single vs collection divergence) and section 3b (promotion)
 - PRD #545 — the work item during which this ADR was captured
-</content>

@@ -126,7 +126,7 @@ the user's layout/navigation unit.
 - [Principles — Planning Domain](../principles/planning.md#6-anticipate-the-users-likely-next-gesture)
 - Supersedes the new-path behavior in [Multi-Pool Atlases by (Dataset, Channel, Chunk Dims)](0004-multi-pool-atlases.md)
 - Supersedes the new-path behavior in [Catalog Degradation Steps One Tier at a Time](0024-catalog-degrade-one-tier-at-a-time.md)
-- Supersedes the new-path behavior in [Groups Are the Planning Unit in Collections](0025-wells-as-planning-unit.md)
+- Supersedes the new-path behavior in [Groups Are the Planning Unit in Collections](0025-groups-as-planning-unit.md)
 - Supersedes the new-path behavior in [Budgeted proxy GPU residency](0038-budgeted-proxy-gpu-residency.md)
 - PRD #672
 - Issue #561

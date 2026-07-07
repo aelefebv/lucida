@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Standalone HCS plate-to-OME-Zarr v0.5 converter.
+Standalone tiled-collection to OME-Zarr v0.5 converter.
 
-Scans a directory of HCS TIFF files matching the pattern:
-    r{row}c{col}f{field}p{plane}-ch{channel}t{timepoint}.tiff
+Scans a directory of tiled TIFF files matching the pattern:
+    r{row}c{col}f{tile}p{plane}-ch{channel}t{timepoint}.tiff
 
-and writes a Zarr v3 / OME-Zarr v0.5 plate hierarchy with multiscale pyramids.
+and writes a Zarr v3 / OME-Zarr v0.5 collection hierarchy with multiscale pyramids.
 
 Dependencies (pip install):
     tifffile numpy lz4
 
 Usage:
-    python plate_to_ome_zarr.py <input_dir> <output.zarr> [options]
+    python collection_to_ome_zarr.py <input_dir> <output.zarr> [options]
 
     Options:
         --chunk-xy N      XY chunk size (default: 256)
@@ -51,26 +51,26 @@ class VoxelSize:
 
 
 @dataclass
-class FovLayout:
+class TileLayout:
     index: int
     files: dict  # (t, c, z) -> Path
 
 
 @dataclass
-class WellLayout:
+class GroupLayout:
     row_name: str
     col_name: str
     row_index: int
     col_index: int
-    fovs: list  # list[FovLayout]
+    tiles: list  # list[TileLayout]
 
 
 @dataclass
-class PlateLayout:
+class CollectionLayout:
     name: str
     rows: list          # sorted row names e.g. ["A", "B"]
     columns: list       # sorted col names e.g. ["1", "2"]
-    wells: list         # list[WellLayout]
+    groups: list        # list[GroupLayout]
     channels: int = 1
     timepoints: int = 1
     z_planes: int = 1
@@ -90,10 +90,10 @@ class LevelSpec:
 
 
 # ---------------------------------------------------------------------------
-# Plate scanning
+# Collection scanning
 # ---------------------------------------------------------------------------
 
-HCS_PATTERN = re.compile(
+TILE_PATTERN = re.compile(
     r"(?i)r(\d+)c(\d+)f(\d+)p(\d+)-ch(\d+)t(\d+)\.tiff?$"
 )
 
@@ -137,27 +137,27 @@ def read_tiff_info(path: Path) -> tuple[int, int, VoxelSize]:
         return w, h, voxel
 
 
-def scan_plate_directory(input_dir: Path) -> PlateLayout:
-    """Scan directory for HCS TIFFs and build plate layout."""
+def scan_collection_directory(input_dir: Path) -> CollectionLayout:
+    """Scan directory for tiled TIFFs and build collection layout."""
     # Collect all matching files
     entries = []
     for root, _dirs, files in os.walk(input_dir):
         for fname in files:
-            m = HCS_PATTERN.search(fname)
+            m = TILE_PATTERN.search(fname)
             if m:
-                row, col, fov, plane, ch, tp = (int(x) for x in m.groups())
+                row, col, tile, plane, ch, tp = (int(x) for x in m.groups())
                 entries.append((
-                    row, col, fov - 1,  # FOV 0-indexed
+                    row, col, tile - 1,  # tile 0-indexed
                     plane, ch, tp,
                     Path(root) / fname,
                 ))
 
     if not entries:
-        raise ValueError(f"No HCS TIFF files found in {input_dir}")
+        raise ValueError(f"No tiled TIFF files found in {input_dir}")
 
-    print(f"Found {len(entries)} HCS TIFF files")
+    print(f"Found {len(entries)} tiled TIFF files")
 
-    # Discover plate dimensions
+    # Discover collection dimensions
     all_rows = sorted(set(e[0] for e in entries))
     all_cols = sorted(set(e[1] for e in entries))
     max_channels = max(e[4] for e in entries)
@@ -170,36 +170,36 @@ def scan_plate_directory(input_dir: Path) -> PlateLayout:
     row_index_map = {r: i for i, r in enumerate(all_rows)}
     col_index_map = {c: i for i, c in enumerate(all_cols)}
 
-    # Group by (row, col, fov)
+    # Group by (row, col, tile)
     grouped: dict[tuple[int, int, int], dict[tuple[int, int, int], Path]] = defaultdict(dict)
-    for row, col, fov, plane, ch, tp, path in entries:
-        grouped[(row, col, fov)][(tp, ch, plane)] = path
+    for row, col, tile, plane, ch, tp, path in entries:
+        grouped[(row, col, tile)][(tp, ch, plane)] = path
 
-    # Build well layouts
-    wells_by_rc: dict[tuple[int, int], list[FovLayout]] = defaultdict(list)
-    for (row, col, fov_idx), file_map in grouped.items():
-        wells_by_rc[(row, col)].append(FovLayout(index=fov_idx, files=file_map))
+    # Build group layouts
+    groups_by_rc: dict[tuple[int, int], list[TileLayout]] = defaultdict(list)
+    for (row, col, tile_idx), file_map in grouped.items():
+        groups_by_rc[(row, col)].append(TileLayout(index=tile_idx, files=file_map))
 
-    wells = []
-    for (row, col), fovs in sorted(wells_by_rc.items()):
-        fovs.sort(key=lambda f: f.index)
-        wells.append(WellLayout(
+    groups = []
+    for (row, col), tiles in sorted(groups_by_rc.items()):
+        tiles.sort(key=lambda t: t.index)
+        groups.append(GroupLayout(
             row_name=row_number_to_letter(row),
             col_name=str(col),
             row_index=row_index_map[row],
             col_index=col_index_map[col],
-            fovs=fovs,
+            tiles=tiles,
         ))
 
     # Read image dimensions from first file
     first_path = entries[0][6]
     img_w, img_h, voxel = read_tiff_info(first_path)
 
-    layout = PlateLayout(
+    layout = CollectionLayout(
         name=input_dir.name,
         rows=row_names,
         columns=col_names,
-        wells=wells,
+        groups=groups,
         channels=max_channels,
         timepoints=max_timepoints,
         z_planes=max_z,
@@ -208,9 +208,9 @@ def scan_plate_directory(input_dir: Path) -> PlateLayout:
         voxel_size=voxel,
     )
 
-    print(f"Plate: {layout.name}")
+    print(f"Collection: {layout.name}")
     print(f"  Rows: {layout.rows}, Columns: {layout.columns}")
-    print(f"  Wells: {len(layout.wells)}")
+    print(f"  Groups: {len(layout.groups)}")
     print(f"  Channels: {layout.channels}, Timepoints: {layout.timepoints}, Z: {layout.z_planes}")
     print(f"  Image: {layout.image_width}x{layout.image_height}")
     print(f"  Voxel: {layout.voxel_size.x:.4f} x {layout.voxel_size.y:.4f} x {layout.voxel_size.z:.4f} µm")
@@ -219,21 +219,21 @@ def scan_plate_directory(input_dir: Path) -> PlateLayout:
 
 
 # ---------------------------------------------------------------------------
-# FOV TIFF reading
+# Tile TIFF reading
 # ---------------------------------------------------------------------------
 
-def read_fov_tiffs(
-    fov: FovLayout,
+def read_tile_tiffs(
+    tile: TileLayout,
     channels: int,
     timepoints: int,
     z_planes: int,
     width: int,
     height: int,
 ) -> np.ndarray:
-    """Read all TIFFs for a single FOV into a 5D TCZYX uint16 array."""
+    """Read all TIFFs for a single tile into a 5D TCZYX uint16 array."""
     volume = np.zeros((timepoints, channels, z_planes, height, width), dtype=np.uint16)
 
-    for (t, c, z), path in fov.files.items():
+    for (t, c, z), path in tile.files.items():
         # Convert from 1-indexed to 0-indexed
         ti, ci, zi = t - 1, c - 1, z - 1
         if ti >= timepoints or ci >= channels or zi >= z_planes:
@@ -391,9 +391,9 @@ def apply_downsample(data: np.ndarray, spec: LevelSpec) -> np.ndarray:
 # OME-Zarr metadata builders
 # ---------------------------------------------------------------------------
 
-def build_plate_metadata(layout: PlateLayout) -> dict:
-    """Build root plate zarr.json."""
-    field_count = max(len(w.fovs) for w in layout.wells) if layout.wells else 0
+def build_collection_metadata(layout: CollectionLayout) -> dict:
+    """Build root collection zarr.json."""
+    field_count = max(len(g.tiles) for g in layout.groups) if layout.groups else 0
 
     return {
         "zarr_format": 3,
@@ -408,11 +408,11 @@ def build_plate_metadata(layout: PlateLayout) -> dict:
                     "columns": [{"name": c} for c in layout.columns],
                     "wells": [
                         {
-                            "path": f"{w.row_name}/{w.col_name}",
-                            "rowIndex": w.row_index,
-                            "columnIndex": w.col_index,
+                            "path": f"{g.row_name}/{g.col_name}",
+                            "rowIndex": g.row_index,
+                            "columnIndex": g.col_index,
                         }
-                        for w in layout.wells
+                        for g in layout.groups
                     ],
                     "field_count": field_count,
                 },
@@ -421,8 +421,8 @@ def build_plate_metadata(layout: PlateLayout) -> dict:
     }
 
 
-def build_well_metadata(well: WellLayout) -> dict:
-    """Build well-level zarr.json."""
+def build_group_metadata(group: GroupLayout) -> dict:
+    """Build group-level zarr.json."""
     return {
         "zarr_format": 3,
         "node_type": "group",
@@ -430,14 +430,14 @@ def build_well_metadata(well: WellLayout) -> dict:
             "ome": {
                 "version": "0.5",
                 "well": {
-                    "images": [{"path": str(fov.index)} for fov in well.fovs],
+                    "images": [{"path": str(tile.index)} for tile in group.tiles],
                 },
             }
         },
     }
 
 
-def build_group_metadata() -> dict:
+def build_row_metadata() -> dict:
     """Build a plain Zarr v3 group (for row directories)."""
     return {
         "zarr_format": 3,
@@ -449,7 +449,7 @@ def build_group_metadata() -> dict:
 def build_multiscales_metadata(
     levels: list[LevelSpec], voxel: VoxelSize
 ) -> dict:
-    """Build FOV-level zarr.json with OME multiscales."""
+    """Build tile-level zarr.json with OME multiscales."""
     datasets = []
     for i, lvl in enumerate(levels):
         datasets.append({
@@ -612,7 +612,7 @@ def write_chunks(
 # Main conversion pipeline
 # ---------------------------------------------------------------------------
 
-def convert_plate_to_zarr(
+def convert_collection_to_zarr(
     input_dir: Path,
     output_dir: Path,
     chunk_xy: int = 256,
@@ -620,9 +620,9 @@ def convert_plate_to_zarr(
     voxel_override: Optional[VoxelSize] = None,
     min_size: int = 256,
 ):
-    """Convert an HCS plate directory to OME-Zarr v0.5."""
-    # 1. Scan plate
-    layout = scan_plate_directory(input_dir)
+    """Convert a tiled collection directory to OME-Zarr v0.5."""
+    # 1. Scan collection
+    layout = scan_collection_directory(input_dir)
 
     # Apply voxel overrides
     if voxel_override:
@@ -633,28 +633,28 @@ def convert_plate_to_zarr(
         if voxel_override.z != 1.0:
             layout.voxel_size.z = voxel_override.z
 
-    # 2. Write plate metadata
+    # 2. Write collection metadata
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(output_dir / "zarr.json", build_plate_metadata(layout))
+    write_json(output_dir / "zarr.json", build_collection_metadata(layout))
 
     # 3. Write row group metadata
     for row_name in layout.rows:
-        write_json(output_dir / row_name / "zarr.json", build_group_metadata())
+        write_json(output_dir / row_name / "zarr.json", build_row_metadata())
 
-    # 4. Process each well
-    for well_idx, well in enumerate(layout.wells):
-        well_dir = output_dir / well.row_name / well.col_name
-        write_json(well_dir / "zarr.json", build_well_metadata(well))
+    # 4. Process each group
+    for group_idx, group in enumerate(layout.groups):
+        group_dir = output_dir / group.row_name / group.col_name
+        write_json(group_dir / "zarr.json", build_group_metadata(group))
 
-        print(f"\nWell {well.row_name}/{well.col_name} ({well_idx + 1}/{len(layout.wells)})")
+        print(f"\nGroup {group.row_name}/{group.col_name} ({group_idx + 1}/{len(layout.groups)})")
 
-        # 5. Process each FOV in the well
-        for fov in well.fovs:
-            print(f"  FOV {fov.index} ({len(fov.files)} files)")
+        # 5. Process each tile in the group
+        for tile in group.tiles:
+            print(f"  Tile {tile.index} ({len(tile.files)} files)")
 
             # Read all TIFFs into 5D volume
-            volume = read_fov_tiffs(
-                fov,
+            volume = read_tile_tiffs(
+                tile,
                 layout.channels,
                 layout.timepoints,
                 layout.z_planes,
@@ -673,16 +673,16 @@ def convert_plate_to_zarr(
 
             print(f"    Pyramid: {len(levels)} levels")
 
-            # Write FOV multiscales metadata
-            fov_dir = well_dir / str(fov.index)
-            write_json(fov_dir / "zarr.json", build_multiscales_metadata(levels, layout.voxel_size))
+            # Write tile multiscales metadata
+            tile_dir = group_dir / str(tile.index)
+            write_json(tile_dir / "zarr.json", build_multiscales_metadata(levels, layout.voxel_size))
 
             # Write each pyramid level
             current = volume
             for level_idx, level in enumerate(levels):
                 print(f"    Level {level_idx}: {level.width}x{level.height}x{level.depth}")
 
-                level_dir = fov_dir / str(level_idx)
+                level_dir = tile_dir / str(level_idx)
                 write_chunks(current, level_dir, chunk_xy, chunk_z)
 
                 # Downsample for next level (if not the last)
@@ -701,9 +701,9 @@ def convert_plate_to_zarr(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert HCS plate TIFFs to OME-Zarr v0.5",
+        description="Convert tiled collection TIFFs to OME-Zarr v0.5",
     )
-    parser.add_argument("input_dir", type=Path, help="Directory containing HCS TIFFs")
+    parser.add_argument("input_dir", type=Path, help="Directory containing tiled TIFFs")
     parser.add_argument("output_zarr", type=Path, help="Output .zarr directory")
     parser.add_argument("--chunk-xy", type=int, default=256, help="XY chunk size (default: 256)")
     parser.add_argument("--chunk-z", type=int, default=64, help="Z chunk size (default: 64)")
@@ -726,7 +726,7 @@ def main():
             z=args.voxel_z or 1.0,
         )
 
-    convert_plate_to_zarr(
+    convert_collection_to_zarr(
         input_dir=args.input_dir,
         output_dir=args.output_zarr,
         chunk_xy=args.chunk_xy,

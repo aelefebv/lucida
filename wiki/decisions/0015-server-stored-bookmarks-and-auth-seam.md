@@ -29,7 +29,7 @@ The bookmark feature uses the principal for ownership (`created_by = principal.e
 A pure URL-hash approach ([URL-as-App-State for Saved Views](0013-url-as-app-state-for-saved-views.md) alone) handles the *personal* use case (refresh-preserves-state) and the *one-shot share* case (copy-current-URL). It does not handle:
 
 - **Discoverability.** "Show me other people's analyses of this dataset" is a sidebar feature; URL hashes are invisible until shared.
-- **Persistence with names.** A URL hash carries no name, no creator, no created-at; it's an opaque blob. For curated analyses ("Apoptotic morphology — group B7"), a named entry is qualitatively different.
+- **Persistence with names.** A URL hash carries no name, no creator, no created-at; it's an opaque blob. For curated analyses ("Group B7 analysis"), a named entry is qualitatively different.
 - **Mutation.** A URL is immutable once shared; a bookmark can be renamed or deleted as understanding evolves.
 
 Server-stored bookmarks fill those gaps without disturbing the URL-hash side. Both surfaces share the same underlying capture record (`SavedView`). Sharing is now bimodal: copy-the-live-URL for ephemeral, or copy-the-bookmark-link (`#b=<id>`) for stable.

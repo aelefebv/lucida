@@ -15,7 +15,7 @@ from lucida import LucidaClient, LucidaError
 
 
 DEFAULT_DATASET = Path(
-    "/Users/austin/local_data/lucida_test_zarrs/20250925_CPPX245_ISR_Washout_v4.ome.zarr"
+    "/Users/austin/local_data/lucida_test_zarrs/collection_a.ome.zarr"
 )
 
 

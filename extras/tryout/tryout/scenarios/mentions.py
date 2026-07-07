@@ -68,7 +68,7 @@ TID_OPTION_PREFIX = "mention-option-"
 
 # The comment text we seed from alice — it both mentions "me" (so it lands in the
 # mentions-of-me panel) and is the row text we click to open the thread.
-MENTION_OF_ME_TEXT_TAIL = "can you confirm these are mitochondria?"
+MENTION_OF_ME_TEXT_TAIL = "can you confirm these are region-a?"
 
 
 def derive_handle(author: str) -> str:

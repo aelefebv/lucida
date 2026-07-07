@@ -160,8 +160,8 @@
     ],
     "source_layouts": [
       {
-        "id": "layout-stage",
-        "name": "Stage positions",
+        "id": "layout-explicit",
+        "name": "Explicit positions",
         "placements": [
           {
             "entity_id": "group-A1",
@@ -180,7 +180,7 @@
         ]
       }
     ],
-    "default_layout_id": "layout-stage"
+    "default_layout_id": "layout-explicit"
   },
   "fetch": {
     "Proxied": {

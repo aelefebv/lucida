@@ -7,7 +7,7 @@ cd "${repo_root}"
 
 server="${LUCIDA_SMOKE_SERVER:-http://127.0.0.1:9876}"
 dataset="${LUCIDA_SMOKE_DATASET:-}"
-default_dataset="/Users/austin/local_data/lucida_test_zarrs/20250925_CPPX245_ISR_Washout_v4.ome.zarr"
+default_dataset="/Users/austin/local_data/lucida_test_zarrs/collection_a.ome.zarr"
 if [[ -z "${dataset}" && -d "${default_dataset}" ]]; then
   dataset="${default_dataset}"
 fi
