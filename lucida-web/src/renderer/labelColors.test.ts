@@ -27,7 +27,7 @@ describe("labelColor", () => {
   });
 
   it("honors explicit colors for ids well past the 16-bit range", () => {
-    // The yeast fixture declares a color for value 92801 (> 65535).
+    // The volume fixture declares a color for value 92801 (> 65535).
     const explicit = new Map<number, RGBA>([[92801, [1, 2, 3, 255]]]);
     expect(labelColor(92801, explicit)).toEqual([1, 2, 3, 255]);
   });

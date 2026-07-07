@@ -279,8 +279,8 @@ const expectedManifestSingle: DatasetManifest = {
         data_type: "Uint16",
         pinned_axes: [{ name: "m", size: 4, pinned_index: 0 }],
         channel_infos: [
-          { label: "DAPI", color: "0000FF" },
-          { label: "GFP" },
+          { label: "Channel 0", color: "0000FF" },
+          { label: "Channel 1" },
         ],
       },
     },
@@ -295,10 +295,10 @@ const expectedManifestSingle: DatasetManifest = {
   default_layout_id: "layout-source",
   labels: [
     {
-      name: "nuclei",
+      name: "region-a",
       source_image_id: "multiscale-0",
       image: {
-        image_id: "multiscale-0:label:nuclei",
+        image_id: "multiscale-0:label:region-a",
         owner: "img-0",
         multiscale: {
           axes: [
@@ -333,7 +333,7 @@ const expectedFetchSingle: FetchSource = {
     images: [
       { image_id: "multiscale-0", wire_format: { Zstd: { data_type: "Uint16" } } },
       {
-        image_id: "multiscale-0:label:nuclei",
+        image_id: "multiscale-0:label:region-a",
         wire_format: { Raw: { data_type: "Uint32" } },
       },
     ],
@@ -478,7 +478,7 @@ const expectedDisplaySettings: WireDatasetDisplaySettings = {
       contrast_min: 100,
       contrast_max: 12000,
       gamma: 1,
-      name: "Nuclei",
+      name: "Region A",
     },
     {
       visible: false,
@@ -707,7 +707,7 @@ const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
   levels: [
     expectedGeneratedLevel,
     {
-      image_id: "multiscale-0:label:nuclei",
+      image_id: "multiscale-0:label:region-a",
       info: {
         level_index: 1,
         role: "coarse",

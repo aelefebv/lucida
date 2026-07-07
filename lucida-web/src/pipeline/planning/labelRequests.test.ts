@@ -47,10 +47,10 @@ function manifestWithLabel(label?: LabelSpec): DatasetManifest {
   };
 }
 
-const yeastLabel: LabelSpec = {
-  name: "mitochondria",
+const volumeLabel: LabelSpec = {
+  name: "region-b",
   source_image_id: "img-0",
-  image: image("img-0:label:mito", "Uint32", [85, 87], [4, 4]),
+  image: image("img-0:label:region-b", "Uint32", [85, 87], [4, 4]),
   colors: [],
   source_declared: true,
 };
@@ -65,15 +65,15 @@ describe("computeLabelChunkRequests", () => {
   it("emits requests for the visible label keyed by the label's own image id", () => {
     const reqs = computeLabelChunkRequests({
       datasetId: "ds-0",
-      manifest: manifestWithLabel(yeastLabel),
+      manifest: manifestWithLabel(volumeLabel),
       t: 0,
       z: 0,
     });
     // 87x85 at chunk 128 → a single 1x1 grid.
     expect(reqs).toHaveLength(1);
     const r = reqs[0];
-    expect(r.imageId).toBe("img-0:label:mito");
-    expect(r.entityId).toBe("img-0:label:mito"); // scoped away from intensity entities
+    expect(r.imageId).toBe("img-0:label:region-b");
+    expect(r.entityId).toBe("img-0:label:region-b"); // scoped away from intensity entities
     expect(r.datasetId).toBe("ds-0");
     expect(r.level).toBe(0);
     expect(r.c).toBe(0);
@@ -84,9 +84,9 @@ describe("computeLabelChunkRequests", () => {
   it("emits one request per chunk of the chosen level's plane", () => {
     // 300x300 label at chunk 128 → ceil(300/128)=3 per axis → 9 chunks.
     const bigLabel: LabelSpec = {
-      name: "cells",
+      name: "region-c",
       source_image_id: "img-0",
-      image: image("img-0:label:cells", "Uint32", [300, 300], [1, 1]),
+      image: image("img-0:label:region-c", "Uint32", [300, 300], [1, 1]),
     };
     const reqs = computeLabelChunkRequests({
       datasetId: "ds-0",
@@ -169,10 +169,10 @@ describe("computeLabelChunkRequests", () => {
 
   it("picks a coarse fitting level (bounded requests) over a huge finest level", () => {
     const label: LabelSpec = {
-      name: "cells",
+      name: "region-c",
       source_image_id: "img-0",
       image: {
-        image_id: "img-0:label:cells",
+        image_id: "img-0:label:region-c",
         owner: "ent-0",
         multiscale: {
           axes: [
@@ -409,12 +409,12 @@ describe("resolveVisibleLabels", () => {
     // drawable) hidden — the seed picked an undrawable label. Rather than open
     // blank, resolve the first eligible label. Guards the non-uint32-first
     // (and, conceptually, footprint/level-ineligible) blank-open regression.
-    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("cells", "Uint32")]);
+    const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("region-c", "Uint32")]);
     const out = resolveVisibleLabels(m, [
       { visible: true, opacity: 0.5 },
       { visible: false, opacity: 0.5 },
     ]);
-    expect(out.map((r) => r.name)).toEqual(["cells"]);
+    expect(out.map((r) => r.name)).toEqual(["region-c"]);
 
     // Fetch agrees — it requests exactly the fallback label's chunks.
     const reqs = computeLabelChunkRequests({
@@ -428,7 +428,7 @@ describe("resolveVisibleLabels", () => {
       ],
     });
     const ids = new Set(reqs.map((r) => r.imageId));
-    expect(ids.has("img-0:label:cells")).toBe(true);
+    expect(ids.has("img-0:label:region-c")).toBe(true);
     expect(ids.has("img-0:label:mask8")).toBe(false);
   });
 
@@ -488,11 +488,11 @@ describe("eligibleLabelInfos", () => {
     // [uint16, uint32, uint16] → only index 1 is drawable, and it keeps index 1
     // (so its control targets the right label_settings entry).
     const m = manifestWithLabels([
-      uintLabel("nuclei", "Uint16"),
-      uintLabel("cells", "Uint32"),
-      uintLabel("membrane", "Uint16"),
+      uintLabel("region-a", "Uint16"),
+      uintLabel("region-c", "Uint32"),
+      uintLabel("region-d", "Uint16"),
     ]);
-    expect(eligibleLabelInfos(m)).toEqual([{ index: 1, name: "cells" }]);
+    expect(eligibleLabelInfos(m)).toEqual([{ index: 1, name: "region-c" }]);
   });
 
   it("returns [] for a manifest with no labels", () => {
@@ -526,9 +526,9 @@ describe("computeLabelChunkRequests — volume mode", () => {
       entities: [], transforms: [], source_layouts: [], default_layout_id: null,
       images: [image5("img-0", [1, 1, 4, 128, 128], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1], "Uint16")],
       labels: [{
-        name: "mito",
+        name: "region-b",
         source_image_id: "img-0",
-        image: image5("img-0:label:mito", [1, 1, 4, 128, 128], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1]),
+        image: image5("img-0:label:region-b", [1, 1, 4, 128, 128], [1, 1, 2, 64, 64], [1, 1, 1, 1, 1]),
       }],
     };
   }
@@ -544,7 +544,7 @@ describe("computeLabelChunkRequests — volume mode", () => {
     expect(keys.has("0/0/0/0/0/0")).toBe(true); // z=0 corner
     expect(keys.has("0/0/0/1/1/1")).toBe(true); // z=1 far corner
     // Every request is scoped under the label's own image id.
-    expect(reqs.every((r) => r.imageId === "img-0:label:mito")).toBe(true);
+    expect(reqs.every((r) => r.imageId === "img-0:label:region-b")).toBe(true);
     expect(reqs.every((r) => r.level === 0)).toBe(true);
   });
 

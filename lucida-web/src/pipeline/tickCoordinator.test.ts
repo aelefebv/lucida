@@ -386,10 +386,10 @@ describe("epoch caching", () => {
   function labeledContent(): DatasetManifest {
     const manifest = createMockContent();
     (manifest as DatasetManifest).labels = [{
-      name: "mito",
+      name: "region-b",
       source_image_id: "img-0",
       image: {
-        image_id: "img-0:label:mito",
+        image_id: "img-0:label:region-b",
         owner: "tile-0",
         multiscale: {
           axes: [],
@@ -410,7 +410,7 @@ describe("epoch caching", () => {
 
   function labelRequestsFromSubmit(cpuCache: CpuCache) {
     const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
-    return submitted.requests.filter((r) => r.imageId === "img-0:label:mito");
+    return submitted.requests.filter((r) => r.imageId === "img-0:label:region-b");
   }
 
   it("merges the label's FULL z-grid into the fetch plan in volume mode", () => {
@@ -429,7 +429,7 @@ describe("epoch caching", () => {
     expect(labelReqs.length).toBe(2);
     expect(new Set(labelReqs.map((r) => r.z))).toEqual(new Set([0, 1]));
     // Scoped under the label's own image id, so intensity eviction is untouched.
-    expect(labelReqs.every((r) => r.imageId === "img-0:label:mito")).toBe(true);
+    expect(labelReqs.every((r) => r.imageId === "img-0:label:region-b")).toBe(true);
   });
 
   it("merges only the mapped z-plane in slice mode (unchanged)", () => {

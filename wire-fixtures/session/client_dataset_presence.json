@@ -19,7 +19,7 @@
           "contrast_min": 100.0,
           "contrast_max": 12000.0,
           "gamma": 1.0,
-          "name": "Nuclei"
+          "name": "Region A"
         },
         {
           "visible": false,

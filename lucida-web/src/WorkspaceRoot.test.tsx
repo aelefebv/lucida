@@ -57,7 +57,7 @@ vi.mock("./WorkspaceDashboard.tsx", () => ({
     <div data-testid="dashboard-mounted">
       <button
         type="button"
-        onClick={() => onOpenWorkspace("ws-created", ["/data/embryo.ome.zarr"])}
+        onClick={() => onOpenWorkspace("ws-created", ["/data/sample.ome.zarr"])}
       >
         dashboard-open-with-seed
       </button>
@@ -179,7 +179,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
   function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
     return {
       id: "ws-created",
-      name: "embryo.ome.zarr",
+      name: "sample.ome.zarr",
       role: "owner",
       created_by: "me@example.com",
       created_at: "2026-06-23T00:00:00Z",
@@ -217,7 +217,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
       expect(screen.getByTestId("app-mounted")).toBeTruthy();
       expect(lastAppProps.current?.workspaceId).toBe("ws-created");
       expect(lastAppProps.current?.initialDatasetUrls).toEqual([
-        "/data/embryo.ome.zarr",
+        "/data/sample.ome.zarr",
       ]);
     });
   });
@@ -234,7 +234,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     );
     await waitFor(() => {
       expect(lastAppProps.current?.initialDatasetUrls).toEqual([
-        "/data/embryo.ome.zarr",
+        "/data/sample.ome.zarr",
       ]);
     });
 
@@ -258,7 +258,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     });
     // The seed was delivered exactly once (the create), never on the re-open.
     const seededRenders = seedRenders.filter((s) => s && s.length > 0);
-    expect(seededRenders).toEqual([["/data/embryo.ome.zarr"]]);
+    expect(seededRenders).toEqual([["/data/sample.ome.zarr"]]);
   });
 
   it("in-viewer 'create from datasets' creates a new workspace and navigates in with the seed", async () => {

@@ -10,7 +10,7 @@
         }
       },
       {
-        "image_id": "multiscale-0:label:nuclei",
+        "image_id": "multiscale-0:label:region-a",
         "wire_format": {
           "Raw": {
             "data_type": "Uint32"

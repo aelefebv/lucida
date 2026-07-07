@@ -28,7 +28,7 @@ pub struct LabelColor {
 /// accessors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabelSpec {
-    /// Label-group name (e.g. `"mitochondria"`), unique within its source image.
+    /// Label-group name (e.g. `"region-b"`), unique within its source image.
     pub name: String,
     /// The intensity image this label overlays.
     pub source_image_id: ImageId,
@@ -164,17 +164,17 @@ mod tests {
 
     #[test]
     fn projection_preserves_dtype_axes_and_scale() {
-        let spec = label_spec("mitochondria");
+        let spec = label_spec("region-b");
         let att = LabelAttachment::from_spec(&spec);
 
-        assert_eq!(att.name, "mitochondria");
+        assert_eq!(att.name, "region-b");
         assert_eq!(att.source_image_id, ImageId("img-0".to_string()));
         // The read-view is self-contained for placement: it exposes the source
         // image's owning entity directly.
         assert_eq!(att.source_entity_id, EntityId("ent-0".to_string()));
         assert_eq!(
             att.label_image_id,
-            ImageId("img-0:label:mitochondria".to_string())
+            ImageId("img-0:label:region-b".to_string())
         );
         // dtype must survive projection exactly (no 16-bit truncation).
         assert_eq!(att.data_type, DataType::Uint32);
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn projection_carries_large_color_values() {
-        let att = LabelAttachment::from_spec(&label_spec("mito"));
+        let att = LabelAttachment::from_spec(&label_spec("region-b"));
         assert_eq!(att.colors.len(), 1);
         // A value well past u16::MAX round-trips untouched.
         assert_eq!(att.colors[0].value, 92801);
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn spec_round_trips_through_serde() {
-        let spec = label_spec("cells");
+        let spec = label_spec("region-c");
         let json = serde_json::to_string(&spec).unwrap();
         let back: LabelSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, spec.name);

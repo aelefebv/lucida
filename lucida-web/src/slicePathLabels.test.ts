@@ -31,7 +31,7 @@ function labelSpec(name: string, imgId: string, colors?: LabelSpec["colors"], dt
 
 function manifest(labels: LabelSpec[]): DatasetManifest {
   return {
-    dataset_id: "ds-0", name: "yeast", kind: "Single",
+    dataset_id: "ds-0", name: "volume", kind: "Single",
     entities: [], transforms: [], source_layouts: [], default_layout_id: null,
     images: [image("img-0", [340, 348], [1, 1])],
     labels,
@@ -46,21 +46,21 @@ describe("pushLabelLayers", () => {
     pushLabelLayers(
       layers,
       manifest([
-        labelSpec("mitochondria", "img-0:label:mito"),
+        labelSpec("region-b", "img-0:label:region-b"),
         labelSpec("foreground", "img-0:label:fg"),
-        labelSpec("nuclei", "img-0:label:nuc"),
+        labelSpec("region-a", "img-0:label:region-a"),
       ]),
       members,
     );
     expect(layers).toHaveLength(1);
-    expect(layers[0].datasetId).toBe("img-0:label:mito"); // manifest order = first
+    expect(layers[0].datasetId).toBe("img-0:label:region-b"); // manifest order = first
     expect(layers[0].isLabel).toBe(true);
     expect(layers[0].opacity).toBeCloseTo(0.5);
   });
 
   it("aligns the overlay to the source footprint (4x-coarse label → source extent)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("mito", "img-0:label:mito")]), members);
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), members);
     expect(layers[0].dataW).toBeCloseTo(348, 3); // 87 * 4 / 1
     expect(layers[0].dataH).toBeCloseTo(340, 3);
     expect(layers[0].offsetX).toBe(0);
@@ -70,7 +70,7 @@ describe("pushLabelLayers", () => {
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("mito", "img-0:label:mito", colors)]), members);
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members);
     expect(layers[0].labelColors).toEqual(colors);
   });
 
@@ -112,8 +112,8 @@ describe("pushLabelLayers", () => {
       entities: [], transforms: [], source_layouts: [], default_layout_id: null,
       images: [near, far],
       labels: [
-        { name: "cells", source_image_id: "collection:image:D/3/0", image: image("collection:image:D/3/0:label:cells", [85, 87], [4, 4]) },
-        { name: "cells", source_image_id: "collection:image:M/13/0", image: image("collection:image:M/13/0:label:cells", [85, 87], [4, 4]) },
+        { name: "region-c", source_image_id: "collection:image:D/3/0", image: image("collection:image:D/3/0:label:region-c", [85, 87], [4, 4]) },
+        { name: "region-c", source_image_id: "collection:image:M/13/0", image: image("collection:image:M/13/0:label:region-c", [85, 87], [4, 4]) },
       ],
     };
     // Only the near tile is active; the far tile's placement must come from
@@ -132,8 +132,8 @@ describe("pushLabelLayers", () => {
       memberPositions,
     );
     expect(layers).toHaveLength(2);
-    const d3 = layers.find((l) => l.datasetId === "collection:image:D/3/0:label:cells");
-    const m13 = layers.find((l) => l.datasetId === "collection:image:M/13/0:label:cells");
+    const d3 = layers.find((l) => l.datasetId === "collection:image:D/3/0:label:region-c");
+    const m13 = layers.find((l) => l.datasetId === "collection:image:M/13/0:label:region-c");
     // In-roster label uses its roster position; off-roster label uses the scene
     // position — NOT [0, 0], which would stack it on the first group (the bug).
     expect([d3?.offsetX, d3?.offsetY]).toEqual([0, 0]);

@@ -1733,7 +1733,7 @@ mod tests {
             contrast_min: 100.0,
             contrast_max: 50000.0,
             gamma: 0.8,
-            name: Some("Nucleus".into()),
+            name: Some("Region A".into()),
         };
         let json = serde_json::to_string(&cs).unwrap();
         let parsed: ChannelSettings = serde_json::from_str(&json).unwrap();
@@ -1742,7 +1742,7 @@ mod tests {
         assert_eq!(parsed.contrast_min, 100.0);
         assert_eq!(parsed.contrast_max, 50000.0);
         assert_eq!(parsed.gamma, 0.8);
-        assert_eq!(parsed.name.as_deref(), Some("Nucleus"));
+        assert_eq!(parsed.name.as_deref(), Some("Region A"));
     }
 
     #[test]
@@ -1860,13 +1860,13 @@ mod tests {
         let cmd = ViewportCommand::SetChannelName {
             dataset_id: "ds1".into(),
             channel: 2,
-            name: Some("Nucleus".into()),
+            name: Some("Region A".into()),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         // The exact wire shape the web client emits (snake_case tag).
         assert_eq!(
             json,
-            r#"{"type":"set_channel_name","dataset_id":"ds1","channel":2,"name":"Nucleus"}"#
+            r#"{"type":"set_channel_name","dataset_id":"ds1","channel":2,"name":"Region A"}"#
         );
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
@@ -1877,7 +1877,7 @@ mod tests {
             } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(channel, 2);
-                assert_eq!(name.as_deref(), Some("Nucleus"));
+                assert_eq!(name.as_deref(), Some("Region A"));
             }
             _ => panic!("expected SetChannelName"),
         }
@@ -2027,7 +2027,7 @@ mod tests {
             ViewportCommand::SetChannelName {
                 dataset_id: "ds1".into(),
                 channel: 1,
-                name: Some("Membrane".into()),
+                name: Some("Region D".into()),
             }
             .into(),
         );
@@ -2035,7 +2035,7 @@ mod tests {
             scene.dataset_settings[&ds_id].channel_settings[1]
                 .name
                 .as_deref(),
-            Some("Membrane")
+            Some("Region D")
         );
 
         // `None` clears it back to the fallback (omero/`Ch N`).
@@ -2087,7 +2087,7 @@ mod tests {
             ViewportCommand::SetChannelName {
                 dataset_id: "ds1".into(),
                 channel: 0,
-                name: Some("Nucleus".into()),
+                name: Some("Region A".into()),
             }
             .into(),
         );
@@ -3743,7 +3743,7 @@ mod tests {
             z: 3.5,
             t: 4,
             c: 2,
-            author: "biologist".into(),
+            author: "analyst".into(),
             kind: crate::scene::AnnotationKind::Point,
             view: None,
         };
@@ -3758,7 +3758,7 @@ mod tests {
         // The view's timepoint/channel ride the wire alongside z.
         assert_eq!(v["t"], 4);
         assert_eq!(v["c"], 2);
-        assert_eq!(v["author"], "biologist");
+        assert_eq!(v["author"], "analyst");
         assert_eq!(v["kind"], "point");
         // A point carries `end: null` on the wire.
         assert!(v["end"].is_null());
@@ -3785,7 +3785,7 @@ mod tests {
                 assert_eq!(z, 3.5);
                 assert_eq!(t, 4);
                 assert_eq!(c, 2);
-                assert_eq!(author, "biologist");
+                assert_eq!(author, "analyst");
                 assert_eq!(kind, crate::scene::AnnotationKind::Point);
             }
             _ => panic!("expected AddAnnotation"),
@@ -5046,14 +5046,14 @@ mod tests {
     #[test]
     fn annotation_set_position_preserves_other_fields_including_thread() {
         let mut pin = point_pin("pin-1");
-        pin.author = "biologist".into();
+        pin.author = "analyst".into();
         pin.add_comment(comment("c1", "alice", "look here"));
         pin.set_position([9.0, 9.0], 1.0);
         // Position/z change; id, author, kind, and the thread are untouched.
         assert_eq!(pin.position, [9.0, 9.0]);
         assert_eq!(pin.z, 1.0);
         assert_eq!(pin.id, "pin-1");
-        assert_eq!(pin.author, "biologist");
+        assert_eq!(pin.author, "analyst");
         assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
         assert_eq!(pin.comments.len(), 1);
         assert_eq!(pin.comments[0].id, "c1");
@@ -5375,11 +5375,11 @@ mod tests {
             Some([4.0, 4.0]),
             crate::scene::AnnotationKind::Box,
         );
-        r#box.author = "biologist".into();
+        r#box.author = "analyst".into();
         r#box.add_comment(comment("c1", "alice", "this region"));
         r#box.set_vertices([2.0, 2.0], [6.0, 5.0], 1.0);
         assert_eq!(r#box.id, "bx");
-        assert_eq!(r#box.author, "biologist");
+        assert_eq!(r#box.author, "analyst");
         assert_eq!(r#box.kind, crate::scene::AnnotationKind::Box);
         assert_eq!(r#box.comments.len(), 1);
         assert_eq!(r#box.comments[0].text, "this region");
@@ -5785,14 +5785,14 @@ mod tests {
     #[test]
     fn add_comment_command_matches_wire_contract() {
         // Field-for-field check against the slice's documented add wire shape.
-        let cmd = add_comment_cmd("wds-abc", "pin-1", "c-1", "biologist", "nice finding");
+        let cmd = add_comment_cmd("wds-abc", "pin-1", "c-1", "analyst", "nice finding");
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "add_comment");
         assert_eq!(v["dataset_id"], "wds-abc");
         assert_eq!(v["annotation_id"], "pin-1");
         assert_eq!(v["id"], "c-1");
-        assert_eq!(v["author"], "biologist");
+        assert_eq!(v["author"], "analyst");
         assert_eq!(v["text"], "nice finding");
 
         // And it parses back from exactly that shape.
@@ -5808,7 +5808,7 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
                 assert_eq!(annotation_id, "pin-1");
                 assert_eq!(id, "c-1");
-                assert_eq!(author, "biologist");
+                assert_eq!(author, "analyst");
                 assert_eq!(text, "nice finding");
             }
             _ => panic!("expected AddComment"),

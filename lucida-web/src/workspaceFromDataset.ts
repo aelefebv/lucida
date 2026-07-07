@@ -48,10 +48,10 @@ export function datasetBasename(url: string): string {
 /**
  * Default name for a workspace created from one or more datasets.
  *
- *   - single dataset  → its basename (e.g. `embryo.ome.zarr`)
+ *   - single dataset  → its basename (e.g. `sample.ome.zarr`)
  *   - multiple        → first dataset's basename + ` (+N)`, where N is the
  *                       number of *additional* datasets (e.g.
- *                       `embryo.ome.zarr (+2)` for three datasets)
+ *                       `sample.ome.zarr (+2)` for three datasets)
  *
  * The `(+N)` form keeps the most useful label (the first dataset's name) front
  * and centre while still signalling that the workspace holds more than one, and

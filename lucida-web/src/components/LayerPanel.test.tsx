@@ -143,12 +143,12 @@ describe("LayerPanel channel labels", () => {
     render(
       <LayerPanel
         {...multiChannelProps({
-          channelInfos: [{ label: "DAPI" }, { label: "GFP" }],
+          channelInfos: [{ label: "Channel 0" }, { label: "Channel 1" }],
         })}
       />,
     );
-    expect(screen.getByText("DAPI")).toBeTruthy();
-    expect(screen.getByText("GFP")).toBeTruthy();
+    expect(screen.getByText("Channel 0")).toBeTruthy();
+    expect(screen.getByText("Channel 1")).toBeTruthy();
     // No fallback labels should appear when both channels are named.
     expect(screen.queryByText("Ch 0")).toBeNull();
     expect(screen.queryByText("Ch 1")).toBeNull();
@@ -165,11 +165,11 @@ describe("LayerPanel channel labels", () => {
       <LayerPanel
         {...multiChannelProps({
           // Only channel 0 has a usable label; channel 1 falls back.
-          channelInfos: [{ label: "DAPI" }],
+          channelInfos: [{ label: "Channel 0" }],
         })}
       />,
     );
-    expect(screen.getByText("DAPI")).toBeTruthy();
+    expect(screen.getByText("Channel 0")).toBeTruthy();
     expect(screen.getByText("Ch 1")).toBeTruthy();
     expect(screen.queryByText("Ch 0")).toBeNull();
   });
@@ -178,13 +178,13 @@ describe("LayerPanel channel labels", () => {
     render(
       <LayerPanel
         {...multiChannelProps({
-          channelInfos: [{ label: "" }, { label: "GFP" }],
+          channelInfos: [{ label: "" }, { label: "Channel 1" }],
         })}
       />,
     );
     // Empty label -> positional fallback for channel 0.
     expect(screen.getByText("Ch 0")).toBeTruthy();
-    expect(screen.getByText("GFP")).toBeTruthy();
+    expect(screen.getByText("Channel 1")).toBeTruthy();
   });
 });
 
@@ -208,22 +208,22 @@ describe("LayerPanel channel rename", () => {
       <LayerPanel
         {...multiChannelProps({
           channelSettings: [
-            // ch0: user override beats the omero label "DAPI".
-            { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, name: "Nucleus" },
-            // ch1: no override → omero label "GFP".
+            // ch0: user override beats the omero label "Channel 0".
+            { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, name: "Region A" },
+            // ch1: no override → omero label "Channel 1".
             { visible: true, colormap: "green", contrast_min: 0, contrast_max: 65535, gamma: 1 },
             // ch2: no override, no omero entry → `Ch 2`.
             { visible: true, colormap: "cyan", contrast_min: 0, contrast_max: 65535, gamma: 1 },
           ],
-          channelInfos: [{ label: "DAPI" }, { label: "GFP" }],
+          channelInfos: [{ label: "Channel 0" }, { label: "Channel 1" }],
         })}
       />,
     );
     // Tier 1: override wins, the omero label is NOT shown.
-    expect(screen.getByText("Nucleus")).toBeTruthy();
-    expect(screen.queryByText("DAPI")).toBeNull();
+    expect(screen.getByText("Region A")).toBeTruthy();
+    expect(screen.queryByText("Channel 0")).toBeNull();
     // Tier 2: omero label for the un-renamed channel.
-    expect(screen.getByText("GFP")).toBeTruthy();
+    expect(screen.getByText("Channel 1")).toBeTruthy();
     // Tier 3: positional fallback when neither override nor omero exists.
     expect(screen.getByText("Ch 2")).toBeTruthy();
   });
@@ -233,16 +233,16 @@ describe("LayerPanel channel rename", () => {
       channelSettings: [
         { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
       ],
-      channelInfos: [{ label: "DAPI" }],
+      channelInfos: [{ label: "Channel 0" }],
     } satisfies Partial<LayerInfo>;
 
     const { rerender } = render(<LayerPanel {...multiChannelProps(named)} />);
-    expect(screen.getByLabelText("Rename channel DAPI")).toBeTruthy();
+    expect(screen.getByLabelText("Rename channel Channel 0")).toBeTruthy();
 
     rerender(
       <LayerPanel {...multiChannelProps(named, { canEdit: false })} />,
     );
-    expect(screen.queryByLabelText("Rename channel DAPI")).toBeNull();
+    expect(screen.queryByLabelText("Rename channel Channel 0")).toBeNull();
   });
 
   it("commits a trimmed name on Enter via onChannelSetName", () => {
@@ -254,20 +254,20 @@ describe("LayerPanel channel rename", () => {
             channelSettings: [
               { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
             ],
-            channelInfos: [{ label: "DAPI" }],
+            channelInfos: [{ label: "Channel 0" }],
           },
           { onChannelSetName },
         )}
       />,
     );
 
-    fireEvent.click(screen.getByLabelText("Rename channel DAPI"));
+    fireEvent.click(screen.getByLabelText("Rename channel Channel 0"));
     const input = screen.getByLabelText("Channel name") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "  Nucleus  " } });
+    fireEvent.change(input, { target: { value: "  Region A  " } });
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onChannelSetName).toHaveBeenCalledTimes(1);
-    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, "Nucleus");
+    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, "Region A");
     // The inline input is gone after commit.
     expect(screen.queryByLabelText("Channel name")).toBeNull();
   });
@@ -278,11 +278,11 @@ describe("LayerPanel channel rename", () => {
       <LayerPanel
         {...multiChannelProps(
           {
-            // Currently overridden to "Nucleus".
+            // Currently overridden to "Region A".
             channelSettings: [
-              { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, name: "Nucleus" },
+              { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, name: "Region A" },
             ],
-            channelInfos: [{ label: "DAPI" }],
+            channelInfos: [{ label: "Channel 0" }],
           },
           { onChannelSetName },
         )}
@@ -290,8 +290,8 @@ describe("LayerPanel channel rename", () => {
     );
 
     // Override shows first.
-    expect(screen.getByText("Nucleus")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("Rename channel Nucleus"));
+    expect(screen.getByText("Region A")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Rename channel Region A"));
     const input = screen.getByLabelText("Channel name") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -310,14 +310,14 @@ describe("LayerPanel channel rename", () => {
             channelSettings: [
               { visible: true, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
             ],
-            channelInfos: [{ label: "DAPI" }],
+            channelInfos: [{ label: "Channel 0" }],
           },
           { onChannelSetName },
         )}
       />,
     );
 
-    fireEvent.click(screen.getByLabelText("Rename channel DAPI"));
+    fireEvent.click(screen.getByLabelText("Rename channel Channel 0"));
     const input = screen.getByLabelText("Channel name") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "discard me" } });
     fireEvent.keyDown(input, { key: "Escape" });
@@ -325,7 +325,7 @@ describe("LayerPanel channel rename", () => {
     expect(onChannelSetName).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("Channel name")).toBeNull();
     // The original (omero) label is shown again.
-    expect(screen.getByText("DAPI")).toBeTruthy();
+    expect(screen.getByText("Channel 0")).toBeTruthy();
   });
 });
 
@@ -346,7 +346,7 @@ describe("LayerPanel per-channel collapse", () => {
       layers: [
         layer({
           channelSettings,
-          channelInfos: [{ label: "DAPI" }, { label: "GFP" }],
+          channelInfos: [{ label: "Channel 0" }, { label: "Channel 1" }],
           ...overrides,
         }),
       ],
@@ -356,62 +356,62 @@ describe("LayerPanel per-channel collapse", () => {
 
   // The colormap selector is the per-channel "detail" the toggle discloses; its
   // aria-label carries the `${layer} ${chName}` prefix.
-  const dapiColormap = "original.zarr DAPI colormap";
-  const gfpColormap = "original.zarr GFP colormap";
+  const ch0Colormap = "original.zarr Channel 0 colormap";
+  const ch1Colormap = "original.zarr Channel 1 colormap";
 
   it("defaults to COLLAPSED: channels show an Expand toggle but hide their controls", () => {
     render(<LayerPanel {...collapseProps()} />);
-    expect(screen.getByLabelText("Expand channel DAPI")).toBeTruthy();
-    expect(screen.getByLabelText("Expand channel GFP")).toBeTruthy();
-    expect(screen.queryByLabelText(dapiColormap)).toBeNull();
-    expect(screen.queryByLabelText(gfpColormap)).toBeNull();
+    expect(screen.getByLabelText("Expand channel Channel 0")).toBeTruthy();
+    expect(screen.getByLabelText("Expand channel Channel 1")).toBeTruthy();
+    expect(screen.queryByLabelText(ch0Colormap)).toBeNull();
+    expect(screen.queryByLabelText(ch1Colormap)).toBeNull();
   });
 
   it("the toggle is a real disclosure button, aria-expanded=false by default", () => {
     render(<LayerPanel {...collapseProps()} />);
-    const t = screen.getByLabelText("Expand channel DAPI");
+    const t = screen.getByLabelText("Expand channel Channel 0");
     expect(t.tagName).toBe("BUTTON");
     expect(t.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(t);
-    expect(screen.getByLabelText("Collapse channel DAPI").getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByLabelText("Collapse channel Channel 0").getAttribute("aria-expanded")).toBe("true");
   });
 
   it("expanding a channel shows its controls; collapsing hides them again", () => {
     render(<LayerPanel {...collapseProps()} />);
-    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
-    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("Collapse channel DAPI"));
-    expect(screen.queryByLabelText(dapiColormap)).toBeNull();
+    fireEvent.click(screen.getByLabelText("Expand channel Channel 0"));
+    expect(screen.getByLabelText(ch0Colormap)).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Collapse channel Channel 0"));
+    expect(screen.queryByLabelText(ch0Colormap)).toBeNull();
   });
 
   it("expanding one channel leaves the others collapsed (no cross-channel bleed)", () => {
     render(<LayerPanel {...collapseProps()} />);
-    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
-    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
-    expect(screen.queryByLabelText(gfpColormap)).toBeNull();
-    expect(screen.getByLabelText("Expand channel GFP")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Expand channel Channel 0"));
+    expect(screen.getByLabelText(ch0Colormap)).toBeTruthy();
+    expect(screen.queryByLabelText(ch1Colormap)).toBeNull();
+    expect(screen.getByLabelText("Expand channel Channel 1")).toBeTruthy();
   });
 
   it("Expand all expands every channel; Collapse all collapses every channel", () => {
     render(<LayerPanel {...collapseProps()} />);
     fireEvent.click(screen.getByLabelText("Expand all channels of original.zarr"));
-    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
-    expect(screen.getByLabelText(gfpColormap)).toBeTruthy();
-    expect(screen.getByLabelText("Collapse channel DAPI")).toBeTruthy();
+    expect(screen.getByLabelText(ch0Colormap)).toBeTruthy();
+    expect(screen.getByLabelText(ch1Colormap)).toBeTruthy();
+    expect(screen.getByLabelText("Collapse channel Channel 0")).toBeTruthy();
 
     fireEvent.click(screen.getByLabelText("Collapse all channels of original.zarr"));
-    expect(screen.queryByLabelText(dapiColormap)).toBeNull();
-    expect(screen.queryByLabelText(gfpColormap)).toBeNull();
-    expect(screen.getByLabelText("Expand channel DAPI")).toBeTruthy();
+    expect(screen.queryByLabelText(ch0Colormap)).toBeNull();
+    expect(screen.queryByLabelText(ch1Colormap)).toBeNull();
+    expect(screen.getByLabelText("Expand channel Channel 0")).toBeTruthy();
   });
 
   it("never calls onChannelSetVisible when toggling collapse, and the eye still works", () => {
     const onChannelSetVisible = vi.fn();
     render(<LayerPanel {...collapseProps({}, { onChannelSetVisible })} />);
-    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
-    fireEvent.click(screen.getByLabelText("Collapse channel DAPI"));
+    fireEvent.click(screen.getByLabelText("Expand channel Channel 0"));
+    fireEvent.click(screen.getByLabelText("Collapse channel Channel 0"));
     expect(onChannelSetVisible).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText("Hide original.zarr DAPI"));
+    fireEvent.click(screen.getByLabelText("Hide original.zarr Channel 0"));
     expect(onChannelSetVisible).toHaveBeenCalledWith("wds-1", 0, false);
   });
 
@@ -427,22 +427,22 @@ describe("LayerPanel per-channel collapse", () => {
           channelSettings: [
             { visible: false, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1 },
           ],
-          channelInfos: [{ label: "DAPI" }],
+          channelInfos: [{ label: "Channel 0" }],
         })}
       />,
     );
-    fireEvent.click(screen.getByLabelText("Expand channel DAPI"));
-    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Expand channel Channel 0"));
+    expect(screen.getByLabelText(ch0Colormap)).toBeTruthy();
   });
 
   it("keeps the rename affordance working alongside collapse", () => {
     const onChannelSetName = vi.fn();
     render(<LayerPanel {...collapseProps({}, { onChannelSetName })} />);
-    fireEvent.click(screen.getByLabelText("Rename channel DAPI"));
+    fireEvent.click(screen.getByLabelText("Rename channel Channel 0"));
     const input = screen.getByLabelText("Channel name") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "Nucleus" } });
+    fireEvent.change(input, { target: { value: "Region A" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, "Nucleus");
+    expect(onChannelSetName).toHaveBeenCalledWith("wds-1", 0, "Region A");
   });
 
   it("collapse/expand-all and per-channel state are per-layer (no cross-layer bleed, survive switching)", () => {
@@ -451,35 +451,35 @@ describe("LayerPanel per-channel collapse", () => {
       multiChannel: true,
       expandedLayerId: "wds-1" as string | null,
       layers: [
-        layer({ channelSettings, channelInfos: [{ label: "DAPI" }, { label: "GFP" }] }),
+        layer({ channelSettings, channelInfos: [{ label: "Channel 0" }, { label: "Channel 1" }] }),
         layer({
           id: "wds-2",
           name: "second.zarr",
           channelSettings,
-          channelInfos: [{ label: "RFP" }, { label: "Cy5" }],
+          channelInfos: [{ label: "Channel 2" }, { label: "Channel 4" }],
         }),
       ],
     };
     const { rerender } = render(<LayerPanel {...props} />);
     // Expand all in layer 1.
     fireEvent.click(screen.getByLabelText("Expand all channels of original.zarr"));
-    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+    expect(screen.getByLabelText(ch0Colormap)).toBeTruthy();
 
     // Switch to layer 2: its channels are still collapsed (default), unaffected.
     rerender(<LayerPanel {...{ ...props, expandedLayerId: "wds-2" }} />);
-    expect(screen.getByLabelText("Expand channel RFP")).toBeTruthy();
-    expect(screen.queryByLabelText("second.zarr RFP colormap")).toBeNull();
+    expect(screen.getByLabelText("Expand channel Channel 2")).toBeTruthy();
+    expect(screen.queryByLabelText("second.zarr Channel 2 colormap")).toBeNull();
 
     // Back to layer 1: still expanded (state survived the switch).
     rerender(<LayerPanel {...{ ...props, expandedLayerId: "wds-1" }} />);
-    expect(screen.getByLabelText(dapiColormap)).toBeTruthy();
+    expect(screen.getByLabelText(ch0Colormap)).toBeTruthy();
   });
 });
 
 describe("LayerPanel labels", () => {
   const labelRows = [
-    { index: 0, name: "mitochondria", visible: true, opacity: 0.5 },
-    { index: 1, name: "cells", visible: false, opacity: 0.25 },
+    { index: 0, name: "region-b", visible: true, opacity: 0.5 },
+    { index: 1, name: "region-c", visible: false, opacity: 0.25 },
   ];
 
   function labelProps(
@@ -503,11 +503,11 @@ describe("LayerPanel labels", () => {
   it("renders a Labels section with per-label eye + opacity controls", () => {
     render(<LayerPanel {...labelProps()} />);
     expect(screen.getByTestId("labels-section-wds-1")).toBeTruthy();
-    expect(screen.getByText("mitochondria")).toBeTruthy();
-    expect(screen.getByText("cells")).toBeTruthy();
+    expect(screen.getByText("region-b")).toBeTruthy();
+    expect(screen.getByText("region-c")).toBeTruthy();
     // Row 0 is visible → its eye offers "Hide"; row 1 is hidden → "Show".
-    expect(screen.getByLabelText("Hide original.zarr mitochondria")).toBeTruthy();
-    expect(screen.getByLabelText("Show original.zarr cells")).toBeTruthy();
+    expect(screen.getByLabelText("Hide original.zarr region-b")).toBeTruthy();
+    expect(screen.getByLabelText("Show original.zarr region-c")).toBeTruthy();
     // Each row exposes an opacity slider (keyed by manifest index).
     expect(screen.getByTestId("label-opacity-wds-1-0")).toBeTruthy();
     expect(screen.getByTestId("label-opacity-wds-1-1")).toBeTruthy();
@@ -564,13 +564,13 @@ describe("LayerPanel labels", () => {
       <LayerPanel
         {...labelProps({
           labelRows: [
-            { index: 0, name: "mito", visible: true, opacity: 0.5 },
+            { index: 0, name: "region-b", visible: true, opacity: 0.5 },
             { index: 1, name: "", visible: false, opacity: 0.5 },
           ],
         })}
       />,
     );
-    expect(screen.getByText("mito")).toBeTruthy();
+    expect(screen.getByText("region-b")).toBeTruthy();
     expect(screen.getByText("Label 1")).toBeTruthy();
   });
 

@@ -241,7 +241,7 @@ describe("WorkspaceDashboard", () => {
     // the dataset basename and that NO sharing/visibility override is sent.
     createWorkspaceMock.mockResolvedValue({
       id: "ws-ds",
-      name: "embryo.ome.zarr",
+      name: "sample.ome.zarr",
       role: "owner",
       created_by: "owner@example.com",
       created_at: "2026-06-23T00:00:00Z",
@@ -259,18 +259,18 @@ describe("WorkspaceDashboard", () => {
 
     fireEvent.change(
       screen.getByLabelText("New workspace from dataset URL or path"),
-      { target: { value: "gs://bucket/scans/embryo.ome.zarr" } },
+      { target: { value: "gs://bucket/scans/sample.ome.zarr" } },
     );
     fireEvent.click(screen.getByRole("button", { name: "Create from URL" }));
 
     await waitFor(() => {
       // Name derived from the basename; only the name is passed (default
       // restricted owner-only reused, never weakened).
-      expect(createWorkspaceMock).toHaveBeenCalledWith("embryo.ome.zarr");
+      expect(createWorkspaceMock).toHaveBeenCalledWith("sample.ome.zarr");
       expect(createWorkspaceMock).toHaveBeenCalledTimes(1);
       // Navigates into the new workspace WITH the dataset to auto-open.
       expect(onOpenWorkspace).toHaveBeenCalledWith("ws-ds", [
-        "gs://bucket/scans/embryo.ome.zarr",
+        "gs://bucket/scans/sample.ome.zarr",
       ]);
     });
   });
@@ -320,7 +320,7 @@ describe("WorkspaceDashboard", () => {
 
     fireEvent.change(
       screen.getByLabelText("New workspace from dataset URL or path"),
-      { target: { value: "/data/embryo.ome.zarr" } },
+      { target: { value: "/data/sample.ome.zarr" } },
     );
     fireEvent.click(screen.getByRole("button", { name: "Create from URL" }));
 

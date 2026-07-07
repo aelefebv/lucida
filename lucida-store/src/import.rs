@@ -1388,10 +1388,10 @@ mod tests {
     // Run locally with `cargo test -- --ignored` when you have the fixture present;
     // skipped on CI (no fixture) per `.github/workflows/ci.yml`.
     #[tokio::test]
-    #[ignore = "depends on example_files/yeast_3d_mitochondria.ome.zarr (not in repo)"]
+    #[ignore = "depends on example_files/volume-3d.ome.zarr (not in repo)"]
     async fn import_single_image() {
         let store = crate::backend::open(&format!(
-            "{}/example_files/yeast_3d_mitochondria.ome.zarr",
+            "{}/example_files/volume-3d.ome.zarr",
             env!("CARGO_MANIFEST_DIR").trim_end_matches("/lucida-store"),
         ))
         .unwrap();
@@ -2747,8 +2747,8 @@ mod tests {
             &dir,
             Some(serde_json::json!({
                 "channels": [
-                    {"label": "DAPI", "color": "0000FF"},
-                    {"label": "GFP", "color": "00FF00"}
+                    {"label": "Channel 0", "color": "0000FF"},
+                    {"label": "Channel 1", "color": "00FF00"}
                 ]
             })),
         );
@@ -2758,9 +2758,9 @@ mod tests {
 
         let ci = &result.manifest.images()[0].multiscale.channel_infos;
         assert_eq!(ci.len(), 2);
-        assert_eq!(ci[0].label, "DAPI");
+        assert_eq!(ci[0].label, "Channel 0");
         assert_eq!(ci[0].color.as_deref(), Some("0000FF"));
-        assert_eq!(ci[1].label, "GFP");
+        assert_eq!(ci[1].label, "Channel 1");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2930,10 +2930,10 @@ mod tests {
     async fn import_single_image_with_label_overlay() {
         let dir = temp_dir("import_single_label");
         create_single_image_fixture(&dir, None);
-        write_labels_index(&dir, &["mitochondria"]);
+        write_labels_index(&dir, &["region-b"]);
         write_label_multiscale(
             &dir,
-            "mitochondria",
+            "region-b",
             &["t", "z", "y", "x"],
             &[1, 1, 16, 16],
             &[1, 1, 16, 16],
@@ -2960,7 +2960,7 @@ mod tests {
         let labels = result.manifest.labels();
         assert_eq!(labels.len(), 1);
         let label = &labels[0];
-        assert_eq!(label.name, "mitochondria");
+        assert_eq!(label.name, "region-b");
         assert_eq!(label.source_image_id, source_image_id);
         // dtype preserved end to end (uint32), never narrowed.
         assert_eq!(label.data_type, DataType::Uint32);
@@ -3000,7 +3000,7 @@ mod tests {
             .iter()
             .find(|b| b.image_id == label_image_id)
             .expect("label has a binding seed");
-        assert_eq!(binding.store_prefix.as_deref(), Some("labels/mitochondria"));
+        assert_eq!(binding.store_prefix.as_deref(), Some("labels/region-b"));
         assert_eq!(binding.axes_names, vec!["t", "z", "y", "x"]);
         assert!(!binding.levels.is_empty());
 
@@ -3009,7 +3009,7 @@ mod tests {
             .manifest
             .label_specs()
             .iter()
-            .find(|s| s.name == "mitochondria")
+            .find(|s| s.name == "region-b")
             .unwrap();
         assert_eq!(spec.image.multiscale.data_type, DataType::Uint32);
         assert_eq!(spec.image.multiscale.levels[0].shape, [1, 1, 1, 16, 16]);
@@ -3114,12 +3114,12 @@ mod tests {
             2,
         );
 
-        // Attach a "cells" label to tile A/1/0 only.
+        // Attach a "region-c" label to tile A/1/0 only.
         let tile_dir = dir.join("A").join("1").join("0");
-        write_labels_index(&tile_dir, &["cells"]);
+        write_labels_index(&tile_dir, &["region-c"]);
         write_label_multiscale(
             &tile_dir,
-            "cells",
+            "region-c",
             &["t", "z", "y", "x"],
             &[1, 10, 256, 256],
             &[1, 1, 128, 128],
@@ -3146,7 +3146,7 @@ mod tests {
         let labels = result.manifest.labels();
         assert_eq!(labels.len(), 1);
         let label = &labels[0];
-        assert_eq!(label.name, "cells");
+        assert_eq!(label.name, "region-c");
         assert_eq!(label.data_type, DataType::Uint32);
         assert_eq!(label.axis_names, vec!["t", "z", "y", "x"]);
         // Attached to the A/1/0 tile image specifically.
@@ -3168,7 +3168,10 @@ mod tests {
             .iter()
             .find(|b| b.image_id == label.label_image_id)
             .expect("label binding present");
-        assert_eq!(binding.store_prefix.as_deref(), Some("A/1/0/labels/cells"));
+        assert_eq!(
+            binding.store_prefix.as_deref(),
+            Some("A/1/0/labels/region-c")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

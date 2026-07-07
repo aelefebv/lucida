@@ -285,7 +285,7 @@ mod tests {
                 contrast_max: 1000.0,
                 gamma: 1.0,
                 // A user channel-name override rides the saved view too.
-                name: Some("Nucleus".into()),
+                name: Some("Region A".into()),
             }],
             ..Default::default()
         };

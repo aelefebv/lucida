@@ -469,7 +469,7 @@ fn enum_vocabulary() -> EnumVocabulary {
 
 const SINGLE_DATASET_ID: &str = "wds-0f3a";
 const SINGLE_IMAGE_ID: &str = "multiscale-0";
-const SINGLE_LABEL_IMAGE_ID: &str = "multiscale-0:label:nuclei";
+const SINGLE_LABEL_IMAGE_ID: &str = "multiscale-0:label:region-a";
 const SINGLE_ENTITY_ID: &str = "img-0";
 
 /// A realistic single-image manifest: multi-level 5D multiscale with a
@@ -543,18 +543,18 @@ fn single_manifest() -> DatasetManifest {
         }],
         channel_infos: vec![
             ChannelInfo {
-                label: "DAPI".into(),
+                label: "Channel 0".into(),
                 color: Some("0000FF".into()),
             },
             ChannelInfo {
-                label: "GFP".into(),
+                label: "Channel 1".into(),
                 color: None,
             },
         ],
     };
 
     let label = LabelSpec {
-        name: "nuclei".into(),
+        name: "region-a".into(),
         source_image_id: image_id.clone(),
         image: ImageSpec {
             image_id: ImageId(SINGLE_LABEL_IMAGE_ID.into()),
@@ -814,7 +814,7 @@ fn peer_display_settings() -> DatasetDisplaySettings {
                 contrast_min: 100.0,
                 contrast_max: 12000.0,
                 gamma: 1.0,
-                name: Some("Nuclei".into()),
+                name: Some("Region A".into()),
             },
             ChannelSettings {
                 visible: false,

@@ -31,7 +31,7 @@ function labelSpec(name: string, imgId: string, colors?: LabelSpec["colors"], dt
 
 function manifest(labels: LabelSpec[]): DatasetManifest {
   return {
-    dataset_id: "ds-0", name: "yeast", kind: "Single",
+    dataset_id: "ds-0", name: "volume", kind: "Single",
     entities: [], transforms: [], source_layouts: [], default_layout_id: null,
     images: [image("img-0", [340, 348], [1, 1])],
     labels,
@@ -62,7 +62,7 @@ describe("pushLabelVolumeLayers", () => {
       scene,
       "ds-0",
       manifest([
-        labelSpec("mitochondria", "img-0:label:mito"),
+        labelSpec("region-b", "img-0:label:region-b"),
         labelSpec("foreground", "img-0:label:fg"),
       ]),
       members,
@@ -72,7 +72,7 @@ describe("pushLabelVolumeLayers", () => {
     );
     expect(layers).toHaveLength(1);
     const layer = layers[0];
-    expect(layer.datasetId).toBe("img-0:label:mito"); // manifest order = first
+    expect(layer.datasetId).toBe("img-0:label:region-b"); // manifest order = first
     expect(layer.isLabel).toBe(true);
     expect(layer.blendMode).toBe("alpha");
     expect(layer.renderMode).toBe("translucent");
@@ -84,7 +84,7 @@ describe("pushLabelVolumeLayers", () => {
   it("places the overlay at the SOURCE member's model matrix (+ inverse)", () => {
     const scene = makeScene();
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("mito", "img-0:label:mito")]), members, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), members, IDENTITY, 800, 600);
     // Matrices are copied from the SOURCE image's placement, not the label's.
     expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(IDENTITY));
     expect(Array.from(layers[0].invModelMatrix!)).toEqual(Array.from(INV_MARK));
@@ -100,7 +100,7 @@ describe("pushLabelVolumeLayers", () => {
       { imageId: "img-0", position: [0, 0], modelMatrix: ownModel, invModelMatrix: ownInv },
     ];
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("mito", "img-0:label:mito")]), membersWithMatrices, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), membersWithMatrices, IDENTITY, 800, 600);
     // Same-extent label (85·4 == 340, 87·4 == 348) → the roster's matrices
     // pass through by value (copied, then scaled by identity ratios).
     expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(ownModel));
@@ -112,7 +112,7 @@ describe("pushLabelVolumeLayers", () => {
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([labelSpec("mito", "img-0:label:mito", colors)]), members, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, IDENTITY, 800, 600);
     expect(layers[0].labelColors).toEqual(colors);
   });
 

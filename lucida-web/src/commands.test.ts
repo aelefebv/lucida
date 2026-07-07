@@ -94,10 +94,10 @@ const manifest: DatasetManifest = {
   default_layout_id: "layout-source",
   labels: [
     {
-      name: "nuclei",
+      name: "region-a",
       source_image_id: "ms-0",
       image: {
-        image_id: "ms-0:label:nuclei",
+        image_id: "ms-0:label:region-a",
         owner: "img-0",
         multiscale: {
           axes: [
@@ -297,7 +297,7 @@ const viewportCases: {
     type: "set_channel_name",
     dataset_id: DS,
     channel: 1,
-    name: "Nuclei",
+    name: "Region A",
   },
   set_channel_contrast: {
     type: "set_channel_contrast",

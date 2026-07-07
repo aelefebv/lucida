@@ -55,7 +55,7 @@ function labelVolumeMsg(
   return {
     type: "labelVolumeChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-    memberId: "img-0:label:mito",
+    memberId: "img-0:label:region-b",
     datasetId: "ds-0",
     chunks: [{ data: ids.buffer as ArrayBuffer, dataType: "Uint32", x: chunk.x, y: chunk.y, z: chunk.z, key: `0/0/0/${chunk.z}/${chunk.y}/${chunk.x}` }],
     level: 0,
@@ -76,8 +76,8 @@ describe("handleLabelVolumeChunkData", () => {
 
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(ids, DIMS_2));
 
-    expect(ctx.state.labelVolumePools.has("img-0:label:mito")).toBe(true);
-    const pool = ctx.state.labelVolumePools.get("img-0:label:mito")!;
+    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(true);
+    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
     expect(pool.width).toBe(2);
     expect(pool.height).toBe(2);
     expect(pool.depth).toBe(2);
@@ -98,11 +98,11 @@ describe("handleLabelVolumeChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), DIMS_2));
-    const poolAfterT0 = ctx.state.labelVolumePools.get("img-0:label:mito");
+    const poolAfterT0 = ctx.state.labelVolumePools.get("img-0:label:region-b");
     const textureT0 = poolAfterT0?.texture;
 
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([9, 10, 11, 12, 13, 14, 15, 16]), DIMS_2));
-    const poolAfterT1 = ctx.state.labelVolumePools.get("img-0:label:mito");
+    const poolAfterT1 = ctx.state.labelVolumePools.get("img-0:label:region-b");
 
     // Same pool + same texture object: overwritten in place, not destroyed +
     // recreated (which would blank the overlay mid-scrub).
@@ -136,7 +136,7 @@ describe("handleLabelVolumeChunkData", () => {
       { levelWidth: 128, levelHeight: 128, levelDepth: 128, chunkX: 2, chunkY: 2, chunkZ: 2 },
       { x: 40, y: 0, z: 0 }, // xOff = 80 >= clamped width 64 → skipped
     ));
-    const pool = ctx.state.labelVolumePools.get("img-0:label:mito")!;
+    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
     expect(pool.width).toBeLessThanOrEqual(64);
     expect(pool.height).toBeLessThanOrEqual(64);
     expect(pool.depth).toBeLessThanOrEqual(64);
@@ -147,7 +147,7 @@ describe("handleLabelVolumeChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), DIMS_2));
-    expect(ctx.state.labelVolumePools.get("img-0:label:mito")!.datasetId).toBe("ds-0");
+    expect(ctx.state.labelVolumePools.get("img-0:label:region-b")!.datasetId).toBe("ds-0");
   });
 
   it("drops a stale-epoch delivery so it can't overwrite the pool with an old T", () => {
@@ -157,7 +157,7 @@ describe("handleLabelVolumeChunkData", () => {
     ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, asset: 0, request: 1 };
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), DIMS_2));
     expect(writes).toHaveLength(0);
-    expect(ctx.state.labelVolumePools.has("img-0:label:mito")).toBe(false);
+    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
   });
 
   it("skips the label (no throw, no pool) when the texture can't be allocated", () => {
@@ -168,7 +168,7 @@ describe("handleLabelVolumeChunkData", () => {
       throw new Error("out of memory");
     });
     expect(() => handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), DIMS_2))).not.toThrow();
-    expect(ctx.state.labelVolumePools.has("img-0:label:mito")).toBe(false);
+    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
     expect(writes).toHaveLength(0);
   });
 });
@@ -178,14 +178,14 @@ describe("label volume pool cleanup on dataset removal", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), DIMS_2));
-    const pool = ctx.state.labelVolumePools.get("img-0:label:mito")!;
+    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
     const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
 
     // removeLayerResources passes the DATASET id ("ds-0"), which is NOT the
-    // pool's key ("img-0:label:mito") — the leak was the lookup missing here.
+    // pool's key ("img-0:label:region-b") — the leak was the lookup missing here.
     removeVolumeResources(ctx, "ds-0");
 
-    expect(ctx.state.labelVolumePools.has("img-0:label:mito")).toBe(false);
+    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
     expect(destroyed).toHaveBeenCalled(); // the (large) 3D texture is freed
   });
 
@@ -194,7 +194,7 @@ describe("label volume pool cleanup on dataset removal", () => {
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), DIMS_2));
     removeVolumeResources(ctx, "some-other-dataset");
-    expect(ctx.state.labelVolumePools.has("img-0:label:mito")).toBe(true);
+    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(true);
   });
 
   it("destroyAllVolumeResources frees every label volume pool", () => {

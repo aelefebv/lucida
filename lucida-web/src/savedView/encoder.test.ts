@@ -216,13 +216,13 @@ describe("SavedView encoder", () => {
       v.datasets = ["gs://x"];
       v.dataset_order = ["ds-x"];
       const ch0 = defaultChannel(0);
-      ch0.name = "Nucleus"; // user override
+      ch0.name = "Region A"; // user override
       const settings = defaultDatasetSettings(2);
       settings.channel_settings = [ch0, defaultChannel(1)];
       v.dataset_settings = { "ds-x": settings };
       const back = await decode(await encode(v));
       // The override persists through the saved-view round-trip...
-      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Nucleus");
+      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Region A");
       // ...and a channel with no override has no `name` key (back-compat with
       // pre-slice payloads).
       expect(back.dataset_settings["ds-x"].channel_settings![1].name).toBeUndefined();
@@ -236,12 +236,12 @@ describe("SavedView encoder", () => {
       v.datasets = ["gs://x"];
       v.dataset_order = ["ds-x"];
       const ch0 = defaultChannel(0); // every field default...
-      ch0.name = "Membrane"; // ...except the override.
+      ch0.name = "Region D"; // ...except the override.
       const settings = defaultDatasetSettings(1);
       settings.channel_settings = [ch0];
       v.dataset_settings = { "ds-x": settings };
       const back = await decode(await encode(v));
-      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Membrane");
+      expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Region D");
     });
 
     it("auto_contrast: false entries round-trip; true entries are stripped (default)", async () => {

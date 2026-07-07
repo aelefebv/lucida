@@ -137,7 +137,7 @@ function SeedHarness({ url }: { url: string }) {
 describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
   it("does NOT send while CONNECTING, then sends exactly once after OPEN", () => {
     vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
-    const url = "/data/embryo.ome.zarr";
+    const url = "/data/sample.ome.zarr";
 
     act(() => {
       render(<SeedHarness url={url} />);

@@ -199,10 +199,10 @@ mod tests {
 
     fn sample_label_spec() -> crate::label::LabelSpec {
         crate::label::LabelSpec {
-            name: "mitochondria".to_string(),
+            name: "region-b".to_string(),
             source_image_id: ImageId("multiscale-0".to_string()),
             image: ImageSpec {
-                image_id: ImageId("multiscale-0:label:mitochondria".to_string()),
+                image_id: ImageId("multiscale-0:label:region-b".to_string()),
                 // Shares the source image's owning entity for placement.
                 owner: EntityId("img-0".to_string()),
                 multiscale: MultiscaleInfo {
@@ -255,7 +255,7 @@ mod tests {
         // The stored spec (label's own image + colors) survives intact.
         assert_eq!(back.label_specs().len(), 1);
         let spec = &back.label_specs()[0];
-        assert_eq!(spec.name, "mitochondria");
+        assert_eq!(spec.name, "region-b");
         assert_eq!(spec.source_image_id, ImageId("multiscale-0".to_string()));
         assert_eq!(spec.image.multiscale.data_type, DataType::Uint32);
         assert_eq!(
