@@ -3112,6 +3112,105 @@ describe("plan() — minimap lane", () => {
     }
   });
 
+  it("bulk seeding sorts after view lanes even when distance terms exceed the bulk offset", () => {
+    // Lane offsets are not bands: computePriority adds unbounded
+    // importance/distance terms, so on a wide view a coarse request's
+    // effective priority (2400 + distance × weight) runs far past any
+    // constant bulk offset. Demoted seeding must rank behind the view's
+    // requests by construction, not by hoping a constant outruns the
+    // distance term.
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const level3 = makeLevelGeo(3, [1, 1, 1, 32, 32], [1, 1, 1, 32, 32]);
+    const entity = createSyntheticEntity({
+      entityId: "eFar",
+      imageId: "imgFar",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      detailLevel: 0,
+      coarseLevel: 3,
+      levels: [level0, level3, level3, level3],
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [entity],
+      // Wide region: the view center sits ~14k voxels from the entity's
+      // chunks, so coarse priority ≈ 2400 + 14k×10 ≫ the bulk offset.
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 20000, 20000] }),
+      selection: makeSelection(),
+      minimapPending: new Map([
+        ["imgFar", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS + 1)],
+      ]),
+    });
+    const result = plan(snap, createSyntheticState());
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    const others = result.requests.filter((r) => r.lane !== "minimap");
+    expect(minimap.length).toBe(MINIMAP_SEED_FAST_MAX_CHUNKS + 1);
+    expect(others.length).toBeGreaterThan(0);
+    const maxOther = Math.max(...others.map((r) => r.priority));
+    expect(maxOther).toBeGreaterThan(MINIMAP_SEED_BULK_LANE_OFFSET);
+    for (const req of minimap) {
+      expect(req.priority).toBeGreaterThan(maxOther);
+    }
+    // And therefore they sort last.
+    const firstMinimapIdx = result.requests.findIndex((r) => r.lane === "minimap");
+    const lastOtherIdx = result.requests.reduce(
+      (acc, r, i) => (r.lane !== "minimap" ? i : acc),
+      -1,
+    );
+    expect(firstMinimapIdx).toBeGreaterThan(lastOtherIdx);
+  });
+
+  it("demotes bulk seeding even when the caller's config predates the seed knobs", () => {
+    // plan() is pure and accepts any PlanningConfig-shaped object;
+    // structural typing admits configs built before the seed knobs
+    // existed (older persisted snapshots, external embedders of the
+    // planner). Large demand must never ride the fast lane because a
+    // knob is merely absent from the caller's object.
+    const preKnobConfig = { ...DEFAULT_PLANNING_CONFIG } as Record<string, unknown>;
+    delete preKnobConfig.minimapSeedFastMaxChunks;
+    delete preKnobConfig.minimapSeedBulkLaneOffset;
+
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        ["imgM", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS + 1)],
+      ]),
+    });
+    const result = plan(
+      snap,
+      createSyntheticState(),
+      preKnobConfig as unknown as PlanningConfig,
+    );
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(MINIMAP_SEED_FAST_MAX_CHUNKS + 1);
+    for (const req of minimap) {
+      expect(req.priority).toBe(MINIMAP_SEED_BULK_LANE_OFFSET);
+    }
+  });
+
+  it("reads the fast/bulk decision from the whole pending map, not the entity-joined subset", () => {
+    // Producers enumerate every dataset image when seeding, so the
+    // pending map can cover members outside this call's entity set —
+    // and the fetch queue the demand lands in is shared. The demotion
+    // decision must follow the full demand, no matter which members
+    // this particular plan() call emits for.
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        ["imgM", makeManyCoords(10)],
+        ["imgElsewhere", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS)],
+      ]),
+    });
+    const result = plan(snap, createSyntheticState());
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    // Emission stays entity-joined — only imgM has a matching entity.
+    expect(minimap).toHaveLength(10);
+    expect(new Set(minimap.map((r) => r.imageId))).toEqual(new Set(["imgM"]));
+    // But the demand total (10 + cap) exceeds the cap, so what IS
+    // emitted rides the bulk lane.
+    for (const req of minimap) {
+      expect(req.priority).toBe(MINIMAP_SEED_BULK_LANE_OFFSET);
+    }
+  });
+
   it("respects config.minimapSeedFastMaxChunks and config.minimapSeedBulkLaneOffset", () => {
     const snap = makeMinimapSnapshot(); // two pending coords
     const result = plan(

@@ -42,10 +42,13 @@ export const MINIMAP_LANE_OFFSET = 0;
 export const MINIMAP_SEED_FAST_MAX_CHUNKS = 128;
 
 /**
- * Lane offset for minimap seeding once the pending seed count exceeds
- * {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Lowest urgency — behind
- * detail, coarse, and overview — so whole-collection seeding never
- * outranks anything the view itself asked for. The minimap then fills
+ * Priority FLOOR for minimap seeding once the pending seed count
+ * exceeds {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Lane offsets are not
+ * bands — the importance/distance terms in the priority formula are
+ * unbounded, so a wide view's coarse/detail requests can run far past
+ * any constant — therefore the planner emits bulk seeds at
+ * `max(this, highest priority already in the plan + 1)`: strictly
+ * behind everything the view asked for. The minimap then fills
  * opportunistically as fetch slots free up: it may take minutes, which
  * is acceptable for a whole-collection overview and not acceptable for
  * the main view.
@@ -176,14 +179,19 @@ export interface PlanningConfig {
   minimapLaneOffset: number;
   /**
    * Largest pending minimap seed set that still rides the top-priority
-   * lane. See {@link MINIMAP_SEED_FAST_MAX_CHUNKS}.
+   * lane. See {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Optional for
+   * compatibility with config objects predating the knob (older
+   * persisted snapshots, external callers of the pure planner):
+   * `emitMinimapLane` falls back to the module default when absent, so
+   * large demand can never ride the fast lane by omission.
    */
-  minimapSeedFastMaxChunks: number;
+  minimapSeedFastMaxChunks?: number;
   /**
    * Lane offset for minimap seeding beyond the fast cap (lowest
-   * urgency). See {@link MINIMAP_SEED_BULK_LANE_OFFSET}.
+   * urgency). See {@link MINIMAP_SEED_BULK_LANE_OFFSET}. Optional for
+   * the same compatibility reason as {@link minimapSeedFastMaxChunks}.
    */
-  minimapSeedBulkLaneOffset: number;
+  minimapSeedBulkLaneOffset?: number;
   /** Detail requests (visible chunks). */
   detailLaneOffset: number;
   /** Proxy requests (group/tile proxy fallbacks). */

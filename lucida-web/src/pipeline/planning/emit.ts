@@ -8,7 +8,11 @@ import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import { chunkWithinRenderRadius } from "../renderRadius.ts";
 import { chunkWorldDims, iterateChunks, iterateChunksAtLodRange } from "./chunks.ts";
-import type { PlanningConfig } from "./config.ts";
+import {
+  MINIMAP_SEED_BULK_LANE_OFFSET,
+  MINIMAP_SEED_FAST_MAX_CHUNKS,
+  type PlanningConfig,
+} from "./config.ts";
 import type {
   ActiveSetEntry,
   ChunkRequest,
@@ -49,11 +53,18 @@ function computePriority(
  * — a bounded ~1 s starvation window for the view lanes. On a wide
  * collection the whole-collection seed set is tens of thousands of
  * chunks; at top priority it would hold every fetch slot for tens of
- * minutes while the visible band waits. Once the pending count exceeds
- * `config.minimapSeedFastMaxChunks`, the whole set emits at
- * `config.minimapSeedBulkLaneOffset` — behind every view-serving lane —
- * and fills opportunistically as slots free up. The minimap can fill
- * over minutes; the view cannot.
+ * minutes while the visible band waits. Once the pending map's TOTAL
+ * demand exceeds `config.minimapSeedFastMaxChunks` (module default when
+ * the caller's config lacks the knob), everything emitted here rides
+ * the bulk lane: `max(bulk offset, bulkPriorityFloor)`, strictly behind
+ * every request the plan emitted before this call — a constant offset
+ * alone cannot guarantee that, because the other lanes' distance terms
+ * are unbounded. Bulk seeding then fills opportunistically as fetch
+ * slots free up: the minimap can fill over minutes; the view cannot.
+ *
+ * `bulkPriorityFloor` — a priority strictly greater than every request
+ * already emitted into this plan (the caller computes it; this emitter
+ * must run after the view-serving lanes).
  *
  * Mutates `out`.
  */
@@ -62,16 +73,27 @@ export function emitMinimapLane(
   entities: EntitySnapshot[],
   datasetId: string,
   config: PlanningConfig,
+  bulkPriorityFloor: number,
   out: ChunkRequest[],
 ): void {
   if (minimapPending.size === 0) return;
+  // The fast/bulk decision reads the WHOLE pending map, not the
+  // entity-joined subset this call happens to emit: seeding producers
+  // enumerate every dataset image (the map can cover members outside
+  // this call's entity set) and the fetch queue the demand lands in is
+  // shared, so the starvation cost is a property of the full demand.
   let pendingTotal = 0;
-  for (const entity of entities) {
-    pendingTotal += minimapPending.get(entity.imageId)?.length ?? 0;
+  for (const coords of minimapPending.values()) {
+    pendingTotal += coords.length;
   }
+  // Fall back to the module defaults when the caller's config predates
+  // the seed knobs (structural typing admits such objects) — large
+  // demand must never ride the fast lane because a knob is absent.
+  const fastMax = config.minimapSeedFastMaxChunks ?? MINIMAP_SEED_FAST_MAX_CHUNKS;
+  const bulkBase = config.minimapSeedBulkLaneOffset ?? MINIMAP_SEED_BULK_LANE_OFFSET;
   const priority =
-    pendingTotal > config.minimapSeedFastMaxChunks
-      ? config.minimapSeedBulkLaneOffset
+    pendingTotal > fastMax
+      ? Math.max(bulkBase, bulkPriorityFloor)
       : config.minimapLaneOffset;
   for (const entity of entities) {
     const pending = minimapPending.get(entity.imageId);

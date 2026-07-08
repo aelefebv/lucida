@@ -104,18 +104,7 @@ export function plan(
   // the same group don't each push a duplicate parent-group request.
   const groupProxyEmitted = new Set<string>();
 
-  // Step 3: Minimap lane — highest priority (see ADR 0023). Emitted
-  // before detail so the minimap appears within ~1s of dataset open
-  // instead of after detail finishes.
-  emitMinimapLane(
-    snapshot.minimapPending,
-    snapshot.entities,
-    snapshot.datasetId,
-    config,
-    allRequests,
-  );
-
-  // Step 4: Detail / proxy lane (per active entry).
+  // Step 3: Detail / proxy lane (per active entry).
   emitDetailLane(
     activeSet,
     snapshot,
@@ -127,16 +116,38 @@ export function plan(
     config,
   );
 
-  // Step 5: Prefetch lane — for tile-mode entries only.
+  // Step 4: Prefetch lane — for tile-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
-  // Step 6: Context fallback lane. The bridge emits explicit coarse
+  // Step 5: Context fallback lane. The bridge emits explicit coarse
   // tier chunks; the legacy path keeps the old overview migration lane.
   if (config.coarseDetailEnabled) {
     emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
   } else {
     emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
   }
+
+  // Step 6: Minimap lane (see ADR 0023). Small seed sets ride the
+  // dedicated top lane (priority 0 — the sort puts them first, so the
+  // minimap appears within ~1s of dataset open). Bulk seed sets must
+  // instead rank strictly behind every request emitted above — lane
+  // offsets are not bands (the importance/distance terms are unbounded,
+  // so a constant offset cannot outrank a wide view's coarse/detail
+  // priorities). The emitter is handed the plan's current maximum
+  // priority as the floor its bulk lane must clear; emitting last makes
+  // that maximum complete.
+  let maxEmittedPriority = 0;
+  for (const req of allRequests) {
+    if (req.priority > maxEmittedPriority) maxEmittedPriority = req.priority;
+  }
+  emitMinimapLane(
+    snapshot.minimapPending,
+    snapshot.entities,
+    snapshot.datasetId,
+    config,
+    maxEmittedPriority + 1,
+    allRequests,
+  );
 
   // Step 7: Merge and sort by priority (ascending — lower = more urgent).
   // Equal-priority chunk ties are spatial-first, channel-second so
