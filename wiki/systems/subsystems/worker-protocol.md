@@ -28,6 +28,7 @@ modified: 2026-07-06
 - `volumeChunkData { epochs, memberId, tier, chunks[], level, t, c, ... }` — same for volume.
 - `proxyAssetData` — proxy asset (`[Z, Y, X]` u16 voxel buffer + identifying metadata). Stays `datasetId`-keyed because proxies are routed per dataset, not per member. A live fallback (still wired); coarse/detail is the default.
 - **render + minimap messages** (also Main → worker): `resize`, `volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimapInit` / `minimapRender` / `minimapDestroy` / `minimapUploadOverviewChunksForLayer`, `removeLayerResources`, `updateCursorData`, `destroy`. These drive draws and minimap residency, distinct from the cold/hot/chunk state push above.
+- A `sliceRenderMultiPass` layer is either a normal per-member layer (one offscreen pass each) or an **aggregate layer** (`SliceAggregateParams`): members whose on-screen diagonal falls below the member-pass budget in `slicePath.ts` are batched into one layer whose quad records (rect in layer UV + entity descriptor index, 32 B each, transferred) render in a single instanced pass via the slice shader's `vsAggregate`/`fsAggregate` entry points. This keeps per-frame pass count bounded by screen size, not member count, on wide collections. Labels never batch.
 
 The full `MainToWorker` union is in `MainToWorkerMessage` (workerProtocol.ts).
 

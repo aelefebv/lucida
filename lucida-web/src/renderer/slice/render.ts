@@ -145,7 +145,11 @@ export function handleSliceRenderMultiPass(
 
   const renderer = ctx.getSliceRenderer();
   const comp = ctx.getCompositor();
-  const pool = ctx.ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
+  // Offscreen targets are canvas-sized; grow the pool per RENDERED
+  // layer, not per posted layer, so skipped layers never cost a target
+  // allocation. (Growing one at a time re-checks dims only — cheap.)
+  const targetFor = (idx: number): GPUTexture =>
+    ctx.ensureOffscreenPool(idx + 1, msg.canvasW, msg.canvasH)[idx];
   const atlasMap = ctx.state.sliceAtlases;
 
   const renderedLayers: CompositeLayer[] = [];
@@ -156,8 +160,63 @@ export function handleSliceRenderMultiPass(
     // Categorical label overlays render from their own r32uint pool via a
     // transient descriptor, independent of the cold-state chunk pipeline.
     if (layer.isLabel) {
-      const drawn = renderLabelLayer(ctx, msg, layer, pool[renderedLayers.length]);
+      const drawn = renderLabelLayer(ctx, msg, layer, targetFor(renderedLayers.length));
       if (drawn) renderedLayers.push(drawn);
+      continue;
+    }
+
+    // Aggregate layer: every batched member in ONE pass. Pools,
+    // descriptor buffer, and colormap resolve through the batch's
+    // representative member (members of one (dataset, channel) share
+    // them); each quad samples its own descriptor entry in-shader.
+    if (layer.aggregate) {
+      const agg = layer.aggregate;
+      const resolved = layerToPool(agg.poolMemberId);
+      if (!resolved) continue;
+      const descIndex = resolved.datasetId
+        ? ctx.lookupEntityDescriptor(resolved.datasetId)
+        : null;
+      if (!descIndex) continue;
+
+      const detailAtlas: SliceAtlasState | null = resolved.detailPoolKey
+        ? atlasMap.get(resolved.detailPoolKey) ?? null
+        : null;
+      const coarseAtlas: SliceAtlasState | null = resolved.coarsePoolKey
+        ? atlasMap.get(resolved.coarsePoolKey) ?? null
+        : null;
+      for (const atlas of [detailAtlas, coarseAtlas]) {
+        if (atlas && atlas.indirectionDirty) {
+          ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+          atlas.indirectionDirty = false;
+        }
+      }
+
+      renderer.setProxyTextures(null, null);
+      renderer.setTierAtlases(
+        detailAtlas ? detailAtlas.texture : null,
+        detailAtlas ? detailAtlas.indirectionBuf : null,
+        detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY] : [0, 0],
+        coarseAtlas ? coarseAtlas.texture : null,
+        coarseAtlas ? coarseAtlas.indirectionBuf : null,
+        coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY] : [0, 0],
+      );
+      const colormapName = descIndex.colormapNameByMember.get(agg.poolMemberId) ?? "gray";
+      renderer.setColormapTexture(ctx.getOrCreateLUT(colormapName));
+      const aggOx = layer.offsetX ?? 0;
+      const aggOy = layer.offsetY ?? 0;
+      renderer.setTransform(
+        msg.zoom, msg.cx - aggOx, msg.cy - aggOy,
+        msg.canvasW, msg.canvasH, layer.dataW, layer.dataH,
+      );
+
+      const aggIdx = renderedLayers.length;
+      const aggTarget = targetFor(aggIdx);
+      const aggEncoder = ctx.device.createCommandEncoder();
+      renderer.renderAggregateTo(
+        aggTarget.createView(), aggEncoder, descIndex.buffer, agg.quads, agg.count,
+      );
+      ctx.device.queue.submit([aggEncoder.finish()]);
+      renderedLayers.push({ view: aggTarget.createView(), blendMode: layer.blendMode });
       continue;
     }
 
@@ -257,10 +316,11 @@ export function handleSliceRenderMultiPass(
     // Intensity draws carry no declared palette; bind the dummy (count 0).
     renderer.setLabelColorBuffer(null);
     renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
+    const layerTarget = targetFor(idx);
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(pool[idx].createView(), layerEncoder);
+    renderer.renderTo(layerTarget.createView(), layerEncoder);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: pool[idx].createView(), blendMode: layer.blendMode });
+    renderedLayers.push({ view: layerTarget.createView(), blendMode: layer.blendMode });
   }
 
   const canvasView = ctx.context.getCurrentTexture().createView();

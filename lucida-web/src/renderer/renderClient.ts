@@ -356,12 +356,19 @@ export class RenderClient implements UploadClient {
     canvasH: number,
     epochs: SceneEpochs,
   ) {
+    // Aggregate quad buffers are rebuilt per render tick on the main
+    // thread; transferring them avoids structured-cloning what can be
+    // hundreds of KB on a wide collection.
+    const transfer: Transferable[] = [];
+    for (const layer of layers) {
+      if (layer.aggregate) transfer.push(layer.aggregate.quads);
+    }
     this.worker.postMessage({
       type: "sliceRenderMultiPass",
       epochs,
       layers, zoom, cx, cy,
       canvasW, canvasH,
-    });
+    }, transfer);
   }
 
   minimapInit(canvas: HTMLCanvasElement) {

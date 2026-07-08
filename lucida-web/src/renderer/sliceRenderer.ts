@@ -14,15 +14,23 @@ const ENTITY_REF_SIZE = 16;
 export class SliceRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline;
+  private aggregatePipeline: GPURenderPipeline;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
   private descriptorBindGroupLayout: GPUBindGroupLayout;
+  private aggregateBindGroupLayout: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
   private descriptorBindGroup: GPUBindGroup | null = null;
   private currentDescriptorBuffer: GPUBuffer | null = null;
   private currentLabelColorBuffer: GPUBuffer | null = null;
   private labelColorBuffer: GPUBuffer | null = null;
+  // Aggregate (batched member) draw state: grown-as-needed quad storage
+  // + a bind group cached on the (descriptor buffer, quad buffer) pair.
+  private aggregateQuadBuffer: GPUBuffer | null = null;
+  private aggregateQuadCapacity = 0;
+  private aggregateBindGroup: GPUBindGroup | null = null;
+  private aggregateBoundDescriptorBuffer: GPUBuffer | null = null;
 
   private detailAtlasTexture: GPUTexture | null = null;
   private detailIndirectionBuffer: GPUBuffer | null = null;
@@ -121,6 +129,26 @@ export class SliceRenderer {
       ],
     });
 
+    // Aggregate pass: the descriptor array plus the per-member quad
+    // storage the instanced vertex stage reads. Binding numbers match
+    // the WGSL declarations (0 = entityDescriptors, 3 = memberQuads);
+    // the per-member layout's entity-ref/palette bindings are absent
+    // because the aggregate entry points never reference them.
+    this.aggregateBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+      ],
+    });
+
     this.pipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({
         bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
@@ -132,6 +160,24 @@ export class SliceRenderer {
       fragment: {
         module: shaderModule,
         entryPoint: "fs",
+        targets: [{ format: OFFSCREEN_FORMAT }],
+      },
+      primitive: { topology: "triangle-list" },
+    });
+
+    // Shares group(0) with the per-member pipeline (same layout object,
+    // so the same bind group binds to both).
+    this.aggregatePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({
+        bindGroupLayouts: [this.bindGroupLayout, this.aggregateBindGroupLayout],
+      }),
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vsAggregate",
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fsAggregate",
         targets: [{ format: OFFSCREEN_FORMAT }],
       },
       primitive: { topology: "triangle-list" },
@@ -363,6 +409,62 @@ export class SliceRenderer {
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.descriptorBindGroup);
     pass.draw(3);
+    pass.end();
+  }
+
+  /**
+   * Draw an aggregate layer's member quads in ONE pass: a single
+   * instanced draw where instance `i` covers `quads` record `i` and
+   * samples that record's entity descriptor. Callers configure atlases,
+   * colormap, and the layer transform through the same setters as
+   * {@link renderTo}; `quads` uses the `SliceAggregateParams` record
+   * layout (rect f32×4 + entityIndex u32 + padding, 32 bytes/record).
+   */
+  renderAggregateTo(
+    target: GPUTextureView,
+    encoder: GPUCommandEncoder,
+    descriptorBuffer: GPUBuffer,
+    quads: ArrayBuffer,
+    count: number,
+  ) {
+    if (!this.bindGroup || count <= 0) return;
+
+    if (!this.aggregateQuadBuffer || this.aggregateQuadCapacity < quads.byteLength) {
+      this.aggregateQuadBuffer?.destroy();
+      this.aggregateQuadBuffer = this.device.createBuffer({
+        size: quads.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.aggregateQuadCapacity = quads.byteLength;
+      this.aggregateBindGroup = null;
+    }
+    this.device.queue.writeBuffer(this.aggregateQuadBuffer, 0, quads);
+
+    if (!this.aggregateBindGroup || this.aggregateBoundDescriptorBuffer !== descriptorBuffer) {
+      this.aggregateBoundDescriptorBuffer = descriptorBuffer;
+      this.aggregateBindGroup = this.device.createBindGroup({
+        layout: this.aggregateBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: descriptorBuffer } },
+          { binding: 3, resource: { buffer: this.aggregateQuadBuffer } },
+        ],
+      });
+    }
+
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: target,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        },
+      ],
+    });
+    pass.setPipeline(this.aggregatePipeline);
+    pass.setBindGroup(0, this.bindGroup);
+    pass.setBindGroup(1, this.aggregateBindGroup);
+    pass.draw(6, count);
     pass.end();
   }
 }

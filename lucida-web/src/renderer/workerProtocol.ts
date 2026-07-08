@@ -240,6 +240,40 @@ export interface VolumeRenderMultiPassMessage {
   clipMode?: number;
 }
 
+/**
+ * Batched member draw for one aggregate slice layer.
+ *
+ * A wide collection at overview zoom has tens of thousands of visible
+ * members, each covering at most a few device pixels. Rendering one
+ * offscreen pass per member makes the frame cost track member count, so
+ * members below the pass budget's size threshold are folded into a
+ * single layer: one render pass, one instanced draw, one quad per
+ * member. Each quad samples the member's own descriptor entry (detail →
+ * coarse fallback chain), so the aggregate shows exactly the content
+ * the per-member passes would have shown.
+ */
+export interface SliceAggregateParams {
+  /**
+   * Member id used to resolve the chunk pools, descriptor buffer, and
+   * colormap for the whole batch. Members of one (dataset, channel)
+   * share pools by construction, so any batched member works; the
+   * builder uses the first.
+   */
+  poolMemberId: string;
+  /** Number of member quads in {@link quads}. */
+  count: number;
+  /**
+   * Interleaved per-member records, 32 bytes each, matching the
+   * shader's `MemberQuad` layout:
+   *   - f32 ×4 — quad rect in layer UV: originX, originY, width, height
+   *     (relative to the aggregate layer's `offsetX/offsetY` +
+   *     `dataW/dataH` extent)
+   *   - u32 — entity descriptor index for the member
+   *   - u32 ×3 — padding (zero)
+   */
+  quads: ArrayBuffer;
+}
+
 export interface SliceLayerParams {
   datasetId: string;
   dataW: number;
@@ -273,6 +307,15 @@ export interface SliceLayerParams {
    * rest. Absent/empty → every id uses the hash.
    */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
+  /**
+   * Batched member quads for an aggregate layer. When present the
+   * worker renders the whole batch in ONE pass (one instanced draw)
+   * instead of one pass per member; `datasetId`, `offsetX/offsetY`,
+   * `dataW/dataH` describe the batch's union extent, and per-member
+   * geometry + descriptor indices ride in {@link SliceAggregateParams}.
+   * Absent for ordinary per-member layers.
+   */
+  aggregate?: SliceAggregateParams;
 }
 
 /**

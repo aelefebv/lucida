@@ -131,6 +131,117 @@ describe("handleSliceRenderMultiPass", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
+  it("renders an aggregate layer as ONE batched pass (single composite layer)", () => {
+    const device = makeDevice();
+    const renderTo = vi.fn();
+    const renderAggregateTo = vi.fn();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const coarseTexture = {} as GPUTexture;
+    const coarseIndirection = {} as GPUBuffer;
+    const coarseAtlas = {
+      texture: coarseTexture,
+      indirectionBuf: coarseIndirection,
+      indirectionData: new Uint32Array([0]),
+      slots: new Map(),
+      slotGridIdx: new Int32Array(1),
+      freeSlots: [],
+      totalSlots: 1,
+      chunkX: 64,
+      chunkY: 64,
+      slotsX: 1,
+      slotsY: 1,
+      entityMetas: new Map(),
+      entityZInfo: new Map(),
+      z: 0,
+      t: 0,
+      c: 0,
+      staleSliceKeys: null,
+      intensityMin: 0,
+      intensityMax: 0,
+      indirectionDirty: false,
+    } as SliceAtlasState;
+    state.sliceAtlases.set("coarse-pool", coarseAtlas);
+
+    const descriptorBuffer = {} as GPUBuffer;
+    const descIndex: EntityDescriptorIndex = {
+      buffer: descriptorBuffer,
+      indexByMember: new Map([["img-0", 0], ["img-1", 1]]),
+      proxyPoolIndexByKey: new Map(),
+      proxyPoolsByIndex: [],
+      entityCount: 2,
+      colormapLutIndices: new Map([["gray", 0]]),
+      colormapNameByMember: new Map([["img-0", "gray"], ["img-1", "gray"]]),
+      proxyDescriptorByMember: new Map(),
+    };
+
+    const setTierAtlases = vi.fn();
+    const ctx = {
+      device,
+      context: {
+        canvas: { width: 0, height: 0 },
+        getCurrentTexture: () => ({ createView: () => ({}) }),
+      },
+      state,
+      getSliceRenderer: () => ({
+        setColormapTexture: vi.fn(),
+        setProxyTextures: vi.fn(),
+        setAtlas: vi.fn(),
+        setTierAtlases,
+        setTransform: vi.fn(),
+        setLabelColorBuffer: vi.fn(),
+        setDescriptorBinding: vi.fn(),
+        renderTo,
+        renderAggregateTo,
+      }),
+      getCompositor: () => ({ composite }),
+      getCursorRenderer: () => ({ hasData: () => false }),
+      ensureOffscreenPool: () => [{ createView: () => ({}) }],
+      getOrCreateLUT: () => ({}),
+      lookupEntityDescriptor: () => descIndex,
+      getDummyTexture: () => ({}),
+    } as unknown as WorkerCtx;
+
+    const quads = new ArrayBuffer(2 * 32);
+    handleSliceRenderMultiPass(
+      ctx,
+      {
+        type: "sliceRenderMultiPass",
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        layers: [
+          {
+            datasetId: "img-0",
+            entityIndex: 0,
+            blendMode: "alpha",
+            dataW: 2048,
+            dataH: 1024,
+            offsetX: 100,
+            offsetY: 200,
+            aggregate: { poolMemberId: "img-0", count: 2, quads },
+          },
+        ],
+        zoom: 0.01,
+        cx: 1024,
+        cy: 512,
+        canvasW: 64,
+        canvasH: 64,
+      },
+      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
+    );
+
+    // One batched draw, no per-member passes, one composite layer.
+    expect(renderAggregateTo).toHaveBeenCalledTimes(1);
+    expect(renderAggregateTo.mock.calls[0][2]).toBe(descriptorBuffer);
+    expect(renderAggregateTo.mock.calls[0][3]).toBe(quads);
+    expect(renderAggregateTo.mock.calls[0][4]).toBe(2);
+    expect(renderTo).not.toHaveBeenCalled();
+    expect(setTierAtlases).toHaveBeenCalledWith(
+      null, null, [0, 0],
+      coarseTexture, coarseIndirection, [1, 1],
+    );
+    expect(composite.mock.calls[0][1]).toHaveLength(1);
+  });
+
   it("renders a layer backed only by a resident tile proxy", () => {
     const device = makeDevice();
     const renderTo = vi.fn();
