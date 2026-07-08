@@ -247,17 +247,28 @@ export interface VolumeRenderMultiPassMessage {
  * members, each covering at most a few device pixels. Rendering one
  * offscreen pass per member makes the frame cost track member count, so
  * members below the pass budget's size threshold are folded into a
- * single layer: one render pass, one instanced draw, one quad per
- * member. Each quad samples the member's own descriptor entry (detail →
- * coarse fallback chain), so the aggregate shows exactly the content
- * the per-member passes would have shown.
+ * single layer: one render pass, one quad per member.
+ *
+ * The quads here are the CANDIDATE set, in roster order (their order is
+ * the aggregate's internal draw order). At draw time the worker:
+ *   - drops quads for members with nothing resident in any tier
+ *     (detail metas, coarse metas, resident proxy) — the same skip rule
+ *     the per-member path applies, so residency is judged where it
+ *     lives (evictions included);
+ *   - groups survivors by pool binding set (detail/coarse chunk pools +
+ *     tile/group proxy pools) and issues one instanced draw per group
+ *     with exactly those pools bound — members of heterogeneous chunk
+ *     shapes/pyramid depths never sample another pool's indirection;
+ *   - reads each quad's own descriptor entry in-shader, so display
+ *     state (contrast/gamma/opacity/colormap) tracks the CURRENT
+ *     descriptor build every frame, like the per-member passes.
  */
 export interface SliceAggregateParams {
   /**
-   * Member id used to resolve the chunk pools, descriptor buffer, and
-   * colormap for the whole batch. Members of one (dataset, channel)
-   * share pools by construction, so any batched member works; the
-   * builder uses the first.
+   * Member id used to resolve the descriptor buffer and colormap for
+   * the whole batch. Members of one (dataset, channel) share both by
+   * construction, so any batched member works; the builder uses the
+   * first.
    */
   poolMemberId: string;
   /** Number of member quads in {@link quads}. */

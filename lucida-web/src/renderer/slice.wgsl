@@ -95,6 +95,17 @@ struct MemberQuad {
 };
 @group(1) @binding(3) var<storage, read> memberQuads: array<MemberQuad>;
 
+// Width of the gray frame drawn just inside a member's footprint edge.
+const MEMBER_BORDER_WIDTH_PX: f32 = 1.5;
+
+// Minimum on-screen member size (per axis) for the footprint border to
+// draw at all. Below this the frame would cover the member's ENTIRE
+// footprint — every visible pixel would be constant border gray, so the
+// sampled data (and any contrast/gamma/colormap edit) could never reach
+// the screen. Tiny members render pure content instead: sampled value
+// on hit, transparent on miss.
+const MEMBER_BORDER_MIN_SCREEN_PX: f32 = 3.0;
+
 struct VSOut {
   @builtin(position) pos: vec4f,
   @location(0) uv: vec2f,
@@ -122,6 +133,9 @@ fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f)
   let slotZ = dims.x;
   let slotY = dims.y;
   let slotX = dims.z;
+  if (slotX == 0u || slotY == 0u || slotZ == 0u) {
+    return 0xFFFFFFFFu;
+  }
   let atlasDims = textureDimensions(tex);
   let slotsX = max(1u, atlasDims.x / slotX);
   let slotsY = max(1u, atlasDims.y / slotY);
@@ -132,12 +146,16 @@ fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f)
   let voxX = clamp(u32(uv.x * f32(slotX)), 0u, slotX - 1u);
   let voxY = clamp(u32(uv.y * f32(slotY)), 0u, slotY - 1u);
   let voxZ = slotZ / 2u;
-  let coord = vec3i(
-    i32(origin.x + voxX),
-    i32(origin.y + voxY),
-    i32(origin.z + voxZ),
-  );
-  return textureLoad(tex, coord, 0).r;
+  let coord = vec3u(origin.x + voxX, origin.y + voxY, origin.z + voxZ);
+  // A slot region that doesn't fit the bound texture (e.g. the 1×1×1
+  // dummy is bound while this member's proxy pool isn't attached to the
+  // draw) must read as a MISS — never as whatever an out-of-bounds
+  // textureLoad yields (typically 0, which shades as an opaque
+  // colormap-zero fill).
+  if (coord.x >= atlasDims.x || coord.y >= atlasDims.y || coord.z >= atlasDims.z) {
+    return 0xFFFFFFFFu;
+  }
+  return textureLoad(tex, vec3i(coord), 0).r;
 }
 
 fn sampleDetail2D(source: ChunkTierSource, uv: vec2f) -> u32 {
@@ -364,17 +382,19 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let entity = entityDescriptors[currentEntity.index.x];
 
-  // member footprint border: a gray frame 1.5 px inside each member's footprint
-  // edge. Skip it for a label overlay (categorical) — an opaque frame around a
-  // sub-footprint mask would sit on top of the intensity image it annotates.
-  if (entity.colormapMode != 1u) {
-    let border_width = 1.5;
+  // member footprint border: a gray frame just inside each member's
+  // footprint edge. Skip it for a label overlay (categorical) — an opaque
+  // frame around a sub-footprint mask would sit on top of the intensity
+  // image it annotates — and for members too small on screen to show
+  // content next to the frame (see MEMBER_BORDER_MIN_SCREEN_PX).
+  if (entity.colormapMode != 1u
+      && min(u.memberScreenSize.x, u.memberScreenSize.y) >= MEMBER_BORDER_MIN_SCREEN_PX) {
     let edge_x = min(texUV.x, 1.0 - texUV.x);
     let edge_y = min(texUV.y, 1.0 - texUV.y);
     let dist_x_px = edge_x * u.memberScreenSize.x;
     let dist_y_px = edge_y * u.memberScreenSize.y;
     let edge_min_px = min(dist_x_px, dist_y_px);
-    if (edge_min_px < border_width) {
+    if (edge_min_px < MEMBER_BORDER_WIDTH_PX) {
       return vec4f(0.3, 0.3, 0.3, 1.0);
     }
   }
@@ -462,16 +482,20 @@ fn fsAggregate(input: AggregateVSOut) -> @location(0) vec4f {
 
   // Same member footprint border as the per-member pass. Aggregate
   // layers are intensity-only (labels never batch), so no categorical
-  // skip is needed.
-  let border_width = 1.5;
-  let edge_x = min(input.uv.x, 1.0 - input.uv.x);
-  let edge_y = min(input.uv.y, 1.0 - input.uv.y);
-  let edge_min_px = min(
-    edge_x * input.memberScreenPx.x,
-    edge_y * input.memberScreenPx.y,
-  );
-  if (edge_min_px < border_width) {
-    return vec4f(0.3, 0.3, 0.3, 1.0);
+  // skip is needed — but the size gate matters MOST here: batched
+  // members are routinely sub-pixel at overview zoom, where an ungated
+  // frame would cover every member's whole footprint and the field
+  // would read as a constant gray grid no display edit can touch.
+  if (min(input.memberScreenPx.x, input.memberScreenPx.y) >= MEMBER_BORDER_MIN_SCREEN_PX) {
+    let edge_x = min(input.uv.x, 1.0 - input.uv.x);
+    let edge_y = min(input.uv.y, 1.0 - input.uv.y);
+    let edge_min_px = min(
+      edge_x * input.memberScreenPx.x,
+      edge_y * input.memberScreenPx.y,
+    );
+    if (edge_min_px < MEMBER_BORDER_WIDTH_PX) {
+      return vec4f(0.3, 0.3, 0.3, 1.0);
+    }
   }
 
   let chunkVal = sampleEntityValue(input.entityIdx, input.uv);

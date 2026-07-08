@@ -66,6 +66,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const descIndex: EntityDescriptorIndex = {
       buffer: {} as GPUBuffer,
       indexByMember: new Map([["img-a", 0], ["img-b", 1]]),
+      memberByIndex: ["img-a", "img-b"],
       proxyPoolIndexByKey: new Map(),
       proxyPoolsByIndex: [],
       entityCount: 2,
@@ -158,6 +159,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const descIndex: EntityDescriptorIndex = {
       buffer: {} as GPUBuffer,
       indexByMember: new Map([["img-a", 0]]),
+      memberByIndex: ["img-a"],
       proxyPoolIndexByKey: new Map(),
       proxyPoolsByIndex: [],
       entityCount: 1,
@@ -232,6 +234,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const descIndex: EntityDescriptorIndex = {
       buffer: {} as GPUBuffer,
       indexByMember: new Map([["img-a:ch1", 0]]),
+      memberByIndex: ["img-a:ch1"],
       proxyPoolIndexByKey: new Map([["tile-proxy-ch1", 0]]),
       proxyPoolsByIndex: [{
         texture: tileProxyTexture,

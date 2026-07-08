@@ -88,6 +88,13 @@ export interface EntityDescriptorIndex {
   buffer: GPUBuffer;
   /** memberId → entity index in {@link buffer}. */
   indexByMember: Map<string, number>;
+  /**
+   * Inverse of {@link indexByMember}: entity index → memberId. The
+   * aggregate render path uses it to resolve each quad's member (pool
+   * lookup, residency check, camera-UV recency) from the entity index
+   * the quad record carries. 1:1 with `indexByMember` by construction.
+   */
+  memberByIndex: string[];
   /** poolKey → dense pool index (matches GPU descriptor's *PoolIndex fields). */
   proxyPoolIndexByKey: Map<string, number>;
   /** Dense pool array indexed by proxy pool index, used by render handlers
@@ -216,10 +223,12 @@ export function buildDescriptorBuffer(
     return idx;
   };
 
+  const memberByIndex: string[] = [];
   let nextEntityIndex = 0;
   for (const { entry, channel, memberId } of iterateColdMembers(cold)) {
     if (!indexByMember.has(memberId)) {
       indexByMember.set(memberId, nextEntityIndex++);
+      memberByIndex.push(memberId);
     }
     const ds = displayStateForChannel(entry, channel);
     colormapNameByMember.set(memberId, ds.colormapName);
@@ -265,6 +274,7 @@ export function buildDescriptorBuffer(
   return {
     buffer,
     indexByMember,
+    memberByIndex,
     proxyPoolIndexByKey,
     proxyPoolsByIndex,
     entityCount,
@@ -277,6 +287,7 @@ export function buildDescriptorBuffer(
 export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
   idx.buffer.destroy();
   idx.indexByMember.clear();
+  idx.memberByIndex.length = 0;
   idx.proxyPoolIndexByKey.clear();
   idx.proxyPoolsByIndex.length = 0;
   idx.colormapLutIndices.clear();
