@@ -4,6 +4,8 @@ Use Conventional Commit subjects for all commits and squash-merge PR titles beca
 
 Pick a real fixture, not a toy one: lucida loads OME-Zarr lazily in chunks, so multi-GB 3D volumes and multi-channel timeseries open fast — dataset size is no reason to avoid them, and large/3D/timeseries data exercises far more of the viewer than a small 2D image.
 
+When verifying anything the viewer renders, test at `devicePixelRatio` 2 (retina), not just 1 — headless browsers default to 1 and it has hidden whole defect classes. See `wiki/gotchas/retina-dpr2-render-verification.md`.
+
 Keep everything domain-neutral. Do NOT use biology- or science-specific terms anywhere — code, identifiers, comments, docs, commits, PRs, beads/issues, or test fixtures. lucida is a general n-dimensional array/image viewer, and the vocabulary should stay generalized across domains. Prefer neutral wording (e.g. "channel", "dataset", "volume", "sample", "label") over domain-loaded jargon.
 
 
