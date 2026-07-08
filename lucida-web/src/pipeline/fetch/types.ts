@@ -27,6 +27,15 @@ export interface CpuCacheConfig {
   proxyBudgetBytes: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
+  /**
+   * Invoked when chunk fetches keep failing with no success in between
+   * (e.g. access revoked after a successful open), so the owner can show a
+   * user-visible signal instead of a silently stalling canvas. Aggregated
+   * and throttled by the cache: at most one call per notify interval, and
+   * only once the consecutive-failure streak reaches its threshold —
+   * healthy operation (including mixed success/failure) never triggers it.
+   */
+  onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void;
 }
 
 /**

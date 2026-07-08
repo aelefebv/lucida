@@ -6,7 +6,12 @@ vi.mock("../../debug/logging.ts", async (importOriginal) => {
 });
 import { debugLog } from "../../debug/logging.ts";
 
-import { CpuCache, type CpuCacheConfig, type ReadyDelivery } from "./cpuCache.ts";
+import {
+  CpuCache,
+  CHUNK_FAILURE_STREAK_THRESHOLD,
+  type CpuCacheConfig,
+  type ReadyDelivery,
+} from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
 import { FetchError } from "./retry.ts";
 import type {
@@ -1443,6 +1448,78 @@ describe("CpuCache", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  // =========================================================================
+  // Fetch failure streak surfacing
+  // =========================================================================
+
+  describe("fetch failure streak surfacing", () => {
+    it("notifies once when a failure streak reaches the threshold, throttled thereafter", async () => {
+      const onChunkFailureStreak = vi.fn();
+      const { cache, source } = createTestCache({
+        maxConcurrentFetches: 32,
+        onChunkFailureStreak,
+      });
+
+      const reqs = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD }, (_, i) =>
+        makeRequest({ x: i }),
+      );
+      cache.submit(makePlan(reqs));
+      for (let i = 0; i < reqs.length; i++) {
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+      }
+      await flush();
+
+      expect(onChunkFailureStreak).toHaveBeenCalledExactlyOnceWith(
+        CHUNK_FAILURE_STREAK_THRESHOLD,
+        "404 not found",
+      );
+
+      // Failures continuing inside the throttle window stay silent — the
+      // signal is an aggregate, never per-chunk spam.
+      cache.submit(makePlan([makeRequest({ y: 1 }), makeRequest({ y: 1, x: 1 })]));
+      source.reject("entity-1/image-1/0/0/0/0/1/0", new Error("404 not found"));
+      source.reject("entity-1/image-1/0/0/0/0/1/1", new Error("404 not found"));
+      await flush();
+
+      expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+    });
+
+    it("a successful fetch resets the streak — mixed success/failure never notifies", async () => {
+      const onChunkFailureStreak = vi.fn();
+      const { cache, source } = createTestCache({
+        maxConcurrentFetches: 32,
+        onChunkFailureStreak,
+      });
+
+      // One below the threshold fails…
+      const firstBatch = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD - 1 }, (_, i) =>
+        makeRequest({ x: i }),
+      );
+      cache.submit(makePlan(firstBatch));
+      for (let i = 0; i < firstBatch.length; i++) {
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+      }
+      await flush();
+
+      // …then one success resets the streak…
+      cache.submit(makePlan([makeRequest({ y: 2 })]));
+      source.resolve("entity-1/image-1/0/0/0/0/2/0");
+      await flush();
+
+      // …so another below-threshold run of failures still stays silent.
+      const secondBatch = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD - 1 }, (_, i) =>
+        makeRequest({ y: 3, x: i }),
+      );
+      cache.submit(makePlan(secondBatch));
+      for (let i = 0; i < secondBatch.length; i++) {
+        source.reject(`entity-1/image-1/0/0/0/0/3/${i}`, new Error("404 not found"));
+      }
+      await flush();
+
+      expect(onChunkFailureStreak).not.toHaveBeenCalled();
     });
   });
 

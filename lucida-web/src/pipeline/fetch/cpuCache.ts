@@ -78,6 +78,14 @@ export const DEFAULT_MAX_BYTES_IN_FLIGHT = 32 * 1024 * 1024;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
+/** Consecutive chunk-fetch failures (no success in between) before the
+ *  `onChunkFailureStreak` config callback fires. High enough that a few
+ *  isolated misses never trip it; a systemically dead source (revoked
+ *  access, unreachable store) crosses it within one viewport's requests. */
+export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
+/** Minimum spacing between `onChunkFailureStreak` calls while a streak
+ *  persists — an aggregate signal, never per-chunk spam. */
+export const CHUNK_FAILURE_NOTIFY_INTERVAL_MS = 15_000;
 export const INTERACTION_MODE_WINDOW = 10;
 const SPARSE_DETAIL_MIN_DESIRED_CHUNKS = 4;
 const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
@@ -132,6 +140,11 @@ export class CpuCache {
   private counters = new TelemetryCounters();
   private burstFailures = new BurstLogger("cache", "cache.failure_burst");
 
+  /** Consecutive chunk-fetch failures with no completed fetch in between.
+   *  Feeds `onChunkFailureStreak` (see `CpuCacheConfig`). */
+  private chunkFailureStreak = 0;
+  private lastChunkFailureNotifyAt = -Infinity;
+
   private chunkRetryPolicy: RetryPolicy = new OnceTransientRetry(TRANSIENT_RETRY_DELAY_MS);
 
   /** Proxies are not retried in-fetch; orchestrator resubmits next tick. */
@@ -175,6 +188,7 @@ export class CpuCache {
       proxyBudgetBytes: config?.proxyBudgetBytes ?? DEFAULT_PROXY_BUDGET,
       maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
+      onChunkFailureStreak: config?.onChunkFailureStreak,
     };
 
     const mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
@@ -224,7 +238,12 @@ export class CpuCache {
       (req, controller, _estimate, key) => {
         const startedEpochs = { ...this.currentEpochs };
         this.rememberInFlightChunk(key, req, startedEpochs);
-        this.fetchAndDecode(req, controller, key, 0, startedEpochs).catch(() => {});
+        // `fetchAndDecode` handles fetch/decode failures internally (retry,
+        // failure map, streak surfacing); anything escaping here is an
+        // unexpected pipeline error — keep it out of the void.
+        this.fetchAndDecode(req, controller, key, 0, startedEpochs).catch((err: unknown) => {
+          console.warn("[CpuCache] unexpected chunk pipeline error:", err);
+        });
       },
     );
     this.proxyScheduler = new Scheduler<ProxyRequest>(
@@ -239,7 +258,11 @@ export class CpuCache {
       (req) => this.inFlightProxyKey(req),
       (req, controller, _estimate, key) => {
         this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
-        this.fetchProxy(req, controller, key).catch(() => {});
+        // Same boundary as the chunk arm: `fetchProxy` handles fetch
+        // failures internally; only unexpected pipeline errors land here.
+        this.fetchProxy(req, controller, key).catch((err: unknown) => {
+          console.warn("[CpuCache] unexpected proxy pipeline error:", err);
+        });
       },
     );
   }
@@ -715,6 +738,8 @@ export class CpuCache {
     this.activeEntityIdsThisRebuild.clear();
     this.interactionDetector.reset();
     this.failures.clear();
+    this.chunkFailureStreak = 0;
+    this.lastChunkFailureNotifyAt = -Infinity;
     this.rejectionTracker.clear();
     this.deliveryState.reset();
     this.inFlightChunkMeta.clear();
@@ -768,6 +793,7 @@ export class CpuCache {
       });
       this.counters.recordFetchFailure(isPermanent, fe.message);
       this.recordFailureForBurstDetection(isPermanent, fe.message);
+      this.recordChunkFailureForStreak(fe.message);
       this.chunkScheduler.markInFlightDone(key);
       this.inFlightChunkMeta.delete(key);
       return;
@@ -777,6 +803,9 @@ export class CpuCache {
     this.chunkScheduler.correctInFlightBytes(key, responseBytes);
 
     this.counters.recordCompletedFetch(responseBytes);
+    // Any completed fetch proves the source is reachable; the failure
+    // streak measures *uninterrupted* failure, so it resets here.
+    this.chunkFailureStreak = 0;
 
     let decoded: ArrayBuffer;
     try {
@@ -1011,6 +1040,25 @@ export class CpuCache {
       lastFailurePermanent: isPermanent,
       lastError: message,
     }));
+  }
+
+  /**
+   * Count a post-retry chunk-fetch failure toward the consecutive-failure
+   * streak and notify the owner once it crosses the threshold — throttled
+   * while the streak persists. This is the user-visible complement to the
+   * per-chunk failure map: individual misses stay quiet, but a source that
+   * fails everything (e.g. credentials lost after a successful open) must
+   * not present as a silently stalling canvas.
+   */
+  private recordChunkFailureForStreak(message: string): void {
+    this.chunkFailureStreak += 1;
+    const notify = this.config.onChunkFailureStreak;
+    if (!notify) return;
+    if (this.chunkFailureStreak < CHUNK_FAILURE_STREAK_THRESHOLD) return;
+    const now = performance.now();
+    if (now - this.lastChunkFailureNotifyAt < CHUNK_FAILURE_NOTIFY_INTERVAL_MS) return;
+    this.lastChunkFailureNotifyAt = now;
+    notify(this.chunkFailureStreak, message);
   }
 
   private proxyEntryToDelivery(entry: ProxyCacheEntry): ReadyProxyDelivery {

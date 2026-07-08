@@ -51,7 +51,9 @@ vi.mock("./pipeline/fetch/index.ts", () => {
   class MockCpuCache {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
-    constructor(_source: unknown, _pool: unknown) {
+    config: unknown;
+    constructor(_source: unknown, _pool: unknown, config?: unknown) {
+      this.config = config;
       MockCpuCache.instances.push(this);
     }
   }
@@ -90,7 +92,10 @@ const MockedDecodePool = DecodePool as unknown as {
   instances: Array<{ terminate: ReturnType<typeof vi.fn> }>;
 };
 const MockedCpuCache = CpuCache as unknown as {
-  instances: Array<{ reset: ReturnType<typeof vi.fn> }>;
+  instances: Array<{
+    reset: ReturnType<typeof vi.fn>;
+    config?: { onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void };
+  }>;
 };
 
 /** The WASM surface the controller touches, as call-recording stubs. */
@@ -365,6 +370,114 @@ describe("SessionController remote-document-changed coalescing", () => {
     await Promise.resolve();
 
     expect(docChanged).not.toHaveBeenCalled();
+  });
+});
+
+/** Activity emissions that carry a non-null error (the visible banner). */
+function errorEmissions(events: SessionControllerEvents): string[] {
+  return (events.onRemoteDatasetActivity as ReturnType<typeof vi.fn>).mock.calls
+    .map(([activity]) => (activity as { error: string | null }).error)
+    .filter((error): error is string => error !== null);
+}
+
+describe("SessionController scene failure surfacing", () => {
+  const visibilityCmd = JSON.stringify({
+    type: "set_dataset_visible",
+    dataset_id: "wds-1",
+    visible: false,
+  });
+
+  it("repeated apply_command failures surface a visible error", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new Error("state mismatch");
+    });
+
+    handlers.onCommand(2, visibilityCmd);
+    handlers.onCommand(3, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(0);
+
+    handlers.onCommand(4, visibilityCmd);
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("state mismatch");
+  });
+
+  it("a fatal-class engine error surfaces on the first failure", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new Error(
+        "recursive use of an object detected which would lead to unsafe aliasing in rust",
+      );
+    });
+
+    handlers.onCommand(2, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(1);
+  });
+
+  it("a wasm trap (RuntimeError) surfaces on the first failure", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+
+    handlers.onCommand(2, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(1);
+  });
+
+  it("isolated failures between successful applies never trip the surface", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+
+    let fail = false;
+    scene.apply_command.mockImplementation(() => {
+      if (fail) throw new Error("transient hiccup");
+    });
+    // fail → ok → fail → ok → fail: three failures, never consecutive.
+    for (let i = 0; i < 5; i++) {
+      fail = i % 2 === 0;
+      handlers.onCommand(2 + i, visibilityCmd);
+    }
+
+    expect(errorEmissions(events)).toHaveLength(0);
+  });
+
+  it("healthy applies emit no error at all", () => {
+    const { handlers, events } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    for (let i = 0; i < 10; i++) {
+      handlers.onCommand(2 + i, visibilityCmd);
+    }
+    expect(errorEmissions(events)).toHaveLength(0);
+  });
+
+  it("an already-visible failure is not re-emitted per subsequent failure", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+
+    for (let i = 0; i < 8; i++) {
+      handlers.onCommand(2 + i, visibilityCmd);
+    }
+    expect(errorEmissions(events)).toHaveLength(1);
+  });
+
+  it("a chunk fetch failure streak reported by the cache surfaces through the same channel", () => {
+    const { events } = makeHarness();
+    const config = MockedCpuCache.instances[0].config;
+    expect(config?.onChunkFailureStreak).toBeTypeOf("function");
+
+    config!.onChunkFailureStreak!(12, "403 rejected");
+
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("12");
+    expect(errors[0]).toContain("403 rejected");
   });
 });
 

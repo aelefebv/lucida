@@ -33,6 +33,28 @@ import { invalidateDisplaySettings } from "./invalidation.ts";
 import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 
+/** Consecutive `apply_command` failures before the scene is treated as
+ *  unable to apply updates and the error becomes user-visible. A single
+ *  bad command stays in the log (the streak resets on the next successful
+ *  apply); known-fatal engine errors skip the streak entirely. */
+const SCENE_APPLY_FAILURE_LIMIT = 3;
+
+/**
+ * Errors after which the wasm scene cannot recover within this page load:
+ * a trap (`WebAssembly.RuntimeError`, e.g. `unreachable`) leaves the
+ * instance in an undefined state, and the bindings' borrow poisoning
+ * ("recursive use of an object …") persists across calls once tripped.
+ * Either way every subsequent scene call fails while the JS UI stays
+ * healthy, so these must surface immediately rather than after a streak.
+ */
+function isFatalSceneError(e: unknown): boolean {
+  if (typeof WebAssembly !== "undefined" && e instanceof WebAssembly.RuntimeError) {
+    return true;
+  }
+  const message = e instanceof Error ? e.message : String(e);
+  return message.includes("recursive use of an object");
+}
+
 /** Callback surface the SavedView applier registers into so it sees the
  * relevant lifecycle events without the session layer importing applier
  * types directly. Optional: when absent, the controller skips the call. */
@@ -190,6 +212,9 @@ export class SessionController {
    *  while it is set — the bridge's synchronous pending-command replays and
    *  gap-buffer drain — are covered by that one emission. */
   private docChangedEmitPending = false;
+  /** Consecutive `apply_command` failures; reset by each successful apply.
+   *  See [`recordSceneApplyFailure`]. */
+  private sceneApplyFailureStreak = 0;
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
@@ -197,7 +222,21 @@ export class SessionController {
     this.contentSource = new ProxiedContentSource(
       (json) => this.session?.bridge.send(json),
     );
-    const cpuCache = new CpuCache(this.contentSource, decodePool);
+    const cpuCache = new CpuCache(this.contentSource, decodePool, {
+      // Chunk fetches failing without interruption (e.g. access revoked
+      // after a successful open) would otherwise present as a silently
+      // stalling canvas; route the cache's aggregated, throttled signal to
+      // the visible error banner.
+      onChunkFailureStreak: (consecutiveFailures, lastError) => {
+        if (this.destroyed) return;
+        this.updateRemoteActivity({
+          error:
+            `Data loading is failing repeatedly (${consecutiveFailures} chunk ` +
+            `fetches in a row; last error: ${lastError}). ` +
+            "Check your connection and access, or reload the page.",
+        });
+      },
+    });
     const bridge = new Bridge(this.buildHandlers(), undefined, deps.workspaceId);
     this.session = new Session({ bridge, contentSource: this.contentSource, cpuCache, decodePool });
   }
@@ -328,6 +367,30 @@ export class SessionController {
   private updateRemoteActivity(patch: Partial<RemoteDatasetActivity>): void {
     this.remoteActivity = { ...this.remoteActivity, ...patch };
     this.deps.events.onRemoteDatasetActivity(this.remoteActivity);
+  }
+
+  /**
+   * Track consecutive `apply_command` failures and surface a user-visible
+   * error once the scene is evidently unable to apply updates. A scene in
+   * that state keeps every JS panel healthy while the canvas stays blank,
+   * so silence here would leave nothing for the user to act on. Isolated
+   * failures (one malformed command) stay in the bridge log — the streak
+   * resets on the next successful apply — but a known-fatal engine error
+   * (see [`isFatalSceneError`]) surfaces on its first occurrence. Emission
+   * is deduplicated so an endlessly failing scene sets the banner once,
+   * not once per command.
+   */
+  private recordSceneApplyFailure(e: unknown): void {
+    this.sceneApplyFailureStreak += 1;
+    if (!isFatalSceneError(e) && this.sceneApplyFailureStreak < SCENE_APPLY_FAILURE_LIMIT) {
+      return;
+    }
+    const message = e instanceof Error ? e.message : String(e);
+    const error =
+      `Viewer engine failure: scene updates are no longer being applied ` +
+      `(${message}). Reload the page to recover.`;
+    if (this.remoteActivity.error === error) return;
+    this.updateRemoteActivity({ loading: false, error, progress: null });
   }
 
   /**
@@ -673,6 +736,7 @@ export class SessionController {
             }
           }
           scene.apply_command(commandJson);
+          this.sceneApplyFailureStreak = 0;
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "dataset_opened") {
@@ -721,6 +785,7 @@ export class SessionController {
             commandType: cmdType,
             error: e instanceof Error ? e.message : String(e),
           });
+          this.recordSceneApplyFailure(e);
         }
       },
       onAck: () => {},
