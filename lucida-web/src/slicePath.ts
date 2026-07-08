@@ -161,8 +161,8 @@ export function pushMemberLayers(
     batched.push(individual.splice(smallest, 1)[0]);
   }
   if (batched.length < 2) {
-    // Aggregation only engages when it reduces passes; a lone tiny
-    // member renders exactly as before.
+    // Aggregation only engages when it reduces passes: a lone tiny member
+    // stays an individual pass rather than a one-member aggregate.
     individual = individual.concat(batched);
     individual.sort((a, b) => a.order - b.order);
     batched = [];
