@@ -195,6 +195,111 @@ describe("pushMemberLayers", () => {
     expect(layers[0].aggregate!.poolMemberId).toBe("img-0:ch2");
     expect(layers[0].blendMode).toBe("additive");
   });
+
+  it("holds the pass cap EXACTLY at the 257-member boundary (folds two, never unfolds past the cap)", () => {
+    // One member over the cap, all above the size threshold. Unfolding the
+    // lone overflow member (aggregation "needs 2 to engage") would emit 257
+    // individual passes — the cap must instead fold a second member so the
+    // budget holds: 255 individual + 1 aggregate of 2 = 256 layers.
+    const zoom = (MEMBER_AGGREGATE_MAX_DIAG_PX + 8) / Math.hypot(1024, 1024);
+    const members = rosterGrid(MAX_INDIVIDUAL_MEMBER_PASSES + 1, 20, 1024);
+    const layers: SliceLayerParams[] = [];
+    pushMemberLayers(layers, {
+      members,
+      indexByMember: indexFor(members, null),
+      channel: null,
+      blendMode: "alpha",
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      zoom,
+    });
+    const individual = layers.filter((l) => !l.aggregate);
+    const aggregate = layers.filter((l) => l.aggregate);
+    expect(individual.length).toBeLessThanOrEqual(MAX_INDIVIDUAL_MEMBER_PASSES);
+    expect(aggregate).toHaveLength(1);
+    expect(aggregate[0].aggregate!.count).toBe(2);
+    expect(layers.length).toBe(MAX_INDIVIDUAL_MEMBER_PASSES);
+    expect(individual.length + aggregate[0].aggregate!.count)
+      .toBe(MAX_INDIVIDUAL_MEMBER_PASSES + 1);
+  });
+
+  it("culls zero-extent members instead of falling back to unbounded per-member passes", () => {
+    const members: MemberRosterEntry[] = [];
+    for (let i = 0; i < 5000; i++) {
+      members.push({
+        imageId: `img-${i}`,
+        position: [0, 0],
+        entityId: `tile-${i}`,
+        dataW: 0,
+        dataH: 0,
+      });
+    }
+    const layers: SliceLayerParams[] = [];
+    pushMemberLayers(layers, {
+      members,
+      indexByMember: indexFor(members, null),
+      channel: null,
+      blendMode: "alpha",
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      zoom: 0.001,
+    });
+    expect(layers).toHaveLength(0);
+  });
+
+  it("excludes zero-extent members from an otherwise valid aggregate", () => {
+    const members = rosterGrid(5, 5, 1024);
+    members.push(
+      { imageId: "img-flat-0", position: [0, 4096], entityId: "tile-flat-0", dataW: 0, dataH: 512 },
+      { imageId: "img-flat-1", position: [512, 4096], entityId: "tile-flat-1", dataW: 512, dataH: 0 },
+      { imageId: "img-flat-2", position: [1024, 4096], entityId: "tile-flat-2", dataW: 0, dataH: 0 },
+    );
+    const layers: SliceLayerParams[] = [];
+    pushMemberLayers(layers, {
+      members,
+      indexByMember: indexFor(members, null),
+      channel: null,
+      blendMode: "alpha",
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      zoom: 0.001,
+    });
+    expect(layers).toHaveLength(1);
+    expect(layers[0].aggregate!.count).toBe(5);
+  });
+
+  it("folds cap overflow in roster order so aggregate quad z-order is stable", () => {
+    // Sizes INCREASE with roster index, so the overflow (smallest) members
+    // are roster indices 0..3. Their quads must appear in roster order —
+    // not size order — because quad order is the aggregate's draw order.
+    const members: MemberRosterEntry[] = [];
+    const n = MAX_INDIVIDUAL_MEMBER_PASSES + 4;
+    for (let i = 0; i < n; i++) {
+      members.push({
+        imageId: `img-${i}`,
+        position: [(i % 20) * 4096, Math.floor(i / 20) * 4096],
+        entityId: `tile-${i}`,
+        dataW: 1000 + i * 4,
+        dataH: 1000 + i * 4,
+      });
+    }
+    const layers: SliceLayerParams[] = [];
+    pushMemberLayers(layers, {
+      members,
+      indexByMember: indexFor(members, null),
+      channel: null,
+      blendMode: "alpha",
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      zoom: 0.03, // smallest diag ≈ 42 px — everyone above the threshold
+    });
+    const agg = layers.find((l) => l.aggregate);
+    expect(agg).toBeDefined();
+    expect(agg!.aggregate!.count).toBe(4);
+    const u32 = new Uint32Array(agg!.aggregate!.quads);
+    const entityOrder = [0, 1, 2, 3].map((i) => u32[i * 8 + 4]);
+    expect(entityOrder).toEqual([0, 1, 2, 3]);
+  });
 });
 
 // ---------------------------------------------------------------------------

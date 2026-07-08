@@ -116,6 +116,11 @@ export function pushMemberLayers(
     // dataW/dataH; normal tile entries use the dataset's image dims.
     const dataW = m.dataW ?? fullResWidth;
     const dataH = m.dataH ?? fullResHeight;
+    // A zero/negative/non-finite extent covers no pixels and would
+    // poison the aggregate's union-extent normalization (whose
+    // degenerate-extent fallback dissolves the whole batch back into
+    // unbounded per-member passes). Cull such members outright.
+    if (!(dataW > 0) || !(dataH > 0)) continue;
     const memberKey = channel === null ? m.imageId : compositeKey(m.imageId, channel);
     const entityIndex = indexByMember.get(memberKey);
     if (entityIndex === undefined) continue;
@@ -144,6 +149,17 @@ export function pushMemberLayers(
     individual = individual.slice(0, MAX_INDIVIDUAL_MEMBER_PASSES);
     individual.sort((a, b) => a.order - b.order);
   }
+  if (batched.length === 1 && individual.length >= MAX_INDIVIDUAL_MEMBER_PASSES) {
+    // Exactly one member over the cap: unfolding it (below) would emit
+    // cap+1 individual passes. Fold the smallest individual with it
+    // instead, so the cap holds exactly and the aggregate still reduces
+    // passes (2 members → 1 pass).
+    let smallest = 0;
+    for (let i = 1; i < individual.length; i++) {
+      if (individual[i].diagPx < individual[smallest].diagPx) smallest = i;
+    }
+    batched.push(individual.splice(smallest, 1)[0]);
+  }
   if (batched.length < 2) {
     // Aggregation only engages when it reduces passes; a lone tiny
     // member renders exactly as before.
@@ -151,6 +167,10 @@ export function pushMemberLayers(
     individual.sort((a, b) => a.order - b.order);
     batched = [];
   }
+  // Quad order is the aggregate's internal draw (z) order. Restore
+  // roster order regardless of how members got here — the cap-overflow
+  // path above collects them in size order.
+  batched.sort((a, b) => a.order - b.order);
 
   if (batched.length > 0) {
     let minX = Infinity, minY = Infinity;
@@ -175,8 +195,12 @@ export function pushMemberLayers(
         f32[base + 3] = c.dataH / extH;
         u32[base + 4] = c.entityIndex;
       });
-      // Beneath the individual layers: batched members are the smallest
-      // on screen, and members of one dataset are spatially disjoint.
+      // Emitted beneath the individual layers. Members that overlap
+      // WITHIN the aggregate blend in quad (roster) order, matching the
+      // per-member emission order; a batched member overlapping an
+      // INDIVIDUAL member composites beneath it regardless of roster
+      // position — the accepted residual of folding into one pass
+      // (batched members are the smallest on screen).
       layers.push({
         datasetId: batched[0].memberKey,
         dataW: extW,
@@ -194,8 +218,10 @@ export function pushMemberLayers(
         },
       });
     } else {
-      // Degenerate extent (zero-size members): fall back to per-member
-      // emission rather than a division by zero.
+      // Defensive only: zero-extent members are culled at candidate
+      // collection, so a batch of positive-extent members always has a
+      // positive union extent. Kept so a future regression degrades to
+      // per-member emission rather than a division by zero.
       individual = individual.concat(batched);
       individual.sort((a, b) => a.order - b.order);
     }
