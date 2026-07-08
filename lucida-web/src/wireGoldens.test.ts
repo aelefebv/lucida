@@ -1221,6 +1221,47 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     );
   });
 
+  it("source_chunk_status reaches the handler and rejects a pending fetch as permanent", async () => {
+    const raw = fixtureRaw("session/server_source_chunk_status.json");
+    COVERED_FIXTURES.add("session/server_source_chunk_status.json");
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "source_chunk_status",
+      dataset_id: "wds-0f3a",
+      image_id: "multiscale-0",
+      key: "0/1/0/1/0/0",
+      status: "failed_permanent",
+      message: "access to the dataset store was denied",
+    });
+
+    const onSourceChunkStatus = vi.fn();
+    const { ws } = openBridge({ onSourceChunkStatus });
+    deliver(ws, raw);
+    expect(onSourceChunkStatus).toHaveBeenCalledWith(
+      "wds-0f3a",
+      "multiscale-0",
+      "0/1/0/1/0/0",
+      "failed_permanent",
+      "access to the dataset store was denied",
+    );
+
+    // Consumption path: the same frame's fields drive the content source,
+    // which must fail the pending fetch permanently (never a transient
+    // timeout) so the delivery-failure streak can count a dead source.
+    const source = new ProxiedContentSource(() => {});
+    source.registerImage("multiscale-0", { Raw: { data_type: "Uint16" } });
+    const pending = source.fetch(
+      { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "0/1/0/1/0/0" },
+      new AbortController().signal,
+    );
+    const [datasetId, imageId, key, status, message] = onSourceChunkStatus.mock.calls[0];
+    source.handleSourceChunkStatus(datasetId, imageId, key, status, message);
+    await expect(pending).rejects.toMatchObject({
+      name: "FetchError",
+      kind: "permanent",
+      message: expect.stringContaining("access to the dataset store was denied"),
+    });
+  });
+
   it("bookmark_changed fans out to handler and subscribers", () => {
     const raw = fixtureRaw("session/server_bookmark_changed.json");
     COVERED_FIXTURES.add("session/server_bookmark_changed.json");

@@ -5,6 +5,7 @@ import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetState } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
@@ -19,7 +20,7 @@ function applySettingsCommand(
   cmd: ViewportCommand,
   loop: RenderLoop | null,
 ): void {
-  scene.apply_command(JSON.stringify(cmd));
+  guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
   invalidateDisplaySettings(loop);
 }
 

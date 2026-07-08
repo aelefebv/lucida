@@ -1695,8 +1695,10 @@ function App({
         {bridge.remoteDatasetLoading && (
           <p className="secondary">{bridge.remoteDatasetProgress ?? "Loading volume..."}</p>
         )}
-        {(render.renderError || bridge.remoteDatasetError) && (
-          <p style={{ color: "#f44" }}>{render.renderError || bridge.remoteDatasetError}</p>
+        {(scene.wasmError || render.renderError || bridge.remoteDatasetError) && (
+          <p style={{ color: "#f44" }}>
+            {scene.wasmError || render.renderError || bridge.remoteDatasetError}
+          </p>
         )}
       </div>
       <WorkspaceSavedViewsSidebar

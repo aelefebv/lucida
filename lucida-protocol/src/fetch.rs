@@ -267,6 +267,30 @@ pub enum WireFormat {
     Zstd { data_type: DataType },
 }
 
+/// Why a proxied source chunk could not be served from its store.
+///
+/// Sent to the requesting client (as `ServerMessage::SourceChunkStatus`)
+/// when the store read fails with anything other than not-found — a
+/// missing object is legitimate sparse data and is served as a canonical
+/// zero-filled frame instead. Without this frame the client would see
+/// only its own request timeout, which it must treat as transient, so a
+/// genuinely dead source (revoked credentials, broken backend) would
+/// never become visible.
+///
+/// The vocabulary is deliberately the failure subset of
+/// [`crate::GeneratedChunkStatus`], with the same wire strings, so both
+/// chunk families report failures in one dialect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceChunkStatus {
+    /// The store rejected the read for lack of permission or valid
+    /// credentials. Retrying cannot succeed without operator action.
+    FailedPermanent,
+    /// The store could not serve the chunk right now (backend error,
+    /// unreachable service, malformed response, ...).
+    Unavailable,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +413,21 @@ mod tests {
         let json = serde_json::to_string(&wf).unwrap();
         let back: WireFormat = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, back);
+    }
+
+    #[test]
+    fn source_chunk_status_wire_names_match_the_generated_dialect() {
+        // The web client dispatches on these strings; they must stay
+        // aligned with the equivalent `GeneratedChunkStatus` variants.
+        for (status, wire) in [
+            (SourceChunkStatus::FailedPermanent, "\"failed_permanent\""),
+            (SourceChunkStatus::Unavailable, "\"unavailable\""),
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, wire);
+            let back: SourceChunkStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status);
+        }
     }
 
     fn wide_proxied(image_count: usize) -> ProxiedFetchDescriptor {

@@ -124,7 +124,7 @@ use lucida_protocol::{
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LevelAddress,
     LocalFetchDescriptor, ProxiedFetchDescriptor, ProxiedImageSpec, ProxyAvailability,
-    ProxyFootprint, ProxyKind, WireFormat,
+    ProxyFootprint, ProxyKind, SourceChunkStatus, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -301,6 +301,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::GeneratedChunkStatus { .. } => {
             &["session/server_generated_chunk_status.json"]
         }
+        ServerMessage::SourceChunkStatus { .. } => &["session/server_source_chunk_status.json"],
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
     }
@@ -1705,6 +1706,20 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 key: "2/1/0/1/0/0".into(),
                 status: GeneratedChunkStatus::FailedTransient,
                 message: Some("source read timed out".into()),
+            },
+            req(
+                "",
+                &["/type", "/dataset_id", "/image_id", "/key", "/status"],
+            ),
+        ),
+        (
+            "session/server_source_chunk_status.json",
+            ServerMessage::SourceChunkStatus {
+                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+                image_id: ImageId(SINGLE_IMAGE_ID.into()),
+                key: "0/1/0/1/0/0".into(),
+                status: SourceChunkStatus::FailedPermanent,
+                message: Some("access to the dataset store was denied".into()),
             },
             req(
                 "",

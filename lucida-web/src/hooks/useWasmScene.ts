@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import init, { WasmScene, set_debug_categories } from "lucida-core";
+import { WasmScene, set_debug_categories } from "lucida-core";
 import { getEnabledCategories, onDebugCategoriesChanged } from "../debug/logging.ts";
+import { initWasmOnce } from "../wasmInit.ts";
 
 export function useWasmScene() {
   const [wasmReady, setWasmReady] = useState(false);
+  /** Human-readable boot failure, set when the wasm initialization
+   *  rejects. Without it a failed boot is a permanently blank shell with
+   *  nothing but a console line; the app renders this like any other
+   *  top-level error. Never set on the same mount as `wasmReady`. */
+  const [wasmError, setWasmError] = useState<string | null>(null);
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
   // Ref mirror of the wasmScene state — handlers and downstream
   // hooks read .current to avoid stale closures over `wasmScene`.
@@ -13,17 +19,32 @@ export function useWasmScene() {
   wasmSceneRef.current = wasmScene;
 
   useEffect(() => {
+    // `initWasmOnce` shares one instantiation across concurrent mounts (dev
+    // StrictMode double-mounts this effect while the first init is still in
+    // flight) and across remounts after completion. `wasmReady` — and with
+    // it every `WasmScene` construction — only ever follows that single
+    // resolved initialization.
+    let cancelled = false;
     let unsub: (() => void) | null = null;
-    init().then(() => {
-      // Push initial enabled categories into WASM, then subscribe so
-      // future panel toggles propagate without a reload.
-      set_debug_categories(getEnabledCategories().join(","));
-      unsub = onDebugCategoriesChanged((cats) => {
-        set_debug_categories(cats.join(","));
+    initWasmOnce()
+      .then(() => {
+        if (cancelled) return;
+        // Push initial enabled categories into WASM, then subscribe so
+        // future panel toggles propagate without a reload.
+        set_debug_categories(getEnabledCategories().join(","));
+        unsub = onDebugCategoriesChanged((cats) => {
+          set_debug_categories(cats.join(","));
+        });
+        setWasmReady(true);
+      })
+      .catch((e: unknown) => {
+        console.error("wasm module initialization failed:", e);
+        if (cancelled) return;
+        const message = e instanceof Error ? e.message : String(e);
+        setWasmError(`Viewer failed to start: ${message}. Reload the page to try again.`);
       });
-      setWasmReady(true);
-    });
     return () => {
+      cancelled = true;
       unsub?.();
     };
   }, []);
@@ -38,5 +59,5 @@ export function useWasmScene() {
     return scene;
   }
 
-  return { wasmReady, wasmScene, wasmSceneRef, setWasmScene, ensureScene };
+  return { wasmReady, wasmError, wasmScene, wasmSceneRef, setWasmScene, ensureScene };
 }

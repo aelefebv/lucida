@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // The controller constructs the real connection stack; replace the classes
 // holding live resources (WebSocket, decode workers, request timers) with
@@ -44,6 +44,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     registerImage = vi.fn();
     handleBinary = vi.fn();
     handleChunkStatus = vi.fn();
+    handleSourceChunkStatus = vi.fn();
     constructor(_send: unknown) {
       MockProxiedContentSource.instances.push(this);
     }
@@ -51,7 +52,10 @@ vi.mock("./pipeline/fetch/index.ts", () => {
   class MockCpuCache {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
-    constructor(_source: unknown, _pool: unknown) {
+    resetChunkFailureStreak = vi.fn();
+    config: unknown;
+    constructor(_source: unknown, _pool: unknown, config?: unknown) {
+      this.config = config;
       MockCpuCache.instances.push(this);
     }
   }
@@ -64,9 +68,11 @@ vi.mock("./pipeline/fetch/index.ts", () => {
 
 import {
   SessionController,
+  type RemoteDatasetActivity,
   type SessionControllerDeps,
   type SessionControllerEvents,
 } from "./sessionController.ts";
+import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
 import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import type { WasmScene } from "lucida-core";
@@ -84,13 +90,21 @@ const MockedContentSource = ProxiedContentSource as unknown as {
   instances: Array<{
     registerImage: ReturnType<typeof vi.fn>;
     rejectAll: ReturnType<typeof vi.fn>;
+    handleSourceChunkStatus: ReturnType<typeof vi.fn>;
   }>;
 };
 const MockedDecodePool = DecodePool as unknown as {
   instances: Array<{ terminate: ReturnType<typeof vi.fn> }>;
 };
 const MockedCpuCache = CpuCache as unknown as {
-  instances: Array<{ reset: ReturnType<typeof vi.fn> }>;
+  instances: Array<{
+    reset: ReturnType<typeof vi.fn>;
+    resetChunkFailureStreak: ReturnType<typeof vi.fn>;
+    config?: {
+      onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void;
+      onChunkFailureRecovered?: () => void;
+    };
+  }>;
 };
 
 /** The WASM surface the controller touches, as call-recording stubs. */
@@ -201,6 +215,11 @@ function makeEvents(): SessionControllerEvents {
   };
 }
 
+/** Controllers created by `makeHarness`, destroyed after every test so the
+ *  module-global sceneGuard observer registry never leaks a live observer
+ *  into the next test. */
+const liveControllers: SessionController[] = [];
+
 function makeHarness() {
   const scene = makeFakeScene();
   const sceneRef: { current: WasmScene | null } = { current: null };
@@ -235,6 +254,7 @@ function makeHarness() {
     events,
   } satisfies SessionControllerDeps;
   const controller = new SessionController(deps);
+  liveControllers.push(controller);
   const handlers = MockedBridge.instances[MockedBridge.instances.length - 1].handlers;
   return { controller, handlers, deps, events, scene, savedViewHooks, datasets };
 }
@@ -244,6 +264,15 @@ beforeEach(() => {
   MockedContentSource.instances.length = 0;
   MockedDecodePool.instances.length = 0;
   MockedCpuCache.instances.length = 0;
+});
+
+afterEach(() => {
+  // Destroy (idempotent) so each controller unsubscribes from the
+  // module-global scene-call guard; a leaked observer would let one test's
+  // scene traffic mutate a later test's error surface.
+  for (const controller of liveControllers.splice(0)) {
+    controller.destroy();
+  }
 });
 
 describe("SessionController dataset registration", () => {
@@ -365,6 +394,385 @@ describe("SessionController remote-document-changed coalescing", () => {
     await Promise.resolve();
 
     expect(docChanged).not.toHaveBeenCalled();
+  });
+});
+
+/** Activity emissions that carry a non-null error (the visible banner). */
+function errorEmissions(events: SessionControllerEvents): string[] {
+  return (events.onRemoteDatasetActivity as ReturnType<typeof vi.fn>).mock.calls
+    .map(([activity]) => (activity as { error: string | null }).error)
+    .filter((error): error is string => error !== null);
+}
+
+/** The most recent activity emission — the state the UI is showing now. */
+function lastActivity(events: SessionControllerEvents): RemoteDatasetActivity {
+  const calls = (events.onRemoteDatasetActivity as ReturnType<typeof vi.fn>).mock.calls;
+  expect(calls.length).toBeGreaterThan(0);
+  return calls[calls.length - 1][0] as RemoteDatasetActivity;
+}
+
+describe("SessionController scene failure surfacing", () => {
+  const visibilityCmd = JSON.stringify({
+    type: "set_dataset_visible",
+    dataset_id: "wds-1",
+    visible: false,
+  });
+
+  it("repeated apply_command failures surface a visible error", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new Error("state mismatch");
+    });
+
+    handlers.onCommand(2, visibilityCmd);
+    handlers.onCommand(3, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(0);
+
+    handlers.onCommand(4, visibilityCmd);
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("state mismatch");
+  });
+
+  it("a fatal-class engine error surfaces on the first failure", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new Error(
+        "recursive use of an object detected which would lead to unsafe aliasing in rust",
+      );
+    });
+
+    handlers.onCommand(2, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(1);
+  });
+
+  it("a wasm trap (RuntimeError) surfaces on the first failure", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+
+    handlers.onCommand(2, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(1);
+  });
+
+  it("isolated failures between successful applies never trip the surface", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+
+    let fail = false;
+    scene.apply_command.mockImplementation(() => {
+      if (fail) throw new Error("transient hiccup");
+    });
+    // fail → ok → fail → ok → fail: three failures, never consecutive.
+    for (let i = 0; i < 5; i++) {
+      fail = i % 2 === 0;
+      handlers.onCommand(2 + i, visibilityCmd);
+    }
+
+    expect(errorEmissions(events)).toHaveLength(0);
+  });
+
+  it("healthy applies emit no error at all", () => {
+    const { handlers, events } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    for (let i = 0; i < 10; i++) {
+      handlers.onCommand(2 + i, visibilityCmd);
+    }
+    expect(errorEmissions(events)).toHaveLength(0);
+  });
+
+  it("an already-visible failure is not re-emitted per subsequent failure", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+
+    for (let i = 0; i < 8; i++) {
+      handlers.onCommand(2 + i, visibilityCmd);
+    }
+    expect(errorEmissions(events)).toHaveLength(1);
+  });
+
+  it("a chunk fetch failure streak reported by the cache surfaces through the same channel", () => {
+    const { events } = makeHarness();
+    const config = MockedCpuCache.instances[0].config;
+    expect(config?.onChunkFailureStreak).toBeTypeOf("function");
+
+    config!.onChunkFailureStreak!(12, "403 rejected");
+
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("12");
+    expect(errors[0]).toContain("403 rejected");
+  });
+});
+
+describe("SessionController local scene mutation surfacing", () => {
+  it("a fatal local apply through applyAndSend surfaces without any remote command traffic", () => {
+    const { events, scene, deps } = makeHarness();
+    const sceneObj = deps.ensureScene();
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+    const sendCommand = vi.fn();
+
+    expect(() =>
+      applyDocumentCommand(sceneObj, { type: "remove_dataset", id: "wds-1" }, sendCommand),
+    ).toThrow(WebAssembly.RuntimeError);
+
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Viewer engine failure");
+    // The failed apply was never broadcast.
+    expect(sendCommand).not.toHaveBeenCalled();
+  });
+
+  it("three consecutive local viewport failures surface the engine banner", () => {
+    const { events, scene, deps } = makeHarness();
+    const sceneObj = deps.ensureScene();
+    scene.apply_command.mockImplementation(() => {
+      throw new Error("state mismatch");
+    });
+
+    for (let t = 0; t < 3; t++) {
+      expect(() => applyViewportCommand(sceneObj, { type: "set_t", t })).toThrow(
+        "state mismatch",
+      );
+    }
+
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Viewer engine failure");
+  });
+
+  it("a fatal load_document failure surfaces even though the snapshot catch swallows it", () => {
+    const { handlers, events, scene } = makeHarness();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      scene.load_document.mockImplementation(() => {
+        throw new WebAssembly.RuntimeError("unreachable");
+      });
+      handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    } finally {
+      warn.mockRestore();
+    }
+
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Viewer engine failure");
+  });
+
+  it("a destroyed controller stops observing scene mutations", () => {
+    const { controller, events, scene, deps } = makeHarness();
+    const sceneObj = deps.ensureScene();
+    controller.destroy();
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+
+    expect(() => applyViewportCommand(sceneObj, { type: "set_t", t: 0 })).toThrow();
+    expect(errorEmissions(events)).toHaveLength(0);
+  });
+});
+
+describe("SessionController error recovery and precedence", () => {
+  const visibilityCmd = JSON.stringify({
+    type: "set_dataset_visible",
+    dataset_id: "wds-1",
+    visible: false,
+  });
+
+  it("a successful apply clears a standing non-fatal engine banner", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new Error("state mismatch");
+    });
+    handlers.onCommand(2, visibilityCmd);
+    handlers.onCommand(3, visibilityCmd);
+    handlers.onCommand(4, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(1);
+
+    // The scene recovers (e.g. the offending state was superseded): the
+    // next successful apply retires the banner.
+    scene.apply_command.mockImplementation(() => {});
+    handlers.onCommand(5, visibilityCmd);
+    expect(lastActivity(events).error).toBeNull();
+  });
+
+  it("a fatal banner persists through subsequent successful applies", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementationOnce(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+    handlers.onCommand(2, visibilityCmd);
+    expect(errorEmissions(events)).toHaveLength(1);
+
+    // Even if an isolated call slips through, a trapped instance is not
+    // un-poisoned — the reload banner must stand.
+    handlers.onCommand(3, visibilityCmd);
+    expect(lastActivity(events).error).toContain("Viewer engine failure");
+  });
+
+  it("parse-boundary rejection bursts surface the softer notice, never the engine banner", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new Error("data did not match any variant of untagged enum Command");
+    });
+    handlers.onCommand(2, visibilityCmd);
+    handlers.onCommand(3, visibilityCmd);
+    handlers.onCommand(4, visibilityCmd);
+
+    const errors = errorEmissions(events);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).not.toContain("Viewer engine failure");
+    expect(errors[0]).not.toContain("Reload");
+    expect(errors[0]).toContain("did not match any variant");
+
+    // The scene provably applies other commands fine — the advisory clears.
+    scene.apply_command.mockImplementation(() => {});
+    handlers.onCommand(5, visibilityCmd);
+    expect(lastActivity(events).error).toBeNull();
+  });
+
+  it("chunk-delivery recovery clears the data banner", () => {
+    const { events } = makeHarness();
+    const config = MockedCpuCache.instances[0].config;
+    expect(config?.onChunkFailureRecovered).toBeTypeOf("function");
+
+    config!.onChunkFailureStreak!(12, "403 rejected");
+    expect(errorEmissions(events)).toHaveLength(1);
+
+    config!.onChunkFailureRecovered!();
+    expect(lastActivity(events).error).toBeNull();
+  });
+
+  it("chunk-delivery recovery never clears a banner it does not own", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+    handlers.onCommand(2, visibilityCmd);
+
+    MockedCpuCache.instances[0].config!.onChunkFailureRecovered!();
+    expect(lastActivity(events).error).toContain("Viewer engine failure");
+  });
+
+  it("dataset-open progress does not wipe a fatal banner", () => {
+    const { handlers, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    scene.apply_command.mockImplementation(() => {
+      throw new WebAssembly.RuntimeError("unreachable");
+    });
+    handlers.onCommand(2, visibilityCmd);
+
+    handlers.onDatasetOpenProgress?.("req-1", "http://example/data.zarr", {
+      stage: "metadata_import",
+      message: "reading metadata",
+    });
+    expect(lastActivity(events).error).toContain("Viewer engine failure");
+  });
+
+  it("dataset-open progress still supersedes a previous open failure", () => {
+    const { handlers, events } = makeHarness();
+    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    expect(lastActivity(events).error).toBe("permission denied");
+
+    handlers.onDatasetOpenProgress?.("req-1", "http://example/b.zarr", {
+      stage: "metadata_import",
+      message: "reading metadata",
+    });
+    expect(lastActivity(events).error).toBeNull();
+  });
+
+  it("a delivery streak beginning after an open failure takes the slot (last-writer)", () => {
+    // A standing one-shot open failure must not mask a live, ongoing data
+    // problem — the stalling canvas would otherwise be attributed to the
+    // wrong (already-final) cause. open/data resolve by last-writer.
+    const { handlers, events } = makeHarness();
+    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    expect(lastActivity(events).error).toBe("permission denied");
+
+    MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
+    expect(lastActivity(events).error).toContain("Data loading is failing repeatedly");
+  });
+
+  it("a fresh open failure supersedes a standing data banner", () => {
+    const { handlers, events } = makeHarness();
+    MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
+
+    handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    expect(lastActivity(events).error).toBe("permission denied");
+  });
+
+  it("reconnect resets the cache chunk-failure streak", () => {
+    const { handlers } = makeHarness();
+    handlers.onConnected?.();
+    expect(MockedCpuCache.instances[0].resetChunkFailureStreak).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SessionController source-chunk status routing", () => {
+  it("routes source_chunk_status frames into the fetch pipeline", () => {
+    const { handlers } = makeHarness();
+
+    handlers.onSourceChunkStatus?.(
+      "wds-1",
+      "wds-1-img",
+      "0/0/0/0/0/0",
+      "failed_permanent",
+      "access denied",
+    );
+
+    expect(
+      MockedContentSource.instances[0].handleSourceChunkStatus,
+    ).toHaveBeenCalledExactlyOnceWith(
+      "wds-1",
+      "wds-1-img",
+      "0/0/0/0/0/0",
+      "failed_permanent",
+      "access denied",
+    );
+  });
+});
+
+describe("SessionController scene-call scoping across coexisting controllers", () => {
+  const visibilityCmd = JSON.stringify({
+    type: "set_dataset_visible",
+    dataset_id: "wds-1",
+    visible: false,
+  });
+
+  it("one controller's successful apply neither clears another's banner nor resets its streak", () => {
+    // Controllers coexist transiently (overlapping mounts); the guard is
+    // module-global, so scoping must come from the call's subject scene.
+    const a = makeHarness();
+    const b = makeHarness();
+    a.handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    b.handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+
+    // B's scene fails into a standing (non-fatal) engine banner.
+    b.scene.apply_command.mockImplementation(() => {
+      throw new Error("state mismatch");
+    });
+    b.handlers.onCommand(2, visibilityCmd);
+    b.handlers.onCommand(3, visibilityCmd);
+    b.handlers.onCommand(4, visibilityCmd);
+    expect(lastActivity(b.events).error).toContain("Viewer engine failure");
+
+    // A's scene keeps applying fine — that proves nothing about B.
+    a.handlers.onCommand(2, visibilityCmd);
+    expect(lastActivity(b.events).error).toContain("Viewer engine failure");
+    // And B's failures never counted against A.
+    expect(errorEmissions(a.events)).toHaveLength(0);
   });
 });
 

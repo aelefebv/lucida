@@ -9,6 +9,16 @@ import { FetchError } from "./retry.ts";
 
 export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
+/**
+ * Failure statuses the server unicasts when a source chunk's store read
+ * fails with a non-not-found error (`source_chunk_status` frames): revoked
+ * access, backend fault, unreachable store. Mirror of
+ * `lucida_protocol::SourceChunkStatus`; not-found is served as a
+ * zero-filled binary frame and success as normal chunk bytes, so this
+ * vocabulary is failure-only.
+ */
+export type SourceChunkStatus = "failed_permanent" | "unavailable";
+
 export interface FetchRequest {
   datasetId: string;
   imageId: string;
@@ -117,6 +127,38 @@ export class ProxiedContentSource implements ContentSource {
     for (const entry of entries) {
       clearTimeout(entry.timeoutId);
       entry.reject(generatedStatusToFetchError(status, chunkKey, message));
+    }
+  }
+
+  /**
+   * Server-reported terminal failure for a source chunk: the store read
+   * failed with a non-not-found error. Both statuses reject the pending
+   * fetch as `permanent` — the bytes will not arrive on this request and a
+   * client-side retry cannot help — so the delivery-failure streak counts
+   * it. This frame is what distinguishes a dead source (revoked access,
+   * broken backend) from an ordinary transient timeout, which stays
+   * excluded from the streak.
+   */
+  handleSourceChunkStatus(
+    datasetId: string,
+    imageId: string,
+    chunkKey: string,
+    status: SourceChunkStatus,
+    message?: string | null,
+  ): void {
+    const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
+    const entries = this.takePending(compositeKey);
+    if (entries.length === 0) return;
+
+    const reason = status === "failed_permanent" ? "failed permanently" : "unavailable";
+    const detail = message ? `: ${message}` : "";
+    for (const entry of entries) {
+      clearTimeout(entry.timeoutId);
+      entry.reject(
+        new FetchError(`Source chunk ${chunkKey} ${reason}${detail}`, {
+          kind: "permanent",
+        }),
+      );
     }
   }
 

@@ -1,0 +1,8 @@
+{
+  "type": "source_chunk_status",
+  "dataset_id": "wds-0f3a",
+  "image_id": "multiscale-0",
+  "key": "0/1/0/1/0/0",
+  "status": "failed_permanent",
+  "message": "access to the dataset store was denied"
+}

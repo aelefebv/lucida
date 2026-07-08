@@ -27,6 +27,7 @@
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
+import { guardedSceneCall } from "../sceneGuard.ts";
 import type {
   Camera,
   DatasetDisplaySettings,
@@ -542,12 +543,12 @@ export class SavedViewApplier {
   private applyDocument(cmd: DocumentCommand): void {
     const json = JSON.stringify(cmd);
     const scene = this.getScene();
-    scene?.apply_command(json);
+    if (scene) guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
     this.bridge.sendCommand(json);
   }
 
   private applyViewport(scene: WasmScene, cmd: ViewportCommand): void {
-    scene.apply_command(JSON.stringify(cmd));
+    guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
   }
 
   private applyDatasetSettings(
@@ -579,7 +580,7 @@ export class SavedViewApplier {
       display: unknown;
     };
     presence.camera = camera;
-    scene.import_presence(JSON.stringify(presence));
+    guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
   }
 
   private updateOpenStatus(url: string, newState: OpenStatus["state"], error?: string): void {

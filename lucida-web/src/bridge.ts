@@ -19,6 +19,7 @@
  * changes behavior.
  */
 import { isDebugEnabled } from "./debug/logging.ts";
+import type { SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
 import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
@@ -308,6 +309,19 @@ export interface BridgeHandlers {
     imageId: string,
     key: string,
     status: GeneratedChunkStatus,
+    message?: string | null,
+  ) => void;
+  /**
+   * The server could not serve a source chunk because its store read
+   * failed with a non-not-found error (revoked access, backend fault,
+   * unreachable store). Routed into the fetch pipeline so the pending
+   * request fails permanently instead of timing out as a transient.
+   */
+  onSourceChunkStatus?: (
+    datasetId: string,
+    imageId: string,
+    key: string,
+    status: SourceChunkStatus,
     message?: string | null,
   ) => void;
   /**
@@ -604,6 +618,15 @@ export class Bridge {
             break;
           case "generated_chunk_status":
             this.handlers.onGeneratedChunkStatus?.(
+              msg.dataset_id,
+              msg.image_id,
+              msg.key,
+              msg.status,
+              msg.message ?? null,
+            );
+            break;
+          case "source_chunk_status":
+            this.handlers.onSourceChunkStatus?.(
               msg.dataset_id,
               msg.image_id,
               msg.key,
