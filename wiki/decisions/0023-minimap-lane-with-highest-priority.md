@@ -5,7 +5,7 @@ description: "The minimap is its own dedicated planning lane (MINIMAP) with prio
 tags: [lucida, decision]
 source_path: wiki/decisions/0023-minimap-lane-with-highest-priority.md
 created: 2026-05-14
-modified: 2026-07-06
+modified: 2026-07-08
 ---
 
 # Minimap Lane with Highest Priority
@@ -31,6 +31,8 @@ The starvation risk on initial load is bounded: minimap chunks are small (~16 ch
 - **One more lane in the system.** The lane count grows from four to five. The Pass 6 anti-recommendation against speculative lane proliferation does not apply here — this is a specific named lane for a specific real producer, not generic extension.
 
 > Note (since): a sixth lane has been added — `COARSE_LANE_OFFSET = 2400` for the coarse/detail path — so the "four → five lanes" framing above is now six in the live code (`pipeline/planning/config.ts`).
+
+> Note (since): the top placement is conditional on the seed set actually being small — the bounded-starvation premise in "Why" (~16 chunks, one-to-two seconds). A wide collection's whole-collection seed set is tens of thousands of coarsest chunks; at top priority that holds every fetch slot for tens of minutes while the visible band waits. Above `MINIMAP_SEED_FAST_MAX_CHUNKS` pending chunks (counted over the whole pending map — the fetch queue the demand lands in is shared), the planner emits the whole set strictly behind every other request in the plan: `max(MINIMAP_SEED_BULK_LANE_OFFSET = 2600, highest emitted priority + 1)`. A constant offset alone is not enough — lane offsets are not bands, because the priority formula's importance/distance terms are unbounded and a wide view's coarse/detail priorities run far past any constant. The minimap then fills opportunistically as slots free up. Small seed sets (this decision's actual case) keep the top lane unchanged.
 
 ## How this decision shows up in code
 

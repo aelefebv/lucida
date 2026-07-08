@@ -162,6 +162,12 @@ export class CpuCache {
   private currentSubmitTick = 0;
   private desiredDetailKeysThisTick = new Set<string>();
   private desiredCoarseKeysThisTick = new Set<string>();
+  /**
+   * Keys demanded by the VIEW's own coarse lane this tick (a strict
+   * subset of `desiredCoarseKeysThisTick`, which also counts minimap
+   * and overview demand). Feeds {@link resolveDemandLane}.
+   */
+  private viewCoarseKeysThisTick = new Set<string>();
   private sparseDetailStreak = 0;
   private lastSparseDetailLogAt = -Infinity;
 
@@ -297,6 +303,7 @@ export class CpuCache {
     this.cancelOmittedChunkWork(newActiveIds, plannedChunkKeys);
 
     const pendingChunks: ChunkRequest[] = [];
+    const pendingKeys = new Set<string>();
     const enqueueNow = performance.now();
     for (const req of plan.requests) {
       const key = this.inFlightKey(req);
@@ -310,14 +317,22 @@ export class CpuCache {
       }
 
       // Refresh lane/tier/priority/lastSeenTick on cached entries so
-      // deliverability and eviction reflect the current plan.
+      // deliverability and eviction reflect the current plan. The lane
+      // is demand-resolved: a chunk the view's coarse lane also wants
+      // this tick must not end up labelled "minimap" (undeliverable)
+      // just because the minimap request happened to be processed last.
       const cachedEntry = this.lookupCachedEntry(req);
       if (cachedEntry) {
         this.counters.recordHit();
-        cachedEntry.lane = req.lane;
+        const lane = this.resolveDemandLane(req.lane, key);
+        cachedEntry.lane = lane;
         cachedEntry.residencyTier = this.requestResidencyTier(req);
-        cachedEntry.tier = this.laneToTier(req.lane);
-        cachedEntry.priority = req.priority;
+        cachedEntry.tier = this.laneToTier(lane);
+        // A relabelled minimap request must not overwrite the view's
+        // own (more urgent) delivery priority for the same chunk.
+        cachedEntry.priority = lane === req.lane
+          ? req.priority
+          : Math.min(cachedEntry.priority, req.priority);
         cachedEntry.lastSeenTick = this.currentSubmitTick;
         continue;
       }
@@ -330,6 +345,12 @@ export class CpuCache {
       const failure = this.failures.get(key);
       if (failure && this.currentEpochs.content < failure.failedUntilContentEpoch) continue;
 
+      // The minimap and coarse lanes can demand the same chunk (shared
+      // residency tier + key); one fetch serves both, and the most
+      // urgent occurrence — plans arrive priority-sorted — keeps the
+      // queue slot.
+      if (pendingKeys.has(key)) continue;
+      pendingKeys.add(key);
       pendingChunks.push(req);
     }
     this.chunkScheduler.enqueue(this.orderChunkRequestsForTierAllocation(pendingChunks), enqueueNow);
@@ -449,6 +470,7 @@ export class CpuCache {
     this.currentSubmitTick++;
     this.desiredDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
+    this.viewCoarseKeysThisTick.clear();
     this.sparseDetailStreak = 0;
     this.rejectionTracker.clear();
     this.deliveryState.onPlanRebuildStart();
@@ -504,6 +526,17 @@ export class CpuCache {
     } else {
       this.deliveryState.markProxySent(this.proxyKeyFromDelivery(delivery));
     }
+  }
+
+  /**
+   * Whether a planned chunk has already been posted to the worker (per
+   * the optimistic delivery ledger) for its residency tier. Feeds the
+   * per-member sent counts in the debug panel.
+   */
+  isChunkSent(req: ChunkRequest): boolean {
+    return this.deliveryState.wasChunkSent(
+      req.imageId, req.c, req.chunkKey, this.requestResidencyTier(req),
+    );
   }
 
   markChunkEvicted(
@@ -745,6 +778,7 @@ export class CpuCache {
 
     this.activeEntityIds.clear();
     this.activeEntityIdsThisRebuild.clear();
+    this.viewCoarseKeysThisTick.clear();
     this.interactionDetector.reset();
     this.failures.clear();
     this.chunkFailureStreak = 0;
@@ -856,8 +890,11 @@ export class CpuCache {
       this.inFlightChunkMeta.delete(key);
     }
 
-    // Cache even if cancelled during decode — the work is done.
-    const lane = effectiveReq.lane;
+    // Cache even if cancelled during decode — the work is done. The
+    // lane is demand-resolved: an arrival the view's coarse lane also
+    // wanted must be deliverable now, not after the next rebuild
+    // happens to relabel it.
+    const lane = this.resolveDemandLane(effectiveReq.lane, key);
     const tier = stale ? "demoted-detail" : this.laneToTier(lane);
     const cacheEntry: CacheEntry = {
       data: decoded,
@@ -1199,6 +1236,23 @@ export class CpuCache {
     return store.get(req.entityId, req.chunkKey);
   }
 
+  /**
+   * Lane a chunk entry should carry given everything demanding it this
+   * tick. The minimap and coarse lanes share a residency tier and a
+   * dedup key, so one fetch (or one cached entry) serves both — but
+   * {@link getDeliverable} only hands lane `"coarse"` entries to the
+   * main view. When the view's own coarse lane demanded the chunk this
+   * tick, a minimap-lane fetch or refresh must not leave the entry
+   * undeliverable until an interaction-triggered rebuild relabels it:
+   * that stalls idle fill at zero regardless of fetch rate. Chunks only
+   * the minimap wanted keep their lane — nothing becomes deliverable
+   * that the view never asked for.
+   */
+  private resolveDemandLane(lane: Lane, key: string): Lane {
+    if (lane === "minimap" && this.viewCoarseKeysThisTick.has(key)) return "coarse";
+    return lane;
+  }
+
   private laneToTier(lane: Lane): EvictionTier {
     if (lane === "prefetch") return "prefetch";
     // overview/minimap use LRU; tier is a no-op label there.
@@ -1218,7 +1272,12 @@ export class CpuCache {
       if (this.requestResidencyTier(req) === "detail") {
         this.desiredDetailKeysThisTick.add(this.inFlightKey(req));
       } else if (this.requestResidencyTier(req) === "coarse") {
-        this.desiredCoarseKeysThisTick.add(this.inFlightKey(req));
+        const key = this.inFlightKey(req);
+        this.desiredCoarseKeysThisTick.add(key);
+        // Recorded over the FULL request list before the enqueue loop
+        // runs, so demand-lane resolution is independent of the order
+        // in which a chunk's minimap and coarse requests appear.
+        if (req.lane === "coarse") this.viewCoarseKeysThisTick.add(key);
       }
     }
   }

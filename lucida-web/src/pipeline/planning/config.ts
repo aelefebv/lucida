@@ -20,9 +20,40 @@ export const HYSTERESIS_PX = 5;
 /**
  * Minimap lane offset — highest urgency, dedicated lane at `0` so
  * whole-sample spatial context appears within ~1 s of dataset open.
- * See ADR 0023.
+ * See ADR 0023. Applies only while the pending seed set is small
+ * ({@link MINIMAP_SEED_FAST_MAX_CHUNKS}); larger sets emit at
+ * {@link MINIMAP_SEED_BULK_LANE_OFFSET}.
  */
 export const MINIMAP_LANE_OFFSET = 0;
+
+/**
+ * Largest pending minimap seed set (chunks, per dataset) that still
+ * rides the top-priority lane. ADR 0023's top placement rests on the
+ * seed set being SMALL — a bounded ~1 s starvation window for the view
+ * lanes. A wide collection breaks that premise: tens of thousands of
+ * coarsest chunks at top priority would hold every fetch slot for tens
+ * of minutes while the visible band waits. Above this count the whole
+ * seed set emits at {@link MINIMAP_SEED_BULK_LANE_OFFSET} instead. At
+ * typical fetch throughput the cap bounds the worst-case fast-lane
+ * window to a few seconds — and on a small collection most seeds are
+ * the same chunks the view's coarse lane wants anyway, so they fill
+ * both at once.
+ */
+export const MINIMAP_SEED_FAST_MAX_CHUNKS = 128;
+
+/**
+ * Priority FLOOR for minimap seeding once the pending seed count
+ * exceeds {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Lane offsets are not
+ * bands — the importance/distance terms in the priority formula are
+ * unbounded, so a wide view's coarse/detail requests can run far past
+ * any constant — therefore the planner emits bulk seeds at
+ * `max(this, highest priority already in the plan + 1)`: strictly
+ * behind everything the view asked for. The minimap then fills
+ * opportunistically as fetch slots free up: it may take minutes, which
+ * is acceptable for a whole-collection overview and not acceptable for
+ * the main view.
+ */
+export const MINIMAP_SEED_BULK_LANE_OFFSET = 2600;
 
 /** Priority lane offset for detail requests (visible chunks). */
 export const DETAIL_LANE_OFFSET = 500;
@@ -146,6 +177,21 @@ export interface PlanningConfig {
   // -- lane offsets ---------------------------------------------------
   /** Minimap lane (highest urgency). See {@link MINIMAP_LANE_OFFSET}. */
   minimapLaneOffset: number;
+  /**
+   * Largest pending minimap seed set that still rides the top-priority
+   * lane. See {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Optional for
+   * compatibility with config objects predating the knob (older
+   * persisted snapshots, external callers of the pure planner):
+   * `emitMinimapLane` falls back to the module default when absent, so
+   * large demand can never ride the fast lane by omission.
+   */
+  minimapSeedFastMaxChunks?: number;
+  /**
+   * Lane offset for minimap seeding beyond the fast cap (lowest
+   * urgency). See {@link MINIMAP_SEED_BULK_LANE_OFFSET}. Optional for
+   * the same compatibility reason as {@link minimapSeedFastMaxChunks}.
+   */
+  minimapSeedBulkLaneOffset?: number;
   /** Detail requests (visible chunks). */
   detailLaneOffset: number;
   /** Proxy requests (group/tile proxy fallbacks). */
@@ -173,6 +219,8 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,
+  minimapSeedFastMaxChunks: MINIMAP_SEED_FAST_MAX_CHUNKS,
+  minimapSeedBulkLaneOffset: MINIMAP_SEED_BULK_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,
   prefetchLaneOffset: PREFETCH_LANE_OFFSET,

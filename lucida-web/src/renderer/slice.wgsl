@@ -84,6 +84,28 @@ struct EntityDescriptor {
 // pairs; `currentEntity.index.y` holds the pair count (0 for intensity).
 @group(1) @binding(2) var<storage, read> labelColors: array<u32>;
 
+// One record per member of an aggregate (batched) layer. `rect` is the
+// member's quad in layer UV (origin xy, size zw); `entityRef.x` is the
+// member's entity descriptor index. Bound only by the aggregate
+// pipeline (vsAggregate/fsAggregate); the per-member pipeline's layout
+// omits it.
+struct MemberQuad {
+  rect: vec4f,
+  entityRef: vec4u,
+};
+@group(1) @binding(3) var<storage, read> memberQuads: array<MemberQuad>;
+
+// Width of the gray frame drawn just inside a member's footprint edge.
+const MEMBER_BORDER_WIDTH_PX: f32 = 1.5;
+
+// Minimum on-screen member size (per axis) for the footprint border to
+// draw at all. Below this the frame would cover the member's ENTIRE
+// footprint — every visible pixel would be constant border gray, so the
+// sampled data (and any contrast/gamma/colormap edit) could never reach
+// the screen. Tiny members render pure content instead: sampled value
+// on hit, transparent on miss.
+const MEMBER_BORDER_MIN_SCREEN_PX: f32 = 3.0;
+
 struct VSOut {
   @builtin(position) pos: vec4f,
   @location(0) uv: vec2f,
@@ -111,6 +133,9 @@ fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f)
   let slotZ = dims.x;
   let slotY = dims.y;
   let slotX = dims.z;
+  if (slotX == 0u || slotY == 0u || slotZ == 0u) {
+    return 0xFFFFFFFFu;
+  }
   let atlasDims = textureDimensions(tex);
   let slotsX = max(1u, atlasDims.x / slotX);
   let slotsY = max(1u, atlasDims.y / slotY);
@@ -121,12 +146,16 @@ fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f)
   let voxX = clamp(u32(uv.x * f32(slotX)), 0u, slotX - 1u);
   let voxY = clamp(u32(uv.y * f32(slotY)), 0u, slotY - 1u);
   let voxZ = slotZ / 2u;
-  let coord = vec3i(
-    i32(origin.x + voxX),
-    i32(origin.y + voxY),
-    i32(origin.z + voxZ),
-  );
-  return textureLoad(tex, coord, 0).r;
+  let coord = vec3u(origin.x + voxX, origin.y + voxY, origin.z + voxZ);
+  // A slot region that doesn't fit the bound texture (e.g. the 1×1×1
+  // dummy is bound while this member's proxy pool isn't attached to the
+  // draw) must read as a MISS — never as whatever an out-of-bounds
+  // textureLoad yields (typically 0, which shades as an opaque
+  // colormap-zero fill).
+  if (coord.x >= atlasDims.x || coord.y >= atlasDims.y || coord.z >= atlasDims.z) {
+    return 0xFFFFFFFFu;
+  }
+  return textureLoad(tex, vec3i(coord), 0).r;
 }
 
 fn sampleDetail2D(source: ChunkTierSource, uv: vec2f) -> u32 {
@@ -262,40 +291,14 @@ fn labelColorFor(id: u32, count: u32) -> vec4f {
   return vec4f(labelGlasbey(id), 1.0);
 }
 
-@fragment
-fn fs(input: VSOut) -> @location(0) vec4f {
-  // Apply inverse transform to get texture UV
-  let texUV4 = u.transform * vec4f(input.uv, 0.0, 1.0);
-  let texUV = texUV4.xy;
-
-  // Bounds check — transparent for compositing
-  if (texUV.x < 0.0 || texUV.x > 1.0 || texUV.y < 0.0 || texUV.y > 1.0) {
-    return vec4f(0.0, 0.0, 0.0, 0.0);
-  }
-
-  let entity = entityDescriptors[currentEntity.index.x];
-
-  // member footprint border: a gray frame 1.5 px inside each member's footprint
-  // edge. Skip it for a label overlay (categorical) — an opaque frame around a
-  // sub-footprint mask would sit on top of the intensity image it annotates.
-  if (entity.colormapMode != 1u) {
-    let border_width = 1.5;
-    let edge_x = min(texUV.x, 1.0 - texUV.x);
-    let edge_y = min(texUV.y, 1.0 - texUV.y);
-    let dist_x_px = edge_x * u.memberScreenSize.x;
-    let dist_y_px = edge_y * u.memberScreenSize.y;
-    let edge_min_px = min(dist_x_px, dist_y_px);
-    if (edge_min_px < border_width) {
-      return vec4f(0.3, 0.3, 0.3, 1.0);
-    }
-  }
-
-  let intensityMin = entity.contrastMin;
-  let intensityMax = entity.contrastMax;
-  let range = intensityMax - intensityMin;
-  let gamma = entity.gamma;
-  let layerOpacity = entity.opacity;
-
+// Resolve the raw sample for one entity at a member-local UV. Shared by
+// the per-member pass (`fs`) and the aggregate batched pass
+// (`fsAggregate`): tier sources first (selected detail → configured
+// coarse), otherwise the legacy semantic fallback chain (target detail
+// LOD → coarser detail LODs → tile proxy → group proxy). Returns the
+// sampled value or 0xFFFFFFFF when nothing is resident at this UV.
+fn sampleEntityValue(entityIdx: u32, texUV: vec2f) -> u32 {
+  let entity = entityDescriptors[entityIdx];
   var chunkVal = 0xFFFFFFFFu;
   let hasTierSources = entity.detailSource.valid != 0u || entity.coarseSource.valid != 0u;
 
@@ -363,6 +366,46 @@ fn fs(input: VSOut) -> @location(0) vec4f {
       }
     }
   }
+  return chunkVal;
+}
+
+@fragment
+fn fs(input: VSOut) -> @location(0) vec4f {
+  // Apply inverse transform to get texture UV
+  let texUV4 = u.transform * vec4f(input.uv, 0.0, 1.0);
+  let texUV = texUV4.xy;
+
+  // Bounds check — transparent for compositing
+  if (texUV.x < 0.0 || texUV.x > 1.0 || texUV.y < 0.0 || texUV.y > 1.0) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
+
+  let entity = entityDescriptors[currentEntity.index.x];
+
+  // member footprint border: a gray frame just inside each member's
+  // footprint edge. Skip it for a label overlay (categorical) — an opaque
+  // frame around a sub-footprint mask would sit on top of the intensity
+  // image it annotates — and for members too small on screen to show
+  // content next to the frame (see MEMBER_BORDER_MIN_SCREEN_PX).
+  if (entity.colormapMode != 1u
+      && min(u.memberScreenSize.x, u.memberScreenSize.y) >= MEMBER_BORDER_MIN_SCREEN_PX) {
+    let edge_x = min(texUV.x, 1.0 - texUV.x);
+    let edge_y = min(texUV.y, 1.0 - texUV.y);
+    let dist_x_px = edge_x * u.memberScreenSize.x;
+    let dist_y_px = edge_y * u.memberScreenSize.y;
+    let edge_min_px = min(dist_x_px, dist_y_px);
+    if (edge_min_px < MEMBER_BORDER_WIDTH_PX) {
+      return vec4f(0.3, 0.3, 0.3, 1.0);
+    }
+  }
+
+  let intensityMin = entity.contrastMin;
+  let intensityMax = entity.contrastMax;
+  let range = intensityMax - intensityMin;
+  let gamma = entity.gamma;
+  let layerOpacity = entity.opacity;
+
+  let chunkVal = sampleEntityValue(currentEntity.index.x, texUV);
 
   // Categorical label overlay: the sampled value is an integer id, not an
   // intensity. Nearest id -> distinct color; id 0 (background) and misses
@@ -384,4 +427,86 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
   let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
   return vec4f(color * layerOpacity, layerOpacity);
+}
+
+// ─── Aggregate (batched member) pass ────────────────────────────────────
+//
+// One instanced draw renders every batched member of an aggregate layer:
+// instance i covers memberQuads[i].rect within the layer's extent and
+// samples that member's own descriptor entry, so pass count is bounded
+// by the layer budget while the content matches the per-member passes.
+
+struct AggregateVSOut {
+  @builtin(position) pos: vec4f,
+  // Member-local UV (0..1 across the member's own footprint).
+  @location(0) uv: vec2f,
+  @location(1) @interpolate(flat) entityIdx: u32,
+  // Member's on-screen pixel size, for the footprint-border rule.
+  @location(2) @interpolate(flat) memberScreenPx: vec2f,
+};
+
+@vertex
+fn vsAggregate(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32,
+) -> AggregateVSOut {
+  let quad = memberQuads[iid];
+  // Two-triangle quad corners in member-local UV.
+  var corners = array<vec2f, 6>(
+    vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(0.0, 1.0),
+    vec2f(0.0, 1.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0),
+  );
+  let local = corners[vid];
+  let layerUV = quad.rect.xy + local * quad.rect.zw;
+  // `u.transform` maps screen UV → layer UV (texUV = s·uv + t, per
+  // axis); invert it to place the corner on screen.
+  let sx = u.transform[0].x;
+  let sy = u.transform[1].y;
+  let tx = u.transform[3].x;
+  let ty = u.transform[3].y;
+  let screenUV = vec2f((layerUV.x - tx) / sx, (layerUV.y - ty) / sy);
+
+  var out: AggregateVSOut;
+  out.pos = vec4f(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0);
+  out.uv = local;
+  out.entityIdx = quad.entityRef.x;
+  // The uniform's memberScreenSize holds the LAYER's screen size for an
+  // aggregate draw; each member covers its rect fraction of it.
+  out.memberScreenPx = quad.rect.zw * u.memberScreenSize.xy;
+  return out;
+}
+
+@fragment
+fn fsAggregate(input: AggregateVSOut) -> @location(0) vec4f {
+  let entity = entityDescriptors[input.entityIdx];
+
+  // Same member footprint border as the per-member pass. Aggregate
+  // layers are intensity-only (labels never batch), so no categorical
+  // skip is needed — but the size gate matters MOST here: batched
+  // members are routinely sub-pixel at overview zoom, where an ungated
+  // frame would cover every member's whole footprint and the field
+  // would read as a constant gray grid no display edit can touch.
+  if (min(input.memberScreenPx.x, input.memberScreenPx.y) >= MEMBER_BORDER_MIN_SCREEN_PX) {
+    let edge_x = min(input.uv.x, 1.0 - input.uv.x);
+    let edge_y = min(input.uv.y, 1.0 - input.uv.y);
+    let edge_min_px = min(
+      edge_x * input.memberScreenPx.x,
+      edge_y * input.memberScreenPx.y,
+    );
+    if (edge_min_px < MEMBER_BORDER_WIDTH_PX) {
+      return vec4f(0.3, 0.3, 0.3, 1.0);
+    }
+  }
+
+  let chunkVal = sampleEntityValue(input.entityIdx, input.uv);
+  if (chunkVal == 0xFFFFFFFFu) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
+  let range = entity.contrastMax - entity.contrastMin;
+  let normalized = pow(
+    clamp((f32(chunkVal) - entity.contrastMin) / range, 0.0, 1.0),
+    entity.gamma,
+  );
+  let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
+  return vec4f(color * entity.opacity, entity.opacity);
 }

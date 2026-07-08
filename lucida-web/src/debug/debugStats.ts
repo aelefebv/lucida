@@ -14,6 +14,15 @@ export interface MemberStat {
   chunksSent: number;
 }
 
+/**
+ * Upper bound on rows in any per-member debug ARRAY (`memberStats`,
+ * `orch.members`, `orch.activeSet`). A wide collection has tens of
+ * thousands of members; building (and letting the panel copy/render)
+ * unbounded per-member rows freezes the page for seconds. Scalar totals
+ * next to each array keep reporting the full population.
+ */
+export const DEBUG_MEMBER_ROW_CAP = 100;
+
 /** Per-member debug data from the TickCoordinator's adapter translation. */
 export interface OrchMemberDebug {
   imageId: string;
@@ -111,7 +120,7 @@ export interface PlanningDatasetDebug {
 
 /** TickCoordinator debug snapshot, populated per planning cycle. */
 export interface OrchDebug {
-  /** Active set entries from plan() */
+  /** Active set entries from plan(), capped at {@link DEBUG_MEMBER_ROW_CAP}. */
   activeSet: Array<{
     entityId: string;
     /** Tier mode — see {@link import("../pipeline/planning/index.ts").EntityMode}. */
@@ -120,6 +129,15 @@ export interface OrchDebug {
     coarsestDetailLod: number;
     detailOwnedLodRange: [number, number];
   }>;
+  /** Full active-set size (the `activeSet` array above is row-capped). */
+  activeSetTotal: number;
+  /** Mode tallies over the FULL active set (not just the capped rows). */
+  activeSetModeCounts: {
+    groupAsProxy: number;
+    tilesProxyFallback: number;
+    tilesDetail: number;
+    invisible: number;
+  };
   /** Request counts by lane */
   laneCount: { detail: number; coarse: number; prefetch: number; overview: number };
   /** Request counts by level */
@@ -133,8 +151,10 @@ export interface OrchDebug {
     priority: number;
     chunkKey: string;
   }>;
-  /** Per-member roster entry (for debug display) */
+  /** Per-member roster rows (for debug display), capped at {@link DEBUG_MEMBER_ROW_CAP}. */
   members: OrchMemberDebug[];
+  /** Full roster size across datasets (the `members` array is row-capped). */
+  membersTotal: number;
   /** True if any member has mixed levels in needed[] */
   hasMixedLevels: boolean;
   /** Whether this was an epoch cache hit (plan() skipped) */
@@ -279,8 +299,12 @@ export interface DebugStats {
   planCacheHits: number;
   planCacheMisses: number;
 
-  // Per-member breakdown
+  // Per-member breakdown. Rows exist only for members with pending
+  // chunk requests (the panel filters to those anyway) and are capped
+  // at DEBUG_MEMBER_ROW_CAP; `memberStatsActiveTotal` is the uncapped
+  // count of members with requests.
   memberStats: MemberStat[];
+  memberStatsActiveTotal: number;
 
   // Mode
   mode: "slice" | "volume" | "";
@@ -439,6 +463,7 @@ export const debugStats: DebugStats = {
   planCacheHits: 0,
   planCacheMisses: 0,
   memberStats: [],
+  memberStatsActiveTotal: 0,
   mode: "",
   orch: null,
   planning: { byDataset: {} },
@@ -450,6 +475,7 @@ export function resetFrameStats(): void {
   debugStats.planCacheHits = 0;
   debugStats.planCacheMisses = 0;
   debugStats.memberStats = [];
+  debugStats.memberStatsActiveTotal = 0;
   debugStats.visibleMembers = 0;
   debugStats.totalMembers = 0;
   debugStats.renderPasses = { total: 0, byDataset: {} };

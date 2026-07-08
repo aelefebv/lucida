@@ -31,6 +31,7 @@ function createMockCpuCache(): CpuCache {
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     getCachedChunk: vi.fn(() => null),
+    isChunkSent: vi.fn(() => false),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -836,6 +837,189 @@ describe("cache occupancy telemetry", () => {
         ["tile-3", 0],
         ["tile-4", 0],
       ]);
+    } finally {
+      debugStats.enabled = false;
+    }
+  });
+});
+
+// ===========================================================================
+// 4. Debug-stat row bounds on wide member sets
+// ===========================================================================
+
+describe("debug stat row bounds", () => {
+  // The panel consumes per-member arrays every poll and renders rows from
+  // them; on a wide collection an unbounded build (tens of thousands of
+  // rows per rebuild) freezes the page for seconds. The arrays must stay
+  // capped while the scalar totals keep reporting the full population.
+
+  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
+  let Uploader: typeof import("./upload/uploader.ts").Uploader;
+  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
+  let DEBUG_MEMBER_ROW_CAP: number;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
+    Uploader = (await import("./upload/uploader.ts")).Uploader;
+    const dbg = await import("../debug/debugStats.ts");
+    debugStats = dbg.debugStats;
+    DEBUG_MEMBER_ROW_CAP = dbg.DEBUG_MEMBER_ROW_CAP;
+  });
+
+  function makeCtx(scene: unknown, datasets: Map<string, DatasetEntry>): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  it("caps per-member debug arrays while totals report the full population", () => {
+    const N = 150; // wider than the row cap
+    const scene = createMockSceneWithTiles(N);
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { manifest: createMockContentWithTiles(N) }],
+    ]);
+    const orch = new TickCoordinator(new Uploader());
+
+    debugStats.enabled = true;
+    debugStats.orch = null;
+    try {
+      orch.planAndFetch(makeCtx(scene, datasets), new Map());
+
+      expect(DEBUG_MEMBER_ROW_CAP).toBeGreaterThan(0);
+      expect(debugStats.memberStats.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
+      expect(debugStats.totalMembers).toBe(N);
+
+      const orchDebug = debugStats.orch as {
+        members: unknown[];
+        membersTotal: number;
+        activeSet: unknown[];
+        activeSetTotal: number;
+      } | null;
+      expect(orchDebug).not.toBeNull();
+      expect(orchDebug!.members.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
+      expect(orchDebug!.membersTotal).toBe(N);
+      expect(orchDebug!.activeSet.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
+      expect(orchDebug!.activeSetTotal).toBe(N);
+    } finally {
+      debugStats.enabled = false;
+    }
+  });
+});
+
+describe("debug member stats honesty", () => {
+  // The Per-Member panel header and the sent/needed columns must report
+  // real state on every tick — including the epoch-hit (idle) ticks
+  // that replay the last rebuild's rows.
+
+  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
+  let Uploader: typeof import("./upload/uploader.ts").Uploader;
+  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
+  let resetFrameStats: typeof import("../debug/debugStats.ts").resetFrameStats;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
+    Uploader = (await import("./upload/uploader.ts")).Uploader;
+    const dbg = await import("../debug/debugStats.ts");
+    debugStats = dbg.debugStats;
+    resetFrameStats = dbg.resetFrameStats;
+  });
+
+  function makeCtx(
+    scene: unknown,
+    datasets: Map<string, DatasetEntry>,
+    cpuCache?: CpuCache,
+  ): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: cpuCache ?? createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  function makeDeps(n: number) {
+    const scene = createMockSceneWithTiles(n);
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { manifest: createMockContentWithTiles(n) }],
+    ]);
+    return { scene, datasets };
+  }
+
+  it("replays the uncapped active-member total on epoch-hit ticks", () => {
+    const { scene, datasets } = makeDeps(3);
+    const orch = new TickCoordinator(new Uploader());
+    debugStats.enabled = true;
+    try {
+      const ctx = makeCtx(scene, datasets);
+      orch.planAndFetch(ctx, new Map());
+      const total = debugStats.memberStatsActiveTotal;
+      const rows = debugStats.memberStats.length;
+      expect(total).toBeGreaterThan(0);
+      expect(rows).toBeGreaterThan(0);
+
+      // Idle tick: the render loop resets per-frame stats, then the
+      // epoch fast-path replays the last rebuild's member snapshot.
+      resetFrameStats();
+      orch.planAndFetch(ctx, new Map());
+      expect(debugStats.memberStats.length).toBe(rows);
+      expect(debugStats.memberStatsActiveTotal).toBe(total);
+    } finally {
+      debugStats.enabled = false;
+    }
+  });
+
+  it("computes per-member sent counts from the cache's delivery ledger", () => {
+    const { scene, datasets } = makeDeps(2);
+    const orch = new TickCoordinator(new Uploader());
+    const cpuCache = createMockCpuCache();
+    vi.mocked(cpuCache.isChunkSent).mockReturnValue(true);
+    debugStats.enabled = true;
+    try {
+      orch.planAndFetch(makeCtx(scene, datasets, cpuCache), new Map());
+      expect(debugStats.memberStats.length).toBeGreaterThan(0);
+      for (const row of debugStats.memberStats) {
+        expect(row.chunksNeeded).toBeGreaterThan(0);
+        expect(row.chunksSent).toBe(row.chunksNeeded);
+      }
+    } finally {
+      debugStats.enabled = false;
+    }
+  });
+
+  it("refreshes sent counts on epoch-hit ticks as idle deliveries land", () => {
+    const { scene, datasets } = makeDeps(2);
+    const orch = new TickCoordinator(new Uploader());
+    const cpuCache = createMockCpuCache();
+    debugStats.enabled = true;
+    try {
+      const ctx = makeCtx(scene, datasets, cpuCache);
+      orch.planAndFetch(ctx, new Map());
+      expect(debugStats.memberStats.length).toBeGreaterThan(0);
+      for (const row of debugStats.memberStats) {
+        expect(row.chunksSent).toBe(0);
+      }
+
+      // Deliveries land while the camera is idle; the next replayed
+      // tick must show the progress instead of the rebuild-time zeros.
+      vi.mocked(cpuCache.isChunkSent).mockReturnValue(true);
+      resetFrameStats();
+      orch.planAndFetch(ctx, new Map());
+      for (const row of debugStats.memberStats) {
+        expect(row.chunksSent).toBe(row.chunksNeeded);
+      }
     } finally {
       debugStats.enabled = false;
     }
