@@ -30,8 +30,11 @@
 
 /// Strip a leading `file://` or `file:///`+ prefix, lowercase the drive
 /// letter on Windows-style paths, forward-slashify backslashes, and
-/// canonicalize UNC `\\server\share\…` to `//server/share/…`. Unix paths
-/// and remote-scheme URLs (`gs://`, `s3://`, `http://`, `https://`) pass
+/// canonicalize UNC `\\server\share\…` to `//server/share/…`. URL schemes
+/// are case-insensitive (RFC 3986 §3.1), so a leading scheme is lowercased
+/// — and only the scheme: bucket names and object paths are case-sensitive
+/// and pass through untouched. Unix paths and already-lowercase
+/// remote-scheme URLs (`gs://`, `s3://`, `http://`, `https://`) pass
 /// through unchanged.
 ///
 /// Idempotent: `normalize_dataset_url(normalize_dataset_url(s)) ==
@@ -44,11 +47,16 @@
 ///   - `"file:///C:/foo"` → `"c:/foo"`
 ///   - `"\\\\server\\share\\foo"` → `"//server/share/foo"`
 ///   - `"gs://bucket/path"` → `"gs://bucket/path"` (unchanged)
+///   - `"HTTP://host/Path"` → `"http://host/Path"` (scheme only)
 pub fn normalize_dataset_url(raw: &str) -> String {
     // Empty stays empty.
     if raw.is_empty() {
         return String::new();
     }
+
+    // Canonical scheme form is lowercase. This also lets an uppercase
+    // `FILE://` prefix reach the strip below.
+    let raw = &*lowercase_scheme(raw);
 
     // Remote schemes (gs://, s3://, http://, https://) pass through
     // unchanged. file:// is handled specially below.
@@ -155,14 +163,43 @@ fn blake3_url(url: &str) -> [u8; 32] {
 
 // ---------- private helpers ----------
 
-/// Match `gs://`, `s3://`, `http://`, `https://` (and only those).
-/// `file://` is intentionally NOT a remote scheme — it's a local
-/// filesystem URI and gets stripped to a plain path by normalize.
+/// Match `gs://`, `s3://`, `http://`, `https://` (and only those), in any
+/// letter case — schemes are case-insensitive per RFC 3986 §3.1. `file://`
+/// is intentionally NOT a remote scheme — it's a local filesystem URI and
+/// gets stripped to a plain path by normalize.
 fn is_remote_scheme(s: &str) -> bool {
-    s.starts_with("gs://")
-        || s.starts_with("s3://")
-        || s.starts_with("http://")
-        || s.starts_with("https://")
+    has_scheme(s, "gs") || has_scheme(s, "s3") || has_scheme(s, "http") || has_scheme(s, "https")
+}
+
+/// `true` if `s` starts with `{scheme}://`, comparing the scheme portion
+/// ASCII-case-insensitively.
+fn has_scheme(s: &str, scheme: &str) -> bool {
+    s.get(..scheme.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+        && s[scheme.len()..].starts_with("://")
+}
+
+/// If `s` begins with a URI scheme (RFC 3986 §3.1: an ASCII letter followed
+/// by letters, digits, `+`, `-`, or `.`) and `://`, return it with the
+/// scheme portion lowercased and everything after `://` byte-for-byte
+/// intact. Anything else — including drive-letter paths like `C:\foo`,
+/// which have a colon but no `//` — is returned unchanged.
+fn lowercase_scheme(s: &str) -> std::borrow::Cow<'_, str> {
+    let Some(sep) = s.find("://") else {
+        return std::borrow::Cow::Borrowed(s);
+    };
+    let scheme = &s[..sep];
+    let shaped_like_scheme = scheme
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphabetic())
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.');
+    if !shaped_like_scheme || !scheme.bytes().any(|b| b.is_ascii_uppercase()) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(format!("{}{}", scheme.to_ascii_lowercase(), &s[sep..]))
 }
 
 /// Strip a `file://` prefix and any number of trailing slashes after
@@ -309,6 +346,13 @@ mod tests {
             ("s3://bucket/path", "s3://bucket/path"),
             ("http://host/p", "http://host/p"),
             ("https://host/p", "https://host/p"),
+            // Schemes are case-insensitive (RFC 3986 §3.1): only the scheme
+            // is lowercased — bucket names and object paths keep their case.
+            ("HTTP://host/Path", "http://host/Path"),
+            ("HtTpS://host/p", "https://host/p"),
+            ("GS://Bucket/Key", "gs://Bucket/Key"),
+            ("S3://bucket/Key", "s3://bucket/Key"),
+            ("FILE:///C:/foo", "c:/foo"),
         ]
     }
 
@@ -348,11 +392,13 @@ mod tests {
             ("c:", true),
             // UNC (canonical form).
             ("//server/share/foo", true),
-            // Remote schemes.
+            // Remote schemes, in any letter case.
             ("gs://bucket/path", false),
             ("s3://bucket/path", false),
             ("http://host/p", false),
             ("https://host/p", false),
+            ("HTTP://host/p", false),
+            ("S3://bucket/path", false),
             // Empty.
             ("", false),
         ];
@@ -383,6 +429,7 @@ mod tests {
                 "file://C:\\foo",
             ],
             vec!["\\\\server\\share\\foo", "//server/share/foo"],
+            vec!["http://host/p", "HTTP://host/p", "hTtP://host/p"],
         ];
         for group in groups {
             let ids: Vec<String> = group

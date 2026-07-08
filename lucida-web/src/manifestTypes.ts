@@ -145,6 +145,175 @@ export interface DatasetManifest {
   labels?: LabelSpec[];
 }
 
+// ---------------------------------------------------------------------------
+// Wire forms and resolution
+//
+// Collection manifests would repeat one identical multiscale (and one
+// identical wire format) per tile — tens of thousands of times on a wide
+// collection — so the server encodes shared values ONCE: a top-level
+// `multiscales` table with per-image `multiscale_ref` indexes, a
+// `wire_formats` table with per-image `wire_format_ref` indexes, and pure-2D
+// placement edges as `translation: [tx, ty]` instead of a 16-element matrix.
+// Entries whose value is unique (every single-image dataset, and older
+// payloads/persisted documents predating the compact form) carry the inline
+// field instead.
+//
+// `resolveDatasetManifest` / `resolveFetchSource` are the ONLY places that
+// know this encoding: every ingest point (dataset_opened broadcast, snapshot
+// document manifests) resolves the wire form into the fully-populated
+// in-memory types above, so downstream consumers never do table lookups.
+// Table-resolved images intentionally share ONE multiscale object reference.
+// ---------------------------------------------------------------------------
+
+/** [`ImageSpec`] as serialized inside a manifest: inline `multiscale` or a
+ *  `multiscale_ref` into the manifest's `multiscales` table. */
+export interface ImageSpecWire {
+  image_id: string;
+  owner: string;
+  multiscale?: MultiscaleInfo;
+  multiscale_ref?: number;
+}
+
+/** [`TransformEdge`] as serialized inside a manifest: a full matrix
+ *  `transform`, or `translation: [tx, ty]` for pure 2D translations. */
+export interface TransformEdgeWire {
+  from: string;
+  to: string;
+  transform?: { matrix: number[] };
+  translation?: [number, number];
+}
+
+export interface DatasetManifestWire {
+  /**
+   * Compact-format marker: present (value 2) whenever the manifest uses a
+   * compact construct (`multiscales` table or `translation` edge), absent on
+   * fully-inline documents. Ignored by the resolver — decoding is driven by
+   * which fields each entry carries — and dropped from the resolved
+   * in-memory manifest; it exists so future readers can recognize a
+   * document's format generation without probing for compact fields.
+   */
+  format_version?: number;
+  dataset_id: string;
+  name: string;
+  kind: DatasetKind;
+  entities: Entity[];
+  transforms: TransformEdgeWire[];
+  /** Multiscale values shared by two or more images; absent when nothing is
+   *  shared (single-image manifests, fully-inline payloads). */
+  multiscales?: MultiscaleInfo[];
+  images: ImageSpecWire[];
+  source_layouts: LayoutSpec[];
+  default_layout_id: string | null;
+  labels?: LabelSpec[];
+}
+
+export interface ProxiedImageSpecWire {
+  image_id: string;
+  wire_format?: WireFormat;
+  wire_format_ref?: number;
+}
+
+export interface ProxiedFetchDescriptorWire {
+  /** Compact-format marker, like `DatasetManifestWire.format_version`:
+   *  present (value 2) exactly when `wire_formats` is, ignored by the
+   *  resolver. */
+  format_version?: number;
+  images: ProxiedImageSpecWire[];
+  /** Wire formats shared by two or more images; absent when nothing is
+   *  shared. */
+  wire_formats?: WireFormat[];
+}
+
+export type FetchSourceWire =
+  | { Proxied: ProxiedFetchDescriptorWire }
+  | { Direct: DirectFetchDescriptor }
+  | { Local: LocalFetchDescriptor };
+
+/** The column-major 4x4 matrix `VoxelTransform::from_voxel_translation_2d`
+ *  builds — the expansion of a wire `translation: [tx, ty]`. */
+function translationMatrix(tx: number, ty: number): number[] {
+  return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
+}
+
+/**
+ * Resolve a wire manifest into the fully-populated in-memory shape: every
+ * image ends up with an effective `multiscale` (table-resolved images share
+ * one object reference — treat multiscales as immutable, copy-on-write) and
+ * every transform edge with a full `matrix`. Throws on a reference outside
+ * the shared table or an entry carrying neither form, mirroring the server's
+ * own decoder.
+ */
+export function resolveDatasetManifest(wire: DatasetManifestWire): DatasetManifest {
+  const table = wire.multiscales ?? [];
+  const images: ImageSpec[] = wire.images.map((image) => {
+    let multiscale = image.multiscale;
+    if (multiscale === undefined && image.multiscale_ref !== undefined) {
+      multiscale = table[image.multiscale_ref];
+      if (multiscale === undefined) {
+        throw new Error(
+          `manifest image ${image.image_id} references shared multiscale ` +
+            `${image.multiscale_ref}, but the manifest declares ${table.length}`,
+        );
+      }
+    }
+    if (multiscale === undefined) {
+      throw new Error(
+        `manifest image ${image.image_id} carries neither a multiscale nor a multiscale_ref`,
+      );
+    }
+    return { image_id: image.image_id, owner: image.owner, multiscale };
+  });
+  const transforms: TransformEdge[] = wire.transforms.map((edge) => {
+    const transform = edge.transform ??
+      (edge.translation !== undefined
+        ? { matrix: translationMatrix(edge.translation[0], edge.translation[1]) }
+        : undefined);
+    if (transform === undefined) {
+      throw new Error(
+        `manifest transform ${edge.from} -> ${edge.to} carries neither a transform nor a translation`,
+      );
+    }
+    return { from: edge.from, to: edge.to, transform };
+  });
+  const resolved: DatasetManifest = {
+    dataset_id: wire.dataset_id,
+    name: wire.name,
+    kind: wire.kind,
+    entities: wire.entities,
+    transforms,
+    images,
+    source_layouts: wire.source_layouts,
+    default_layout_id: wire.default_layout_id,
+  };
+  if (wire.labels !== undefined) resolved.labels = wire.labels;
+  return resolved;
+}
+
+/** Resolve a wire fetch source; only the Proxied variant has a compact form. */
+export function resolveFetchSource(wire: FetchSourceWire): FetchSource {
+  if (!("Proxied" in wire)) return wire;
+  const table = wire.Proxied.wire_formats ?? [];
+  const images: ProxiedImageSpec[] = wire.Proxied.images.map((image) => {
+    let wireFormat = image.wire_format;
+    if (wireFormat === undefined && image.wire_format_ref !== undefined) {
+      wireFormat = table[image.wire_format_ref];
+      if (wireFormat === undefined) {
+        throw new Error(
+          `proxied image ${image.image_id} references shared wire format ` +
+            `${image.wire_format_ref}, but the descriptor declares ${table.length}`,
+        );
+      }
+    }
+    if (wireFormat === undefined) {
+      throw new Error(
+        `proxied image ${image.image_id} carries neither a wire format nor a wire_format_ref`,
+      );
+    }
+    return { image_id: image.image_id, wire_format: wireFormat };
+  });
+  return { Proxied: { images } };
+}
+
 /** Externally tagged enum: { "Proxied": { images: [...] } } */
 export type FetchSource =
   | { Proxied: ProxiedFetchDescriptor }

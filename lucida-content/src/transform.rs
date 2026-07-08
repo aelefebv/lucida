@@ -13,14 +13,14 @@ use crate::id::EntityId;
 /// [`VoxelTransform::from_voxel_translation_2d`].
 ///
 /// This contract is enforced by the type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransformEdge {
     pub from: EntityId,
     pub to: EntityId,
     pub transform: VoxelTransform,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffineTransform {
     /// Column-major 4x4 matrix. Identity = no transform.
     pub matrix: [f64; 16],
@@ -64,7 +64,7 @@ impl AffineTransform {
 /// use lucida_content::{VoxelTransform, AffineTransform};
 /// let _: VoxelTransform = AffineTransform::identity();
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct VoxelTransform {
     inner: AffineTransform,
@@ -99,5 +99,31 @@ impl VoxelTransform {
     /// Borrow the underlying column-major 4x4 matrix.
     pub fn matrix(&self) -> &[f64; 16] {
         &self.inner.matrix
+    }
+
+    /// If this transform is exactly a pure 2D translation — the matrix
+    /// [`AffineTransform::translation_2d`] builds, identity everywhere except
+    /// `matrix[12]` (tx) and `matrix[13]` (ty) — return `[tx, ty]`.
+    ///
+    /// [`DatasetManifest`](crate::DatasetManifest) uses this to encode
+    /// tile-placement edges (grid or explicit 2D positions) as a two-number
+    /// `translation` on the wire instead of 16 matrix elements, which is what
+    /// keeps wide-collection manifests from repeating near-identity matrices
+    /// tens of thousands of times. Comparisons are IEEE `==`, so any scale,
+    /// rotation, z component, or non-affine bottom row falls back to the full
+    /// matrix form. The reconstruction `from_voxel_translation_2d(tx, ty)`
+    /// carries `tx`/`ty` through bit-exactly (including a signed-zero
+    /// translation component); the *other* fourteen elements are rebuilt as
+    /// the canonical identity pattern, so a matrix that matched it only
+    /// IEEE-equally (e.g. `-0.0` where the pattern has `0.0`) round-trips to
+    /// the canonical bits, not the original ones.
+    pub fn as_voxel_translation_2d(&self) -> Option<[f64; 2]> {
+        let m = &self.inner.matrix;
+        let reference = AffineTransform::translation_2d(m[12], m[13]).matrix;
+        if *m == reference {
+            Some([m[12], m[13]])
+        } else {
+            None
+        }
     }
 }

@@ -193,6 +193,65 @@ function createMockContent(): DatasetManifest {
   } as unknown as DatasetManifest;
 }
 
+/** Scene with `n` visible tiles (`tile-0` … `tile-{n-1}`) laid out in a row. */
+function createMockSceneWithTiles(n: number) {
+  const rows: MockSceneConfig["viewQuery"]["visible_entities"] = [];
+  const memberPositions: Record<string, [number, number]> = {};
+  for (let i = 0; i < n; i++) {
+    rows.push({
+      entity_id: `tile-${i}`,
+      image_id: `img-${i}`,
+      kind: "Tile",
+      visible: true,
+      projected_diagonal_px: 100,
+      projected_area_px2: 10000,
+      centroid_world: [i * 1024, 0, 0],
+      ideal_target_lod: 0,
+      importance: 1.0,
+    });
+    memberPositions[`tile-${i}`] = [i * 1024, 0];
+  }
+  return createMockScene({ viewQuery: { visible_entities: rows }, memberPositions });
+}
+
+/** Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles. */
+function createMockContentWithTiles(n: number): DatasetManifest {
+  const entities: Array<Record<string, unknown>> = [
+    { id: "group-0", kind: "Group", parent: null, labels: {} },
+  ];
+  const images: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < n; i++) {
+    entities.push({ id: `tile-${i}`, kind: "Tile", parent: "group-0", labels: {} });
+    images.push({
+      image_id: `img-${i}`,
+      owner: `tile-${i}`,
+      multiscale: {
+        axes: [],
+        data_type: "uint16",
+        levels: [
+          {
+            level_index: 0,
+            shape: [1, 1, 1, 1024, 1024],
+            chunk_shape: [1, 1, 1, 256, 256],
+            grid_shape: [1, 1, 1, 4, 4],
+            scale: [1, 1, 1, 1, 1],
+          },
+        ],
+      },
+    });
+  }
+  return {
+    dataset_id: "ds1",
+    name: "test",
+    kind: "Single",
+    entities,
+    transforms: [],
+    images,
+    source_layouts: [],
+    default_layout_id: null,
+  } as unknown as DatasetManifest;
+}
+
 // ===========================================================================
 // 1. Epoch caching
 // ===========================================================================
@@ -664,5 +723,121 @@ describe("multi-dataset planning", () => {
     expect(tick2Ds2State.previousActiveSet).toEqual(tick1Ds2Result.activeSet);
     expect(tick2Ds1State).toBe(tick1Ds1Result.nextState);
     expect(tick2Ds2State).toBe(tick1Ds2Result.nextState);
+  });
+});
+
+// ===========================================================================
+// 3. Cache-occupancy telemetry
+// ===========================================================================
+
+describe("cache occupancy telemetry", () => {
+  // `CpuCache.snapshot()` walks every resident entity in the chunk and
+  // overview stores, so a rebuild must take at most ONE snapshot — and
+  // none at all while no debug surface consumes it. These tests pin
+  // both the call count and the entityDiag content derived from it.
+
+  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
+  let Uploader: typeof import("./upload/uploader.ts").Uploader;
+  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
+
+  beforeEach(async () => {
+    // Fresh module registry so the module-global debugStats sink can't
+    // leak panel state between tests.
+    vi.resetModules();
+    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
+    Uploader = (await import("./upload/uploader.ts")).Uploader;
+    debugStats = (await import("../debug/debugStats.ts")).debugStats;
+  });
+
+  function makeCtx(
+    scene: unknown,
+    datasets: Map<string, DatasetEntry>,
+    cpuCache: CpuCache,
+  ): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache,
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  const emptyMinimap = new Map<string, never[]>();
+  const N = 6; // > 5 so the entityDiag cap is exercised too.
+
+  function makeDeps() {
+    const scene = createMockSceneWithTiles(N);
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { manifest: createMockContentWithTiles(N) }],
+    ]);
+    return { scene, datasets };
+  }
+
+  it("never snapshots the cpu cache while debug stats are off", () => {
+    const { scene, datasets } = makeDeps();
+    const cpuCache = createMockCpuCache();
+    const orch = new TickCoordinator(new Uploader());
+
+    expect(debugStats.enabled).toBe(false);
+    orch.planAndFetch(makeCtx(scene, datasets, cpuCache), emptyMinimap);
+
+    expect(cpuCache.snapshot).not.toHaveBeenCalled();
+  });
+
+  it("snapshots the cpu cache at most once per rebuild while debug stats are on", () => {
+    const { scene, datasets } = makeDeps();
+    const cpuCache = createMockCpuCache();
+    const orch = new TickCoordinator(new Uploader());
+
+    debugStats.enabled = true;
+    debugStats.orch = null;
+    try {
+      orch.planAndFetch(makeCtx(scene, datasets, cpuCache), emptyMinimap);
+
+      expect(vi.mocked(cpuCache.snapshot).mock.calls.length).toBeLessThanOrEqual(1);
+    } finally {
+      debugStats.enabled = false;
+    }
+  });
+
+  it("reports per-entity cached-key counts in entityDiag from the snapshot", () => {
+    const { scene, datasets } = makeDeps();
+    const cpuCache = createMockCpuCache();
+    vi.mocked(cpuCache.snapshot).mockReturnValue({
+      cached: new Map([
+        ["tile-0", new Set(["0/0.0.0.0.0", "0/0.0.0.1.0"])],
+        ["tile-2", new Set(["0/0.0.0.0.1"])],
+      ]),
+      inFlight: new Map(),
+    });
+    const orch = new TickCoordinator(new Uploader());
+
+    debugStats.enabled = true;
+    debugStats.orch = null;
+    try {
+      orch.planAndFetch(makeCtx(scene, datasets, cpuCache), emptyMinimap);
+
+      // `debugStats.orch = null` above narrows the property to `null`;
+      // planAndFetch repopulates it, so widen back for the read.
+      const orchDebug = debugStats.orch as {
+        entityDiag: Array<{ entityId: string; cachedKeys: number }>;
+      } | null;
+      const diag = orchDebug?.entityDiag ?? [];
+      // Capped at 5 entries even though 6 entities are visible.
+      expect(diag).toHaveLength(5);
+      expect(diag.map((e) => [e.entityId, e.cachedKeys])).toEqual([
+        ["tile-0", 2],
+        ["tile-1", 0],
+        ["tile-2", 1],
+        ["tile-3", 0],
+        ["tile-4", 0],
+      ]);
+    } finally {
+      debugStats.enabled = false;
+    }
   });
 });

@@ -1,4 +1,5 @@
 /** Minimap render path: overview seeding + render + overlay callback. */
+import type { WasmScene } from "lucida-core";
 import { Axis } from "./axes.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
@@ -97,6 +98,50 @@ export function resolveMinimapLayerContrast(
     contrastMax: ch?.contrast_max ?? settings.contrast_max,
     gamma: ch?.gamma ?? settings.gamma,
   };
+}
+
+/** A member's forward/inverse placement matrices, as one bulk-read entry. */
+export interface MemberRenderMatrices {
+  model: Float32Array;
+  invModel: Float32Array;
+}
+
+/** Identity matrix — the same fallback the per-id wasm matrix lookups return
+ *  for an unknown member, so bulk consumers degrade identically. */
+export function identityModelMatrix(): Float32Array {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+}
+
+/**
+ * Read every member's forward + inverse model matrix for a dataset in two
+ * wasm calls (`member_render_ids` + `member_render_matrices`) instead of two
+ * calls *per member* (`member_model_matrix` / `inv_member_model_matrix`).
+ * A wide collection has tens of thousands of members, so the per-member form
+ * crosses the wasm boundary tens of thousands of times per pass; the bulk
+ * form crosses twice and yields byte-identical matrices (same
+ * `Scene::rendering_transform` source). Duplicate ids keep the first entry,
+ * matching the per-id lookups' first-match resolution.
+ */
+export function readMemberRenderMatrices(
+  scene: WasmScene,
+  datasetId: string,
+): Map<string, MemberRenderMatrices> {
+  const out = new Map<string, MemberRenderMatrices>();
+  let ids: string[];
+  try {
+    ids = JSON.parse(scene.member_render_ids(datasetId));
+  } catch {
+    return out;
+  }
+  const flat = scene.member_render_matrices(datasetId);
+  for (let i = 0; i < ids.length; i++) {
+    if (out.has(ids[i])) continue;
+    out.set(ids[i], {
+      model: flat.slice(i * 32, i * 32 + 16),
+      invModel: flat.slice(i * 32 + 16, i * 32 + 32),
+    });
+  }
+  return out;
 }
 
 export interface SliceViewBounds {
@@ -342,10 +387,13 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       memberPositions = {};
     }
 
+    const memberMatrices = readMemberRenderMatrices(scene, dsId);
+
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
-      const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
-      const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
+      const mats = memberMatrices.get(memberId);
+      const model = mats?.model ?? identityModelMatrix();
+      const invModel = mats?.invModel ?? identityModelMatrix();
       const level0 = img.multiscale.levels[0];
 
       const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
@@ -392,17 +440,22 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   }
 
   if (state.overlayCallback) {
-    // Dataset dimensions (per member — all members share the same tile shape)
-    const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
-    for (const layer of overlayLayers) {
-      // Find the parent dataset for this member
-      let shape: number[] | undefined;
-      for (const [, ds] of datasets) {
-        if (ds.manifest.images.some(img => img.image_id === layer.datasetId)) {
-          shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
-          break;
+    // Dataset dimensions (per member — all members share the same tile shape).
+    // Member id → owning dataset's first-image level-0 shape, built in one
+    // pass over the datasets: resolving each overlay layer by scanning every
+    // dataset's image list would be quadratic in member count.
+    const shapeByMember = new Map<string, number[] | undefined>();
+    for (const [, ds] of datasets) {
+      const shape = ds.manifest.images[0]?.multiscale.levels[0]?.shape; // [T, C, Z, Y, X]
+      for (const img of ds.manifest.images) {
+        if (!shapeByMember.has(img.image_id)) {
+          shapeByMember.set(img.image_id, shape);
         }
       }
+    }
+    const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
+    for (const layer of overlayLayers) {
+      const shape = shapeByMember.get(layer.datasetId);
       if (shape) {
         datasetDims.set(layer.datasetId, { width: shape[Axis.X], height: shape[Axis.Y], depth: shape[Axis.Z] });
       }

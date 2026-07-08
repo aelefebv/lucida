@@ -1189,12 +1189,32 @@ def dataset_summaries_from_document(document: dict[str, Any]) -> list[dict[str, 
     ]
 
 
+def effective_multiscale(manifest: dict[str, Any], image: dict[str, Any]) -> dict[str, Any]:
+    """The image's multiscale description, resolving the shared-once wire form.
+
+    Collection manifests carry each multiscale shared by several images ONCE,
+    in the manifest's top-level ``multiscales`` table, with sharing images
+    holding a ``multiscale_ref`` index; images with a unique multiscale (and
+    all payloads from before the compact encoding) inline it instead.
+    """
+    inline = image.get("multiscale")
+    if isinstance(inline, dict):
+        return inline
+    ref = image.get("multiscale_ref")
+    table = manifest.get("multiscales") or []
+    if isinstance(ref, int) and 0 <= ref < len(table):
+        shared = table[ref]
+        if isinstance(shared, dict):
+            return shared
+    return {}
+
+
 def dataset_summary(document: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
     images = manifest.get("images") or []
     entities = manifest.get("entities") or []
     first_level = None
     if images:
-        levels = ((images[0].get("multiscale") or {}).get("levels") or [])
+        levels = effective_multiscale(manifest, images[0]).get("levels") or []
         first_level = levels[0] if levels else None
     dataset_id = str(manifest.get("dataset_id") or "")
     return {
@@ -1219,13 +1239,14 @@ def dataset_info_from_document(document: dict[str, Any], selector: str) -> dict[
         raise LucidaError("missing_resource", "dataset was not found")
     images = []
     for image in manifest.get("images") or []:
-        levels = ((image.get("multiscale") or {}).get("levels") or [])
+        multiscale = effective_multiscale(manifest, image)
+        levels = multiscale.get("levels") or []
         first_level = levels[0] if levels else None
         images.append(
             {
                 "image_id": image.get("image_id"),
                 "owner": image.get("owner"),
-                "data_type": (image.get("multiscale") or {}).get("data_type"),
+                "data_type": multiscale.get("data_type"),
                 "level_count": len(levels),
                 "level_indices": [level.get("level_index") for level in levels],
                 "dimensions": first_level.get("shape") if first_level else None,

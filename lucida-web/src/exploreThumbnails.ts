@@ -21,6 +21,8 @@ import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetState } from "./types.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
+  identityModelMatrix,
+  readMemberRenderMatrices,
   resolveMinimapLayerColormap,
   resolveMinimapLayerContrast,
   type MinimapDatasetSettings,
@@ -38,7 +40,11 @@ type ThumbDatasetSettings = {
  * visible member (tile); empty when the dataset is hidden / unknown.
  *
  * These are camera-independent (content + placement), so all of a dataset's
- * thumbnails share them and only the camera matrices differ per candidate.
+ * thumbnails share them and only the camera matrices differ per candidate;
+ * `makeThumbnailRequester` caches the list across requests on that basis.
+ * The matrices come from the bulk `member_render_matrices` export (two wasm
+ * calls for the whole dataset) rather than two per-member calls, so even a
+ * cache-miss rebuild is a single pass over a wide collection.
  */
 function buildThumbnailLayers(
   scene: WasmScene,
@@ -58,13 +64,15 @@ function buildThumbnailLayers(
   const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
   const colormap = resolveMinimapLayerColormap(settings, activeC);
 
+  const memberMatrices = readMemberRenderMatrices(scene, datasetId);
   const layers: MinimapLayerParams[] = [];
   for (const img of ds.manifest.images) {
     const memberId = img.image_id;
     // Worker overview textures are keyed by member id; the model matrices place
     // each member exactly as the minimap/main view does (shared world math).
-    const modelMatrix = new Float32Array(scene.member_model_matrix(datasetId, memberId));
-    const invModelMatrix = new Float32Array(scene.inv_member_model_matrix(datasetId, memberId));
+    const mats = memberMatrices.get(memberId);
+    const modelMatrix = mats?.model ?? identityModelMatrix();
+    const invModelMatrix = mats?.invModel ?? identityModelMatrix();
     layers.push({ datasetId: memberId, modelMatrix, invModelMatrix, contrastMin, contrastMax, gamma, colormap });
   }
   return layers;
@@ -79,6 +87,14 @@ function buildThumbnailLayers(
  * `getScene` / `getDatasets` are read at call time (refs), so the closure stays
  * stable while always seeing the latest scene + manifest. `datasetId` is the
  * Explore panel's current target.
+ *
+ * The layer list is cached across requests: it is camera-independent, so the
+ * panel's whole batch of candidate thumbnails shares one list, rebuilt only
+ * when an input that shapes it changes — content/layout epochs (member set +
+ * matrices), the active channel, or the display settings (visibility,
+ * contrast, colormap). Camera-only changes (view epoch) deliberately do NOT
+ * invalidate it. `client.thumbnailRender` structured-clones the layers per
+ * call, so reuse never hands the worker a detached buffer.
  */
 export function makeThumbnailRequester(opts: {
   getScene: () => WasmScene | null;
@@ -87,6 +103,8 @@ export function makeThumbnailRequester(opts: {
   datasetId: string;
 }): (view: SavedView, size: number) => Promise<ImageBitmap | null> {
   const { getScene, getClient, getDatasets, datasetId } = opts;
+  let cachedLayers: MinimapLayerParams[] | null = null;
+  let cachedLayersKey: string | null = null;
   return async (view, size) => {
     const scene = getScene();
     const client = getClient();
@@ -94,7 +112,22 @@ export function makeThumbnailRequester(opts: {
     const ds = getDatasets().get(datasetId);
     if (!ds) return null;
 
-    const layers = buildThumbnailLayers(scene, ds, datasetId);
+    let layersKey: string | null = null;
+    try {
+      const epochs: { content: number; layout: number } = JSON.parse(scene.epochs());
+      layersKey =
+        `${datasetId}|${epochs.content}|${epochs.layout}|${scene.c()}` +
+        `|${ds.manifest.images.length}|${scene.all_dataset_settings()}`;
+    } catch {
+      // Unreadable epochs: fall through with a null key (rebuild, don't cache).
+    }
+
+    const layers =
+      layersKey !== null && layersKey === cachedLayersKey && cachedLayers !== null
+        ? cachedLayers
+        : buildThumbnailLayers(scene, ds, datasetId);
+    cachedLayers = layersKey !== null ? layers : null;
+    cachedLayersKey = layersKey;
     if (layers.length === 0) return null;
 
     // Child camera → GPU matrices (35 floats: invViewProj[16] + eye[3] +

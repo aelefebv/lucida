@@ -148,9 +148,18 @@ export function mergeGeneratedAvailabilityIntoManifest(
   manifest: DatasetManifest,
   availability: GeneratedAvailabilitySnapshot | WireGeneratedAvailabilitySnapshot,
 ): DatasetManifest {
+  // Callers treat the returned manifest as an independent snapshot, so this
+  // deep-copies the whole thing up front (O(images)) rather than sharing
+  // untouched sub-objects with the input.
   const next = cloneManifest(manifest);
+  // Image id → image, first occurrence winning, so applying L availability
+  // levels is O(images + L) instead of an O(images) scan per level.
+  const imageById = new Map<string, ImageSpec>();
+  for (const image of next.images) {
+    if (!imageById.has(image.image_id)) imageById.set(image.image_id, image);
+  }
   for (const generated of availability.levels ?? []) {
-    const image = next.images.find((candidate) => candidate.image_id === generated.image_id);
+    const image = imageById.get(generated.image_id);
     if (!image) continue;
     upsertLevelGeometry(image, generated.level);
     upsertGeneratedLevelInfo(image, generated.info);

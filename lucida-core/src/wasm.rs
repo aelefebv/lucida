@@ -374,7 +374,8 @@ impl WasmScene {
     ///
     /// The placement math is owned by `Scene::member_world_matrix` (non-gated, so
     /// the minimap and the camera auto-fit share the exact same world boxes); this
-    /// only resolves the member by id and delegates.
+    /// only resolves the member by id (O(1) via the derived-state member index)
+    /// and delegates.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
         let identity = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -384,11 +385,7 @@ impl WasmScene {
             Some(d) => d,
             None => return identity,
         };
-        let member = match derived
-            .members
-            .iter()
-            .find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id)
-        {
+        let member = match derived.member_by_id(member_id) {
             Some(m) => m,
             None => return identity,
         };
@@ -398,9 +395,9 @@ impl WasmScene {
     /// Returns the inverse model matrix for a specific member of a dataset.
     ///
     /// The placement math is owned by `Scene::rendering_transform` (the single
-    /// source — what is actually drawn); this only resolves the member by id and
-    /// returns that transform's inverse, so picking/upload can never desync from
-    /// the render.
+    /// source — what is actually drawn); this only resolves the member by id
+    /// (O(1) via the derived-state member index) and returns that transform's
+    /// inverse, so picking/upload can never desync from the render.
     pub fn inv_member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
         let identity = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -410,15 +407,30 @@ impl WasmScene {
             Some(d) => d,
             None => return identity,
         };
-        let member = match derived
-            .members
-            .iter()
-            .find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id)
-        {
+        let member = match derived.member_by_id(member_id) {
             Some(m) => m,
             None => return identity,
         };
         self.inner.rendering_transform(member).1.inv_model.to_vec()
+    }
+
+    /// All member matrices for a dataset in one call: 32 floats per member —
+    /// the forward model matrix (16) followed by its inverse (16), the exact
+    /// pairs [`Self::member_model_matrix`] / [`Self::inv_member_model_matrix`]
+    /// return one id at a time. Ordered to match [`Self::member_render_ids`];
+    /// empty for an unknown dataset. Owned by `Scene::member_render_matrices`
+    /// (non-gated); callers drawing every member of a wide collection should
+    /// prefer this over per-member calls, which cross the boundary twice per
+    /// member.
+    pub fn member_render_matrices(&self, dataset_id: &str) -> Vec<f32> {
+        self.inner.member_render_matrices(dataset_id)
+    }
+
+    /// JSON array of member image ids aligned with
+    /// [`Self::member_render_matrices`]: entry `i` names the member whose
+    /// matrices occupy floats `i*32 .. i*32+32`. `"[]"` for an unknown dataset.
+    pub fn member_render_ids(&self, dataset_id: &str) -> String {
+        serde_json::to_string(&self.inner.member_render_ids(dataset_id)).unwrap()
     }
 
     // --- Fly camera methods ---

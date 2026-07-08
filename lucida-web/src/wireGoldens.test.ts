@@ -61,9 +61,13 @@ import {
 } from "./bridge.ts";
 import {
   extractDataType,
+  resolveDatasetManifest,
+  resolveFetchSource,
   type DatasetManifest,
+  type DatasetManifestWire,
   type Entity,
   type FetchSource,
+  type FetchSourceWire,
   type LayoutSpec,
 } from "./manifestTypes.ts";
 import { dtypeMax } from "./types.ts";
@@ -226,7 +230,12 @@ const expectedManifestSingle: DatasetManifest = {
     {
       from: "img-0",
       to: "img-0",
-      transform: { matrix: IDENTITY_TRANSLATION(128, -64) },
+      // Not a pure 2D translation (anisotropic z scale), so it stays in the
+      // full-matrix wire form; pure translations arrive as
+      // `translation: [tx, ty]` (locked by the collection fixture).
+      transform: {
+        matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 128, -64, 0, 1],
+      },
     },
   ],
   images: [
@@ -367,7 +376,42 @@ const expectedDatasetOpenedSingle: WireDatasetOpened = {
   opener_client_id: 7,
 };
 
-const expectedManifestCollection: DatasetManifest = {
+/** The collection's one shared multiscale, emitted ONCE in the manifest's
+ *  `multiscales` table and referenced per tile via `multiscale_ref`. */
+const expectedCollectionSharedMultiscale = {
+  axes: [
+    { name: "c", kind: "Channel" },
+    { name: "z", kind: "Space" },
+    { name: "y", kind: "Space" },
+    { name: "x", kind: "Space" },
+  ],
+  levels: [
+    {
+      level_index: 0,
+      shape: [1, 4, 12, 1024, 1024],
+      chunk_shape: [1, 1, 1, 512, 512],
+      grid_shape: [1, 4, 12, 2, 2],
+      scale: [1, 1, 5, 0.65, 0.65],
+    },
+    {
+      level_index: 1,
+      shape: [1, 4, 12, 512, 512],
+      chunk_shape: [1, 1, 1, 512, 512],
+      grid_shape: [1, 4, 12, 1, 1],
+      scale: [1, 1, 5, 1.3, 1.3],
+    },
+  ],
+  data_type: "Uint8",
+  pinned_axes: [],
+};
+
+/** The collection manifest as it crosses the wire: shared-once multiscale
+ *  table, per-image references, and compact `translation` placement edges —
+ *  announced by the leading `format_version` marker (absent on fully-inline
+ *  manifests, e.g. the single fixture). `resolveDatasetManifest` expands
+ *  this into the in-memory shape below. */
+const expectedManifestCollection: DatasetManifestWire = {
+  format_version: 2,
   dataset_id: "wds-collection-77",
   name: "screening-collection-01.zarr",
   kind: {
@@ -397,45 +441,21 @@ const expectedManifestCollection: DatasetManifest = {
       parent: "group-A1",
       labels: { name: "A1/0", tile_index: 0 },
     },
+    {
+      id: "tile-A1-f1",
+      kind: "Tile",
+      parent: "group-A1",
+      labels: { name: "A1/1", tile_index: 1 },
+    },
   ],
   transforms: [
-    {
-      from: "tile-A1-f0",
-      to: "group-A1",
-      transform: { matrix: IDENTITY_TRANSLATION(2048, 1024) },
-    },
+    { from: "tile-A1-f0", to: "group-A1", translation: [0, 0] },
+    { from: "tile-A1-f1", to: "group-A1", translation: [2048, 1024] },
   ],
+  multiscales: [expectedCollectionSharedMultiscale],
   images: [
-    {
-      image_id: "tile-A1-f0-image",
-      owner: "tile-A1-f0",
-      multiscale: {
-        axes: [
-          { name: "c", kind: "Channel" },
-          { name: "z", kind: "Space" },
-          { name: "y", kind: "Space" },
-          { name: "x", kind: "Space" },
-        ],
-        levels: [
-          {
-            level_index: 0,
-            shape: [1, 4, 12, 1024, 1024],
-            chunk_shape: [1, 1, 1, 512, 512],
-            grid_shape: [1, 4, 12, 2, 2],
-            scale: [1, 1, 5, 0.65, 0.65],
-          },
-          {
-            level_index: 1,
-            shape: [1, 4, 12, 512, 512],
-            chunk_shape: [1, 1, 1, 512, 512],
-            grid_shape: [1, 4, 12, 1, 1],
-            scale: [1, 1, 5, 1.3, 1.3],
-          },
-        ],
-        data_type: "Uint8",
-        pinned_axes: [],
-      },
-    },
+    { image_id: "tile-A1-f0-image", owner: "tile-A1-f0", multiscale_ref: 0 },
+    { image_id: "tile-A1-f1-image", owner: "tile-A1-f1", multiscale_ref: 0 },
   ],
   source_layouts: [
     {
@@ -443,22 +463,37 @@ const expectedManifestCollection: DatasetManifest = {
       name: "Explicit positions",
       placements: [
         { entity_id: "group-A1", position: [0, 0] },
-        { entity_id: "tile-A1-f0", position: [2048, 1024] },
+        { entity_id: "tile-A1-f0", position: [0, 0] },
+        { entity_id: "tile-A1-f1", position: [2048, 1024] },
       ],
     },
   ],
   default_layout_id: "layout-explicit",
 };
 
-const expectedDatasetOpenedCollection: WireDatasetOpened = {
-  manifest: expectedManifestCollection,
-  fetch: {
-    Proxied: {
-      images: [
-        { image_id: "tile-A1-f0-image", wire_format: { Lz4: { data_type: "Uint8" } } },
-      ],
-    },
+const expectedFetchCollection: FetchSourceWire = {
+  Proxied: {
+    format_version: 2,
+    images: [
+      { image_id: "tile-A1-f0-image", wire_format_ref: 0 },
+      { image_id: "tile-A1-f1-image", wire_format_ref: 0 },
+    ],
+    wire_formats: [{ Lz4: { data_type: "Uint8" } }],
   },
+};
+
+/** Wire shape of `lucida_protocol::DatasetOpened` for a collection: manifest
+ *  and fetch arrive in the compact form. */
+interface WireDatasetOpenedCollection {
+  manifest: DatasetManifestWire;
+  fetch: FetchSourceWire;
+  catalog: WireAssetCatalog;
+  opener_client_id: number | null;
+}
+
+const expectedDatasetOpenedCollection: WireDatasetOpenedCollection = {
+  manifest: expectedManifestCollection,
+  fetch: expectedFetchCollection,
   catalog: { entries: [] },
   opener_client_id: null,
 };
@@ -1571,19 +1606,56 @@ describe("wire goldens: dataset-open payloads", () => {
   it("collection DatasetOpened matches the manifestTypes mirror", () => {
     const opened = coveredFixture(
       "dataset-open/dataset_opened_collection.json",
-    ) as WireDatasetOpened;
+    ) as WireDatasetOpenedCollection;
     expect(opened).toStrictEqual(expectedDatasetOpenedCollection);
 
-    // Collection-kind discrimination as the web performs it.
-    expect(typeof opened.manifest.kind).not.toBe("string");
-    if (typeof opened.manifest.kind !== "string") {
-      expect(opened.manifest.kind.Collection.rows).toStrictEqual(["A", "B"]);
-      expect(opened.manifest.kind.Collection.columns).toStrictEqual(["1", "2", "3"]);
-      expect(opened.manifest.kind.Collection.positioning_mode).toBe("Explicit");
-      expect(opened.manifest.kind.Collection.has_explicit_positions).toBe(true);
+    // Resolution as sessionController performs it on every ingest: the
+    // shared multiscale table, wire-format table, and compact translation
+    // edges expand into effective per-image/per-edge values.
+    const manifest = resolveDatasetManifest(opened.manifest);
+    // The format_version marker is a wire-level detail; resolution drops it.
+    expect("format_version" in manifest).toBe(false);
+    expect(manifest.images).toHaveLength(2);
+    for (const image of manifest.images) {
+      expect(image.multiscale).toStrictEqual(expectedCollectionSharedMultiscale);
     }
-    const proxied = "Proxied" in opened.fetch ? opened.fetch.Proxied : null;
+    // Table-resolved images share ONE multiscale object (copy-on-write
+    // downstream), so a 20k-tile manifest does not fan out 20k copies.
+    expect(manifest.images[0].multiscale).toBe(manifest.images[1].multiscale);
+    expect(manifest.transforms).toStrictEqual([
+      { from: "tile-A1-f0", to: "group-A1", transform: { matrix: IDENTITY_TRANSLATION(0, 0) } },
+      {
+        from: "tile-A1-f1",
+        to: "group-A1",
+        transform: { matrix: IDENTITY_TRANSLATION(2048, 1024) },
+      },
+    ]);
+
+    // Collection-kind discrimination as the web performs it.
+    expect(typeof manifest.kind).not.toBe("string");
+    if (typeof manifest.kind !== "string") {
+      expect(manifest.kind.Collection.rows).toStrictEqual(["A", "B"]);
+      expect(manifest.kind.Collection.columns).toStrictEqual(["1", "2", "3"]);
+      expect(manifest.kind.Collection.positioning_mode).toBe("Explicit");
+      expect(manifest.kind.Collection.has_explicit_positions).toBe(true);
+    }
+
+    const fetch = resolveFetchSource(opened.fetch);
+    const proxied = "Proxied" in fetch ? fetch.Proxied : null;
+    expect(proxied!.images).toHaveLength(2);
+    expect(proxied!.images[0].image_id).toBe("tile-A1-f0-image");
     expect(extractDataType(proxied!.images[0].wire_format)).toBe("Uint8");
+    expect(extractDataType(proxied!.images[1].wire_format)).toBe("Uint8");
+  });
+
+  it("inline (single / historical) payloads resolve as a pass-through", () => {
+    // Persisted documents and single-image manifests carry inline metadata;
+    // the resolvers must hand them through unchanged.
+    const opened = fixture(
+      "dataset-open/dataset_opened_single.json",
+    ) as WireDatasetOpened;
+    expect(resolveDatasetManifest(opened.manifest)).toStrictEqual(expectedManifestSingle);
+    expect(resolveFetchSource(opened.fetch)).toStrictEqual(expectedFetchSingle);
   });
 
   it("FetchSource variants match the externally tagged mirror", () => {

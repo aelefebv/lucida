@@ -27,6 +27,49 @@ function sourceDefaultPlacements(manifest: DatasetManifest): LayoutSpec["placeme
 }
 
 /**
+ * Hash indexes over a manifest's relational scans, built once per builder
+ * call so per-placement footprint lookups are O(1). Without them a wide
+ * collection pays `placements × (images + entities + transforms)` array
+ * scans — millions for hundreds of groups × tens of thousands of tiles.
+ * Every map keeps the FIRST match, mirroring `Array.find` semantics.
+ */
+interface ManifestIndex {
+  /** Owner entity id → first image it owns. */
+  imageByOwner: Map<string, DatasetManifest["images"][number]>;
+  /** Parent entity id → child entities, in manifest order. */
+  childrenByParent: Map<string, DatasetManifest["entities"]>;
+  /** `from` id → `to` id → first matching transform edge. */
+  transformByEdge: Map<string, Map<string, DatasetManifest["transforms"][number]>>;
+}
+
+function buildManifestIndex(manifest: DatasetManifest): ManifestIndex {
+  const imageByOwner = new Map<string, DatasetManifest["images"][number]>();
+  for (const img of manifest.images) {
+    if (!imageByOwner.has(img.owner)) imageByOwner.set(img.owner, img);
+  }
+  const childrenByParent = new Map<string, DatasetManifest["entities"]>();
+  for (const e of manifest.entities) {
+    if (e.parent === undefined || e.parent === null) continue;
+    const siblings = childrenByParent.get(e.parent);
+    if (siblings) {
+      siblings.push(e);
+    } else {
+      childrenByParent.set(e.parent, [e]);
+    }
+  }
+  const transformByEdge = new Map<string, Map<string, DatasetManifest["transforms"][number]>>();
+  for (const t of manifest.transforms) {
+    let byTo = transformByEdge.get(t.from);
+    if (!byTo) {
+      byTo = new Map();
+      transformByEdge.set(t.from, byTo);
+    }
+    if (!byTo.has(t.to)) byTo.set(t.to, t);
+  }
+  return { imageByOwner, childrenByParent, transformByEdge };
+}
+
+/**
  * Footprint `[height, width]` in voxel units for a placed entity.
  *
  *   - Image entity (owns an image directly) → that image's level-0 tile.
@@ -34,20 +77,20 @@ function sourceDefaultPlacements(manifest: DatasetManifest): LayoutSpec["placeme
  *     child tiles, computed as `(tile_offset + tile_footprint)`. The
  *     tile→group TransformEdge contributes the offset (matrix[12], [13]).
  *
- * This matches `lucida-core::scene::find_entity_position`, which composes
+ * This matches `lucida-core::scene::resolve_entity_position`, which composes
  * tile positions from `group_position + tile_offset_within_group`. For
  * dense packing we therefore need the GROUP's footprint (which scales with
  * tiles-per-group), not just one tile's footprint.
  */
-function entityFootprintYX(manifest: DatasetManifest, entityId: string): [number, number] {
-  const directImg = manifest.images.find((i) => i.owner === entityId);
+function entityFootprintYX(index: ManifestIndex, entityId: string): [number, number] {
+  const directImg = index.imageByOwner.get(entityId);
   if (directImg) {
     const lvl0 = directImg.multiscale.levels[0];
     if (!lvl0) return [1, 1];
     return [lvl0.shape[Axis.Y] ?? 1, lvl0.shape[Axis.X] ?? 1];
   }
 
-  const children = manifest.entities.filter((e) => e.parent === entityId);
+  const children = index.childrenByParent.get(entityId) ?? [];
   if (children.length === 0) return [1, 1];
 
   let minX = Infinity;
@@ -55,13 +98,13 @@ function entityFootprintYX(manifest: DatasetManifest, entityId: string): [number
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (const child of children) {
-    const childImg = manifest.images.find((i) => i.owner === child.id);
+    const childImg = index.imageByOwner.get(child.id);
     if (!childImg) continue;
     const lvl0 = childImg.multiscale.levels[0];
     if (!lvl0) continue;
     const footprintY = lvl0.shape[Axis.Y] ?? 1;
     const footprintX = lvl0.shape[Axis.X] ?? 1;
-    const t = manifest.transforms.find((t) => t.from === child.id && t.to === entityId);
+    const t = index.transformByEdge.get(child.id)?.get(entityId);
     const tx = t?.transform.matrix[12] ?? 0;
     const ty = t?.transform.matrix[13] ?? 0;
     if (tx < minX) minX = tx;
@@ -81,10 +124,11 @@ function entityFootprintYX(manifest: DatasetManifest, entityId: string): [number
 function maxPlacementFootprintYX(manifest: DatasetManifest): [number, number] {
   const placements = sourceDefaultPlacements(manifest);
   if (!placements) return [1, 1];
+  const index = buildManifestIndex(manifest);
   let maxY = 0;
   let maxX = 0;
   for (const p of placements) {
-    const [y, x] = entityFootprintYX(manifest, p.entity_id);
+    const [y, x] = entityFootprintYX(index, p.entity_id);
     if (y > maxY) maxY = y;
     if (x > maxX) maxX = x;
   }

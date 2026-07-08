@@ -26,6 +26,31 @@ pub struct DatasetDerivedState {
     pub volume_transforms: HashMap<ImageId, VolumeTransform>,
     pub active_layout: LayoutSpec,
     pub members: Vec<MemberState>,
+    /// Member id (image id **or** entity id) → index into `members`. First
+    /// occurrence wins, so a lookup lands on the same member a front-to-back
+    /// scan matching either id would return. Lets per-member queries (model
+    /// matrices, picking) stay O(1) instead of scanning tens of thousands of
+    /// members per call in wide collections.
+    pub member_index: HashMap<String, usize>,
+    /// Max of every member's (positive-clamped) `max_physical_extent`; `0.0`
+    /// for a dataset with no members so it is neutral in a cross-dataset
+    /// `max` fold. Precomputed here so [`Scene::global_max_physical_extent`]
+    /// folds over datasets, not over every member of every dataset.
+    pub max_physical_extent: f64,
+    /// Max of every member's physical Y extent (`model[5] * clamped extent`);
+    /// `0.0` with no members. The per-dataset input to
+    /// [`Scene::global_max_physical_y`], precomputed for the same reason as
+    /// `max_physical_extent`.
+    pub max_physical_y: f64,
+}
+
+impl DatasetDerivedState {
+    /// Resolve a member by image id or entity id in O(1). Matches the member
+    /// a linear scan testing `image_id == id || entity_id == id` would find
+    /// first (see `member_index`). `None` for an unknown id.
+    pub fn member_by_id(&self, id: &str) -> Option<&MemberState> {
+        self.member_index.get(id).map(|&i| &self.members[i])
+    }
 }
 
 /// Precomputed per image-bearing entity.
@@ -241,35 +266,31 @@ impl Scene {
     /// Returns the maximum `max_physical_extent` across all datasets.
     /// Used to apply a global normalization correction so multi-dataset
     /// scenes preserve relative physical sizes in 3D.
+    ///
+    /// Folds over the per-dataset maxima precomputed by
+    /// [`build_derived_state`], so this is O(datasets) — cheap enough to sit
+    /// inside [`Self::placement_correction`], which runs once per member on
+    /// render-path passes. The maxima can only change when `derived` is
+    /// rebuilt, so they are never stale mid-frame.
     pub fn global_max_physical_extent(&self) -> f64 {
         let max = self
             .derived
             .values()
-            .flat_map(|d| d.members.iter())
-            .map(|m| {
-                let e = m.volume_transform.max_physical_extent;
-                if e > 0.0 { e } else { 1.0 }
-            })
+            .map(|d| d.max_physical_extent)
             .fold(0.0_f64, f64::max);
         if max > 0.0 { max } else { 1.0 }
     }
 
     /// Returns the maximum physical Y extent across all datasets.
     /// Used to top-align datasets in 3D mode.
+    ///
+    /// O(datasets) via the precomputed per-dataset `max_physical_y`, same
+    /// rationale as [`Self::global_max_physical_extent`].
     pub fn global_max_physical_y(&self) -> f64 {
         let max = self
             .derived
             .values()
-            .flat_map(|d| d.members.iter())
-            .map(|m| {
-                let t = &m.volume_transform;
-                let ds_max = if t.max_physical_extent > 0.0 {
-                    t.max_physical_extent
-                } else {
-                    1.0
-                };
-                t.model[5] as f64 * ds_max
-            })
+            .map(|d| d.max_physical_y)
             .fold(0.0_f64, f64::max);
         if max > 0.0 { max } else { 1.0 }
     }
@@ -289,6 +310,46 @@ impl Scene {
     /// callers can fold it in without a special case.
     pub fn member_world_matrix(&self, member: &MemberState) -> [f32; 16] {
         self.rendering_transform(member).0.model
+    }
+
+    /// Every member's forward + inverse world matrix for one dataset in a
+    /// single pass: for member `i` (in `derived.members` order), floats
+    /// `i*32 .. i*32+16` are the forward `model` and `i*32+16 .. i*32+32` its
+    /// `inv_model` — exactly the pair [`Self::rendering_transform`] produces,
+    /// i.e. the same values the per-id `member_world_matrix` /
+    /// `rendering_transform(..).1.inv_model` lookups return one at a time.
+    ///
+    /// The flat layout exists so a binding can hand a whole collection's
+    /// placement to a consumer in one crossing instead of two calls per
+    /// member; pair with [`Self::member_render_ids`] for the id of each
+    /// 32-float block. Empty for an unknown dataset.
+    pub fn member_render_matrices(&self, dataset_id: &str) -> Vec<f32> {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let Some(derived) = self.derived.get(&ds_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(derived.members.len() * 32);
+        for member in &derived.members {
+            let (fwd, inv) = self.rendering_transform(member);
+            out.extend_from_slice(&fwd.model);
+            out.extend_from_slice(&inv.inv_model);
+        }
+        out
+    }
+
+    /// Image ids aligned with [`Self::member_render_matrices`]: entry `i`
+    /// names the member whose matrices occupy floats `i*32 .. i*32+32`.
+    /// Empty for an unknown dataset.
+    pub fn member_render_ids(&self, dataset_id: &str) -> Vec<String> {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let Some(derived) = self.derived.get(&ds_id) else {
+            return Vec::new();
+        };
+        derived
+            .members
+            .iter()
+            .map(|m| m.image_id.0.clone())
+            .collect()
     }
 
     /// World-space axis-aligned bounds (`(min, max)`) of **a single dataset's**
@@ -1082,6 +1143,15 @@ impl Scene {
         let vp = self.camera.viewport();
         let eye = self.camera.eye_position();
 
+        // Entity id → kind, first occurrence winning (same entity a linear
+        // front-to-back scan would find), so the per-member kind lookup below
+        // is O(1) rather than O(entities) per member.
+        let mut kind_by_entity: HashMap<&EntityId, &EntityKind> =
+            HashMap::with_capacity(manifest.entities().len());
+        for entity in manifest.entities() {
+            kind_by_entity.entry(&entity.id).or_insert(&entity.kind);
+        }
+
         let mut results = Vec::with_capacity(derived.members.len());
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
@@ -1184,11 +1254,9 @@ impl Scene {
             };
 
             // Determine entity kind
-            let kind = manifest
-                .entities()
-                .iter()
-                .find(|e| e.id == member.entity_id)
-                .map(|e| e.kind.clone())
+            let kind = kind_by_entity
+                .get(&member.entity_id)
+                .map(|k| (*k).clone())
                 .unwrap_or(EntityKind::Image);
 
             results.push(EntityQueryResult {
@@ -1260,18 +1328,20 @@ pub fn resolve_layout(
 pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> DatasetDerivedState {
     let active_layout = layout.clone();
 
+    // One position index for the whole rebuild: resolving every image through
+    // it is O(placements + entities + transforms + images) total, where the
+    // per-image scans of `find_entity_position` would make a wide collection's
+    // rebuild quadratic in its member count.
+    let position_index =
+        LayoutPositionIndex::new(&active_layout, manifest.entities(), manifest.transforms());
+
     // Build per-image member state
     let mut members = Vec::new();
     let mut volume_transforms = HashMap::new();
 
     for image in manifest.images() {
         // Find position from layout placements
-        let position = find_entity_position(
-            &image.owner,
-            &active_layout,
-            manifest.entities(),
-            manifest.transforms(),
-        );
+        let position = position_index.resolve(&image.owner).unwrap_or([0.0, 0.0]);
 
         // Compute volume transform from level 0 geometry
         let vt = if let Some(level0) = image.multiscale.levels.first() {
@@ -1306,42 +1376,113 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
         });
     }
 
+    // Id → index (first occurrence wins, both id namespaces) and the
+    // per-dataset extent maxima the scene-global placement correction folds
+    // over. Derived entirely from `members`, so they can never disagree with
+    // a linear pass over it.
+    let mut member_index = HashMap::with_capacity(members.len() * 2);
+    let mut max_physical_extent = 0.0_f64;
+    let mut max_physical_y = 0.0_f64;
+    for (i, member) in members.iter().enumerate() {
+        member_index.entry(member.image_id.0.clone()).or_insert(i);
+        member_index.entry(member.entity_id.0.clone()).or_insert(i);
+        let extent = member.volume_transform.max_physical_extent;
+        let extent = if extent > 0.0 { extent } else { 1.0 };
+        max_physical_extent = max_physical_extent.max(extent);
+        max_physical_y = max_physical_y.max(member.volume_transform.model[5] as f64 * extent);
+    }
+
     DatasetDerivedState {
         volume_transforms,
         active_layout,
         members,
+        member_index,
+        max_physical_extent,
+        max_physical_y,
     }
 }
 
-/// Find the position of an entity in the layout.
-/// For Image entities: look up directly in layout placements.
-/// For Tile entities: look up parent group's placement + tile->group transform translation.
+/// Hash-indexed resolver for entity positions in a layout, with the exact
+/// first-match semantics of [`resolve_entity_position`] but O(1) per lookup.
 ///
-/// Returns `[0.0, 0.0]` as a last-resort fallback for an entity with no resolvable
-/// placement, so render-path callers always get *some* position. Annotation
-/// anchoring instead uses [`resolve_entity_position`] (this function's `Option`
-/// sibling) so it never mistakes that fallback for a real origin placement.
-///
-/// `pub(crate)` so `DocumentState::apply` (in `scene::types`) can reuse the exact
-/// same entity→position mapping the renderer uses when it re-anchors pins on a
-/// layout switch — the displacement a pin rides must match where the entity is
-/// actually drawn.
-pub(crate) fn find_entity_position(
-    entity_id: &EntityId,
-    layout: &LayoutSpec,
-    entities: &[Entity],
-    transforms: &[TransformEdge],
-) -> [f64; 2] {
-    resolve_entity_position(entity_id, layout, entities, transforms).unwrap_or([0.0, 0.0])
+/// [`build_derived_state`] constructs one per rebuild and resolves every image
+/// through it; [`resolve_entity_position`] remains the single-lookup form for
+/// callers resolving a handful of entities (annotation anchoring), where
+/// building an index would cost more than the scan it replaces.
+pub(crate) struct LayoutPositionIndex<'a> {
+    /// First placement per entity id.
+    placement_by_entity: HashMap<&'a EntityId, [f64; 2]>,
+    /// First entity per id → its parent (if any).
+    parent_by_entity: HashMap<&'a EntityId, Option<&'a EntityId>>,
+    /// First transform edge per `from` id → per `to` id → XY translation.
+    offset_by_edge: HashMap<&'a EntityId, HashMap<&'a EntityId, [f64; 2]>>,
+}
+
+impl<'a> LayoutPositionIndex<'a> {
+    pub(crate) fn new(
+        layout: &'a LayoutSpec,
+        entities: &'a [Entity],
+        transforms: &'a [TransformEdge],
+    ) -> Self {
+        let mut placement_by_entity = HashMap::with_capacity(layout.placements.len());
+        for p in &layout.placements {
+            placement_by_entity
+                .entry(&p.entity_id)
+                .or_insert(p.position);
+        }
+        let mut parent_by_entity = HashMap::with_capacity(entities.len());
+        for e in entities {
+            parent_by_entity.entry(&e.id).or_insert(e.parent.as_ref());
+        }
+        let mut offset_by_edge: HashMap<&EntityId, HashMap<&EntityId, [f64; 2]>> = HashMap::new();
+        for t in transforms {
+            offset_by_edge
+                .entry(&t.from)
+                .or_default()
+                .entry(&t.to)
+                .or_insert([t.transform.matrix()[12], t.transform.matrix()[13]]);
+        }
+        Self {
+            placement_by_entity,
+            parent_by_entity,
+            offset_by_edge,
+        }
+    }
+
+    /// Resolve an entity's `[x, y]`, or `None` when it has no placement —
+    /// mirrors [`resolve_entity_position`] step for step (direct placement,
+    /// else parent placement + tile→parent transform translation, defaulting
+    /// the translation to `[0, 0]` when no edge exists).
+    pub(crate) fn resolve(&self, entity_id: &EntityId) -> Option<[f64; 2]> {
+        if let Some(p) = self.placement_by_entity.get(entity_id) {
+            return Some(*p);
+        }
+        let parent = (*self.parent_by_entity.get(entity_id)?)?;
+        let parent_pos = *self.placement_by_entity.get(parent)?;
+        let offset = self
+            .offset_by_edge
+            .get(entity_id)
+            .and_then(|by_to| by_to.get(parent))
+            .copied()
+            .unwrap_or([0.0, 0.0]);
+        Some([parent_pos[0] + offset[0], parent_pos[1] + offset[1]])
+    }
 }
 
 /// Resolve an entity's `[x, y]` in `layout`, or `None` when it has no placement
 /// there (neither a direct placement nor a placed parent to compose against).
 ///
-/// This is the strict, fallback-free sibling of [`find_entity_position`]: where
-/// that function collapses an unplaceable entity to `[0.0, 0.0]` for the render
-/// path, this distinguishes "genuinely placed at the origin" from "not placeable
-/// in this layout". Annotation anchoring depends on that distinction:
+/// For Image entities: look up directly in layout placements. For Tile
+/// entities: parent group's placement + tile→group transform translation.
+/// This is the single-lookup owner of that composition rule;
+/// [`LayoutPositionIndex`] is its hash-indexed bulk twin (used by
+/// [`build_derived_state`], where the render path collapses an unresolvable
+/// entity to `[0.0, 0.0]` so it always gets *some* position).
+///
+/// Unlike that render-path fallback, the `Option` here distinguishes
+/// "genuinely placed at the origin" from "not placeable in this layout".
+/// Annotation anchoring (`DocumentState::apply` in `scene::types`) depends on
+/// that distinction:
 ///   - picking the nearest entity must not treat unplaceable entities as if they
 ///     sat at the origin, and
 ///   - re-anchoring on a layout switch must skip a pin whose anchor isn't placed
@@ -1753,6 +1894,140 @@ pub(crate) mod test_helpers {
             },
             entities,
             vec![],
+            images,
+            vec![layout],
+            Some(LayoutId("default".into())),
+        );
+
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
+            images: fetch_images,
+        });
+
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+            opener_client_id: None,
+        }
+    }
+
+    /// Create a DatasetOpened for a collection of `groups` placed group
+    /// entities, each parenting `tiles_per_group` tile entities whose
+    /// positions compose from the group placement plus a tile→group
+    /// transform translation — the wide-collection shape (groups × tiles)
+    /// that exercises the parent-composition position path at scale.
+    pub fn make_grouped_collection_opened(
+        id: &str,
+        groups: usize,
+        tiles_per_group: usize,
+    ) -> DatasetOpened {
+        use lucida_content::layout::EntityPlacement;
+
+        let mut entities = Vec::new();
+        let mut transforms = Vec::new();
+        let mut images = Vec::new();
+        let mut placements = Vec::new();
+        let mut fetch_images = Vec::new();
+
+        for g in 0..groups {
+            let group_id = EntityId(format!("{id}-g{g}"));
+            entities.push(Entity {
+                id: group_id.clone(),
+                kind: EntityKind::Group,
+                parent: None,
+                labels: EntityLabels {
+                    name: Some(format!("g{g}")),
+                    ..Default::default()
+                },
+            });
+            placements.push(EntityPlacement {
+                entity_id: group_id.clone(),
+                position: [(g % 16) as f64 * 800.0, (g / 16) as f64 * 800.0],
+            });
+
+            for t in 0..tiles_per_group {
+                let tile_id = EntityId(format!("{id}-g{g}-t{t}"));
+                let image_id = ImageId(format!("{id}-g{g}-t{t}-image"));
+                entities.push(Entity {
+                    id: tile_id.clone(),
+                    kind: EntityKind::Tile,
+                    parent: Some(group_id.clone()),
+                    labels: EntityLabels::default(),
+                });
+                transforms.push(TransformEdge {
+                    from: tile_id.clone(),
+                    to: group_id.clone(),
+                    transform: VoxelTransform::from_voxel_translation_2d(
+                        (t % 8) as f64 * 64.0,
+                        (t / 8) as f64 * 64.0,
+                    ),
+                });
+                images.push(ImageSpec {
+                    image_id: image_id.clone(),
+                    owner: tile_id,
+                    multiscale: MultiscaleInfo {
+                        axes: vec![
+                            Axis {
+                                name: "t".to_string(),
+                                kind: AxisKind::Time,
+                            },
+                            Axis {
+                                name: "c".to_string(),
+                                kind: AxisKind::Channel,
+                            },
+                            Axis {
+                                name: "z".to_string(),
+                                kind: AxisKind::Space,
+                            },
+                            Axis {
+                                name: "y".to_string(),
+                                kind: AxisKind::Space,
+                            },
+                            Axis {
+                                name: "x".to_string(),
+                                kind: AxisKind::Space,
+                            },
+                        ],
+                        levels: vec![LevelGeometry {
+                            level_index: 0,
+                            shape: [1, 1, 1, 64, 64],
+                            chunk_shape: [1, 1, 1, 64, 64],
+                            grid_shape: [1, 1, 1, 1, 1],
+                            scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                        }],
+                        coarse_level_index: None,
+                        generated_levels: vec![],
+                        data_type: DataType::Uint16,
+                        pinned_axes: vec![],
+                        channel_infos: vec![],
+                    },
+                });
+                fetch_images.push(ProxiedImageSpec {
+                    image_id,
+                    wire_format: WireFormat::Raw {
+                        data_type: DataType::Uint16,
+                    },
+                });
+            }
+        }
+
+        let layout = LayoutSpec {
+            id: LayoutId("default".into()),
+            name: "Default".into(),
+            placements,
+        };
+
+        let manifest = DatasetManifest::new(
+            DatasetId(id.to_string()),
+            id.to_string(),
+            DatasetKind::Collection {
+                rows: vec!["A".to_string()],
+                columns: (0..groups).map(|g| format!("{}", g + 1)).collect(),
+                positioning_mode: PositioningMode::Derived,
+                has_explicit_positions: false,
+            },
+            entities,
+            transforms,
             images,
             vec![layout],
             Some(LayoutId("default".into())),
@@ -3337,5 +3612,298 @@ mod tests {
         // Identical rebroadcast: no further bump.
         scene.import_dataset_presence(order, settings);
         assert_eq!(scene.epochs.selection, baseline.selection + 1);
+    }
+
+    // --- Indexed-lookup equivalence ---
+    //
+    // The hash indexes below (member_index, LayoutPositionIndex, the
+    // per-dataset extent maxima, the bulk matrix export) exist purely for
+    // speed; each test pins its output to the linear-scan definition it
+    // replaces, on fixtures that include the ambiguous cases (duplicate ids,
+    // unplaced parents, missing transform edges).
+
+    #[test]
+    fn member_by_id_matches_linear_scan_for_both_id_namespaces() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_grouped_collection_opened("coll", 4, 6);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let derived = scene.derived.get(&DatasetId("coll".into())).unwrap();
+
+        for member in &derived.members {
+            for id in [member.image_id.0.as_str(), member.entity_id.0.as_str()] {
+                let expected = derived
+                    .members
+                    .iter()
+                    .find(|m| m.image_id.0 == id || m.entity_id.0 == id)
+                    .unwrap();
+                let got = derived.member_by_id(id).unwrap();
+                assert_eq!(got.entity_id, expected.entity_id);
+                assert_eq!(got.image_id, expected.image_id);
+            }
+        }
+        assert!(derived.member_by_id("no-such-member").is_none());
+    }
+
+    #[test]
+    fn layout_position_index_matches_single_lookup_resolver() {
+        use lucida_content::layout::EntityPlacement;
+
+        let ent = |id: &str, parent: Option<&str>| Entity {
+            id: EntityId(id.into()),
+            kind: EntityKind::Tile,
+            parent: parent.map(|p| EntityId(p.into())),
+            labels: EntityLabels::default(),
+        };
+        let entities = vec![
+            ent("placed-direct", None),
+            ent("tile-with-edge", Some("placed-direct")),
+            ent("tile-without-edge", Some("placed-direct")),
+            ent("tile-unplaced-parent", Some("nowhere")),
+            ent("tile-no-parent", None),
+            // Duplicate entity id with a different parent: first must win.
+            ent("tile-with-edge", Some("nowhere")),
+        ];
+        let transforms = vec![
+            TransformEdge {
+                from: EntityId("tile-with-edge".into()),
+                to: EntityId("placed-direct".into()),
+                transform: VoxelTransform::from_voxel_translation_2d(10.0, 20.0),
+            },
+            // Duplicate edge with a different offset: first must win.
+            TransformEdge {
+                from: EntityId("tile-with-edge".into()),
+                to: EntityId("placed-direct".into()),
+                transform: VoxelTransform::from_voxel_translation_2d(999.0, 999.0),
+            },
+        ];
+        let layout = LayoutSpec {
+            id: LayoutId("l".into()),
+            name: "L".into(),
+            placements: vec![
+                EntityPlacement {
+                    entity_id: EntityId("placed-direct".into()),
+                    position: [5.0, 7.0],
+                },
+                // Duplicate placement: first must win.
+                EntityPlacement {
+                    entity_id: EntityId("placed-direct".into()),
+                    position: [-1.0, -1.0],
+                },
+            ],
+        };
+
+        let index = LayoutPositionIndex::new(&layout, &entities, &transforms);
+        for id in [
+            "placed-direct",
+            "tile-with-edge",
+            "tile-without-edge",
+            "tile-unplaced-parent",
+            "tile-no-parent",
+            "unknown-entity",
+        ] {
+            let entity_id = EntityId(id.into());
+            assert_eq!(
+                index.resolve(&entity_id),
+                resolve_entity_position(&entity_id, &layout, &entities, &transforms),
+                "position mismatch for entity '{id}'"
+            );
+        }
+    }
+
+    #[test]
+    fn per_dataset_extent_maxima_match_member_folds() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "small",
+                "small",
+                1,
+                [1, 1, 8, 128, 128],
+                [1, 1, 8, 64, 64],
+                1,
+            ))
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "large",
+                "large",
+                1,
+                [1, 1, 64, 4096, 2048],
+                [1, 1, 16, 256, 256],
+                3,
+            ))
+            .into(),
+        );
+
+        let fold_extent = |members: &[MemberState]| {
+            members
+                .iter()
+                .map(|m| {
+                    let e = m.volume_transform.max_physical_extent;
+                    if e > 0.0 { e } else { 1.0 }
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        let fold_y = |members: &[MemberState]| {
+            members
+                .iter()
+                .map(|m| {
+                    let t = &m.volume_transform;
+                    let e = if t.max_physical_extent > 0.0 {
+                        t.max_physical_extent
+                    } else {
+                        1.0
+                    };
+                    t.model[5] as f64 * e
+                })
+                .fold(0.0_f64, f64::max)
+        };
+
+        let mut expected_extent = 0.0_f64;
+        let mut expected_y = 0.0_f64;
+        for derived in scene.derived.values() {
+            assert_eq!(derived.max_physical_extent, fold_extent(&derived.members));
+            assert_eq!(derived.max_physical_y, fold_y(&derived.members));
+            expected_extent = expected_extent.max(derived.max_physical_extent);
+            expected_y = expected_y.max(derived.max_physical_y);
+        }
+        assert_eq!(scene.global_max_physical_extent(), expected_extent);
+        assert_eq!(scene.global_max_physical_y(), expected_y);
+    }
+
+    #[test]
+    fn member_render_matrices_match_per_member_queries() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_grouped_collection_opened("coll", 3, 5);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        // 3D mode so the global correction + top-alignment terms are exercised.
+        scene.set_mode_3d();
+
+        let ids = scene.member_render_ids("coll");
+        let flat = scene.member_render_matrices("coll");
+        let derived = scene.derived.get(&DatasetId("coll".into())).unwrap();
+
+        assert_eq!(ids.len(), derived.members.len());
+        assert_eq!(flat.len(), derived.members.len() * 32);
+
+        for (i, member) in derived.members.iter().enumerate() {
+            assert_eq!(ids[i], member.image_id.0);
+            let fwd = scene.member_world_matrix(member);
+            let inv = scene.rendering_transform(member).1.inv_model;
+            assert_eq!(&flat[i * 32..i * 32 + 16], &fwd[..]);
+            assert_eq!(&flat[i * 32 + 16..i * 32 + 32], &inv[..]);
+        }
+
+        assert!(scene.member_render_ids("missing").is_empty());
+        assert!(scene.member_render_matrices("missing").is_empty());
+    }
+
+    // --- Scaling regressions ---
+    //
+    // Wide collections (hundreds of groups × tens of thousands of tiles) make
+    // any per-member linear scan quadratic in the member count. Each test
+    // times the same operation at 1× and 4× member count and bounds the
+    // ratio: linear work lands near 4×, quadratic near 16×. The bound of 10×
+    // is deliberately loose (shared CI machines are noisy; best-of-3 damps
+    // scheduling spikes) while still cleanly separating the two regimes.
+
+    fn best_of_3<F: FnMut()>(mut f: F) -> std::time::Duration {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            f();
+            best = best.min(start.elapsed());
+        }
+        best
+    }
+
+    const SCALING_GROUPS_1X: usize = 100; // × 40 tiles = 4_000 members
+    const SCALING_GROUPS_4X: usize = 400; // × 40 tiles = 16_000 members
+    const SCALING_TILES_PER_GROUP: usize = 40;
+    const SCALING_RATIO_BOUND: f64 = 10.0;
+
+    fn grouped_scene(groups: usize) -> Scene {
+        let mut scene = Scene::new([800, 600]);
+        let reg =
+            test_helpers::make_grouped_collection_opened("coll", groups, SCALING_TILES_PER_GROUP);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene
+    }
+
+    #[test]
+    fn dataset_open_apply_scales_linearly_with_member_count() {
+        let time_apply = |groups: usize| {
+            let reg = test_helpers::make_grouped_collection_opened(
+                "coll",
+                groups,
+                SCALING_TILES_PER_GROUP,
+            );
+            best_of_3(|| {
+                let mut scene = Scene::new([800, 600]);
+                scene.apply(DocumentCommand::DatasetOpened(reg.clone()).into());
+            })
+        };
+
+        let t1 = time_apply(SCALING_GROUPS_1X);
+        let t4 = time_apply(SCALING_GROUPS_4X);
+        let ratio = t4.as_secs_f64() / t1.as_secs_f64().max(1e-9);
+        assert!(
+            ratio < SCALING_RATIO_BOUND,
+            "4× members took {ratio:.1}× as long ({t1:?} → {t4:?}); \
+             expected near-linear scaling"
+        );
+    }
+
+    #[test]
+    fn full_member_matrix_pass_scales_linearly_with_member_count() {
+        // The per-member matrix queries the render/minimap paths issue for
+        // every member: resolve by id, then build the forward + inverse
+        // transform (which folds in the scene-global placement correction).
+        let time_pass = |groups: usize| {
+            let scene = grouped_scene(groups);
+            let derived = scene.derived.get(&DatasetId("coll".into())).unwrap();
+            let ids: Vec<String> = derived
+                .members
+                .iter()
+                .map(|m| m.image_id.0.clone())
+                .collect();
+            best_of_3(|| {
+                for id in &ids {
+                    let member = derived.member_by_id(id).unwrap();
+                    let (fwd, inv) = scene.rendering_transform(member);
+                    std::hint::black_box((fwd.model[12], inv.inv_model[12]));
+                }
+            })
+        };
+
+        let t1 = time_pass(SCALING_GROUPS_1X);
+        let t4 = time_pass(SCALING_GROUPS_4X);
+        let ratio = t4.as_secs_f64() / t1.as_secs_f64().max(1e-9);
+        assert!(
+            ratio < SCALING_RATIO_BOUND,
+            "4× members took {ratio:.1}× as long ({t1:?} → {t4:?}); \
+             expected near-linear scaling"
+        );
+    }
+
+    #[test]
+    fn view_query_scales_linearly_with_member_count() {
+        let time_query = |groups: usize| {
+            let scene = grouped_scene(groups);
+            let ds_id = DatasetId("coll".into());
+            best_of_3(|| {
+                std::hint::black_box(scene.view_query(&ds_id).unwrap());
+            })
+        };
+
+        let t1 = time_query(SCALING_GROUPS_1X);
+        let t4 = time_query(SCALING_GROUPS_4X);
+        let ratio = t4.as_secs_f64() / t1.as_secs_f64().max(1e-9);
+        assert!(
+            ratio < SCALING_RATIO_BOUND,
+            "4× members took {ratio:.1}× as long ({t1:?} → {t4:?}); \
+             expected near-linear scaling"
+        );
     }
 }

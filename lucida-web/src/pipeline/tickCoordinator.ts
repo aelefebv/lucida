@@ -193,8 +193,6 @@ export class TickCoordinator {
   private _lastVisibleRegion = new Map<string, VisibleRegion>();
   /** Per-dataset snapshot of the most recent entity list. */
   private _lastEntities = new Map<string, EntitySnapshot[]>();
-  /** Per-dataset entityId → number of CpuCache-cached chunk keys. */
-  private _lastCachedKeyCounts = new Map<string, Map<string, number>>();
   /** Per-dataset snapshot of the most recent full `plan()` output. */
   private _lastPlanByDataset = new Map<string, RequestPlan>();
 
@@ -290,6 +288,14 @@ export class TickCoordinator {
     // config even if a UI knob fires between dataset iterations.
     const planningConfig = configStore.get();
 
+    // One CPU-cache snapshot per rebuild, taken only when a debug
+    // surface will read it. `snapshot()` walks every resident entity in
+    // the chunk and overview stores, so it must never run per-entity or
+    // per-dataset — with tens of thousands of visible entities that
+    // walk would dominate the rebuild. Every debug consumer below
+    // (planning panel, entityDiag) shares this single copy.
+    const cacheSnapshot = debugStats.enabled ? ctx.cpuCache.snapshot() : null;
+
     // Step 3 — Per-dataset loop
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
@@ -322,15 +328,7 @@ export class TickCoordinator {
       if (!built) continue;
       const { snapshot, entities, visibleRegion, selection } = built;
 
-      // 3c. Track per-entity cache occupancy for telemetry.
-      const cachedKeyCountsForDataset = new Map<string, number>();
-      for (const entity of entities) {
-        const cachedKeys = ctx.cpuCache.snapshot().cached.get(entity.entityId);
-        cachedKeyCountsForDataset.set(entity.entityId, cachedKeys?.size ?? 0);
-      }
-      this._lastCachedKeyCounts.set(dsId, cachedKeyCountsForDataset);
-
-      // 3d. Plan. Opaque carry-forward state travels via {@link PlanningState};
+      // 3c. Plan. Opaque carry-forward state travels via {@link PlanningState};
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? { previousActiveSet: [] };
@@ -346,9 +344,9 @@ export class TickCoordinator {
 
       // Built before downstream side-effects so the panel reflects what
       // `plan()` produced, not the post-LOD-filter upload-path view.
-      if (debugStats.enabled) {
+      if (cacheSnapshot !== null) {
         debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
-          dsId, result, entities, entityById, visibleRegion, ctx.cpuCache,
+          dsId, result, entities, entityById, visibleRegion, cacheSnapshot,
           planningConfig,
         );
       }
@@ -398,7 +396,7 @@ export class TickCoordinator {
       };
       this._lastPlanByDataset.set(dsId, budgetedResult);
 
-      // 3e. Build member roster + per-entity matrix map in one walk.
+      // 3d. Build member roster + per-entity matrix map in one walk.
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
         activeSet: result.activeSet,
         entities,
@@ -623,8 +621,7 @@ export class TickCoordinator {
       // truncated to the last-processed dataset's first 5 (the prior
       // last-dataset-wins behavior).
       const entityDiagEntries: OrchDebug["entityDiag"] = [];
-      for (const [dsId, entities] of this._lastEntities) {
-        const cachedKeyCountsForDataset = this._lastCachedKeyCounts.get(dsId);
+      for (const [, entities] of this._lastEntities) {
         for (const e of entities) {
           if (entityDiagEntries.length >= 5) break;
           entityDiagEntries.push({
@@ -633,7 +630,9 @@ export class TickCoordinator {
             fullShape: e.levels.length > 0
               ? [e.levels[0].shape[Axis.X], e.levels[0].shape[Axis.Y]] as [number, number]
               : null,
-            cachedKeys: cachedKeyCountsForDataset?.get(e.entityId) ?? 0,
+            // Occupancy is counted lazily for just the entries shown
+            // here, against the shared per-rebuild cache snapshot.
+            cachedKeys: cacheSnapshot?.cached.get(e.entityId)?.size ?? 0,
           });
         }
         if (entityDiagEntries.length >= 5) break;
@@ -687,7 +686,6 @@ export class TickCoordinator {
     this._lastPlanByDataset.delete(workerMemberId);
     this._lastEntities.delete(workerMemberId);
     this._lastVisibleRegion.delete(workerMemberId);
-    this._lastCachedKeyCounts.delete(workerMemberId);
     // Without this delete, a dataset removed and re-added would keep
     // its prior `PlanningState` (`previousActiveSet` etc.) across the gap.
     this.planningState.delete(workerMemberId);

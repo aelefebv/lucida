@@ -44,6 +44,29 @@ pub(crate) fn open_progress(
         workspace_dataset_id,
         dataset_source_id,
         detail,
+        warning: false,
+    }
+}
+
+/// An [`open_progress`] entry flagged as a non-fatal problem (an import
+/// warning), so clients can surface it durably instead of treating it as a
+/// transient stage transition.
+pub(crate) fn open_warning(
+    stage: DatasetOpenStage,
+    message: impl Into<String>,
+    workspace_dataset_id: Option<DatasetId>,
+    dataset_source_id: Option<String>,
+    detail: Option<String>,
+) -> DatasetOpenProgressDiagnostic {
+    DatasetOpenProgressDiagnostic {
+        warning: true,
+        ..open_progress(
+            stage,
+            message,
+            workspace_dataset_id,
+            dataset_source_id,
+            detail,
+        )
     }
 }
 

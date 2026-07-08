@@ -31,8 +31,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::{Request as WsRequest, StatusCode as WsStatusCode};
-use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
 use crate::error::{CliError, ErrorKind};
 
@@ -106,14 +106,29 @@ pub fn workspace_ws_request(ws_url: &str, token: Option<&str>) -> Result<WsReque
     Ok(request)
 }
 
+/// Message/frame limits for the workspace socket. Snapshots of workspaces
+/// with many datasets — and dataset-opened broadcasts for wide collections —
+/// are legitimately large, so raise tungstenite's 64 MiB / 16 MiB defaults
+/// (which would otherwise drop the connection mid-handshake) well clear of
+/// any payload the server produces.
+fn workspace_socket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(256 * 1024 * 1024))
+        .max_frame_size(Some(64 * 1024 * 1024))
+}
+
 /// Connect to a workspace WebSocket URL with optional bearer auth.
 pub async fn connect_workspace_socket(
     ws_url: &str,
     token: Option<&str>,
 ) -> Result<WorkspaceSocket, CliError> {
-    let (socket, _response) = connect_async(workspace_ws_request(ws_url, token)?)
-        .await
-        .map_err(map_websocket_error)?;
+    let (socket, _response) = connect_async_with_config(
+        workspace_ws_request(ws_url, token)?,
+        Some(workspace_socket_config()),
+        false,
+    )
+    .await
+    .map_err(map_websocket_error)?;
     Ok(socket)
 }
 
