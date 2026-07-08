@@ -228,12 +228,15 @@ where
         while let Some(message) = messages.next().await {
             match message? {
                 IncomingSessionMessage::Text(text) => {
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        CliError::new(
-                            ErrorKind::Protocol,
-                            format!("invalid workspace server message: {error}"),
-                        )
-                    })?;
+                    // Skip text frames that don't parse as a known
+                    // `ServerMessage`: a newer server may notify with
+                    // message types this binary predates, and none of them
+                    // can be the reply an observer is waiting for. Failing
+                    // the whole wait would make every server-side protocol
+                    // addition break deployed CLIs.
+                    let Ok(message) = serde_json::from_str::<ServerMessage>(&text) else {
+                        continue;
+                    };
                     if matches!(message, ServerMessage::WorkspaceArchived { .. }) {
                         return Err(CliError::new(
                             ErrorKind::ArchivedWorkspace,
@@ -495,6 +498,35 @@ mod tests {
 
         assert_eq!(seq, 51);
         assert!(!observed_snapshot, "resync snapshot leaked to the observer");
+    }
+
+    #[tokio::test]
+    async fn observe_until_skips_unknown_message_types() {
+        // A newer server may unicast message types this binary predates
+        // (protocol additions land server-first). They can never be the
+        // awaited reply, so the wait skips them instead of failing.
+        let mut messages = text_messages(vec![
+            serde_json::json!({
+                "type": "notification_from_the_future",
+                "detail": "unknown vocabulary"
+            })
+            .to_string(),
+            serde_json::json!({ "type": "ack", "seq": 9 }).to_string(),
+        ]);
+
+        let seq = observe_until(
+            &mut messages,
+            Duration::from_secs(1),
+            &ack_wait(),
+            |message| match message {
+                ServerMessage::Ack { seq } => Ok(Some(seq)),
+                _ => Ok(None),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(seq, 9);
     }
 
     #[tokio::test]

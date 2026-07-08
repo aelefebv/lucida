@@ -78,11 +78,14 @@ export const DEFAULT_MAX_BYTES_IN_FLIGHT = 32 * 1024 * 1024;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
-/** Consecutive chunk-delivery failures (permanent fetch failures plus decode
- *  failures, with no delivered chunk in between) before the
- *  `onChunkFailureStreak` config callback fires. High enough that a few
- *  isolated misses never trip it; a systemically dead source (revoked
- *  access, wrong wire format) crosses it within one viewport's requests. */
+/** Consecutive chunk-delivery failures with no delivered chunk in between
+ *  before the `onChunkFailureStreak` config callback fires. What counts:
+ *  permanent-kind fetch rejections — including the server's per-chunk
+ *  `source_chunk_status` reports for store failures (revoked access,
+ *  backend faults) — plus decode failures. Transient-kind failures
+ *  (timeouts, disconnect rejections) never count. High enough that a few
+ *  isolated misses never trip it; a systemically dead source crosses it
+ *  within one viewport's requests. */
 export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
 /** Minimum spacing between `onChunkFailureStreak` calls while a streak
  *  persists — an aggregate signal, never per-chunk spam. */
@@ -1079,8 +1082,9 @@ export class CpuCache {
    * owner once it crosses the threshold — throttled while the streak
    * persists. This is the user-visible complement to the per-chunk failure
    * map: individual misses stay quiet, but a source that fails everything
-   * (e.g. credentials lost after a successful open) must not present as a
-   * silently stalling canvas.
+   * (e.g. credentials lost after a successful open, which the server
+   * reports per chunk as `source_chunk_status` and the content source
+   * rejects as permanent) must not present as a silently stalling canvas.
    */
   private recordChunkFailureForStreak(message: string): void {
     this.chunkFailureStreak += 1;

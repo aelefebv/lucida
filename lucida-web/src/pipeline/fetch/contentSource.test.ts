@@ -219,6 +219,56 @@ describe("ProxiedContentSource.fetch", () => {
       await expect(promise).rejects.toMatchObject({ kind });
     }
   });
+
+  it("a server source-chunk status rejects the pending fetch as permanent (both statuses)", async () => {
+    // The server only reports terminal store failures here (not-found is
+    // served as zero-filled bytes); both statuses must land as `permanent`
+    // so the delivery-failure streak counts them, instead of a transient
+    // timeout hiding a dead source.
+    for (const status of ["failed_permanent", "unavailable"] as const) {
+      const ctrl = new AbortController();
+      const chunkKey = `2/0/0/0/1/${status.length}`;
+      const promise = source.fetch(
+        { datasetId: "ds-1", imageId: "image-1", chunkKey },
+        ctrl.signal,
+      );
+      source.handleSourceChunkStatus(
+        "ds-1",
+        "image-1",
+        chunkKey,
+        status,
+        "store rejected the read",
+      );
+
+      await expect(promise).rejects.toMatchObject({
+        name: "FetchError",
+        kind: "permanent",
+        message: expect.stringContaining("store rejected the read"),
+      });
+    }
+  });
+
+  it("a source-chunk status rejects every coalesced waiter and clears the pending slot", async () => {
+    const ctrl = new AbortController();
+    const request = { datasetId: "ds-1", imageId: "image-1", chunkKey: "2/0/0/0/0/0" };
+    const first = source.fetch(request, ctrl.signal);
+    const second = source.fetch(request, ctrl.signal);
+
+    source.handleSourceChunkStatus("ds-1", "image-1", "2/0/0/0/0/0", "unavailable");
+    await expect(first).rejects.toMatchObject({ kind: "permanent" });
+    await expect(second).rejects.toMatchObject({ kind: "permanent" });
+
+    // The slot was consumed: a re-fetch sends a fresh chunk_request.
+    const framesBefore = sentMessages.length;
+    void source.fetch(request, ctrl.signal).catch(() => {});
+    expect(sentMessages.length).toBe(framesBefore + 1);
+  });
+
+  it("a source-chunk status with no pending fetch is a no-op", () => {
+    expect(() =>
+      source.handleSourceChunkStatus("ds-1", "image-1", "9/9/9/9/9/9", "failed_permanent"),
+    ).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,10 @@ describe("classifySceneError", () => {
     ).toBe("fatal");
   });
 
+  it("classifies a freed/moved wasm handle (null pointer) as fatal", () => {
+    expect(classifySceneError(new Error("null pointer passed to rust"))).toBe("fatal");
+  });
+
   it.each([
     "data did not match any variant of untagged enum Command",
     "unknown variant `set_warp`, expected one of `set_t`, `set_c`",
@@ -46,30 +50,39 @@ describe("classifySceneError", () => {
 });
 
 describe("guardedSceneCall", () => {
-  it("passes the value through and reports success to observers", () => {
+  const sceneA = { id: "scene-a" };
+
+  it("passes the value through and reports success (with its subject) to observers", () => {
     const observer = makeObserver();
     const unobserve = observeSceneCalls(observer);
     try {
-      const value = guardedSceneCall("apply_command", () => 42);
+      const value = guardedSceneCall("apply_command", sceneA, () => 42);
       expect(value).toBe(42);
-      expect(observer.onSceneCallApplied).toHaveBeenCalledExactlyOnceWith("apply_command");
+      expect(observer.onSceneCallApplied).toHaveBeenCalledExactlyOnceWith(
+        "apply_command",
+        sceneA,
+      );
       expect(observer.onSceneCallFailed).not.toHaveBeenCalled();
     } finally {
       unobserve();
     }
   });
 
-  it("rethrows the original error after reporting the failure", () => {
+  it("rethrows the original error after reporting the failure with its subject", () => {
     const observer = makeObserver();
     const unobserve = observeSceneCalls(observer);
     try {
       const boom = new Error("state mismatch");
       expect(() =>
-        guardedSceneCall("load_document", () => {
+        guardedSceneCall("load_document", sceneA, () => {
           throw boom;
         }),
       ).toThrow(boom);
-      expect(observer.onSceneCallFailed).toHaveBeenCalledExactlyOnceWith(boom, "load_document");
+      expect(observer.onSceneCallFailed).toHaveBeenCalledExactlyOnceWith(
+        boom,
+        "load_document",
+        sceneA,
+      );
       expect(observer.onSceneCallApplied).not.toHaveBeenCalled();
     } finally {
       unobserve();
@@ -81,7 +94,7 @@ describe("guardedSceneCall", () => {
     const unobserve = observeSceneCalls(observer);
     unobserve();
 
-    guardedSceneCall("apply_command", () => undefined);
+    guardedSceneCall("apply_command", sceneA, () => undefined);
     expect(observer.onSceneCallApplied).not.toHaveBeenCalled();
   });
 
@@ -95,7 +108,7 @@ describe("guardedSceneCall", () => {
     const unobserveHealthy = observeSceneCalls(healthy);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      expect(guardedSceneCall("apply_command", () => "ok")).toBe("ok");
+      expect(guardedSceneCall("apply_command", sceneA, () => "ok")).toBe("ok");
       expect(healthy.onSceneCallApplied).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();

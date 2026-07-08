@@ -20,7 +20,7 @@ function applySettingsCommand(
   cmd: ViewportCommand,
   loop: RenderLoop | null,
 ): void {
-  guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
+  guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
   invalidateDisplaySettings(loop);
 }
 

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // The controller constructs the real connection stack; replace the classes
 // holding live resources (WebSocket, decode workers, request timers) with
@@ -44,6 +44,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     registerImage = vi.fn();
     handleBinary = vi.fn();
     handleChunkStatus = vi.fn();
+    handleSourceChunkStatus = vi.fn();
     constructor(_send: unknown) {
       MockProxiedContentSource.instances.push(this);
     }
@@ -89,6 +90,7 @@ const MockedContentSource = ProxiedContentSource as unknown as {
   instances: Array<{
     registerImage: ReturnType<typeof vi.fn>;
     rejectAll: ReturnType<typeof vi.fn>;
+    handleSourceChunkStatus: ReturnType<typeof vi.fn>;
   }>;
 };
 const MockedDecodePool = DecodePool as unknown as {
@@ -213,6 +215,11 @@ function makeEvents(): SessionControllerEvents {
   };
 }
 
+/** Controllers created by `makeHarness`, destroyed after every test so the
+ *  module-global sceneGuard observer registry never leaks a live observer
+ *  into the next test. */
+const liveControllers: SessionController[] = [];
+
 function makeHarness() {
   const scene = makeFakeScene();
   const sceneRef: { current: WasmScene | null } = { current: null };
@@ -247,6 +254,7 @@ function makeHarness() {
     events,
   } satisfies SessionControllerDeps;
   const controller = new SessionController(deps);
+  liveControllers.push(controller);
   const handlers = MockedBridge.instances[MockedBridge.instances.length - 1].handlers;
   return { controller, handlers, deps, events, scene, savedViewHooks, datasets };
 }
@@ -256,6 +264,15 @@ beforeEach(() => {
   MockedContentSource.instances.length = 0;
   MockedDecodePool.instances.length = 0;
   MockedCpuCache.instances.length = 0;
+});
+
+afterEach(() => {
+  // Destroy (idempotent) so each controller unsubscribes from the
+  // module-global scene-call guard; a leaked observer would let one test's
+  // scene traffic mutate a later test's error surface.
+  for (const controller of liveControllers.splice(0)) {
+    controller.destroy();
+  }
 });
 
 describe("SessionController dataset registration", () => {
@@ -676,13 +693,16 @@ describe("SessionController error recovery and precedence", () => {
     expect(lastActivity(events).error).toBeNull();
   });
 
-  it("the recurring data banner cannot overwrite a fresh open failure", () => {
+  it("a delivery streak beginning after an open failure takes the slot (last-writer)", () => {
+    // A standing one-shot open failure must not mask a live, ongoing data
+    // problem — the stalling canvas would otherwise be attributed to the
+    // wrong (already-final) cause. open/data resolve by last-writer.
     const { handlers, events } = makeHarness();
     handlers.onOpenDatasetFailed?.("http://example/a.zarr", "permission denied");
+    expect(lastActivity(events).error).toBe("permission denied");
 
     MockedCpuCache.instances[0].config!.onChunkFailureStreak!(12, "403 rejected");
-    expect(lastActivity(events).error).toBe("permission denied");
-    expect(errorEmissions(events).some((e) => e.includes("Data loading"))).toBe(false);
+    expect(lastActivity(events).error).toContain("Data loading is failing repeatedly");
   });
 
   it("a fresh open failure supersedes a standing data banner", () => {
@@ -697,6 +717,62 @@ describe("SessionController error recovery and precedence", () => {
     const { handlers } = makeHarness();
     handlers.onConnected?.();
     expect(MockedCpuCache.instances[0].resetChunkFailureStreak).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SessionController source-chunk status routing", () => {
+  it("routes source_chunk_status frames into the fetch pipeline", () => {
+    const { handlers } = makeHarness();
+
+    handlers.onSourceChunkStatus?.(
+      "wds-1",
+      "wds-1-img",
+      "0/0/0/0/0/0",
+      "failed_permanent",
+      "access denied",
+    );
+
+    expect(
+      MockedContentSource.instances[0].handleSourceChunkStatus,
+    ).toHaveBeenCalledExactlyOnceWith(
+      "wds-1",
+      "wds-1-img",
+      "0/0/0/0/0/0",
+      "failed_permanent",
+      "access denied",
+    );
+  });
+});
+
+describe("SessionController scene-call scoping across coexisting controllers", () => {
+  const visibilityCmd = JSON.stringify({
+    type: "set_dataset_visible",
+    dataset_id: "wds-1",
+    visible: false,
+  });
+
+  it("one controller's successful apply neither clears another's banner nor resets its streak", () => {
+    // Controllers coexist transiently (overlapping mounts); the guard is
+    // module-global, so scoping must come from the call's subject scene.
+    const a = makeHarness();
+    const b = makeHarness();
+    a.handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    b.handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+
+    // B's scene fails into a standing (non-fatal) engine banner.
+    b.scene.apply_command.mockImplementation(() => {
+      throw new Error("state mismatch");
+    });
+    b.handlers.onCommand(2, visibilityCmd);
+    b.handlers.onCommand(3, visibilityCmd);
+    b.handlers.onCommand(4, visibilityCmd);
+    expect(lastActivity(b.events).error).toContain("Viewer engine failure");
+
+    // A's scene keeps applying fine — that proves nothing about B.
+    a.handlers.onCommand(2, visibilityCmd);
+    expect(lastActivity(b.events).error).toContain("Viewer engine failure");
+    // And B's failures never counted against A.
+    expect(errorEmissions(a.events)).toHaveLength(0);
   });
 });
 

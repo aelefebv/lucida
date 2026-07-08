@@ -54,25 +54,29 @@ const SCENE_APPLY_FAILURE_LIMIT = 3;
  *   everything and is never cleared — only a reload recovers.
  * - `engine`: scene mutations keep failing (non-fatal streak). Cleared by
  *   the next successful mutation, which disproves persistent apply death.
- * - `open`: a dataset open failed. Directly actionable and fresh, so the
- *   recurring lower-rank banners must not paper over it; cleared when a
- *   new open attempt supersedes it.
+ * - `open`: a dataset open failed. Cleared when a new open attempt (or its
+ *   progress) supersedes it.
  * - `data`: chunk delivery keeps failing. Cleared by the next delivered
  *   (fetched AND decoded) chunk.
  * - `incompatible`: inbound commands were refused at the parse boundary
  *   (e.g. version skew with a peer) while the scene stays healthy.
  *   Advisory only; cleared by the next successful mutation.
  *
- * `data` and `incompatible` share the lowest rank: both are recurring
- * advisories with their own re-emission paths, so last-writer-wins between
- * them loses nothing durable.
+ * `open`, `data`, and `incompatible` share the lowest rank and resolve by
+ * last-writer-wins. Ranking any of them above the others would let a stale
+ * one-shot banner mask a live, ongoing condition — e.g. a standing open
+ * failure hiding a delivery-failure streak that began afterwards, leaving
+ * the stalling canvas unexplained. Each kind still retires only through
+ * its own signal, and `data`/`incompatible` re-emit while their condition
+ * persists, so the newest actionable signal wins the slot without losing
+ * anything durable.
  */
 type SurfacedErrorKind = "engine-fatal" | "engine" | "open" | "data" | "incompatible";
 
 const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
-  "engine-fatal": 4,
-  "engine": 3,
-  "open": 2,
+  "engine-fatal": 3,
+  "engine": 2,
+  "open": 1,
   "data": 1,
   "incompatible": 1,
 };
@@ -253,11 +257,14 @@ export class SessionController {
       (json) => this.session?.bridge.send(json),
     );
     this.cpuCache = new CpuCache(this.contentSource, decodePool, {
-      // Chunk deliveries failing without interruption (e.g. access revoked
-      // after a successful open, or a source serving undecodable bytes)
-      // would otherwise present as a silently stalling canvas; route the
-      // cache's aggregated, throttled signal to the visible error banner,
-      // and retire it when delivery recovers.
+      // Chunk deliveries failing without interruption would otherwise
+      // present as a silently stalling canvas; route the cache's
+      // aggregated, throttled signal to the visible error banner, and
+      // retire it when delivery recovers. Access revoked after a
+      // successful open lands here because the server reports store
+      // failures as per-chunk `source_chunk_status` frames (permanent
+      // rejections); a source serving undecodable bytes lands here via
+      // the decode boundary.
       onChunkFailureStreak: (consecutiveFailures, lastError) => {
         if (this.destroyed) return;
         this.surfaceError(
@@ -282,10 +289,20 @@ export class SessionController {
     // Scene mutations report their outcome through the guard from every
     // module (the remote handlers here, but also local UI paths, saved-view
     // restores, registries), so a solo session's engine failure surfaces
-    // exactly like a collaborative one's.
+    // exactly like a collaborative one's. Reports are scoped to THIS
+    // session's scene via the guard's subject: sessions can coexist
+    // transiently (overlapping mounts during a workspace switch), and
+    // another session's successful apply on its own scene must not reset
+    // this one's failure streak or retire its banner.
     this.stopObservingSceneCalls = observeSceneCalls({
-      onSceneCallApplied: () => this.handleSceneCallApplied(),
-      onSceneCallFailed: (e) => this.handleSceneCallFailed(e),
+      onSceneCallApplied: (_context, subject) => {
+        if (subject !== this.deps.getScene()) return;
+        this.handleSceneCallApplied();
+      },
+      onSceneCallFailed: (e, _context, subject) => {
+        if (subject !== this.deps.getScene()) return;
+        this.handleSceneCallFailed(e);
+      },
     });
   }
 
@@ -376,14 +393,14 @@ export class SessionController {
         view: peer.view,
         display: peer.display,
       });
-      guardedSceneCall("import_presence", () => scene.import_presence(presenceJson));
+      guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
       if (peer.dataset_order && peer.dataset_settings) {
         try {
           const layerJson = JSON.stringify({
             dataset_order: peer.dataset_order,
             dataset_settings: peer.dataset_settings,
           });
-          guardedSceneCall("import_dataset_presence", () =>
+          guardedSceneCall("import_dataset_presence", scene, () =>
             scene.import_dataset_presence(layerJson));
           bumpSettingsGeneration();
           this.deps.bumpLayerSettingsVersion();
@@ -679,7 +696,7 @@ export class SessionController {
           channel: channelCount - 1,
           visible: true,
         };
-        guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
+        guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
         bumpSettingsGeneration();
       }
     }
@@ -761,14 +778,13 @@ export class SessionController {
     return {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId, generatedAvailability) => {
         try {
-          // Guarded so a fatal load failure (trap, borrow poisoning)
-          // surfaces even though the enclosing catch swallows the throw —
-          // a client whose snapshot cannot load is a blank shell otherwise.
-          const scene = guardedSceneCall("load_document", () => {
-            const s = this.deps.ensureScene();
-            s.load_document(documentJson);
-            return s;
-          });
+          // The scene is obtained first so the guarded load carries it as
+          // its subject; the guard makes a fatal load failure (trap,
+          // borrow poisoning) surface even though the enclosing catch
+          // swallows the throw — a client whose snapshot cannot load is a
+          // blank shell otherwise.
+          const scene = this.deps.ensureScene();
+          guardedSceneCall("load_document", scene, () => scene.load_document(documentJson));
           // Adopt the self id BEFORE any registration work: a
           // `dataset_opened` replayed in the same tick as this snapshot
           // must never read a stale self-id when deriving `isOpener`.
@@ -851,7 +867,7 @@ export class SessionController {
               return;
             }
           }
-          guardedSceneCall("apply_command", () => scene.apply_command(commandJson));
+          guardedSceneCall("apply_command", scene, () => scene.apply_command(commandJson));
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "dataset_opened") {
@@ -934,7 +950,7 @@ export class SessionController {
           if (scene) {
             try {
               const presenceJson = JSON.stringify({ camera, view, display });
-              guardedSceneCall("import_presence", () => scene.import_presence(presenceJson));
+              guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
               syncSceneViewState(scene, this.deps.viewState);
               this.deps.getLoop()?.markInteractiveDirty();
               this.session.bridge.sendPresence(scene.export_presence());
@@ -971,7 +987,7 @@ export class SessionController {
                 view: peer.view,
                 display: peer.display,
               });
-              guardedSceneCall("import_presence", () => scene.import_presence(presenceJson));
+              guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
               syncSceneViewState(scene, this.deps.viewState);
               this.deps.getLoop()?.markInteractiveDirty();
               this.session.bridge.sendPresence(scene.export_presence());
@@ -998,7 +1014,7 @@ export class SessionController {
           if (scene) {
             try {
               const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
-              guardedSceneCall("import_dataset_presence", () =>
+              guardedSceneCall("import_dataset_presence", scene, () =>
                 scene.import_dataset_presence(json));
               invalidateDisplaySettings(this.deps.getLoop(), "peer_dataset_presence");
               this.deps.bumpLayerSettingsVersion();
@@ -1054,6 +1070,9 @@ export class SessionController {
       },
       onGeneratedChunkStatus: (datasetId, imageId, key, status, message) => {
         this.contentSource.handleChunkStatus(datasetId, imageId, key, status, message);
+      },
+      onSourceChunkStatus: (datasetId, imageId, key, status, message) => {
+        this.contentSource.handleSourceChunkStatus(datasetId, imageId, key, status, message);
       },
       onConnected: () => {
         // Chunk failures accumulated against a dropped transport (or its

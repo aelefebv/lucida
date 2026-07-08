@@ -60,7 +60,7 @@ export class LayoutRegistry {
   register(datasetId: string, spec: LayoutSpec, sendCommand: (json: string) => void): void {
     const cmd: DocumentCommand = { type: "register_layout", dataset_id: datasetId, layout: spec };
     const json = JSON.stringify(cmd);
-    guardedSceneCall("apply_command", () => this.wasmScene.apply_command(json));
+    guardedSceneCall("apply_command", this.wasmScene, () => this.wasmScene.apply_command(json));
     sendCommand(json);
 
     let specs = this.specsByDataset.get(datasetId);
@@ -78,7 +78,7 @@ export class LayoutRegistry {
   setActive(datasetId: string, layoutId: string, sendCommand: (json: string) => void): void {
     const cmd: DocumentCommand = { type: "set_active_layout", dataset_id: datasetId, layout_id: layoutId };
     const json = JSON.stringify(cmd);
-    guardedSceneCall("apply_command", () => this.wasmScene.apply_command(json));
+    guardedSceneCall("apply_command", this.wasmScene, () => this.wasmScene.apply_command(json));
     sendCommand(json);
 
     this.activeByDataset.set(datasetId, layoutId);

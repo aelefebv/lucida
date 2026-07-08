@@ -13,7 +13,7 @@ export function applyDocumentCommand(
   sendCommand: (json: string) => void,
 ) {
   const json = JSON.stringify(cmd);
-  guardedSceneCall("apply_command", () => scene.apply_command(json));
+  guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
   bumpSettingsGeneration();
   sendCommand(json);
 }
@@ -21,5 +21,5 @@ export function applyDocumentCommand(
 /** Apply a viewport/display command locally only (not sent to server). */
 export function applyViewportCommand(scene: WasmScene, cmd: ViewportCommand) {
   const json = JSON.stringify(cmd);
-  guardedSceneCall("apply_command", () => scene.apply_command(json));
+  guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
 }

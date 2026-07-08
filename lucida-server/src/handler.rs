@@ -13,7 +13,7 @@ use lucida_protocol::{
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
     DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
-    DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
+    DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
@@ -26,7 +26,9 @@ use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
     GeneratedCoarseService,
 };
-use crate::open_diagnostics::{backend_kind_for_url, is_not_found, open_failure, open_progress};
+use crate::open_diagnostics::{
+    backend_kind_for_url, is_not_found, open_failure, open_progress, store_error_status,
+};
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
@@ -1346,7 +1348,22 @@ async fn serve_chunk_from_store(
             vec![0_u8; level_info.chunk_byte_layout.canonical_byte_size]
         }
         Err(e) => {
+            // A non-not-found store failure (revoked access, backend fault,
+            // unreachable service) must reach the requesting client as an
+            // explicit status frame: from its side the alternative is a
+            // request timeout, which it has to treat as transient, so a
+            // dead source would never surface.
             eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
+            send_source_chunk_status(
+                client_id,
+                dataset_id,
+                image_id,
+                chunk_key,
+                store_error_status(&e),
+                Some(e.to_string()),
+                unicast_routes,
+            )
+            .await;
             return;
         }
     };
@@ -1403,6 +1420,33 @@ async fn serve_generated_chunk_request(
             )
             .await;
         }
+    }
+}
+
+/// Unicast the failure status for a source chunk whose store read failed
+/// (see the error arm in [`serve_chunk_from_store`]). Mirrors
+/// [`send_generated_chunk_status`]: a TEXT frame to the requesting client,
+/// while served bytes always travel as binary chunk frames.
+async fn send_source_chunk_status(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    chunk_key: &str,
+    status: SourceChunkStatus,
+    message: Option<String>,
+    unicast_routes: &UnicastRoutes,
+) {
+    let msg = ServerMessage::SourceChunkStatus {
+        dataset_id: dataset_id.clone(),
+        image_id: image_id.clone(),
+        key: chunk_key.to_string(),
+        status,
+        message,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
     }
 }
 
@@ -1934,6 +1978,211 @@ mod tests {
         let buf = buf.as_ref();
         let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
         assert_eq!(&buf[6 + key_len..], &[0, 0, 0, 0]);
+        // Not-found is sparse data, never a failure status frame.
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Which error class [`FailingStore`] fabricates for every read.
+    #[derive(Debug, Clone, Copy)]
+    enum StoreFailure {
+        PermissionDenied,
+        Backend,
+    }
+
+    /// An `ObjectStore` whose reads always fail with the configured error
+    /// class, standing in for a source whose credentials were revoked or
+    /// whose backend is down after a successful open.
+    #[derive(Debug)]
+    struct FailingStore(StoreFailure);
+
+    impl FailingStore {
+        fn error(&self) -> object_store::Error {
+            match self.0 {
+                StoreFailure::PermissionDenied => object_store::Error::PermissionDenied {
+                    path: "chunk".into(),
+                    source: "403 Forbidden".to_string().into(),
+                },
+                StoreFailure::Backend => object_store::Error::Generic {
+                    store: "failing-store",
+                    source: "503 Service Unavailable".to_string().into(),
+                },
+            }
+        }
+    }
+
+    impl std::fmt::Display for FailingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FailingStore({:?})", self.0)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for FailingStore {
+        async fn put_opts(
+            &self,
+            _location: &Path,
+            _payload: object_store::PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            Err(self.error())
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &Path,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            Err(self.error())
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &Path,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            Err(self.error())
+        }
+
+        async fn delete(&self, _location: &Path) -> object_store::Result<()> {
+            Err(self.error())
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            futures_util::stream::empty().boxed()
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            Err(self.error())
+        }
+
+        async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+            Err(self.error())
+        }
+
+        async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+            Err(self.error())
+        }
+    }
+
+    fn tiny_level_info() -> crate::binding::LevelInfo {
+        crate::binding::LevelInfo {
+            level_index: 0,
+            compression: crate::decode::StorageCompression::None,
+            chunk_shape: vec![1, 1, 1, 1, 2],
+            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
+                canonical_byte_size: 4,
+                on_disk_byte_size: 4,
+                byte_stride_t: 0,
+                byte_stride_c: 0,
+                chunk_size_t: 1,
+                chunk_size_c: 1,
+            },
+        }
+    }
+
+    /// Drive `serve_chunk_from_store` against a [`FailingStore`] and return
+    /// the single frame the requesting client received.
+    async fn serve_against_failing_store(failure: StoreFailure) -> serde_json::Value {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(7, tx);
+        let store = Arc::new(FailingStore(failure)) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::new(store, 1024));
+
+        serve_chunk_from_store(
+            7,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            "0/0/0/0/0/0",
+            Some("some/object"),
+            Some(tiny_level_info()),
+            &cache,
+            &routes,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("status frame");
+        let Message::Text(json) = msg else {
+            panic!("expected text status frame");
+        };
+        assert!(rx.try_recv().is_err(), "the status must be the only frame");
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn present_source_chunk_is_served_as_binary_with_no_status_frame() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+        let store = object_store::memory::InMemory::new();
+        object_store::ObjectStore::put(
+            &store,
+            &Path::from("some/object"),
+            object_store::PutPayload::from_static(&[1, 2, 3, 4]),
+        )
+        .await
+        .unwrap();
+        let cache = Arc::new(CachedStore::new(
+            Arc::new(store) as Arc<dyn object_store::ObjectStore>,
+            1024,
+        ));
+
+        serve_chunk_from_store(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            "0/0/0/0/0/0",
+            Some("some/object"),
+            Some(tiny_level_info()),
+            &cache,
+            &routes,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("message");
+        let Message::Binary(buf) = msg else {
+            panic!("expected binary chunk frame");
+        };
+        let buf = buf.as_ref();
+        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
+        assert_eq!(&buf[6 + key_len..], &[1, 2, 3, 4]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn backend_store_error_serving_source_chunk_reports_unavailable() {
+        let value = serve_against_failing_store(StoreFailure::Backend).await;
+        assert_eq!(value["type"], "source_chunk_status");
+        assert_eq!(value["dataset_id"], "ds1");
+        assert_eq!(value["image_id"], "img1");
+        assert_eq!(value["key"], "0/0/0/0/0/0");
+        assert_eq!(value["status"], "unavailable");
+        assert!(
+            value["message"]
+                .as_str()
+                .expect("message string")
+                .contains("503"),
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_store_error_serving_source_chunk_reports_failed_permanent() {
+        let value = serve_against_failing_store(StoreFailure::PermissionDenied).await;
+        assert_eq!(value["type"], "source_chunk_status");
+        assert_eq!(value["status"], "failed_permanent");
+        assert!(
+            value["message"]
+                .as_str()
+                .expect("message string")
+                .contains("403"),
+        );
     }
 
     #[tokio::test]

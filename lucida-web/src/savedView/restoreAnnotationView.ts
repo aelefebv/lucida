@@ -55,7 +55,7 @@ import type { Camera, DatasetId, SavedView } from "./types.ts";
  * (rather than importing `applyViewportCommand`) so this module's surface is
  * obviously local-only and self-contained; identical behavior. */
 function applyLocal(scene: WasmScene, cmd: ViewportCommand): void {
-  guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
+  guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
 }
 
 /** The view-mode a captured camera implies: a `slice` camera is the 2D view;
@@ -321,7 +321,7 @@ function importCameraOnly(scene: WasmScene, camera: Camera): void {
   }
   presence.camera = camera;
   try {
-    guardedSceneCall("import_presence", () => scene.import_presence(JSON.stringify(presence)));
+    guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
   } catch (e) {
     // A bad captured camera (rejected by the WASM presence importer): keep the
     // already-applied mode/display/z/t/c and skip the camera, instead of

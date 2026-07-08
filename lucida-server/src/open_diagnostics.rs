@@ -12,7 +12,7 @@ use lucida_content::DatasetId;
 use lucida_content::url::is_local_dataset_url;
 use lucida_protocol::{
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
-    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, SourceChunkStatus,
 };
 
 pub(crate) fn open_failure(
@@ -195,4 +195,56 @@ pub(crate) fn is_not_found(error: &object_store::Error) -> bool {
     matches!(error, object_store::Error::NotFound { .. })
         || error.to_string().contains("not found")
         || error.to_string().contains("No such file or directory")
+}
+
+/// Triage a non-not-found store error from a source-chunk read into the
+/// wire status vocabulary. Permission/credential rejections are permanent
+/// (the store answered; retrying without operator action cannot succeed);
+/// everything else — backend faults, unreachable services — reports the
+/// source as unavailable. Callers must handle not-found before calling
+/// this: a missing chunk is legitimate sparse data, not a failure.
+pub(crate) fn store_error_status(error: &object_store::Error) -> SourceChunkStatus {
+    match error {
+        object_store::Error::PermissionDenied { .. }
+        | object_store::Error::Unauthenticated { .. } => SourceChunkStatus::FailedPermanent,
+        _ => SourceChunkStatus::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boxed(message: &str) -> Box<dyn std::error::Error + Send + Sync> {
+        message.to_string().into()
+    }
+
+    #[test]
+    fn permission_class_store_errors_are_permanent() {
+        let denied = object_store::Error::PermissionDenied {
+            path: "chunk".into(),
+            source: boxed("403 Forbidden"),
+        };
+        let unauthenticated = object_store::Error::Unauthenticated {
+            path: "chunk".into(),
+            source: boxed("credentials expired"),
+        };
+        assert_eq!(
+            store_error_status(&denied),
+            SourceChunkStatus::FailedPermanent
+        );
+        assert_eq!(
+            store_error_status(&unauthenticated),
+            SourceChunkStatus::FailedPermanent
+        );
+    }
+
+    #[test]
+    fn other_store_errors_report_unavailable() {
+        let generic = object_store::Error::Generic {
+            store: "test",
+            source: boxed("503 Service Unavailable"),
+        };
+        assert_eq!(store_error_status(&generic), SourceChunkStatus::Unavailable);
+    }
 }

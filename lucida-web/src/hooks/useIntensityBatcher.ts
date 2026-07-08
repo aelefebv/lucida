@@ -79,7 +79,7 @@ export function useIntensityBatcher({
             min: mergedMin,
             max: mergedMax,
           };
-          guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
+          guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
           invalidateResidency(loopRef.current, "auto_contrast");
           sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
         }

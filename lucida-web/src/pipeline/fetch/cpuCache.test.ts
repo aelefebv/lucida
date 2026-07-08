@@ -1626,6 +1626,45 @@ describe("CpuCache", () => {
       expect(onChunkFailureStreak.mock.calls[0][1]).toContain("decode failed");
     });
 
+    it("server-reported source-chunk failures feed the streak (dead source becomes visible)", async () => {
+      // End-to-end through the real ProxiedContentSource: the server's
+      // `source_chunk_status` frames (store failures after a successful
+      // open — revoked access, backend down) reject the pending fetches
+      // as permanent, so the streak fires instead of the requests dying
+      // as streak-exempt transient timeouts.
+      const onChunkFailureStreak = vi.fn();
+      const sentMessages: string[] = [];
+      const realSource = new ProxiedContentSource((json) => sentMessages.push(json));
+      realSource.registerImage("image-1", { Raw: { data_type: "uint16" } });
+      const cache = new CpuCache(realSource, createSyncDecode(), {
+        maxConcurrentFetches: 32,
+        onChunkFailureStreak,
+      });
+
+      const reqs = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD }, (_, i) =>
+        makeRequest({ x: i }),
+      );
+      cache.submit(makePlan(reqs));
+      for (let i = 0; i < reqs.length; i++) {
+        // Both wire statuses count identically.
+        const status = i % 2 === 0 ? "failed_permanent" : "unavailable";
+        realSource.handleSourceChunkStatus(
+          "entity-1",
+          "image-1",
+          `0/0/0/0/0/${i}`,
+          status,
+          "access to the dataset store was denied",
+        );
+      }
+      await flush();
+
+      expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+      expect(onChunkFailureStreak.mock.calls[0][0]).toBe(CHUNK_FAILURE_STREAK_THRESHOLD);
+      expect(onChunkFailureStreak.mock.calls[0][1]).toContain(
+        "access to the dataset store was denied",
+      );
+    });
+
     it("a delivered chunk retires a notified streak exactly once and re-arms the notifier", async () => {
       const onChunkFailureStreak = vi.fn();
       const onChunkFailureRecovered = vi.fn();

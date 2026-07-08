@@ -543,12 +543,12 @@ export class SavedViewApplier {
   private applyDocument(cmd: DocumentCommand): void {
     const json = JSON.stringify(cmd);
     const scene = this.getScene();
-    if (scene) guardedSceneCall("apply_command", () => scene.apply_command(json));
+    if (scene) guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
     this.bridge.sendCommand(json);
   }
 
   private applyViewport(scene: WasmScene, cmd: ViewportCommand): void {
-    guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
+    guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
   }
 
   private applyDatasetSettings(
@@ -580,7 +580,7 @@ export class SavedViewApplier {
       display: unknown;
     };
     presence.camera = camera;
-    guardedSceneCall("import_presence", () => scene.import_presence(JSON.stringify(presence)));
+    guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
   }
 
   private updateOpenStatus(url: string, newState: OpenStatus["state"], error?: string): void {

@@ -6,7 +6,7 @@ use lucida_content::{DatasetId, ImageId};
 use lucida_protocol::{
     AssetCatalogDelta, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
     DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
 };
 
 use crate::camera::Camera;
@@ -328,6 +328,24 @@ pub enum ServerMessage {
     /// A workspace was archived while this client was connected.
     /// Workspace clients should stop reconnecting and leave the workspace route.
     WorkspaceArchived { workspace_id: String },
+    /// Sent to the requester when a source chunk's store read fails with a
+    /// non-not-found error (revoked access, backend failure, unreachable
+    /// store). Not-found is legitimate sparse data and keeps the canonical
+    /// zero-filled binary frame; successful reads keep the binary chunk
+    /// frame. Without this frame the client only observes its own request
+    /// timeout, which it must treat as transient — a dead source would
+    /// stay invisible behind a stalling canvas.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift (see `wiki/gotchas/scene-document-state-json-compat`).
+    SourceChunkStatus {
+        dataset_id: DatasetId,
+        image_id: ImageId,
+        key: String,
+        status: SourceChunkStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
@@ -1404,6 +1422,30 @@ mod tests {
                 assert_eq!(status, GeneratedChunkStatus::Pending);
             }
             _ => panic!("expected GeneratedChunkStatus"),
+        }
+    }
+
+    #[test]
+    fn source_chunk_status_round_trips() {
+        let msg = ServerMessage::SourceChunkStatus {
+            dataset_id: DatasetId("ds1".into()),
+            image_id: ImageId("img1".into()),
+            key: "0/0/0/0/0/0".into(),
+            status: SourceChunkStatus::FailedPermanent,
+            message: Some("access denied".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"source_chunk_status\""));
+        assert!(json.contains("\"status\":\"failed_permanent\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::SourceChunkStatus {
+                status, message, ..
+            } => {
+                assert_eq!(status, SourceChunkStatus::FailedPermanent);
+                assert_eq!(message.as_deref(), Some("access denied"));
+            }
+            _ => panic!("expected SourceChunkStatus"),
         }
     }
 
