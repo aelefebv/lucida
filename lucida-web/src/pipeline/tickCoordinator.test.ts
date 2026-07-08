@@ -841,3 +841,74 @@ describe("cache occupancy telemetry", () => {
     }
   });
 });
+
+// ===========================================================================
+// 4. Debug-stat row bounds on wide member sets
+// ===========================================================================
+
+describe("debug stat row bounds", () => {
+  // The panel consumes per-member arrays every poll and renders rows from
+  // them; on a wide collection an unbounded build (tens of thousands of
+  // rows per rebuild) freezes the page for seconds. The arrays must stay
+  // capped while the scalar totals keep reporting the full population.
+
+  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
+  let Uploader: typeof import("./upload/uploader.ts").Uploader;
+  let debugStats: typeof import("../debug/debugStats.ts").debugStats;
+  let DEBUG_MEMBER_ROW_CAP: number;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
+    Uploader = (await import("./upload/uploader.ts")).Uploader;
+    const dbg = await import("../debug/debugStats.ts");
+    debugStats = dbg.debugStats;
+    DEBUG_MEMBER_ROW_CAP = dbg.DEBUG_MEMBER_ROW_CAP;
+  });
+
+  function makeCtx(scene: unknown, datasets: Map<string, DatasetEntry>): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  it("caps per-member debug arrays while totals report the full population", () => {
+    const N = 150; // wider than the row cap
+    const scene = createMockSceneWithTiles(N);
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { manifest: createMockContentWithTiles(N) }],
+    ]);
+    const orch = new TickCoordinator(new Uploader());
+
+    debugStats.enabled = true;
+    debugStats.orch = null;
+    try {
+      orch.planAndFetch(makeCtx(scene, datasets), new Map());
+
+      expect(DEBUG_MEMBER_ROW_CAP).toBeGreaterThan(0);
+      expect(debugStats.memberStats.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
+      expect(debugStats.totalMembers).toBe(N);
+
+      const orchDebug = debugStats.orch as {
+        members: unknown[];
+        membersTotal: number;
+        activeSet: unknown[];
+        activeSetTotal: number;
+      } | null;
+      expect(orchDebug).not.toBeNull();
+      expect(orchDebug!.members.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
+      expect(orchDebug!.membersTotal).toBe(N);
+      expect(orchDebug!.activeSet.length).toBeLessThanOrEqual(DEBUG_MEMBER_ROW_CAP);
+      expect(orchDebug!.activeSetTotal).toBe(N);
+    } finally {
+      debugStats.enabled = false;
+    }
+  });
+});

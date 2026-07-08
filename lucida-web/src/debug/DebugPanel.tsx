@@ -836,15 +836,17 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             </div>
 
             {snap.memberStats.length > 0 && (() => {
+              // Rows arrive pre-filtered to members with pending requests
+              // and pre-capped (DEBUG_MEMBER_ROW_CAP); the uncapped active
+              // population is the scalar `memberStatsActiveTotal`.
               const active = snap.memberStats
-                .filter(m => m.chunksNeeded > 0)
                 .map(m => ({ ...m, gap: m.chunksNeeded - m.chunksSent }))
                 .sort((a, b) => b.gap - a.gap);
               if (active.length === 0) return null;
               const worstGap = active[0].gap;
               return (
                 <div className="debug-section">
-                  <div className="debug-title">Per-Member ({active.length} active, sorted by gap)</div>
+                  <div className="debug-title">Per-Member ({snap.memberStatsActiveTotal} active, sorted by gap)</div>
                   <div className="debug-member-list">
                     {active.slice(0, 12).map((m, i) => (
                       <div
@@ -859,8 +861,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                         <span>{m.chunksSent}/{m.chunksNeeded}</span>
                       </div>
                     ))}
-                    {active.length > 12 && (
-                      <div className="debug-more">+{active.length - 12} more</div>
+                    {snap.memberStatsActiveTotal > 12 && (
+                      <div className="debug-more">+{snap.memberStatsActiveTotal - 12} more</div>
                     )}
                   </div>
                 </div>
@@ -1507,14 +1509,15 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   </div>
                 )}
 
-                {/* Active Set */}
+                {/* Active Set — mode tallies come from the uncapped
+                    counters; the row list itself is capped upstream. */}
                 {snap.orch.activeSet.length > 0 && (
                   <div className="debug-section">
                     <div className="debug-title">
                       Active Set (
-                      {snap.orch.activeSet.filter(e => e.mode === "group-as-proxy").length} group-proxy /
-                      {" "}{snap.orch.activeSet.filter(e => e.mode === "tiles-with-proxy-fallback").length} tiles+proxy /
-                      {" "}{snap.orch.activeSet.filter(e => e.mode === "tiles-with-detail").length} tiles-detail)
+                      {snap.orch.activeSetModeCounts.groupAsProxy} group-proxy /
+                      {" "}{snap.orch.activeSetModeCounts.tilesProxyFallback} tiles+proxy /
+                      {" "}{snap.orch.activeSetModeCounts.tilesDetail} tiles-detail)
                     </div>
                     <div className="debug-member-list">
                       {snap.orch.activeSet.slice(0, 10).map((e) => (
@@ -1527,6 +1530,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <span>range {e.detailOwnedLodRange[0]}-{e.detailOwnedLodRange[1]}</span>
                         </div>
                       ))}
+                      {snap.orch.activeSetTotal > 10 && (
+                        <div className="debug-more">+{snap.orch.activeSetTotal - 10} more</div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1556,7 +1562,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 {/* Per-member adapter output */}
                 {snap.orch.members.length > 0 && (
                   <div className="debug-section">
-                    <div className="debug-title">Members (adapter output)</div>
+                    <div className="debug-title">Members (adapter output, {snap.orch.membersTotal} total)</div>
                     <div className="debug-member-list">
                       {snap.orch.members.slice(0, 10).map((m, i) => (
                         <div key={`${m.imageId}-${i}`} className="debug-member-row" style={{
@@ -1573,6 +1579,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           {m.mixedLevels && <span style={{ color: "#f44" }}>MIX</span>}
                         </div>
                       ))}
+                      {snap.orch.membersTotal > 10 && (
+                        <div className="debug-more">+{snap.orch.membersTotal - 10} more</div>
+                      )}
                     </div>
                   </div>
                 )}

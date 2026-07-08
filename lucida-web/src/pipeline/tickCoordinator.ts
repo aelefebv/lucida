@@ -41,6 +41,7 @@ export type { MinimapChunkCoord } from "./planning/index.ts";
 import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
 import {
+  DEBUG_MEMBER_ROW_CAP,
   debugStats,
   type OrchDebug,
 } from "../debug/debugStats.ts";
@@ -473,14 +474,28 @@ export class TickCoordinator {
         nextState: result.nextState,
       });
 
-      // Debug stats
+      // Debug stats. Everything here must stay O(entities + requests):
+      // a wide collection has tens of thousands of visible entities, and
+      // a per-entity scan of the active set or request list froze the
+      // page for seconds with the panel open. Per-member ROWS are also
+      // bounded (DEBUG_MEMBER_ROW_CAP) — the scalar counters keep the
+      // full population visible.
       if (debugStats.enabled) {
+        const activeByEntity = new Map(
+          result.activeSet.map((a) => [a.entityId, a]),
+        );
+        const nonPrefetchRequestsByEntity = new Map<string, number>();
+        for (const r of result.requests) {
+          if (r.lane === "prefetch") continue;
+          nonPrefetchRequestsByEntity.set(
+            r.entityId,
+            (nonPrefetchRequestsByEntity.get(r.entityId) ?? 0) + 1,
+          );
+        }
         for (const entity of entities) {
           debugStats.totalMembers++;
           debugStats.visibleMembers++;
-          const activeEntry = result.activeSet.find(
-            (a) => a.entityId === entity.entityId,
-          );
+          const activeEntry = activeByEntity.get(entity.entityId);
           // Only tile entries carry `targetLod`; group-as-proxy has
           // no LOD bookkeeping (-1 sentinel), invisibles report coarsest.
           const tl =
@@ -489,18 +504,24 @@ export class TickCoordinator {
               : activeEntry?.kind === "invisible"
                 ? activeEntry.coarsestLod
                 : -1;
-          const memberKey = multiChannel
-            ? compositeKey(entity.imageId, selection.c)
-            : entity.imageId;
-          debugStats.memberStats.push({
-            id: memberKey,
-            level: tl,
-            numLevels: entity.levels.length,
-            chunksNeeded: result.requests.filter(
-              (r) => r.entityId === entity.entityId && r.lane !== "prefetch",
-            ).length,
-            chunksSent: 0,
-          });
+          // Rows only for members with pending chunk requests — the
+          // panel filters to `chunksNeeded > 0` anyway — and row-capped.
+          const chunksNeeded = nonPrefetchRequestsByEntity.get(entity.entityId) ?? 0;
+          if (chunksNeeded > 0) {
+            debugStats.memberStatsActiveTotal++;
+            if (debugStats.memberStats.length < DEBUG_MEMBER_ROW_CAP) {
+              const memberKey = multiChannel
+                ? compositeKey(entity.imageId, selection.c)
+                : entity.imageId;
+              debugStats.memberStats.push({
+                id: memberKey,
+                level: tl,
+                numLevels: entity.levels.length,
+                chunksNeeded,
+                chunksSent: 0,
+              });
+            }
+          }
           if (tl >= 0) {
             debugStats.selectedLevel = tl;
             debugStats.numLevels = entity.levels.length;
@@ -513,10 +534,18 @@ export class TickCoordinator {
     if (debugStats.enabled) {
       const orchDebug: OrchDebug = {
         activeSet: [],
+        activeSetTotal: 0,
+        activeSetModeCounts: {
+          groupAsProxy: 0,
+          tilesProxyFallback: 0,
+          tilesDetail: 0,
+          invisible: 0,
+        },
         laneCount: { detail: 0, coarse: 0, prefetch: 0, overview: 0 },
         chunksByLevel: {},
         topRequests: [],
         members: [],
+        membersTotal: 0,
         hasMixedLevels: false,
         epochCacheHit: false,
         proxyResidency: {
@@ -536,9 +565,13 @@ export class TickCoordinator {
         entityDiag: [],
       };
 
-      // Aggregate from member roster
+      // Aggregate from member roster. Rows are capped (wide collections
+      // have tens of thousands of members); `membersTotal` carries the
+      // full count for the panel's "+N more" line.
       for (const [_key, entries] of memberRoster) {
         for (const m of entries) {
+          orchDebug.membersTotal++;
+          if (orchDebug.members.length >= DEBUG_MEMBER_ROW_CAP) continue;
           orchDebug.members.push({
             imageId: m.imageId,
             position: m.position,
@@ -555,9 +588,22 @@ export class TickCoordinator {
       // (the active set produced by the most recent `plan()` call).
       // ActiveSetEntry is a discriminated union; per-variant LOD columns
       // are derived from `kind` (group-as-proxy = 0, tile reads from entry,
-      // invisible reports coarsest).
+      // invisible reports coarsest). Mode COUNTS run over the full set;
+      // row emission is capped like the other per-member arrays.
+      const modeCounts = orchDebug.activeSetModeCounts;
       for (const [, state] of this.planningState) {
         for (const entry of state.previousActiveSet) {
+          orchDebug.activeSetTotal++;
+          if (entry.kind === "group-as-proxy") {
+            modeCounts.groupAsProxy++;
+          } else if (entry.kind === "invisible") {
+            modeCounts.invisible++;
+          } else if (entry.mode === "tiles-with-proxy-fallback") {
+            modeCounts.tilesProxyFallback++;
+          } else {
+            modeCounts.tilesDetail++;
+          }
+          if (orchDebug.activeSet.length >= DEBUG_MEMBER_ROW_CAP) continue;
           if (entry.kind === "group-as-proxy") {
             orchDebug.activeSet.push({
               entityId: entry.entityId,
