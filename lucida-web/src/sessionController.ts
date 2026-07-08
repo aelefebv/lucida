@@ -32,28 +32,50 @@ import { bumpSettingsGeneration } from "./tickCommon.ts";
 import { invalidateDisplaySettings } from "./invalidation.ts";
 import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
+import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
 
-/** Consecutive `apply_command` failures before the scene is treated as
- *  unable to apply updates and the error becomes user-visible. A single
- *  bad command stays in the log (the streak resets on the next successful
- *  apply); known-fatal engine errors skip the streak entirely. */
+/** Consecutive scene-mutation failures (local, remote, or snapshot — every
+ *  mutation reports through the scene-call guard) before the scene is
+ *  treated as unable to apply updates and the error becomes user-visible.
+ *  A single bad command stays in the log (the streak resets on the next
+ *  successful mutation, again from any origin); fatal-class engine errors
+ *  skip the streak entirely. */
 const SCENE_APPLY_FAILURE_LIMIT = 3;
 
 /**
- * Errors after which the wasm scene cannot recover within this page load:
- * a trap (`WebAssembly.RuntimeError`, e.g. `unreachable`) leaves the
- * instance in an undefined state, and the bindings' borrow poisoning
- * ("recursive use of an object …") persists across calls once tripped.
- * Either way every subsequent scene call fails while the JS UI stays
- * healthy, so these must surface immediately rather than after a streak.
+ * The kinds of user-visible errors competing for the single
+ * [`RemoteDatasetActivity`]`.error` slot. There is one banner, so
+ * collisions are resolved by rank ([`SURFACED_ERROR_RANK`]): a candidate
+ * never displaces a standing error of strictly higher rank, equal-or-lower
+ * standing errors yield to it. Each kind also has its own retirement
+ * signal — see [`clearSurfacedError`] call sites:
+ *
+ * - `engine-fatal`: the wasm scene is unrecoverably dead. Outranks
+ *   everything and is never cleared — only a reload recovers.
+ * - `engine`: scene mutations keep failing (non-fatal streak). Cleared by
+ *   the next successful mutation, which disproves persistent apply death.
+ * - `open`: a dataset open failed. Directly actionable and fresh, so the
+ *   recurring lower-rank banners must not paper over it; cleared when a
+ *   new open attempt supersedes it.
+ * - `data`: chunk delivery keeps failing. Cleared by the next delivered
+ *   (fetched AND decoded) chunk.
+ * - `incompatible`: inbound commands were refused at the parse boundary
+ *   (e.g. version skew with a peer) while the scene stays healthy.
+ *   Advisory only; cleared by the next successful mutation.
+ *
+ * `data` and `incompatible` share the lowest rank: both are recurring
+ * advisories with their own re-emission paths, so last-writer-wins between
+ * them loses nothing durable.
  */
-function isFatalSceneError(e: unknown): boolean {
-  if (typeof WebAssembly !== "undefined" && e instanceof WebAssembly.RuntimeError) {
-    return true;
-  }
-  const message = e instanceof Error ? e.message : String(e);
-  return message.includes("recursive use of an object");
-}
+type SurfacedErrorKind = "engine-fatal" | "engine" | "open" | "data" | "incompatible";
+
+const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
+  "engine-fatal": 4,
+  "engine": 3,
+  "open": 2,
+  "data": 1,
+  "incompatible": 1,
+};
 
 /** Callback surface the SavedView applier registers into so it sees the
  * relevant lifecycle events without the session layer importing applier
@@ -212,9 +234,17 @@ export class SessionController {
    *  while it is set — the bridge's synchronous pending-command replays and
    *  gap-buffer drain — are covered by that one emission. */
   private docChangedEmitPending = false;
-  /** Consecutive `apply_command` failures; reset by each successful apply.
-   *  See [`recordSceneApplyFailure`]. */
+  /** Consecutive scene-mutation failures reported by the scene-call guard;
+   *  reset by each successful mutation. See [`handleSceneCallFailed`]. */
   private sceneApplyFailureStreak = 0;
+  /** Kind of the currently displayed `remoteActivity.error`, or null when
+   *  no error is showing. Kept in lock-step with the error string by
+   *  [`surfaceError`] / [`clearSurfacedError`] — never write the error
+   *  field around them. */
+  private surfacedErrorKind: SurfacedErrorKind | null = null;
+  /** Unsubscribes this controller from the scene-call guard on destroy. */
+  private readonly stopObservingSceneCalls: () => void;
+  private readonly cpuCache: CpuCache;
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
@@ -222,23 +252,41 @@ export class SessionController {
     this.contentSource = new ProxiedContentSource(
       (json) => this.session?.bridge.send(json),
     );
-    const cpuCache = new CpuCache(this.contentSource, decodePool, {
-      // Chunk fetches failing without interruption (e.g. access revoked
-      // after a successful open) would otherwise present as a silently
-      // stalling canvas; route the cache's aggregated, throttled signal to
-      // the visible error banner.
+    this.cpuCache = new CpuCache(this.contentSource, decodePool, {
+      // Chunk deliveries failing without interruption (e.g. access revoked
+      // after a successful open, or a source serving undecodable bytes)
+      // would otherwise present as a silently stalling canvas; route the
+      // cache's aggregated, throttled signal to the visible error banner,
+      // and retire it when delivery recovers.
       onChunkFailureStreak: (consecutiveFailures, lastError) => {
         if (this.destroyed) return;
-        this.updateRemoteActivity({
-          error:
-            `Data loading is failing repeatedly (${consecutiveFailures} chunk ` +
-            `fetches in a row; last error: ${lastError}). ` +
-            "Check your connection and access, or reload the page.",
-        });
+        this.surfaceError(
+          "data",
+          `Data loading is failing repeatedly (${consecutiveFailures} chunks ` +
+            `in a row; last error: ${lastError}). ` +
+            "Check your connection and access.",
+        );
+      },
+      onChunkFailureRecovered: () => {
+        if (this.destroyed) return;
+        this.clearSurfacedError(["data"]);
       },
     });
     const bridge = new Bridge(this.buildHandlers(), undefined, deps.workspaceId);
-    this.session = new Session({ bridge, contentSource: this.contentSource, cpuCache, decodePool });
+    this.session = new Session({
+      bridge,
+      contentSource: this.contentSource,
+      cpuCache: this.cpuCache,
+      decodePool,
+    });
+    // Scene mutations report their outcome through the guard from every
+    // module (the remote handlers here, but also local UI paths, saved-view
+    // restores, registries), so a solo session's engine failure surfaces
+    // exactly like a collaborative one's.
+    this.stopObservingSceneCalls = observeSceneCalls({
+      onSceneCallApplied: () => this.handleSceneCallApplied(),
+      onSceneCallFailed: (e) => this.handleSceneCallFailed(e),
+    });
   }
 
   get bridge(): Bridge {
@@ -260,6 +308,7 @@ export class SessionController {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.stopObservingSceneCalls();
     this.session.destroy();
     this.deps.datasets.clear();
     this.lastOpenSendTime = null;
@@ -292,9 +341,12 @@ export class SessionController {
   openRemoteDataset(url: string): void {
     this.lastOpenSendTime = performance.now();
     bridgeLog("open_remote_dataset.loading_start", { url });
+    // A new open attempt supersedes a previous open's failure. Other error
+    // kinds keep their own retirement signals (delivery recovery, apply
+    // recovery, never for fatal) — an unrelated open must not mask them.
+    this.clearSurfacedError(["open"]);
     this.updateRemoteActivity({
       loading: true,
-      error: null,
       progress: "dataset open request sent",
     });
     this.session.bridge.sendOpenRemoteDataset(url);
@@ -324,14 +376,15 @@ export class SessionController {
         view: peer.view,
         display: peer.display,
       });
-      scene.import_presence(presenceJson);
+      guardedSceneCall("import_presence", () => scene.import_presence(presenceJson));
       if (peer.dataset_order && peer.dataset_settings) {
         try {
           const layerJson = JSON.stringify({
             dataset_order: peer.dataset_order,
             dataset_settings: peer.dataset_settings,
           });
-          scene.import_dataset_presence(layerJson);
+          guardedSceneCall("import_dataset_presence", () =>
+            scene.import_dataset_presence(layerJson));
           bumpSettingsGeneration();
           this.deps.bumpLayerSettingsVersion();
         } catch (e) {
@@ -370,27 +423,84 @@ export class SessionController {
   }
 
   /**
-   * Track consecutive `apply_command` failures and surface a user-visible
-   * error once the scene is evidently unable to apply updates. A scene in
-   * that state keeps every JS panel healthy while the canvas stays blank,
-   * so silence here would leave nothing for the user to act on. Isolated
-   * failures (one malformed command) stay in the bridge log — the streak
-   * resets on the next successful apply — but a known-fatal engine error
-   * (see [`isFatalSceneError`]) surfaces on its first occurrence. Emission
-   * is deduplicated so an endlessly failing scene sets the banner once,
-   * not once per command.
+   * Show `message` in the single visible error slot, unless a standing
+   * error of strictly higher rank holds it (see [`SurfacedErrorKind`] for
+   * the ranking rationale). Re-surfacing the identical kind+message is a
+   * no-op so an endlessly failing source sets the banner once, not once
+   * per failure.
    */
-  private recordSceneApplyFailure(e: unknown): void {
-    this.sceneApplyFailureStreak += 1;
-    if (!isFatalSceneError(e) && this.sceneApplyFailureStreak < SCENE_APPLY_FAILURE_LIMIT) {
+  private surfaceError(
+    kind: SurfacedErrorKind,
+    message: string,
+    extra?: Partial<Omit<RemoteDatasetActivity, "error">>,
+  ): void {
+    if (
+      this.surfacedErrorKind !== null &&
+      SURFACED_ERROR_RANK[kind] < SURFACED_ERROR_RANK[this.surfacedErrorKind]
+    ) {
       return;
     }
+    if (this.surfacedErrorKind === kind && this.remoteActivity.error === message) return;
+    this.surfacedErrorKind = kind;
+    this.updateRemoteActivity({ ...extra, error: message });
+  }
+
+  /** Retire the visible error if (and only if) its kind is one of `kinds`.
+   *  Every kind has exactly one retirement signal wired to this — a
+   *  recovery event can never wipe a banner it doesn't own, which is what
+   *  keeps fatal banners standing for the life of the page. */
+  private clearSurfacedError(kinds: readonly SurfacedErrorKind[]): void {
+    if (this.surfacedErrorKind === null) return;
+    if (!kinds.includes(this.surfacedErrorKind)) return;
+    this.surfacedErrorKind = null;
+    this.updateRemoteActivity({ error: null });
+  }
+
+  /** Any successful scene mutation (local, remote, or snapshot) disproves
+   *  persistent apply death and retires the parse-boundary advisory. A
+   *  fatal banner stays: one call slipping through does not un-poison a
+   *  trapped wasm instance. */
+  private handleSceneCallApplied(): void {
+    this.sceneApplyFailureStreak = 0;
+    this.clearSurfacedError(["engine", "incompatible"]);
+  }
+
+  /**
+   * Route a failed scene mutation to the visible error slot by consequence
+   * class. A dead scene keeps every JS panel healthy while the canvas stays
+   * blank, so silence here would leave nothing for the user to act on:
+   *
+   * - fatal (trap / borrow poisoning): the engine banner, immediately.
+   * - incompatible (parse-boundary rejection, e.g. version skew): a softer
+   *   advisory. The scene never executed the command, so this neither
+   *   feeds nor resets the death streak — three skewed commands from a
+   *   newer peer must not read as an engine failure.
+   * - recoverable: counts toward the consecutive-failure streak; the
+   *   engine banner appears only once the scene evidently cannot apply
+   *   anything (no success since [`SCENE_APPLY_FAILURE_LIMIT`] failures).
+   */
+  private handleSceneCallFailed(e: unknown): void {
+    const cls = classifySceneError(e);
     const message = e instanceof Error ? e.message : String(e);
-    const error =
+    if (cls === "incompatible") {
+      this.surfaceError(
+        "incompatible",
+        `Some updates could not be applied because this viewer did not ` +
+          `recognize them (${message}). They may come from a newer app ` +
+          `version; everything else keeps working.`,
+      );
+      return;
+    }
+    this.sceneApplyFailureStreak += 1;
+    if (cls !== "fatal" && this.sceneApplyFailureStreak < SCENE_APPLY_FAILURE_LIMIT) {
+      return;
+    }
+    this.surfaceError(
+      cls === "fatal" ? "engine-fatal" : "engine",
       `Viewer engine failure: scene updates are no longer being applied ` +
-      `(${message}). Reload the page to recover.`;
-    if (this.remoteActivity.error === error) return;
-    this.updateRemoteActivity({ loading: false, error, progress: null });
+        `(${message}). Reload the page to recover.`,
+      { loading: false, progress: null },
+    );
   }
 
   /**
@@ -569,7 +679,7 @@ export class SessionController {
           channel: channelCount - 1,
           visible: true,
         };
-        scene.apply_command(JSON.stringify(cmd));
+        guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
         bumpSettingsGeneration();
       }
     }
@@ -651,8 +761,14 @@ export class SessionController {
     return {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId, generatedAvailability) => {
         try {
-          const scene = this.deps.ensureScene();
-          scene.load_document(documentJson);
+          // Guarded so a fatal load failure (trap, borrow poisoning)
+          // surfaces even though the enclosing catch swallows the throw —
+          // a client whose snapshot cannot load is a blank shell otherwise.
+          const scene = guardedSceneCall("load_document", () => {
+            const s = this.deps.ensureScene();
+            s.load_document(documentJson);
+            return s;
+          });
           // Adopt the self id BEFORE any registration work: a
           // `dataset_opened` replayed in the same tick as this snapshot
           // must never read a stale self-id when deriving `isOpener`.
@@ -735,8 +851,7 @@ export class SessionController {
               return;
             }
           }
-          scene.apply_command(commandJson);
-          this.sceneApplyFailureStreak = 0;
+          guardedSceneCall("apply_command", () => scene.apply_command(commandJson));
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "dataset_opened") {
@@ -781,11 +896,13 @@ export class SessionController {
           } catch {
             // commandJson itself wasn't valid JSON — fall through with undefined
           }
+          // Surfacing already happened through the scene-call guard (the
+          // controller observes every guarded mutation); this log adds the
+          // command type, which the guard cannot know.
           bridgeLog("apply_command.failed", {
             commandType: cmdType,
             error: e instanceof Error ? e.message : String(e),
           });
-          this.recordSceneApplyFailure(e);
         }
       },
       onAck: () => {},
@@ -817,7 +934,7 @@ export class SessionController {
           if (scene) {
             try {
               const presenceJson = JSON.stringify({ camera, view, display });
-              scene.import_presence(presenceJson);
+              guardedSceneCall("import_presence", () => scene.import_presence(presenceJson));
               syncSceneViewState(scene, this.deps.viewState);
               this.deps.getLoop()?.markInteractiveDirty();
               this.session.bridge.sendPresence(scene.export_presence());
@@ -854,7 +971,7 @@ export class SessionController {
                 view: peer.view,
                 display: peer.display,
               });
-              scene.import_presence(presenceJson);
+              guardedSceneCall("import_presence", () => scene.import_presence(presenceJson));
               syncSceneViewState(scene, this.deps.viewState);
               this.deps.getLoop()?.markInteractiveDirty();
               this.session.bridge.sendPresence(scene.export_presence());
@@ -881,7 +998,8 @@ export class SessionController {
           if (scene) {
             try {
               const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
-              scene.import_dataset_presence(json);
+              guardedSceneCall("import_dataset_presence", () =>
+                scene.import_dataset_presence(json));
               invalidateDisplaySettings(this.deps.getLoop(), "peer_dataset_presence");
               this.deps.bumpLayerSettingsVersion();
             } catch (e) {
@@ -892,7 +1010,10 @@ export class SessionController {
       },
       onOpenDatasetFailed: (url, error) => {
         bridgeLog("open_remote_dataset.failed", { url, error });
-        this.updateRemoteActivity({ loading: false, error, progress: null });
+        // Spinner/progress always stop; the error surfaces through the
+        // ranked slot (a fatal engine banner outranks an open failure).
+        this.updateRemoteActivity({ loading: false, progress: null });
+        this.surfaceError("open", error);
         this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
       },
       onDatasetOpenProgress: (_requestId: string, url: string, diagnostic: DatasetOpenProgressDiagnostic) => {
@@ -905,9 +1026,13 @@ export class SessionController {
           this.updateRemoteActivity({ loading: false, progress: null });
           return;
         }
+        // Progress of a fresh open retires only a previous open's failure.
+        // Engine/data banners have their own recovery signals — and a
+        // fatal banner in particular must never be wiped by an unrelated
+        // open making progress.
+        this.clearSurfacedError(["open"]);
         this.updateRemoteActivity({
           loading: true,
-          error: null,
           progress: diagnostic.message,
         });
       },
@@ -931,6 +1056,9 @@ export class SessionController {
         this.contentSource.handleChunkStatus(datasetId, imageId, key, status, message);
       },
       onConnected: () => {
+        // Chunk failures accumulated against a dropped transport (or its
+        // reconnect window) say nothing about the restored connection.
+        this.cpuCache.resetChunkFailureStreak();
         this.deps.events.onConnectedChanged(true);
       },
       onWorkspaceArchived: () => {

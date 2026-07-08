@@ -28,14 +28,25 @@ export interface CpuCacheConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
-   * Invoked when chunk fetches keep failing with no success in between
-   * (e.g. access revoked after a successful open), so the owner can show a
-   * user-visible signal instead of a silently stalling canvas. Aggregated
-   * and throttled by the cache: at most one call per notify interval, and
-   * only once the consecutive-failure streak reaches its threshold —
-   * healthy operation (including mixed success/failure) never triggers it.
+   * Invoked when chunk deliveries keep failing with no delivered (fetched
+   * AND decoded) chunk in between — permanent fetch failures (e.g. access
+   * revoked after a successful open) and decode failures (e.g. a source
+   * answering with the wrong wire format) both count — so the owner can
+   * show a user-visible signal instead of a silently stalling canvas.
+   * Transient-kind fetch failures never count: they are the reconnect
+   * machinery's business (see also `CpuCache.resetChunkFailureStreak`).
+   * Aggregated and throttled by the cache: at most one call per notify
+   * interval, and only once the consecutive-failure streak reaches its
+   * threshold — healthy operation (including mixed success/failure) never
+   * triggers it.
    */
   onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void;
+  /**
+   * Invoked once when a chunk is delivered after `onChunkFailureStreak`
+   * has fired, so the owner can retire the visible signal — the failure
+   * evidently did not persist.
+   */
+  onChunkFailureRecovered?: () => void;
 }
 
 /**

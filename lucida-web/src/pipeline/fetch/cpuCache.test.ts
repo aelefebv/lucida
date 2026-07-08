@@ -1452,10 +1452,10 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Fetch failure streak surfacing
+  // Delivery failure streak surfacing
   // =========================================================================
 
-  describe("fetch failure streak surfacing", () => {
+  describe("delivery failure streak surfacing", () => {
     it("notifies once when a failure streak reaches the threshold, throttled thereafter", async () => {
       const onChunkFailureStreak = vi.fn();
       const { cache, source } = createTestCache({
@@ -1487,7 +1487,7 @@ describe("CpuCache", () => {
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
     });
 
-    it("a successful fetch resets the streak — mixed success/failure never notifies", async () => {
+    it("a delivered chunk resets the streak — mixed success/failure never notifies", async () => {
       const onChunkFailureStreak = vi.fn();
       const { cache, source } = createTestCache({
         maxConcurrentFetches: 32,
@@ -1520,6 +1520,150 @@ describe("CpuCache", () => {
       await flush();
 
       expect(onChunkFailureStreak).not.toHaveBeenCalled();
+    });
+
+    it("transient failures (disconnect rejections, timeouts) never feed the streak", async () => {
+      vi.useFakeTimers();
+      try {
+        const onChunkFailureStreak = vi.fn();
+        const { cache, source } = createTestCache({
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+        });
+
+        const reqs = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD + 2 }, (_, i) =>
+          makeRequest({ x: i }),
+        );
+        cache.submit(makePlan(reqs));
+        // First attempt: reject everything the way the transport does when
+        // the bridge drops mid-flight. The cache retries transient once.
+        for (let i = 0; i < reqs.length; i++) {
+          source.reject(
+            `entity-1/image-1/0/0/0/0/0/${i}`,
+            new FetchError("Bridge disconnected", { kind: "transient" }),
+          );
+        }
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        // Retry attempt: the socket is still down, so these time out /
+        // reject transiently too — the post-retry failures are recorded,
+        // but a connection drop must not read as a failing data source.
+        for (let i = 0; i < reqs.length; i++) {
+          source.reject(
+            `entity-1/image-1/0/0/0/0/0/${i}`,
+            new FetchError("Chunk timed out", { kind: "transient" }),
+          );
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(onChunkFailureStreak).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resetChunkFailureStreak (reconnect) starts the count over", async () => {
+      const onChunkFailureStreak = vi.fn();
+      const { cache, source } = createTestCache({
+        maxConcurrentFetches: 32,
+        onChunkFailureStreak,
+      });
+
+      const rejectBatch = async (y: number, count: number) => {
+        const reqs = Array.from({ length: count }, (_, i) => makeRequest({ y, x: i }));
+        cache.submit(makePlan(reqs));
+        for (let i = 0; i < count; i++) {
+          source.reject(`entity-1/image-1/0/0/0/0/${y}/${i}`, new Error("404 not found"));
+        }
+        await flush();
+      };
+
+      await rejectBatch(0, 6);
+      cache.resetChunkFailureStreak();
+      await rejectBatch(1, 6);
+      // 6 + 6 would have crossed the threshold without the reset.
+      expect(onChunkFailureStreak).not.toHaveBeenCalled();
+
+      // Sanity: the counter still works after a reset — 4 more failures
+      // complete a fresh run of 10 consecutive.
+      await rejectBatch(2, 4);
+      expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+    });
+
+    it("decode failures count toward the streak, and fetch completion alone does not reset it", async () => {
+      const onChunkFailureStreak = vi.fn();
+      const source = createMockContentSource();
+      let failDecode = false;
+      const decode = {
+        decode: (bytes: ArrayBuffer) =>
+          failDecode
+            ? Promise.reject(new Error("length mismatch for wire format"))
+            : Promise.resolve(bytes),
+        activeCount: () => 0,
+        get size() { return 3; },
+        terminate: () => {},
+      } as unknown as DecodePool;
+      const cache = new CpuCache(source, decode, {
+        maxConcurrentFetches: 32,
+        onChunkFailureStreak,
+      });
+
+      // One short of the threshold fails at the fetch boundary…
+      const reqs = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD }, (_, i) =>
+        makeRequest({ x: i }),
+      );
+      cache.submit(makePlan(reqs));
+      for (let i = 0; i < CHUNK_FAILURE_STREAK_THRESHOLD - 1; i++) {
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+      }
+      // …then the last fetch COMPLETES but its bytes cannot be decoded
+      // (e.g. a source answering 200 with the wrong wire format). That is
+      // a delivery failure, not a recovery.
+      failDecode = true;
+      source.resolve(`entity-1/image-1/0/0/0/0/0/${CHUNK_FAILURE_STREAK_THRESHOLD - 1}`);
+      await flush();
+
+      expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+      expect(onChunkFailureStreak.mock.calls[0][1]).toContain("decode failed");
+    });
+
+    it("a delivered chunk retires a notified streak exactly once and re-arms the notifier", async () => {
+      const onChunkFailureStreak = vi.fn();
+      const onChunkFailureRecovered = vi.fn();
+      const { cache, source } = createTestCache({
+        maxConcurrentFetches: 32,
+        onChunkFailureStreak,
+        onChunkFailureRecovered,
+      });
+
+      const rejectBatch = async (y: number, count: number) => {
+        const reqs = Array.from({ length: count }, (_, i) => makeRequest({ y, x: i }));
+        cache.submit(makePlan(reqs));
+        for (let i = 0; i < count; i++) {
+          source.reject(`entity-1/image-1/0/0/0/0/${y}/${i}`, new Error("404 not found"));
+        }
+        await flush();
+      };
+
+      await rejectBatch(0, CHUNK_FAILURE_STREAK_THRESHOLD);
+      expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+      expect(onChunkFailureRecovered).not.toHaveBeenCalled();
+
+      // A delivered (fetched AND decoded) chunk retires the signal…
+      cache.submit(makePlan([makeRequest({ y: 1 })]));
+      source.resolve("entity-1/image-1/0/0/0/0/1/0");
+      await flush();
+      expect(onChunkFailureRecovered).toHaveBeenCalledTimes(1);
+
+      // …exactly once: further healthy deliveries stay silent.
+      cache.submit(makePlan([makeRequest({ y: 2 })]));
+      source.resolve("entity-1/image-1/0/0/0/0/2/0");
+      await flush();
+      expect(onChunkFailureRecovered).toHaveBeenCalledTimes(1);
+
+      // A NEW streak after recovery is a new incident: it notifies
+      // immediately instead of waiting out the previous throttle window.
+      await rejectBatch(3, CHUNK_FAILURE_STREAK_THRESHOLD);
+      expect(onChunkFailureStreak).toHaveBeenCalledTimes(2);
     });
   });
 

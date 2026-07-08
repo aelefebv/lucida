@@ -5,6 +5,11 @@ import { initWasmOnce } from "../wasmInit.ts";
 
 export function useWasmScene() {
   const [wasmReady, setWasmReady] = useState(false);
+  /** Human-readable boot failure, set when the wasm initialization
+   *  rejects. Without it a failed boot is a permanently blank shell with
+   *  nothing but a console line; the app renders this like any other
+   *  top-level error. Never set on the same mount as `wasmReady`. */
+  const [wasmError, setWasmError] = useState<string | null>(null);
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
   // Ref mirror of the wasmScene state — handlers and downstream
   // hooks read .current to avoid stale closures over `wasmScene`.
@@ -34,6 +39,9 @@ export function useWasmScene() {
       })
       .catch((e: unknown) => {
         console.error("wasm module initialization failed:", e);
+        if (cancelled) return;
+        const message = e instanceof Error ? e.message : String(e);
+        setWasmError(`Viewer failed to start: ${message}. Reload the page to try again.`);
       });
     return () => {
       cancelled = true;
@@ -51,5 +59,5 @@ export function useWasmScene() {
     return scene;
   }
 
-  return { wasmReady, wasmScene, wasmSceneRef, setWasmScene, ensureScene };
+  return { wasmReady, wasmError, wasmScene, wasmSceneRef, setWasmScene, ensureScene };
 }

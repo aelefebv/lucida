@@ -25,6 +25,10 @@ const glue = vi.hoisted(() => ({
   finalizeAll() {
     for (const p of this.pending.splice(0)) p.finalize();
   },
+  /** Reject every in-flight instantiation (fetch/instantiate failure). */
+  failAll(err: Error) {
+    for (const p of this.pending.splice(0)) p.fail(err);
+  },
 }));
 
 vi.mock("lucida-core", () => ({
@@ -96,5 +100,22 @@ describe("useWasmScene wasm boot", () => {
     await waitFor(() => expect(a.result.current.wasmReady).toBe(true));
     await waitFor(() => expect(b.result.current.wasmReady).toBe(true));
     expect(glue.instantiations).toBe(1);
+  });
+
+  it("an initialization failure surfaces as a visible boot error, not just a console line", async () => {
+    const { useWasmScene } = await loadHook();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { result } = renderHook(() => useWasmScene());
+      glue.failAll(new Error("wasm instantiation refused"));
+
+      await waitFor(() =>
+        expect(result.current.wasmError).toContain("wasm instantiation refused"),
+      );
+      expect(result.current.wasmError).toContain("Reload the page");
+      expect(result.current.wasmReady).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

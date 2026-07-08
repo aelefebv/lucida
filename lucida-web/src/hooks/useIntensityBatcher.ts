@@ -4,6 +4,7 @@ import type { Session } from "../session.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import { invalidateResidency } from "../invalidation.ts";
+import { guardedSceneCall } from "../sceneGuard.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState } from "../types.ts";
 
@@ -78,7 +79,7 @@ export function useIntensityBatcher({
             min: mergedMin,
             max: mergedMax,
           };
-          scene.apply_command(JSON.stringify(cmd));
+          guardedSceneCall("apply_command", () => scene.apply_command(JSON.stringify(cmd)));
           invalidateResidency(loopRef.current, "auto_contrast");
           sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
         }
