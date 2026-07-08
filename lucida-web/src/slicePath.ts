@@ -470,7 +470,10 @@ export function tickSlice(
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  return uploadAndRenderSlice(ctx, uploader, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  const t1 = debugStats.enabled ? performance.now() : 0;
+  const result = uploadAndRenderSlice(ctx, uploader, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
+  return result;
 }
 
 export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}

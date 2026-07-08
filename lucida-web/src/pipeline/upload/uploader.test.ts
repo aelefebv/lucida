@@ -372,6 +372,31 @@ describe("Uploader unified delivery", () => {
     ]);
   });
 
+  it("reports real posted bytes against the caller's budget for the panel header", () => {
+    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+    const cpuCache = makeCpuCache([chunk]);
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+
+    new Uploader().deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(scopedDebugStats.uploadBytesUsed).toBe(2048);
+    expect(scopedDebugStats.uploadBudgetTotal).toBe(8 * 1024 * 1024);
+    expect(scopedDebugStats.budgetExhausted).toBe(false);
+  });
+
+  it("flags the panel header when the upload budget is exhausted", () => {
+    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+    const cpuCache = makeCpuCache([chunk]);
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+
+    new Uploader().deliverToWorker(ctx, 1024, 0);
+
+    expect(scopedDebugStats.uploadBytesUsed).toBe(2048);
+    expect(scopedDebugStats.budgetExhausted).toBe(true);
+  });
+
   it("skips telemetry aggregation when neither the panel nor the orch category is on", () => {
     // debugStats.enabled=false + no `orch` log category (node env has no
     // localStorage, so no categories) → orchTelemetryActive() is false.

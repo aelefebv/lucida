@@ -23,6 +23,7 @@ import type {
   MissingProxy,
 } from "../../renderer/workerProtocol.ts";
 import {
+  debugStats,
   emptyUploadTickStats,
   type UploadTickStats,
 } from "../../debug/debugStats.ts";
@@ -212,6 +213,14 @@ export class Uploader {
     this.currentUploadStats.budgetExhausted = budgetExhausted;
     if (telemetryActive) {
       this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
+    }
+    if (debugStats.enabled) {
+      // Panel header "Budget" line: real bytes posted this tick against
+      // the caller's budget. Accumulated (+=) because the frame counter
+      // resets once per tick, not per deliverToWorker call.
+      debugStats.uploadBytesUsed += this.currentUploadStats.bytesUploaded;
+      debugStats.uploadBudgetTotal = budget;
+      if (budgetExhausted) debugStats.budgetExhausted = true;
     }
 
     return sentAny || budgetExhausted;

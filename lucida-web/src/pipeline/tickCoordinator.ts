@@ -116,6 +116,14 @@ interface PlannedDataset {
 const VIEWER_INTEREST_TTL_MS = 2_000;
 const VIEWER_INTEREST_KEY_CAP = 512;
 
+/**
+ * Minimum spacing between per-member sent-count refreshes on epoch-hit
+ * ticks. Sent counts advance between rebuilds as the upload path drains
+ * the cache, so the replayed rows are recomputed from the delivery
+ * ledger — but not on every idle frame; the panel only polls ~5×/s.
+ */
+const MEMBER_SENT_REFRESH_MS = 250;
+
 function emitViewerInterestHint(
   ctx: TickContext,
   datasetId: string,
@@ -185,9 +193,21 @@ export class TickCoordinator {
     visibleMembers: number;
     totalMembers: number;
     memberStats: typeof debugStats.memberStats;
+    /** Uncapped count of members with pending requests (rows are capped). */
+    memberStatsActiveTotal: number;
+    /**
+     * Planned (non-prefetch) chunk requests backing each `memberStats`
+     * row, index-aligned. Lets epoch-hit ticks recompute each row's
+     * sent count from the delivery ledger instead of replaying the
+     * rebuild-time values.
+     */
+    memberChunkRefs: ChunkRequest[][];
     selectedLevel: number;
     numLevels: number;
   } | null = null;
+  /** Last time the replayed rows' sent counts were recomputed. Starts
+   *  at -Infinity so the first epoch-hit tick always refreshes. */
+  private lastMemberSentRefreshAt = -Infinity;
   private requestEpoch = 0;
   private _lastRequests: ChunkRequest[] = [];
   /** Per-dataset snapshot of the most recent visible region. Consumed by `orchDebug`. */
@@ -267,9 +287,27 @@ export class TickCoordinator {
       // doesn't blink to "Visible: 0 / 0" between non-planning ticks.
       if (debugStats.enabled && this.cachedDebugMemberSnapshot) {
         const s = this.cachedDebugMemberSnapshot;
+        // Sent counts keep advancing between rebuilds as the upload
+        // path drains the cache; refresh the replayed rows from the
+        // delivery ledger (throttled) so idle fill shows as progress
+        // instead of freezing at the rebuild-time counts.
+        const now = performance.now();
+        if (now - this.lastMemberSentRefreshAt >= MEMBER_SENT_REFRESH_MS) {
+          this.lastMemberSentRefreshAt = now;
+          for (let i = 0; i < s.memberStats.length; i++) {
+            const refs = s.memberChunkRefs[i];
+            if (!refs) continue;
+            let sent = 0;
+            for (const r of refs) {
+              if (ctx.cpuCache.isChunkSent(r)) sent++;
+            }
+            s.memberStats[i].chunksSent = sent;
+          }
+        }
         debugStats.visibleMembers = s.visibleMembers;
         debugStats.totalMembers = s.totalMembers;
         debugStats.memberStats = [...s.memberStats];
+        debugStats.memberStatsActiveTotal = s.memberStatsActiveTotal;
         debugStats.selectedLevel = s.selectedLevel;
         debugStats.numLevels = s.numLevels;
       }
@@ -301,6 +339,10 @@ export class TickCoordinator {
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
+    // Index-aligned with the rows pushed to `debugStats.memberStats`
+    // below (the render loop resets those per tick); captured into the
+    // member snapshot so epoch-hit ticks can refresh sent counts.
+    const memberChunkRefs: ChunkRequest[][] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
       // 3a. Skip invisible datasets
@@ -484,13 +526,12 @@ export class TickCoordinator {
         const activeByEntity = new Map(
           result.activeSet.map((a) => [a.entityId, a]),
         );
-        const nonPrefetchRequestsByEntity = new Map<string, number>();
+        const requestsByEntity = new Map<string, ChunkRequest[]>();
         for (const r of result.requests) {
           if (r.lane === "prefetch") continue;
-          nonPrefetchRequestsByEntity.set(
-            r.entityId,
-            (nonPrefetchRequestsByEntity.get(r.entityId) ?? 0) + 1,
-          );
+          const list = requestsByEntity.get(r.entityId);
+          if (list) list.push(r);
+          else requestsByEntity.set(r.entityId, [r]);
         }
         for (const entity of entities) {
           debugStats.totalMembers++;
@@ -506,20 +547,29 @@ export class TickCoordinator {
                 : -1;
           // Rows only for members with pending chunk requests — the
           // panel filters to `chunksNeeded > 0` anyway — and row-capped.
-          const chunksNeeded = nonPrefetchRequestsByEntity.get(entity.entityId) ?? 0;
-          if (chunksNeeded > 0) {
+          const entityRequests = requestsByEntity.get(entity.entityId);
+          const chunksNeeded = entityRequests?.length ?? 0;
+          if (chunksNeeded > 0 && entityRequests) {
             debugStats.memberStatsActiveTotal++;
             if (debugStats.memberStats.length < DEBUG_MEMBER_ROW_CAP) {
               const memberKey = multiChannel
                 ? compositeKey(entity.imageId, selection.c)
                 : entity.imageId;
+              // Delivery state clears at rebuild start (atlas remap), so
+              // this usually reads 0 here and climbs on epoch-hit ticks
+              // as the upload path re-sends — the honest signal.
+              let chunksSent = 0;
+              for (const r of entityRequests) {
+                if (ctx.cpuCache.isChunkSent(r)) chunksSent++;
+              }
               debugStats.memberStats.push({
                 id: memberKey,
                 level: tl,
                 numLevels: entity.levels.length,
                 chunksNeeded,
-                chunksSent: 0,
+                chunksSent,
               });
+              memberChunkRefs.push(entityRequests);
             }
           }
           if (tl >= 0) {
@@ -697,6 +747,8 @@ export class TickCoordinator {
         visibleMembers: debugStats.visibleMembers,
         totalMembers: debugStats.totalMembers,
         memberStats: [...debugStats.memberStats],
+        memberStatsActiveTotal: debugStats.memberStatsActiveTotal,
+        memberChunkRefs,
         selectedLevel: debugStats.selectedLevel,
         numLevels: debugStats.numLevels,
       };
