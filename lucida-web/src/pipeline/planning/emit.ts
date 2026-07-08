@@ -39,12 +39,21 @@ function computePriority(
 }
 
 /**
- * Minimap lane — its own dedicated highest-priority lane (see ADR
- * 0023). For every {@link EntitySnapshot} in `entities`, look up
- * `minimapPending.get(entity.imageId)` and emit one
- * {@link ChunkRequest} per coord with `priority = config.minimapLaneOffset`
- * directly (no importance / distance terms — minimap chunks are
- * per-dataset, not per-entity-importance).
+ * Minimap lane (see ADR 0023). For every {@link EntitySnapshot} in
+ * `entities`, look up `minimapPending.get(entity.imageId)` and emit one
+ * {@link ChunkRequest} per coord (no importance / distance terms —
+ * minimap chunks are per-dataset, not per-entity-importance).
+ *
+ * Priority is two-mode. The dedicated top lane
+ * (`config.minimapLaneOffset`) is justified by the seed set being SMALL
+ * — a bounded ~1 s starvation window for the view lanes. On a wide
+ * collection the whole-collection seed set is tens of thousands of
+ * chunks; at top priority it would hold every fetch slot for tens of
+ * minutes while the visible band waits. Once the pending count exceeds
+ * `config.minimapSeedFastMaxChunks`, the whole set emits at
+ * `config.minimapSeedBulkLaneOffset` — behind every view-serving lane —
+ * and fills opportunistically as slots free up. The minimap can fill
+ * over minutes; the view cannot.
  *
  * Mutates `out`.
  */
@@ -56,6 +65,14 @@ export function emitMinimapLane(
   out: ChunkRequest[],
 ): void {
   if (minimapPending.size === 0) return;
+  let pendingTotal = 0;
+  for (const entity of entities) {
+    pendingTotal += minimapPending.get(entity.imageId)?.length ?? 0;
+  }
+  const priority =
+    pendingTotal > config.minimapSeedFastMaxChunks
+      ? config.minimapSeedBulkLaneOffset
+      : config.minimapLaneOffset;
   for (const entity of entities) {
     const pending = minimapPending.get(entity.imageId);
     if (!pending) continue;
@@ -72,7 +89,7 @@ export function emitMinimapLane(
         x: coord.x,
         lane: "minimap",
         tier: "coarse",
-        priority: config.minimapLaneOffset,
+        priority,
         chunkKey: coord.key,
       });
     }

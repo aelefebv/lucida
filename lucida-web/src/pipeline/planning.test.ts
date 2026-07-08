@@ -12,6 +12,8 @@ import {
   DETAIL_THRESHOLD_PX,
   HYSTERESIS_PX,
   MINIMAP_LANE_OFFSET,
+  MINIMAP_SEED_FAST_MAX_CHUNKS,
+  MINIMAP_SEED_BULK_LANE_OFFSET,
   COARSE_LANE_OFFSET,
   PROXY_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
@@ -2323,6 +2325,12 @@ describe("PlanningConfig", () => {
       GROUP_PROXY_PRIORITY_BUMP,
     );
     expect(DEFAULT_PLANNING_CONFIG.minimapLaneOffset).toBe(MINIMAP_LANE_OFFSET);
+    expect(DEFAULT_PLANNING_CONFIG.minimapSeedFastMaxChunks).toBe(
+      MINIMAP_SEED_FAST_MAX_CHUNKS,
+    );
+    expect(DEFAULT_PLANNING_CONFIG.minimapSeedBulkLaneOffset).toBe(
+      MINIMAP_SEED_BULK_LANE_OFFSET,
+    );
     expect(DEFAULT_PLANNING_CONFIG.detailLaneOffset).toBe(DETAIL_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.proxyLaneOffset).toBe(PROXY_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.prefetchLaneOffset).toBe(
@@ -2335,7 +2343,7 @@ describe("PlanningConfig", () => {
     expect(DEFAULT_PLANNING_CONFIG.coarseDetailEnabled).toBe(true);
   });
 
-  it("lane offsets: 0 / 500 / 1000 / 1500 / 2400 / 2500", () => {
+  it("lane offsets: 0 / 500 / 1000 / 1500 / 2400 / 2500 / 2600", () => {
     // Hard-pinned values so a future re-number is loud.
     expect(MINIMAP_LANE_OFFSET).toBe(0);
     expect(DETAIL_LANE_OFFSET).toBe(500);
@@ -2343,6 +2351,7 @@ describe("PlanningConfig", () => {
     expect(PREFETCH_LANE_OFFSET).toBe(1500);
     expect(COARSE_LANE_OFFSET).toBe(2400);
     expect(OVERVIEW_LANE_OFFSET).toBe(2500);
+    expect(MINIMAP_SEED_BULK_LANE_OFFSET).toBe(2600);
   });
 
   it("mergeConfig({}) returns a config equal to DEFAULT_PLANNING_CONFIG", () => {
@@ -2997,6 +3006,122 @@ describe("plan() — minimap lane", () => {
     const afterMinimap = after.requests.filter((r) => r.lane === "minimap");
     expect(afterMinimap.length).toBeGreaterThan(0);
     for (const req of afterMinimap) expect(req.priority).toBe(250);
+  });
+
+  // Bulk seeding. The top-priority lane is justified by the seed set
+  // being SMALL (the "starvation risk is bounded" argument in ADR 0023).
+  // A wide collection's whole-collection seed set is not small: at tens
+  // of thousands of coarsest chunks, top-priority seeding would occupy
+  // every fetch slot for minutes while the visible band waits. Above
+  // the fast-seed cap the whole set emits behind every view-serving
+  // lane instead.
+
+  function makeManyCoords(n: number): MinimapChunkCoord[] {
+    const coords: MinimapChunkCoord[] = [];
+    for (let i = 0; i < n; i++) {
+      coords.push({ level: 3, x: i, y: 0, z: 0, t: 0, c: 0, key: `3/0/0/0/0/${i}` });
+    }
+    return coords;
+  }
+
+  it("keeps the top-priority lane at exactly the fast-seed cap", () => {
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        ["imgM", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS)],
+      ]),
+    });
+    const result = plan(snap, createSyntheticState());
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(MINIMAP_SEED_FAST_MAX_CHUNKS);
+    for (const req of minimap) expect(req.priority).toBe(MINIMAP_LANE_OFFSET);
+  });
+
+  it("demotes seeding below every view-serving lane once pending exceeds the fast-seed cap", () => {
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        ["imgM", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS + 1)],
+      ]),
+    });
+    const result = plan(snap, createSyntheticState());
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(MINIMAP_SEED_FAST_MAX_CHUNKS + 1);
+    for (const req of minimap) {
+      expect(req.priority).toBe(MINIMAP_SEED_BULK_LANE_OFFSET);
+    }
+    // Bulk seeding must rank behind the view's own coarse fill and the
+    // overview backstop — the view cannot wait minutes, the minimap can.
+    expect(MINIMAP_SEED_BULK_LANE_OFFSET).toBeGreaterThan(COARSE_LANE_OFFSET);
+    expect(MINIMAP_SEED_BULK_LANE_OFFSET).toBeGreaterThan(OVERVIEW_LANE_OFFSET);
+  });
+
+  it("bulk-demoted seeding sorts after every other lane in the plan", () => {
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        ["imgM", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS + 1)],
+      ]),
+    });
+    const result = plan(snap, createSyntheticState());
+    const firstMinimapIdx = result.requests.findIndex((r) => r.lane === "minimap");
+    const lastOtherIdx = result.requests.reduce(
+      (acc, r, i) => (r.lane !== "minimap" ? i : acc),
+      -1,
+    );
+    expect(firstMinimapIdx).toBeGreaterThanOrEqual(0);
+    expect(lastOtherIdx).toBeGreaterThanOrEqual(0);
+    expect(firstMinimapIdx).toBeGreaterThan(lastOtherIdx);
+  });
+
+  it("counts pending across all entities when deciding fast vs bulk", () => {
+    // Two members, each under the cap alone but over it together: the
+    // starvation cost is a property of the whole seed set, not of any
+    // one member's share of it.
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const perEntity = Math.ceil((MINIMAP_SEED_FAST_MAX_CHUNKS + 2) / 2);
+    const entities = [
+      createSyntheticEntity({
+        entityId: "e0",
+        imageId: "imgA",
+        kind: "Image",
+        projectedDiagonalPx: 200,
+        idealTargetLod: 0,
+        levels: [level0],
+      }),
+      createSyntheticEntity({
+        entityId: "e1",
+        imageId: "imgB",
+        kind: "Image",
+        projectedDiagonalPx: 200,
+        idealTargetLod: 0,
+        levels: [level0],
+      }),
+    ];
+    const snap = createSyntheticSnapshot({
+      entities,
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256] }),
+      selection: makeSelection(),
+      minimapPending: new Map([
+        ["imgA", makeManyCoords(perEntity)],
+        ["imgB", makeManyCoords(perEntity)],
+      ]),
+    });
+    const result = plan(snap, createSyntheticState());
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(perEntity * 2);
+    for (const req of minimap) {
+      expect(req.priority).toBe(MINIMAP_SEED_BULK_LANE_OFFSET);
+    }
+  });
+
+  it("respects config.minimapSeedFastMaxChunks and config.minimapSeedBulkLaneOffset", () => {
+    const snap = makeMinimapSnapshot(); // two pending coords
+    const result = plan(
+      snap,
+      createSyntheticState(),
+      mergeConfig({ minimapSeedFastMaxChunks: 1, minimapSeedBulkLaneOffset: 2700 }),
+    );
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(2);
+    for (const req of minimap) expect(req.priority).toBe(2700);
   });
 });
 

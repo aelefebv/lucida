@@ -1320,6 +1320,119 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
+  // Dual-lane demand: minimap seeding + the view's coarse lane
+  // =========================================================================
+  //
+  // The minimap and coarse lanes share a residency tier and a dedup
+  // key, so one fetch (or one cached entry) can serve both. Whichever
+  // lane's request holds the queue slot, an arrival the VIEW demanded
+  // this tick must be deliverable immediately — idle fill must not wait
+  // for the next interaction-triggered rebuild to relabel the entry.
+  // Chunks only the minimap wanted stay off the view's delivery path.
+
+  describe("dual-lane minimap/coarse demand", () => {
+    const dualChunkKey = "3/0/0/0/0/0";
+    const dualFetchKey = "entity-1/image-1/3/0/0/0/0/0";
+
+    function minimapReq(priority = 0): ChunkRequest {
+      return makeRequest({ lane: "minimap", tier: "coarse", level: 3, priority });
+    }
+    function coarseReq(): ChunkRequest {
+      return makeRequest({ lane: "coarse", tier: "coarse", level: 3, priority: 2400 });
+    }
+    function deliverableChunkKeys(cache: CpuCache): string[] {
+      return Array.from(cache.getDeliverable()).flatMap((d) =>
+        d.kind === "chunk" ? [d.chunkKey] : [],
+      );
+    }
+
+    it("delivers a chunk demanded by both lanes when the minimap-lane fetch resolves, without a rebuild", async () => {
+      // Concurrency 1 models the wide-collection queue: the coarse copy
+      // of a dual-demand chunk never reaches a fetch slot itself.
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([minimapReq(), coarseReq()]));
+
+      source.resolve(dualFetchKey);
+      await flush();
+
+      expect(deliverableChunkKeys(cache)).toContain(dualChunkKey);
+      expect(cache.telemetry().readyCount).toBeGreaterThan(0);
+    });
+
+    it("fetches a dual-demand chunk exactly once", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([minimapReq(), coarseReq()]));
+      await flush();
+      expect(source.fetchCount).toBe(1);
+    });
+
+    it("delivers when a coarse request dedups onto an in-flight minimap fetch, in any request order", async () => {
+      const { cache, source } = createTestCache();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([minimapReq()]));
+
+      // Rebuild while the fetch is in flight: the view's coarse request
+      // rides the same fetch. The minimap request is deliberately LAST
+      // (its bulk-demoted sort position) so the freshest in-flight
+      // metadata carries lane "minimap".
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarseReq(), minimapReq(2600)]));
+
+      source.resolve(dualFetchKey);
+      await flush();
+
+      expect(deliverableChunkKeys(cache)).toContain(dualChunkKey);
+    });
+
+    it("keeps a cached dual-demand chunk deliverable when the minimap request sorts after coarse", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([minimapReq()]));
+      await flush(); // cached under lane "minimap"
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarseReq(), minimapReq(2600)]));
+
+      expect(deliverableChunkKeys(cache)).toContain(dualChunkKey);
+    });
+
+    it("keeps the view's delivery priority on a cached dual-demand chunk", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([minimapReq()]));
+      await flush();
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarseReq(), minimapReq(2600)]));
+
+      const chunk = Array.from(cache.getDeliverable()).find(
+        (d) => d.kind === "chunk" && d.chunkKey === dualChunkKey,
+      );
+      expect(chunk).toBeDefined();
+      // The bulk-demoted minimap refresh (2600) must not displace the
+      // coarse lane's own urgency (2400) in delivery ordering.
+      expect(chunk!.priority).toBe(2400);
+    });
+
+    it("never delivers a minimap-only chunk to the view", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([minimapReq()]));
+      await flush();
+
+      expect(deliverableChunkKeys(cache)).toHaveLength(0);
+      // The minimap path still reads it from the cache by key.
+      expect(cache.getCachedChunk("entity-1", dualChunkKey)).not.toBeNull();
+    });
+  });
+
+  // =========================================================================
   // Error handling
   // =========================================================================
 
