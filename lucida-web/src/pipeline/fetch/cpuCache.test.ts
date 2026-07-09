@@ -9,6 +9,12 @@ import { debugLog } from "../../debug/logging.ts";
 import {
   CpuCache,
   CHUNK_FAILURE_STREAK_THRESHOLD,
+  FAILURE_BACKOFF_BASE_MS,
+  FAILURE_BACKOFF_FACTOR,
+  FAILURE_BACKOFF_MAX_MS,
+  FAILURE_BACKOFF_JITTER_RATIO,
+  MAX_TRACKED_FAILURES,
+  backoffWithJitter,
   type CpuCacheConfig,
   type ReadyDelivery,
 } from "./cpuCache.ts";
@@ -1493,25 +1499,286 @@ describe("CpuCache", () => {
       expect(deliveries[0]).toMatchObject({ chunkKey: "2/0/0/0/0/0", lane: "coarse" });
     });
 
-    it("excludes failed chunks from future submits until contentEpoch changes", async () => {
-      const { cache, source } = createTestCache();
-      const req = makeRequest();
-      cache.submit(makePlan([req], undefined, { content: 1 }));
+    it("self-heals a transient failure after its backoff; permanent stays excluded", async () => {
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const { cache, source } = createTestCache({
+          now: () => clock,
+          random: () => 0,
+        });
 
-      source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("404 not found"));
-      // Multiple flushes to ensure the async error handling chain completes
-      await flush();
+        // --- Transient key: fails, backs off, then re-fetches by time. ---
+        const transientReq = makeRequest({ x: 0 });
+        cache.submit(makePlan([transientReq]));
+        // First transient rejection triggers the one in-fetch retry…
+        source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        // …and the retry also fails, so the key lands in the failure map.
+        source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(cache.failuresTracked()).toBe(1);
+        const fetchesAfterFail = source.fetchCount;
+
+        // Re-planned immediately (clock unchanged): still inside backoff.
+        cache.submit(makePlan([transientReq]));
+        expect(source.fetchCount).toBe(fetchesAfterFail);
+
+        // Advance the injected clock past the backoff → re-eligible.
+        clock += FAILURE_BACKOFF_MAX_MS + 1;
+        cache.submit(makePlan([transientReq]));
+        expect(source.fetchCount).toBe(fetchesAfterFail + 1);
+
+        // A clean re-fetch clears the failure record.
+        source.resolve("entity-1/image-1/0/0/0/0/0/0");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cache.failuresTracked()).toBe(0);
+
+        // --- Permanent key: excluded regardless of elapsed time. ---
+        const permanentReq = makeRequest({ x: 1 });
+        cache.submit(makePlan([permanentReq]));
+        source.reject("entity-1/image-1/0/0/0/0/0/1", new Error("404 not found"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cache.failuresTracked()).toBe(1);
+
+        const fetchesAfterPermanent = source.fetchCount;
+        clock += FAILURE_BACKOFF_MAX_MS * 1000;
+        cache.submit(makePlan([permanentReq]));
+        expect(source.fetchCount).toBe(fetchesAfterPermanent); // never re-fetched
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("grows the transient backoff on each re-attempt (capped)", async () => {
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const { cache, source } = createTestCache({
+          now: () => clock,
+          random: () => 0, // random()==0 returns the jitter band's floor
+        });
+        const req = makeRequest();
+        const composite = "entity-1/image-1/0/0/0/0/0/0";
+
+        // With random()==0 the returned delay is the floor of the band:
+        // growth * (1 - ratio). It stays strictly monotonic in `attempt`.
+        const backoff = (attempt: number) =>
+          FAILURE_BACKOFF_BASE_MS *
+          FAILURE_BACKOFF_FACTOR ** (attempt - 1) *
+          (1 - FAILURE_BACKOFF_JITTER_RATIO);
+
+        async function failTransientlyOnce() {
+          source.reject(composite, new Error("Network error"));
+          await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+          source.reject(composite, new Error("Network error"));
+          await vi.advanceTimersByTimeAsync(0);
+        }
+
+        // Attempt 1 recorded at clock 0 → eligible at backoff(1).
+        cache.submit(makePlan([req]));
+        await failTransientlyOnce();
+
+        // Just before attempt-1's backoff elapses: still skipped.
+        clock = backoff(1) - 1;
+        let fetches = source.fetchCount;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetches);
+
+        // At backoff(1): re-eligible → attempt 2 fetch fires and fails.
+        clock = backoff(1);
+        fetches = source.fetchCount;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetches + 1);
+        const secondFailAt = clock;
+        await failTransientlyOnce();
+
+        // Attempt 2's backoff is longer: attempt-1's span no longer frees it.
+        clock = secondFailAt + backoff(1);
+        fetches = source.fetchCount;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetches);
+
+        // Past the grown backoff → re-eligible.
+        clock = secondFailAt + backoff(2);
+        fetches = source.fetchCount;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetches + 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps backoff jitter alive at the cap so retries de-correlate", () => {
+      // attempt 9 pins the growth term well past the cap.
+      const cappedAttempt = 9;
+      const low = backoffWithJitter(cappedAttempt, () => 0.2);
+      const high = backoffWithJitter(cappedAttempt, () => 0.9);
+
+      // Two entries at the cap with different random() get different delays
+      // (the whole point of jitter during a synchronized outage).
+      expect(low).not.toBe(high);
+      expect(high).toBeGreaterThan(low);
+
+      // …never zero/negative, never at or above the cap.
+      for (const value of [low, high]) {
+        expect(value).toBeGreaterThan(0);
+        expect(value).toBeLessThan(FAILURE_BACKOFF_MAX_MS);
+      }
+    });
+
+    it("keeps every backoff within its band and below the cap", () => {
+      for (let attempt = 1; attempt <= 12; attempt++) {
+        const floor = backoffWithJitter(attempt, () => 0);
+        const ceilingSample = backoffWithJitter(attempt, () => 1 - 1e-9);
+        expect(floor).toBeGreaterThan(0);
+        expect(ceilingSample).toBeGreaterThanOrEqual(floor);
+        expect(ceilingSample).toBeLessThan(FAILURE_BACKOFF_MAX_MS);
+      }
+    });
+
+    it("bounds the tracked failures map and keeps retained permanents excluded", async () => {
+      const { cache, source } = createTestCache({
+        maxConcurrentFetches: 100_000,
+        maxBytesInFlight: 1e12,
+        now: () => 0,
+        random: () => 0,
+      });
+
+      const count = MAX_TRACKED_FAILURES + 512;
+      const reqs = Array.from({ length: count }, (_, i) =>
+        makeRequest({ x: i, chunkKey: `0/0/0/0/0/${i}` }),
+      );
+      cache.submit(makePlan(reqs));
+
+      for (let i = 0; i < count; i++) {
+        source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+      }
       await flush();
 
-      // Submit again with same contentEpoch — should not re-fetch
+      // Memory stays bounded at the cap.
+      expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
+
+      // A retained permanent (the most-recent record survives the FIFO drop
+      // of the oldest permanents) stays excluded: re-planning it must NOT
+      // issue a new fetch. Merely counting entries would miss a regression
+      // where the gate re-enqueued an evicted-then-forgotten key.
+      const retained = makeRequest({
+        x: count - 1,
+        chunkKey: `0/0/0/0/0/${count - 1}`,
+      });
       const fetchesBefore = source.fetchCount;
-      cache.submit(makePlan([req], undefined, { content: 1 }));
-      expect(source.fetchCount).toBe(fetchesBefore); // no new fetch
+      cache.submit(makePlan([retained]));
+      expect(source.fetchCount).toBe(fetchesBefore);
+    });
 
-      // Submit with bumped contentEpoch — should re-fetch
-      const fetchesBefore2 = source.fetchCount;
-      cache.submit(makePlan([req], undefined, { content: 2 }));
-      expect(source.fetchCount).toBe(fetchesBefore2 + 1);
+    it("retains a fresh transient's backoff even when the permanent store is full", async () => {
+      // The compound exposure: a malformed collection floods the map with
+      // permanent 404s AND a throttling backend produces transient timeouts.
+      // The transient store is independent, so the transient keeps its own
+      // backoff slot instead of being crowded out — no no-backoff retry storm
+      // against the throttling backend.
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const { cache, source } = createTestCache({
+          maxConcurrentFetches: 1_000_000,
+          maxBytesInFlight: 1e12,
+          now: () => clock,
+          random: () => 0, // returns each backoff band's floor
+        });
+
+        // Saturate the PERMANENT store to capacity with 404s.
+        const permReqs = Array.from({ length: MAX_TRACKED_FAILURES }, (_, i) =>
+          makeRequest({ x: i, chunkKey: `0/0/0/0/0/${i}` }),
+        );
+        cache.submit(makePlan(permReqs));
+        for (let i = 0; i < MAX_TRACKED_FAILURES; i++) {
+          source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
+
+        // A brand-new TRANSIENT failure arrives while permanents are full.
+        const tIdx = MAX_TRACKED_FAILURES;
+        const transientReq = makeRequest({ x: tIdx, chunkKey: `0/0/0/0/0/${tIdx}` });
+        const transientComposite = `entity-1/image-1/0/0/0/0/0/${tIdx}`;
+        cache.submit(makePlan([transientReq]));
+        source.reject(transientComposite, new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        source.reject(transientComposite, new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The transient got its OWN store slot — permanents did not evict it.
+        expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES + 1);
+
+        // The regression this fixes: the transient is RETAINED with its
+        // backoff. Re-planning it before its eligibility instant issues NO
+        // new fetch — with a single saturated map it would have been evicted
+        // and re-fetched with no backoff every tick.
+        const backoffFloor =
+          FAILURE_BACKOFF_BASE_MS * (1 - FAILURE_BACKOFF_JITTER_RATIO);
+        clock = backoffFloor - 1;
+        let fetchesBefore = source.fetchCount;
+        cache.submit(makePlan([transientReq]));
+        expect(source.fetchCount).toBe(fetchesBefore);
+
+        // Permanents stay sticky through the transient churn: neither the
+        // FIFO-oldest nor the most-recent permanent re-fetches.
+        cache.submit(makePlan([makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" })]));
+        cache.submit(makePlan([
+          makeRequest({
+            x: MAX_TRACKED_FAILURES - 1,
+            chunkKey: `0/0/0/0/0/${MAX_TRACKED_FAILURES - 1}`,
+          }),
+        ]));
+        expect(source.fetchCount).toBe(fetchesBefore);
+
+        // And self-heal still works: past the backoff the transient re-fetches.
+        clock = backoffFloor;
+        fetchesBefore = source.fetchCount;
+        cache.submit(makePlan([transientReq]));
+        expect(source.fetchCount).toBe(fetchesBefore + 1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a key flips transient → permanent and becomes sticky (leaves the transient store)", async () => {
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const { cache, source } = createTestCache({ now: () => clock, random: () => 0 });
+        const req = makeRequest();
+        const composite = "entity-1/image-1/0/0/0/0/0/0";
+
+        // First incident: transient. Fails, retries once, fails again → the
+        // key lands in the transient store with a backoff.
+        cache.submit(makePlan([req]));
+        source.reject(composite, new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        source.reject(composite, new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cache.failuresTracked()).toBe(1);
+
+        // Backoff elapses → re-planned, re-fetched. This time it is a 404.
+        clock += FAILURE_BACKOFF_MAX_MS + 1;
+        cache.submit(makePlan([req]));
+        source.reject(composite, new Error("404 not found"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Still exactly one tracked entry — it moved stores, not duplicated.
+        expect(cache.failuresTracked()).toBe(1);
+
+        // Now sticky: no elapsed time makes it re-fetch.
+        const fetchesBefore = source.fetchCount;
+        clock += FAILURE_BACKOFF_MAX_MS * 1000;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetchesBefore);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("reports errors in telemetry", async () => {

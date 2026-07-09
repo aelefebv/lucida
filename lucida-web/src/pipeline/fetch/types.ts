@@ -47,6 +47,17 @@ export interface CpuCacheConfig {
    * evidently did not persist.
    */
   onChunkFailureRecovered?: () => void;
+  /**
+   * Monotonic time source (milliseconds) used for the transient-failure
+   * self-heal backoff. Defaults to `() => performance.now()`. Injectable
+   * so the re-eligibility decision can be driven by a controlled clock.
+   */
+  now?: () => number;
+  /**
+   * Randomness source in `[0, 1)` used for backoff jitter. Defaults to
+   * `Math.random`. Injectable so jitter is deterministic under test.
+   */
+  random?: () => number;
 }
 
 /**

@@ -96,9 +96,51 @@ const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
 const SPARSE_DETAIL_STREAK_THRESHOLD = 3;
 const SPARSE_DETAIL_LOG_RATE_LIMIT_MS = 5000;
 
-interface FailedEntry {
-  failedUntilContentEpoch: number;
-  isPermanent: boolean;
+/** Nominal (pre-jitter) first-attempt backoff before a transient failure
+ *  is retried. */
+export const FAILURE_BACKOFF_BASE_MS = 500;
+/** Each successive transient re-attempt multiplies the backoff by this. */
+export const FAILURE_BACKOFF_FACTOR = 2;
+/** Cap the jittered transient backoff stays strictly below. */
+export const FAILURE_BACKOFF_MAX_MS = 30_000;
+/** Width of the jitter band, as a fraction of the (capped) backoff: the
+ *  returned delay is spread across `[base·(1 − ratio), base)`, so it keeps
+ *  varying even once the backoff pins to the cap. */
+export const FAILURE_BACKOFF_JITTER_RATIO = 0.5;
+/** Hard cap on tracked failure entries per store. The permanent and
+ *  transient failure stores are bounded independently at this size, each
+ *  FIFO-dropping its oldest entry past the cap, so total tracked entries
+ *  never exceed `2 · MAX_TRACKED_FAILURES`. */
+export const MAX_TRACKED_FAILURES = 8192;
+
+/**
+ * Capped exponential backoff with jitter for a transient failure's
+ * `attempt`-th record (1-based). The growth term doubles each attempt and
+ * is capped at {@link FAILURE_BACKOFF_MAX_MS}; jitter is then applied as a
+ * band *below* that cap — `[base·(1 − ratio), base)` — so two entries that
+ * both reach the cap still draw distinct, de-correlated delays instead of
+ * collapsing onto one synchronized retry instant. The result is always
+ * greater than zero and strictly below the cap.
+ */
+export function backoffWithJitter(attempt: number, random: () => number): number {
+  const growth = FAILURE_BACKOFF_BASE_MS *
+    Math.pow(FAILURE_BACKOFF_FACTOR, Math.max(0, attempt - 1));
+  const base = Math.min(FAILURE_BACKOFF_MAX_MS, growth);
+  const floor = base * (1 - FAILURE_BACKOFF_JITTER_RATIO);
+  return floor + random() * (base - floor);
+}
+
+interface TransientFailure {
+  /** `now()` at the moment the failure was recorded. */
+  failedAt: number;
+  /** How many times this key has failed transiently (>= 1); grows the
+   *  backoff across successive records. */
+  attempt: number;
+  /**
+   * Wall-clock (in `now()`'s frame) at or after which the key may be
+   * re-planned. The plan-time gate skips the key until `now()` reaches it.
+   */
+  eligibleAt: number;
 }
 
 interface InFlightChunkMeta {
@@ -117,6 +159,11 @@ export class CpuCache {
   private source: ContentSource;
   private decode: DecodePool;
   private config: CpuCacheConfig;
+
+  /** Time source for failure-expiry decisions (injectable for tests). */
+  private now: () => number;
+  /** Randomness source for backoff jitter (injectable for tests). */
+  private random: () => number;
 
   private chunkStore!: ChunkStore;
 
@@ -137,7 +184,35 @@ export class CpuCache {
 
   private interactionDetector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
-  private failures = new Map<string, FailedEntry>();
+  /**
+   * Keys with a PERMANENT fetch failure — one that
+   * {@link classifyFetchError} tagged `permanent` (e.g. an HTTP 404 /
+   * not-found, or a source that rejects the fetch outright, such as no
+   * wire format registered for the image). Permanent failures are sticky:
+   * never made re-eligible by the passage of time, and cleared only by a
+   * subsequent successful delivery, {@link CpuCache.reset}, or
+   * {@link CpuCache.cancelDataset}. A fetch that completes but cannot be
+   * decoded is NOT recorded here — decode failures feed the
+   * delivery-failure streak (see
+   * {@link CpuCache.recordChunkFailureForStreak}) instead.
+   *
+   * A `Set` because membership plus insertion order is all the gate needs;
+   * insertion order is FIFO, so once the set reaches
+   * {@link MAX_TRACKED_FAILURES} the oldest permanent key is dropped to hold
+   * the memory bound. Kept independent from {@link transientFailures} so a
+   * flood of permanents (e.g. a malformed collection emitting thousands of
+   * 404s) can never crowd out a transient's backoff slot — and vice versa.
+   */
+  private permanentFailures = new Set<string>();
+  /**
+   * Keys with an outstanding TRANSIENT fetch failure (a timeout, disconnect,
+   * or other retryable rejection) awaiting their self-heal backoff. Each
+   * entry records when it failed, its attempt count (grows the backoff), and
+   * the instant it becomes re-eligible for planning. Bounded independently at
+   * {@link MAX_TRACKED_FAILURES} with FIFO eviction of the oldest entry, so
+   * backoff slots survive no matter how many permanent failures exist.
+   */
+  private transientFailures = new Map<string, TransientFailure>();
 
   private lruCounter = 0;
 
@@ -204,7 +279,12 @@ export class CpuCache {
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
       onChunkFailureStreak: config?.onChunkFailureStreak,
       onChunkFailureRecovered: config?.onChunkFailureRecovered,
+      now: config?.now,
+      random: config?.random,
     };
+
+    this.now = config?.now ?? (() => performance.now());
+    this.random = config?.random ?? Math.random;
 
     const mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
     this.chunkStore = new ChunkStore({
@@ -342,8 +422,14 @@ export class CpuCache {
         continue;
       }
 
-      const failure = this.failures.get(key);
-      if (failure && this.currentEpochs.content < failure.failedUntilContentEpoch) continue;
+      // Permanent failures stay excluded for the session (until reset /
+      // cancelDataset). Transient failures self-heal: once a re-planned
+      // key has waited out its (jittered, capped-exponential) backoff, it
+      // is re-enqueued. Re-eligibility is evaluated lazily here at plan
+      // time — there is no timer re-arming failed tiles on its own.
+      if (this.permanentFailures.has(key)) continue;
+      const transientFailure = this.transientFailures.get(key);
+      if (transientFailure && this.now() < transientFailure.eligibleAt) continue;
 
       // The minimap and coarse lanes can demand the same chunk (shared
       // residency tier + key); one fetch serves both, and the most
@@ -417,11 +503,12 @@ export class CpuCache {
 
     // Failure keys are `${entityId}/${chunkKey}`; entityIds may
     // contain slashes (collection naming, e.g. "collectionId:A/1/0"), so
-    // prefix-match on `entityId + "/"` rather than splitting.
+    // prefix-match on `entityId + "/"` rather than splitting. Snapshot both
+    // stores' keys before mutating them.
     for (const entityId of entityIds) {
       const prefix = `${entityId}/`;
-      for (const key of this.failures.keys()) {
-        if (key.startsWith(prefix)) this.failures.delete(key);
+      for (const key of [...this.permanentFailures, ...this.transientFailures.keys()]) {
+        if (key.startsWith(prefix)) this.clearFailure(key);
       }
       for (const key of this.inFlightChunkMeta.keys()) {
         if (key.startsWith(prefix)) this.inFlightChunkMeta.delete(key);
@@ -657,6 +744,8 @@ export class CpuCache {
 
   updateConfig(partial: Partial<CpuCacheConfig>): void {
     Object.assign(this.config, partial);
+    if (partial.now) this.now = partial.now;
+    if (partial.random) this.random = partial.random;
     this.applyElasticTierBudgets();
   }
 
@@ -780,7 +869,8 @@ export class CpuCache {
     this.activeEntityIdsThisRebuild.clear();
     this.viewCoarseKeysThisTick.clear();
     this.interactionDetector.reset();
-    this.failures.clear();
+    this.permanentFailures.clear();
+    this.transientFailures.clear();
     this.chunkFailureStreak = 0;
     this.lastChunkFailureNotifyAt = -Infinity;
     this.chunkFailureSurfaced = false;
@@ -831,10 +921,7 @@ export class CpuCache {
       }
 
       const isPermanent = fe.kind === "permanent";
-      this.failures.set(key, {
-        failedUntilContentEpoch: this.currentEpochs.content + 1,
-        isPermanent,
-      });
+      this.recordFailure(key, isPermanent);
       this.counters.recordFetchFailure(isPermanent, fe.message);
       this.recordFailureForBurstDetection(isPermanent, fe.message);
       // Transient-kind failures (network blips, timeouts, the transport's
@@ -875,6 +962,11 @@ export class CpuCache {
     // Only a DELIVERED chunk — fetched AND decoded — proves the source is
     // serving usable data; a completed fetch alone can still be garbage.
     this.recordChunkDelivered();
+
+    // A previously-failed key that now delivers has recovered: drop its
+    // failure record so its attempt/backoff bookkeeping starts clean if
+    // it ever fails again.
+    this.clearFailure(key);
 
     const latestMeta = this.inFlightChunkMeta.get(key);
     const effectiveReq = latestMeta?.request ?? req;
@@ -1092,6 +1184,88 @@ export class CpuCache {
 
   private inFlightProxyKey(req: ProxyRequest): string {
     return `${req.datasetId}|${proxyInnerKey(req)}`;
+  }
+
+  /**
+   * Record a fetch failure for `key`, routing it to the matching store.
+   *
+   * A key can flip kind between records (a timeout that later resolves to a
+   * 404, or a 404 that later times out), so both stores are cleared of the
+   * key first — it must live in exactly one. A permanent failure is recorded
+   * in {@link permanentFailures} and stays sticky. A transient failure grows
+   * its attempt count from any prior transient record (so the backoff
+   * lengthens, capped) and records its re-eligibility instant in
+   * {@link transientFailures}.
+   *
+   * Each store is bounded independently at {@link MAX_TRACKED_FAILURES} with
+   * FIFO eviction of its oldest entry. Because the stores are separate, a
+   * flood of permanents cannot evict a transient's backoff slot: a transient
+   * always retains its own record and thus its backoff, even when the
+   * permanent store is saturated. Total tracked entries stay bounded at
+   * `2 · MAX_TRACKED_FAILURES`.
+   */
+  private recordFailure(key: string, isPermanent: boolean): void {
+    if (isPermanent) {
+      this.transientFailures.delete(key);
+      // Delete-then-add refreshes FIFO recency, so a re-reported permanent
+      // is not the first to be dropped under cap pressure.
+      this.permanentFailures.delete(key);
+      this.permanentFailures.add(key);
+      this.evictOldestWhileOverCap(this.permanentFailures);
+      return;
+    }
+
+    const prev = this.transientFailures.get(key);
+    const failedAt = this.now();
+    const attempt = (prev?.attempt ?? 0) + 1;
+    const eligibleAt = failedAt + this.backoffMs(attempt);
+
+    this.permanentFailures.delete(key);
+    // Delete-then-set keeps Map iteration order == insertion recency, so
+    // FIFO eviction drops the genuinely oldest transient.
+    this.transientFailures.delete(key);
+    this.transientFailures.set(key, { failedAt, attempt, eligibleAt });
+    this.evictOldestWhileOverCap(this.transientFailures);
+  }
+
+  /**
+   * Drop the oldest (first-inserted) entries from a failure store until it
+   * is back within {@link MAX_TRACKED_FAILURES}. `Set` and `Map` both
+   * iterate in insertion order, so `keys().next()` yields the oldest key.
+   */
+  private evictOldestWhileOverCap(
+    store: Set<string> | Map<string, TransientFailure>,
+  ): void {
+    while (store.size > MAX_TRACKED_FAILURES) {
+      const oldest = store.keys().next().value;
+      if (oldest === undefined) break;
+      store.delete(oldest);
+    }
+  }
+
+  /** Remove a key's failure record from both stores (used by success-path
+   *  recovery and {@link cancelDataset}). A key lives in at most one store,
+   *  but deleting from both is cheap and keeps callers from having to know
+   *  which. */
+  private clearFailure(key: string): void {
+    this.permanentFailures.delete(key);
+    this.transientFailures.delete(key);
+  }
+
+  /**
+   * Short, capped exponential backoff with jitter for a transient
+   * failure's `attempt`-th record (1-based). Jitter is drawn from the
+   * injected `random()` so retries across many tiles de-correlate — and
+   * still de-correlate at the cap (see {@link backoffWithJitter}).
+   */
+  private backoffMs(attempt: number): number {
+    return backoffWithJitter(attempt, this.random);
+  }
+
+  /** Total tracked failure entries (permanent + transient), across both
+   *  independently-bounded stores. */
+  failuresTracked(): number {
+    return this.permanentFailures.size + this.transientFailures.size;
   }
 
   private recordFailureForBurstDetection(isPermanent: boolean, message: string): void {
