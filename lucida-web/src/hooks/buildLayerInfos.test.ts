@@ -138,12 +138,14 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
     expect(infos[0].labelRows).toEqual([{ index: 1, name: "region-c", visible: true, opacity: 0.7 }]);
   });
 
-  it("with NO label_settings (empty), every drawable label shows (render fallback)", () => {
+  it("with NO label_settings (empty), every drawable label is LISTED but hidden (opt-in)", () => {
+    // Masks are opt-in: the panel still lists every drawable mask (so any can be
+    // toggled on with one click), but each row starts hidden.
     const scene = stubScene(["ds-0"], settingsWith([]));
     const infos = buildLayerInfos(scene, datasetsWith([label("region-b"), label("region-c")]), emptyMaps);
     expect(infos[0].labelRows).toEqual([
-      { index: 0, name: "region-b", visible: true, opacity: 0.5 },
-      { index: 1, name: "region-c", visible: true, opacity: 0.5 },
+      { index: 0, name: "region-b", visible: false, opacity: 0.5 },
+      { index: 1, name: "region-c", visible: false, opacity: 0.5 },
     ]);
   });
 

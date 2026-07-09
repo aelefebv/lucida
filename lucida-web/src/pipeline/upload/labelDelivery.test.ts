@@ -97,8 +97,9 @@ function makeWorkerCtx(writes: WriteTextureCall[]): WorkerCtx {
 
 describe("label chunk flow: request → pre-sliced delivery → pool", () => {
   it("extracts only the current Z-plane and lands it in the pool with ids intact", () => {
-    // 1. Fetch plan the tickCoordinator merges (source Z=1 in view).
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 1 });
+    // 1. Fetch plan the tickCoordinator merges (source Z=1 in view). Masks are
+    //    opt-in, so the single label is turned on explicitly.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 1, labelSettings: [{ visible: true, opacity: 0.5 }] });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
     expect(req.imageId).toBe("img-0:label:region-b");
@@ -199,8 +200,9 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
 
 describe("label chunk flow (3D): volume request → whole-chunk delivery → volume pool", () => {
   it("forwards the WHOLE 3D chunk (no plane extraction) and lands it with ids intact", () => {
-    // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume" });
+    // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk. Masks are
+    //    opt-in, so the single label is turned on explicitly.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume", labelSettings: [{ visible: true, opacity: 0.5 }] });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
     expect(req.imageId).toBe("img-0:label:region-b");

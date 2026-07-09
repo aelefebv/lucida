@@ -53,8 +53,14 @@ function makeScene(model = IDENTITY, inv = INV_MARK): LabelVolumeScene {
 
 const members: MemberRosterEntry[] = [{ imageId: "img-0", position: [0, 0] }];
 
+/** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
+ *  default), so a test that renders every eligible overlay must turn them on. */
+function allOn(n: number): { visible: boolean; opacity: number }[] {
+  return Array.from({ length: n }, () => ({ visible: true, opacity: 0.5 }));
+}
+
 describe("pushLabelVolumeLayers", () => {
-  it("emits every eligible label layer by default, each a first-hit surface", () => {
+  it("emits every eligible label layer when all are on, each a first-hit surface", () => {
     const scene = makeScene();
     const layers: VolumeLayerParams[] = [];
     pushLabelVolumeLayers(
@@ -69,6 +75,7 @@ describe("pushLabelVolumeLayers", () => {
       IDENTITY,
       800,
       600,
+      allOn(2),
     );
     expect(layers.map((l) => l.datasetId)).toEqual([
       "img-0:label:region-b",
@@ -87,7 +94,7 @@ describe("pushLabelVolumeLayers", () => {
   it("places the overlay at the SOURCE member's model matrix (+ inverse)", () => {
     const scene = makeScene();
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), members, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), members, IDENTITY, 800, 600, allOn(1));
     // Matrices are copied from the SOURCE image's placement, not the label's.
     expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(IDENTITY));
     expect(Array.from(layers[0].invModelMatrix!)).toEqual(Array.from(INV_MARK));
@@ -103,7 +110,7 @@ describe("pushLabelVolumeLayers", () => {
       { imageId: "img-0", position: [0, 0], modelMatrix: ownModel, invModelMatrix: ownInv },
     ];
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), membersWithMatrices, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), membersWithMatrices, IDENTITY, 800, 600, allOn(1));
     // Same-extent label (85·4 == 340, 87·4 == 348) → the roster's matrices
     // pass through by value (copied, then scaled by identity ratios).
     expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(ownModel));
@@ -115,7 +122,7 @@ describe("pushLabelVolumeLayers", () => {
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, IDENTITY, 800, 600, allOn(1));
     expect(layers[0].labelColors).toEqual(colors);
   });
 
@@ -160,6 +167,7 @@ describe("pushLabelVolumeLayers", () => {
       IDENTITY,
       800,
       600,
+      allOn(2),
     );
     expect(layers).toHaveLength(1);
     expect(layers[0].datasetId).toBe("img-0:label:seg32");

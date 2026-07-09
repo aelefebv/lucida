@@ -33,9 +33,10 @@ interface PanelLabelRow {
  * nothing (the render/fetch paths drop it under this mode's caps). Volume caps
  * are stricter than slice, so the realistic disabled case is a slice-eligible
  * label that busts the volume caps, viewed in 3D. Visibility mirrors
- * `resolveVisibleLabels` (the render path): with settings, the stored flag (a
- * label with no explicit setting defaults to visible-if-eligible); with NO
- * settings, every label eligible in the CURRENT mode.
+ * `resolveVisibleLabels` (the render path): masks are opt-in, so with settings
+ * the stored flag drives it (a label with no explicit setting defaults to
+ * HIDDEN), and with NO settings every row starts hidden — the panel still lists
+ * every drawable mask so any can be toggled on with one click.
  *
  * In 3D there is a second disabled case: a visible + volume-eligible mask that
  * falls past the TOTAL label-volume memory budget. The panel applies the SAME
@@ -72,10 +73,10 @@ function buildLabelRows(
     const row: PanelLabelRow = {
       index: i,
       name: labels[i].name,
-      // A label with no explicit setting defaults to visible-if-eligible-now; an
-      // explicit flag is honored. With NO settings, every current-eligible label
-      // is visible. Mirrors `resolveVisibleLabels`.
-      visible: hasLabelSettings ? (ls?.visible ?? true) : drawableNow,
+      // Masks are opt-in: a label with no explicit setting defaults to HIDDEN; an
+      // explicit flag is honored. With NO settings, every row starts hidden.
+      // Mirrors `resolveVisibleLabels`.
+      visible: hasLabelSettings ? (ls?.visible ?? false) : false,
       opacity: ls?.opacity ?? 0.5,
     };
     if (!drawableNow) {

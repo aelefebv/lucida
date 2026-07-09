@@ -355,14 +355,15 @@ export function volumeBudgetPrefix(
  * state and the screen never diverge, a hidden label stays hidden, and switching
  * modes never conjures a label whose own checkbox reads off.
  *
- * When `labelSettings` is undefined/empty — a fresh open, or a snapshot that
- * predates the per-label controls — this shows EVERY eligible label at
- * {@link DEFAULT_LABEL_OPACITY}. With settings present, a label is shown iff its
- * entry is `visible` AND it is eligible; a label with NO explicit entry (an
- * absent/short-snapshot slot) defaults to visible-if-eligible, and an explicit
- * `visible: false` is honored (and never auto-revealed). This is the SAME rule
- * the layer panel uses (see `buildLayerInfos`), so the panel's toggle state and
- * the drawn set never diverge.
+ * Masks are OPT-IN: when `labelSettings` is undefined/empty — a fresh open, or a
+ * snapshot that predates the per-label controls — this shows NOTHING (every mask
+ * defaults hidden). With settings present, a label is shown iff its entry is
+ * `visible` AND it is eligible; a label with NO explicit entry (an absent/short-
+ * snapshot slot) defaults to hidden, an explicit `visible: false` is honored, and
+ * an explicit `visible: true` is honored (a mask the user turned on). ONLY the
+ * default flipped: an unset/absent entry is now hidden rather than shown. This is
+ * the SAME rule the layer panel uses (see `buildLayerInfos`), so the panel's
+ * toggle state and the drawn set never diverge.
  *
  * In VOLUME mode the visible + eligible set is then capped by the total
  * label-volume memory budget ({@link volumeBudgetPrefix}): masks are kept in
@@ -393,13 +394,13 @@ export function resolveVisibleLabels(
     let opacity: number;
     if (hasSettings) {
       const setting = labelSettings[i];
-      // A label with no explicit setting (absent/short-snapshot slot) defaults
-      // to visible-if-eligible; an explicit `false` stays hidden.
-      visible = setting?.visible ?? true;
+      // Masks are opt-in: a label with no explicit setting (absent/short-snapshot
+      // slot) defaults to HIDDEN; an explicit `true` shows it, `false` hides it.
+      visible = setting?.visible ?? false;
       opacity = normalizeLabelOpacity(setting?.opacity);
     } else {
-      // No settings at all: show every eligible label at the default opacity.
-      visible = true;
+      // No settings at all: nothing shown by default (masks are opt-in).
+      visible = false;
       opacity = DEFAULT_LABEL_OPACITY;
     }
     if (!visible) continue;
@@ -483,16 +484,26 @@ export function eligibleLabelInfos(
 }
 
 /**
- * The FIRST eligible label of a dataset (in manifest order), at the default
- * opacity — a thin wrapper over {@link resolveVisibleLabels} with no settings,
- * for callers/paths that need a single representative label rather than the full
- * default set. Returns `null` when none qualifies.
+ * The FIRST ELIGIBLE label of a dataset (in manifest order), for callers/paths
+ * that need a single representative drawable label rather than a visibility-
+ * resolved set. Keyed on ELIGIBILITY only (same {@link eligibleLabel} criterion
+ * as fetch/render), deliberately independent of the per-mask visibility default:
+ * masks are opt-in and hidden by default, so a visibility-driven resolve would
+ * return nothing on a fresh open — but "the first drawable mask" is still a
+ * meaningful, default-agnostic notion. Returns `null` when none qualifies.
  */
 export function resolveDefaultLabel(
   manifest: DatasetManifest,
   caps?: LabelSelectionCaps,
 ): ResolvedLabel | null {
-  return resolveVisibleLabels(manifest, undefined, caps)[0] ?? null;
+  const labels = manifest.labels;
+  if (!labels || labels.length === 0) return null;
+  const resolvedCaps = resolveLabelCaps(caps);
+  for (const label of labels) {
+    const elig = eligibleLabel(manifest, label, resolvedCaps);
+    if (elig) return { label, source: elig.source, levelIdx: elig.levelIdx };
+  }
+  return null;
 }
 
 export interface LabelRequestArgs {
@@ -504,9 +515,10 @@ export interface LabelRequestArgs {
   z: number;
   /**
    * Per-label visibility/opacity from the dataset's display settings
-   * (`dataset_settings.label_settings`). Undefined/empty falls back to every
-   * eligible label (see {@link resolveVisibleLabels}), so fetch keeps pace with
-   * what render draws — a hidden label is neither fetched nor drawn.
+   * (`dataset_settings.label_settings`). Masks are opt-in: undefined/empty
+   * resolves to NOTHING visible (see {@link resolveVisibleLabels}), so a fresh
+   * open fetches no overlays until the user turns a mask on — fetch keeps pace
+   * with what render draws, and a hidden label is neither fetched nor drawn.
    */
   labelSettings?: LabelViewSetting[];
   maxLevelDim?: number;

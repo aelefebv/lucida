@@ -9,6 +9,7 @@ import type { RequestPlan } from "./planning/index.ts";
 import { TickCoordinator } from "./tickCoordinator.ts";
 import { Uploader } from "./upload/uploader.ts";
 import { plan } from "./planning/index.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
 import { debugStats } from "../debug/debugStats.ts";
 
@@ -481,8 +482,26 @@ describe("epoch caching", () => {
     return submitted.requests.filter((r) => r.imageId === "img-0:label:region-b");
   }
 
+  // Scene settings that turn the single label ON — masks are opt-in (hidden by
+  // default), so the fetch-merge tests below must explicitly reveal the mask.
+  function labeledSettings() {
+    return {
+      ds1: {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 1,
+        gamma: 1,
+        blend_mode: "alpha",
+        channel_settings: [],
+        channel_blend_mode: "additive",
+        label_settings: [{ visible: true, opacity: 0.5 }],
+      },
+    };
+  }
+
   it("merges the label's FULL z-grid into the fetch plan in volume mode", () => {
-    const scene = createMockScene();
+    const scene = createMockScene({ allSettings: labeledSettings() });
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: labeledContent() }]]);
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -490,6 +509,9 @@ describe("epoch caching", () => {
     ctx.cpuCache = cpuCache;
     ctx.mode = "volume";
 
+    // Force a fresh read of this scene's settings (the module cache persists
+    // across tests); in the app a settings change bumps this generation.
+    bumpSettingsGeneration();
     orch.planAndFetch(ctx, emptyMinimap);
 
     const labelReqs = labelRequestsFromSubmit(cpuCache);
@@ -501,7 +523,7 @@ describe("epoch caching", () => {
   });
 
   it("merges only the mapped z-plane in slice mode (unchanged)", () => {
-    const scene = createMockScene();
+    const scene = createMockScene({ allSettings: labeledSettings() });
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: labeledContent() }]]);
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -509,6 +531,9 @@ describe("epoch caching", () => {
     ctx.cpuCache = cpuCache;
     ctx.mode = "slice";
 
+    // Force a fresh read of this scene's settings (the module cache persists
+    // across tests); in the app a settings change bumps this generation.
+    bumpSettingsGeneration();
     orch.planAndFetch(ctx, emptyMinimap);
 
     const labelReqs = labelRequestsFromSubmit(cpuCache);

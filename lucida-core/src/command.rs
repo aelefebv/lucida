@@ -2207,42 +2207,44 @@ mod tests {
     }
 
     #[test]
-    fn dataset_opened_seeds_all_drawable_labels_visible() {
+    fn dataset_opened_seeds_all_labels_hidden() {
         let mut scene = Scene::new([800, 600]);
-        // All-uint32 labels: every one is drawable.
+        // All-uint32 labels: every one is drawable, yet none seeds visible.
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
         let ls = &scene.dataset_settings[&ds_id].label_settings;
         // One settings entry per attached label, seeded on open.
         assert_eq!(ls.len(), 3);
-        // Every drawable mask is visible by default (the render/fetch path filters
-        // by mode-eligibility; the 3D memory guard caps the volume set). All at 0.5.
-        assert!(ls.iter().all(|l| l.visible));
+        // Masks are opt-in: every one seeds HIDDEN, so a dataset opens with no
+        // overlays until the user reveals a mask via the per-label toggle. All at
+        // 0.5 (the opacity a mask composites at once turned on).
+        assert!(ls.iter().all(|l| !l.visible));
         for l in ls {
             assert_eq!(l.opacity, 0.5);
         }
     }
 
     #[test]
-    fn seeded_for_marks_all_drawable_labels_visible() {
+    fn seeded_for_marks_all_labels_hidden() {
         // The shared seeding constructor (used by BOTH the DatasetOpened apply
         // path and the document-restore path) produces complete channel + label
-        // settings, with every drawable (uint32) label visible.
+        // settings, with every label hidden by default (opt-in per mask).
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 2, 3);
         let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
         // Channels seeded full-length from the C dimension.
         assert_eq!(s.channel_settings.len(), 2);
-        // Labels: one entry each, all visible, all at 0.5.
+        // Labels: one entry each, all hidden, all at 0.5.
         assert_eq!(s.label_settings.len(), 3);
-        assert!(s.label_settings.iter().all(|l| l.visible));
+        assert!(s.label_settings.iter().all(|l| !l.visible));
         assert!(s.label_settings.iter().all(|l| l.opacity == 0.5));
     }
 
     #[test]
-    fn seeded_for_shows_every_uint32_label_and_hides_non_uint32() {
-        // A uint16 mask can never draw, so it seeds hidden; every uint32 mask
-        // seeds visible — the default-all policy, gated only by drawability.
+    fn seeded_for_hides_every_label_regardless_of_dtype() {
+        // The hidden default is dtype-agnostic: a drawable (uint32) mask seeds
+        // hidden just like an undrawable (uint16) one — masks are opt-in, so the
+        // seed reveals nothing and the user turns on the masks they want.
         let reg = test_helpers::make_dataset_opened_with_label_dtypes(
             "ds1",
             "test",
@@ -2255,15 +2257,14 @@ mod tests {
         );
         let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
         assert_eq!(s.label_settings.len(), 3);
-        assert!(!s.label_settings[0].visible); // uint16 — undrawable, hidden
-        assert!(s.label_settings[1].visible); // uint32 — drawable, shown
-        assert!(s.label_settings[2].visible); // uint32 — drawable, shown
+        assert!(s.label_settings.iter().all(|l| !l.visible));
     }
 
     #[test]
     fn seeded_for_hides_all_labels_when_none_are_uint32() {
-        // No drawable label → none visible (nothing can render); the layer
-        // panel's count badge still surfaces that labels exist.
+        // No drawable label → still none visible; the hidden default holds for
+        // undrawable masks too. The layer panel's count badge still surfaces that
+        // labels exist.
         let reg = test_helpers::make_dataset_opened_with_label_dtypes(
             "ds1",
             "test",
@@ -2293,19 +2294,9 @@ mod tests {
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
-        // Label 1 starts visible (every drawable label is shown by default).
-        assert!(scene.dataset_settings[&ds_id].label_settings[1].visible);
-        // Hide it.
-        scene.apply(
-            ViewportCommand::SetLabelVisible {
-                dataset_id: "ds1".into(),
-                label: 1,
-                visible: false,
-            }
-            .into(),
-        );
+        // Label 1 starts hidden (masks are opt-in — none is shown by default).
         assert!(!scene.dataset_settings[&ds_id].label_settings[1].visible);
-        // And reveal it again.
+        // Reveal it.
         scene.apply(
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
@@ -2315,6 +2306,16 @@ mod tests {
             .into(),
         );
         assert!(scene.dataset_settings[&ds_id].label_settings[1].visible);
+        // And hide it again.
+        scene.apply(
+            ViewportCommand::SetLabelVisible {
+                dataset_id: "ds1".into(),
+                label: 1,
+                visible: false,
+            }
+            .into(),
+        );
+        assert!(!scene.dataset_settings[&ds_id].label_settings[1].visible);
     }
 
     #[test]
@@ -2447,7 +2448,9 @@ mod tests {
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
                 label: 0,
-                visible: false,
+                // A real change from the hidden default (masks are opt-in), so
+                // the selection epoch actually bumps.
+                visible: true,
             }
             .into(),
         );
