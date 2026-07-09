@@ -124,6 +124,26 @@ impl Default for LabelSettings {
     }
 }
 
+impl LabelSettings {
+    /// A hidden per-label default: `visible: false` at the same `0.5` opacity as
+    /// [`LabelSettings::default`]. Used wherever an entry is *materialised for a
+    /// label the user never addressed* — an [`DatasetDisplaySettings::ensure_label`]
+    /// back-fill past the seeded count, or a
+    /// [`DatasetDisplaySettings::reconcile_label_settings`] fallback for a current
+    /// label the save never named. Such an entry must start hidden: an unrelated
+    /// gesture (dragging one label's opacity) or restoring a save must never
+    /// surprise-reveal a label the user hadn't turned on. An explicit
+    /// `SetLabelVisible(.., true)` still sets `visible = true` on its target, and a
+    /// save that MATCHED a label restores that label's own `visible`, so the reveal
+    /// paths are untouched — only untouched entries stay hidden.
+    pub fn hidden() -> Self {
+        Self {
+            visible: false,
+            opacity: 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetDisplaySettings {
     pub visible: bool,
@@ -187,15 +207,22 @@ impl DatasetDisplaySettings {
     }
 
     /// Get a mutable reference to label settings at the given index, growing
-    /// the vec with defaults if needed. The per-label mirror of
-    /// [`Self::ensure_channel`]: a per-label edit that targets an index past
-    /// the seeded count back-fills intervening entries with the default
-    /// (visible, 0.5) rather than panicking. Callers bound the index to the
+    /// the vec if needed. The per-label mirror of [`Self::ensure_channel`]: a
+    /// per-label edit that targets an index past the seeded count back-fills
+    /// intervening entries rather than panicking. Callers bound the index to the
     /// dataset's real label count first (see the `SetLabel*` apply arms), so a
     /// stray/huge index can never balloon the vec.
+    ///
+    /// Back-filled entries — including the target index itself — are seeded
+    /// [`LabelSettings::hidden`], not the visible default: they stand for labels
+    /// the user never addressed, so growing the vec must not turn any of them on.
+    /// An explicit `SetLabelVisible(index, true)` sets `.visible = true` on the
+    /// returned target after the grow, so that reveal path still works; a
+    /// `SetLabelOpacity` on a hidden high-index label only tunes opacity and
+    /// leaves every back-filled entry (intermediate and target) hidden.
     pub fn ensure_label(&mut self, index: usize) -> &mut LabelSettings {
         while self.label_settings.len() <= index {
-            self.label_settings.push(LabelSettings::default());
+            self.label_settings.push(LabelSettings::hidden());
         }
         &mut self.label_settings[index]
     }
@@ -277,7 +304,15 @@ impl DatasetDisplaySettings {
     ///   `k`-th entry of `saved` whose `author_names` entry equals `N`. A current
     ///   label with no matching author entry (a label the author never had, or
     ///   one occurrence too many of a repeated name) takes
-    ///   [`LabelSettings::default`].
+    ///   [`LabelSettings::hidden`].
+    ///
+    /// Every fallback for a current label the save never addressed —
+    /// positionally, an out-of-range positional index, a name the author never
+    /// had, or a defensively-missing parallel `saved` slot — resolves to
+    /// [`LabelSettings::hidden`], never the visible default: restoring a save
+    /// must not surprise-reveal a label the author never turned on. A label the
+    /// save MATCHED restores that saved entry verbatim, so a matched-visible
+    /// label still comes back visible.
     ///
     /// Occurrence-awareness is what keeps a collection whose plate repeats a
     /// name (e.g. two labels both called `region-a`) from collapsing both onto
@@ -289,9 +324,11 @@ impl DatasetDisplaySettings {
         current_names: &[String],
     ) -> Vec<LabelSettings> {
         if author_names.is_empty() {
-            // Legacy blob: no names to key on, so fall back to positional.
+            // Legacy blob: no names to key on, so fall back to positional. A
+            // current index with no saved entry was never addressed by the save,
+            // so it comes back hidden rather than the visible default.
             return (0..current_names.len())
-                .map(|i| saved.get(i).cloned().unwrap_or_default())
+                .map(|i| saved.get(i).cloned().unwrap_or_else(LabelSettings::hidden))
                 .collect();
         }
 
@@ -312,14 +349,22 @@ impl DatasetDisplaySettings {
                 for (author_index, author_name) in author_names.iter().enumerate() {
                     if author_name == name {
                         if matched == target_occurrence {
-                            return saved.get(author_index).cloned().unwrap_or_default();
+                            // Name matched, but a malformed blob whose `saved` is
+                            // shorter than `author_names` may lack the parallel
+                            // slot — treat that missing entry as never-addressed
+                            // (hidden), not the visible default.
+                            return saved
+                                .get(author_index)
+                                .cloned()
+                                .unwrap_or_else(LabelSettings::hidden);
                         }
                         matched += 1;
                     }
                 }
                 // No matching author entry (or not enough occurrences of a
-                // repeated name): this current label starts at the default.
-                LabelSettings::default()
+                // repeated name): the save never addressed this current label, so
+                // it starts hidden rather than the visible default.
+                LabelSettings::hidden()
             })
             .collect()
     }
@@ -1880,6 +1925,72 @@ mod annotation_view_tests {
 }
 
 #[cfg(test)]
+mod ensure_label_tests {
+    //! Growing `label_settings` to reach a per-label edit's index. These lock the
+    //! contract that back-filling the vec never turns on a label the user did not
+    //! address: intermediate AND target entries materialise HIDDEN, an opacity
+    //! edit at a high index leaves every touched-but-not-revealed entry hidden,
+    //! and an explicit visible-set still reveals its own target.
+
+    use super::*;
+
+    /// Settings with a SHORT `label_settings` vec — the legacy shape a per-label
+    /// edit can outrun (e.g. a blob seeded before the full label count was
+    /// known). Only index 0 exists, and it starts hidden.
+    fn short() -> DatasetDisplaySettings {
+        DatasetDisplaySettings {
+            label_settings: vec![LabelSettings::hidden()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn opacity_edit_at_high_index_leaves_intermediate_and_target_hidden() {
+        // Mirrors the `SetLabelOpacity` apply arm: `ensure_label(idx).opacity =`.
+        // Dragging opacity on a hidden high-index label must not reveal it — nor
+        // any intermediate entry the grow had to back-fill.
+        let mut s = short();
+        s.ensure_label(3).opacity = 0.2;
+        assert_eq!(s.label_settings.len(), 4);
+        // The pre-existing entry is untouched.
+        assert!(!s.label_settings[0].visible);
+        // Back-filled intermediates stay hidden at the default opacity.
+        assert_eq!(s.label_settings[1], LabelSettings::hidden());
+        assert_eq!(s.label_settings[2], LabelSettings::hidden());
+        // The target took the opacity edit but stayed hidden.
+        assert!(!s.label_settings[3].visible);
+        assert_eq!(s.label_settings[3].opacity, 0.2);
+        // No back-filled entry (intermediate or target) turned itself on.
+        assert!(s.label_settings.iter().all(|l| !l.visible));
+    }
+
+    #[test]
+    fn explicit_visible_set_reveals_only_its_target() {
+        // Mirrors the `SetLabelVisible(.., true)` apply arm: the reveal path must
+        // still work — the target turns on, while every back-filled intermediate
+        // stays hidden.
+        let mut s = short();
+        s.ensure_label(2).visible = true;
+        assert_eq!(s.label_settings.len(), 3);
+        assert!(!s.label_settings[0].visible);
+        assert!(!s.label_settings[1].visible);
+        assert!(s.label_settings[2].visible);
+    }
+
+    #[test]
+    fn reaching_an_existing_index_does_not_grow_or_alter() {
+        // ensure_label at an in-range index returns the existing entry unchanged.
+        let mut s = short();
+        s.label_settings[0].visible = true;
+        s.label_settings[0].opacity = 0.9;
+        let entry = s.ensure_label(0);
+        assert!(entry.visible);
+        assert_eq!(entry.opacity, 0.9);
+        assert_eq!(s.label_settings.len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod reconcile_label_settings_tests {
     //! Name-keyed, occurrence-aware remap of saved per-label settings onto a
     //! recipient's current label order. These lock the contract that a saved
@@ -1893,8 +2004,12 @@ mod reconcile_label_settings_tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    /// A visible marker settings value, so a reconciled entry is trivially
-    /// distinguishable from the `default()` a miss produces.
+    /// A marker settings value carrying a distinctive opacity, so a matched
+    /// (reconciled) entry is trivially distinguishable from the
+    /// [`LabelSettings::hidden`] a miss produces (which is fixed at opacity
+    /// `0.5`). `visible: false` here is deliberate: it does not clash with the
+    /// hidden fallback on the visibility axis, so the tests can assert an entry
+    /// came from a match versus a miss purely by its opacity.
     fn marked(opacity: f32) -> LabelSettings {
         LabelSettings {
             visible: false,
@@ -1902,9 +2017,22 @@ mod reconcile_label_settings_tests {
         }
     }
 
+    /// A matched entry that is explicitly VISIBLE, used to assert that a save
+    /// which marked a label visible restores it visible (matched settings are
+    /// never touched by the hidden-fallback policy).
+    fn visible_marked(opacity: f32) -> LabelSettings {
+        LabelSettings {
+            visible: true,
+            opacity,
+        }
+    }
+
     #[test]
     fn result_is_always_aligned_to_current_names() {
-        // Even a total mismatch produces exactly one entry per current label.
+        // Even a total mismatch produces exactly one entry per current label,
+        // and every unmatched current label comes back HIDDEN (never the visible
+        // default) — restoring a save never surprise-reveals a label the author
+        // did not name.
         let saved = vec![marked(0.1)];
         let out = DatasetDisplaySettings::reconcile_label_settings(
             &saved,
@@ -1912,7 +2040,8 @@ mod reconcile_label_settings_tests {
             &names(&["x", "y", "z"]),
         );
         assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|s| *s == LabelSettings::default()));
+        assert!(out.iter().all(|s| *s == LabelSettings::hidden()));
+        assert!(out.iter().all(|s| !s.visible));
     }
 
     #[test]
@@ -1933,9 +2062,10 @@ mod reconcile_label_settings_tests {
         // Current is LONGER: extra current labels take the default.
         let longer =
             DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a", "b", "c"]));
+        // The extra current label the save never covered comes back HIDDEN.
         assert_eq!(
             longer,
-            vec![marked(0.1), marked(0.2), LabelSettings::default()]
+            vec![marked(0.1), marked(0.2), LabelSettings::hidden()]
         );
         // Current is SHORTER: trailing saved entries are dropped.
         let shorter = DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a"]));
@@ -1953,16 +2083,18 @@ mod reconcile_label_settings_tests {
     }
 
     #[test]
-    fn added_current_label_takes_the_default() {
+    fn added_current_label_comes_back_hidden() {
         let author = names(&["region-a", "region-b"]);
         let saved = vec![marked(0.11), marked(0.22)];
-        // "region-c" is new to the recipient — the author never had it.
+        // "region-c" is new to the recipient — the author never had it, so it
+        // must NOT surprise-reveal on restore: it comes back hidden.
         let current = names(&["region-a", "region-c", "region-b"]);
         let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
         assert_eq!(
             out,
-            vec![marked(0.11), LabelSettings::default(), marked(0.22)]
+            vec![marked(0.11), LabelSettings::hidden(), marked(0.22)]
         );
+        assert!(!out[1].visible);
     }
 
     #[test]
@@ -1996,7 +2128,7 @@ mod reconcile_label_settings_tests {
                 marked(0.11),
                 marked(0.22),
                 marked(0.33),
-                LabelSettings::default()
+                LabelSettings::hidden()
             ]
         );
     }
@@ -2014,14 +2146,42 @@ mod reconcile_label_settings_tests {
     }
 
     #[test]
-    fn shorter_saved_than_author_names_defaults_the_gap() {
+    fn shorter_saved_than_author_names_hides_the_gap() {
         // Defensive: a malformed blob whose `saved` is shorter than its
         // `label_names` must not panic — a name whose parallel saved slot is
-        // missing yields the default.
+        // missing was never really addressed by the save, so it yields the
+        // hidden fallback (not the visible default).
         let author = names(&["a", "b", "c"]);
         let saved = vec![marked(0.11)]; // only "a" has a settings entry
         let current = names(&["c", "a"]);
         let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
-        assert_eq!(out, vec![LabelSettings::default(), marked(0.11)]);
+        assert_eq!(out, vec![LabelSettings::hidden(), marked(0.11)]);
+        assert!(!out[0].visible);
+    }
+
+    #[test]
+    fn matched_visible_setting_restores_visible() {
+        // A save that MATCHED a label and marked it visible must restore that
+        // label visible — the hidden-fallback policy only touches labels the save
+        // never addressed, never a matched entry.
+        let author = names(&["region-a", "region-b"]);
+        // region-a was saved VISIBLE; region-b saved hidden.
+        let saved = vec![visible_marked(0.8), marked(0.3)];
+        let current = names(&["region-b", "region-a"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        // region-b (hidden) then region-a (visible) — each follows its own name.
+        assert_eq!(out, vec![marked(0.3), visible_marked(0.8)]);
+        assert!(out[1].visible);
+    }
+
+    #[test]
+    fn legacy_positional_restores_a_matched_visible_entry() {
+        // The positional (legacy, no author names) path likewise restores an
+        // in-range saved entry verbatim — a visible one stays visible.
+        let saved = vec![visible_marked(0.7), marked(0.2)];
+        let out =
+            DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a", "b"]));
+        assert_eq!(out, vec![visible_marked(0.7), marked(0.2)]);
+        assert!(out[0].visible);
     }
 }
