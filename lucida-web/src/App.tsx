@@ -101,21 +101,6 @@ interface AppProps {
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
 }
 
-/** Whether the page loaded into a specific saved view / annotation rather than a
- *  bare workspace open: a `#view=` inline payload, a `#b=<id>` saved view, or a
- *  `#a=<id>` annotation deep-link in the URL hash. Used to decide the Explore
- *  panel's INITIAL open state (closed when restoring such a view, open otherwise).
- *  SSR-safe: a missing `window`/`location` reads as "no deep-link". */
-function hasSavedViewDeepLink(): boolean {
-  if (typeof window === "undefined") return false;
-  const hash = window.location.hash;
-  return (
-    hash.includes("#view=") ||
-    hash.includes("#b=") ||
-    hash.includes("#a=")
-  );
-}
-
 function App({
   workspaceId,
   workspaceName,
@@ -977,14 +962,9 @@ function App({
     () => false,
   );
   const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
-  // Default the Explore panel OPEN on a fresh dataset open so a first-timer finds
-  // the guided-exploration affordance — but stay CLOSED when the page loads into a
-  // specific saved view / annotation (a `#view=` inline payload, a `#b=<id>` saved
-  // view, or a `#a=<id>` annotation deep-link): that visitor came for that exact
-  // frame, not to be nudged elsewhere. It remains a user toggle either way.
-  const [showExplorePanel, setShowExplorePanel] = useState(
-    () => !hasSavedViewDeepLink(),
-  );
+  // Default the Explore panel CLOSED; it remains a user toggle. (It previously
+  // opened on a fresh dataset open to surface the guided-exploration affordance.)
+  const [showExplorePanel, setShowExplorePanel] = useState(false);
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
