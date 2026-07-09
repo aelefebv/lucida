@@ -245,8 +245,8 @@ export function pushMemberLayers(
  * Append a categorical overlay layer for each of the dataset's VISIBLE labels,
  * composited over the intensity layers already pushed. The visible set + each
  * label's opacity come from `labelSettings` (the dataset's per-label display
- * state); with no settings this falls back to the single default label at the
- * default opacity, so behavior is unchanged until the user interacts.
+ * state); with no settings every eligible label is shown at the default
+ * opacity (see {@link resolveVisibleLabels}).
  *
  * The set drawn here MUST match what {@link computeLabelChunkRequests} fetches,
  * so both resolve through the shared {@link resolveVisibleLabels} (each

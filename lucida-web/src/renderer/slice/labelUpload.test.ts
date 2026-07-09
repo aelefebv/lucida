@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 (globalThis as Record<string, unknown>).GPUBufferUsage = { STORAGE: 0x80, COPY_DST: 0x08 };
 (globalThis as Record<string, unknown>).GPUTextureUsage = { TEXTURE_BINDING: 0x04, COPY_DST: 0x02 };
@@ -7,6 +7,8 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { LabelSliceChunkDataMessage } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
 import { handleLabelSliceChunkData } from "./upload.ts";
+import { destroyAllSliceResources, removeSliceResources } from "./index.ts";
+import { resetLabelSliceAllocWarnings } from "./atlas.ts";
 
 interface WriteTextureCall {
   origin: [number, number, number] | undefined;
@@ -39,6 +41,7 @@ function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
     type: "labelSliceChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     memberId: "img-0:label:region-b",
+    datasetId: "ds-0",
     chunks: [{ data: plane.buffer as ArrayBuffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
     level: 0,
     t: 0,
@@ -49,6 +52,10 @@ function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
     chunkY: 2,
   };
 }
+
+beforeEach(() => {
+  resetLabelSliceAllocWarnings();
+});
 
 describe("handleLabelSliceChunkData", () => {
   it("writes a pre-sliced uint32 plane to a per-member pool without truncating ids", () => {
@@ -107,6 +114,13 @@ describe("handleLabelSliceChunkData", () => {
     expect(writes).toHaveLength(1);
   });
 
+  it("stamps the owning dataset id on the pool (so removal can free it)", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    expect(ctx.state.labelSlicePools.get("img-0:label:region-b")!.datasetId).toBe("ds-0");
+  });
+
   it("drops a stale-epoch delivery so it can't overwrite the pool with an old T/Z", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
@@ -115,5 +129,71 @@ describe("handleLabelSliceChunkData", () => {
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect(writes).toHaveLength(0);
     expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+  });
+
+  it("skips the label (no throw, no pool) when the texture can't be allocated", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    // Simulate an allocation failure (out-of-budget device).
+    (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error("out of memory");
+    });
+    expect(() => handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])))).not.toThrow();
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(writes).toHaveLength(0);
+  });
+
+  it("destroys the created texture (no orphan) when the indirection buffer alloc fails", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    // The texture allocates fine, but the indirection buffer alloc throws —
+    // the partial-alloc path must free the already-created texture rather
+    // than leaking it on the GPU.
+    const textureDestroy = vi.fn();
+    (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+      destroy: textureDestroy,
+      createView: vi.fn(() => ({})),
+    }));
+    (ctx.device.createBuffer as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error("out of memory");
+    });
+
+    expect(() => handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])))).not.toThrow();
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(writes).toHaveLength(0);
+    expect(textureDestroy).toHaveBeenCalled();
+  });
+});
+
+describe("label slice pool cleanup on dataset removal", () => {
+  it("frees the label pool keyed by image id when its DATASET is removed", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
+    const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
+
+    // removeLayerResources passes the DATASET id ("ds-0"), which is NOT the
+    // pool's key ("img-0:label:region-b") — the leak was the lookup missing here.
+    removeSliceResources(ctx, "ds-0");
+
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(destroyed).toHaveBeenCalled(); // the label texture is freed
+  });
+
+  it("does NOT free a label pool belonging to a different dataset", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    removeSliceResources(ctx, "some-other-dataset");
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(true);
+  });
+
+  it("destroyAllSliceResources frees every label slice pool", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    destroyAllSliceResources(ctx);
+    expect(ctx.state.labelSlicePools.size).toBe(0);
   });
 });

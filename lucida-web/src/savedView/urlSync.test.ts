@@ -219,10 +219,11 @@ describe("UrlSync", () => {
     });
     sync.start();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // popstate handler kicks off `bootstrap()` whose decode awaits the
-    // CompressionStream pipeline — drain a few macrotasks to be sure.
-    await new Promise((r) => setTimeout(r, 5));
-    expect(applier.apply).toHaveBeenCalledTimes(1);
+    // popstate kicks off a fire-and-forget `bootstrap()` whose decode awaits
+    // the CompressionStream pipeline. Poll for the apply to land rather than
+    // guessing a fixed wall-clock delay, which races a slow CI runner
+    // (lucida-80g).
+    await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledTimes(1));
     sync.destroy();
   });
 
@@ -411,9 +412,9 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     });
     sync.start();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // Drain the bookmark fetch + apply microtasks.
-    await new Promise((r) => setTimeout(r, 5));
-    expect(applier.apply).toHaveBeenCalledOnce();
+    // Poll for the bookmark fetch + apply to land instead of guessing a fixed
+    // wall-clock delay, which races a slow CI runner (lucida-80g).
+    await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledOnce());
     expect(applier.applied[0].view.t).toBe(99);
     sync.destroy();
   });

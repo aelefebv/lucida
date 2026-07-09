@@ -1,11 +1,21 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  __resetLabelWarningsForTest,
   computeLabelChunkRequests,
   eligibleLabelInfos,
   resolveDefaultLabel,
   resolveVisibleLabels,
+  volumeBudgetPrefix,
 } from "./labelRequests.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../../manifestTypes.ts";
+
+/** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
+ *  default), so a test that exercises level selection / the 3D memory budget /
+ *  mode-eligibility with every mask SHOWN must turn them on explicitly rather
+ *  than relying on an all-visible default (there no longer is one). */
+function allOn(n: number): { visible: boolean; opacity: number }[] {
+  return Array.from({ length: n }, () => ({ visible: true, opacity: 0.5 }));
+}
 
 function image(id: string, dtype: string, shapeYX: [number, number], scaleYX: [number, number]): ImageSpec {
   return {
@@ -68,6 +78,7 @@ describe("computeLabelChunkRequests", () => {
       manifest: manifestWithLabel(volumeLabel),
       t: 0,
       z: 0,
+      labelSettings: allOn(1),
     });
     // 87x85 at chunk 128 → a single 1x1 grid.
     expect(reqs).toHaveLength(1);
@@ -93,6 +104,7 @@ describe("computeLabelChunkRequests", () => {
       manifest: manifestWithLabel(bigLabel),
       t: 0,
       z: 0,
+      labelSettings: allOn(1),
     });
     expect(reqs).toHaveLength(9);
     const keys = new Set(reqs.map((r) => r.chunkKey));
@@ -108,7 +120,13 @@ describe("computeLabelChunkRequests", () => {
       image: image("img-0:label:x", "Uint32", [10, 10], [1, 1]),
     };
     expect(
-      computeLabelChunkRequests({ datasetId: "ds-0", manifest: manifestWithLabel(orphan), t: 0, z: 0 }),
+      computeLabelChunkRequests({
+        datasetId: "ds-0",
+        manifest: manifestWithLabel(orphan),
+        t: 0,
+        z: 0,
+        labelSettings: allOn(1),
+      }),
     ).toEqual([]);
   });
 
@@ -144,7 +162,7 @@ describe("computeLabelChunkRequests", () => {
       }],
     };
     // Source at t=7, but the label has only t=0.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 7, z: 0 });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 7, z: 0, labelSettings: allOn(1) });
     expect(reqs).toHaveLength(1);
     expect(reqs[0].t).toBe(0);
     expect(reqs[0].chunkKey).toBe("0/0/0/0/0/0"); // t component is 0, not 7
@@ -164,7 +182,7 @@ describe("computeLabelChunkRequests", () => {
         image: image5("img-0:label:huge", [1, 1, 1, 20000, 20000], [1, 1, 1, 512, 512], [1, 1, 1, 1, 1]),
       }],
     };
-    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 })).toEqual([]);
+    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) })).toEqual([]);
   });
 
   it("picks a coarse fitting level (bounded requests) over a huge finest level", () => {
@@ -195,7 +213,7 @@ describe("computeLabelChunkRequests", () => {
       images: [image5("img-0", [1, 1, 1, 16384, 16384], [1, 1, 1, 512, 512], [1, 1, 1, 1, 1])],
       labels: [label],
     };
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) });
     // Bounded: the coarse level's 4×4 grid, not level 0's 1024 chunks.
     expect(reqs).toHaveLength(16);
     expect(reqs.every((r) => r.level === 1)).toBe(true);
@@ -229,22 +247,27 @@ describe("computeLabelChunkRequests", () => {
     const resolved = resolveDefaultLabel(manifest);
     expect(resolved?.label.image.image_id).toBe("img-0:label:ok");
 
-    // Fetch agrees: requests target the resolvable second label, not the first.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
+    // Fetch agrees: with both masks turned on, requests target the resolvable
+    // second label, not the ineligible first.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(2) });
     expect(reqs.length).toBeGreaterThan(0);
     expect(reqs.every((r) => r.imageId === "img-0:label:ok")).toBe(true);
   });
 
-  it("MAJOR: fetches chunks for ONLY the one resolved label, not every label", () => {
+  it("MAJOR: nothing is fetched by default (masks opt-in); all-on fetches every eligible label", () => {
     const manifest = multiLabelManifest([
       singleLevelLabel("a", "Uint32", [512, 512]),
       singleLevelLabel("b", "Uint32", [512, 512]),
       singleLevelLabel("c", "Uint32", [512, 512]),
     ]);
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
+    // Default (no settings): masks are opt-in, so nothing is fetched on open.
+    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 })).toEqual([]);
+    // With every mask explicitly turned on, all three are fetched.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(3) });
     const ids = new Set(reqs.map((r) => r.imageId));
-    expect(ids.size).toBe(1); // only the first resolved label
-    expect(ids.has("img-0:label:a")).toBe(true);
+    expect(ids).toEqual(
+      new Set(["img-0:label:a", "img-0:label:b", "img-0:label:c"]),
+    );
   });
 
   it("MAJOR: skips a non-uint32 (uint8) label and resolves a uint32 sibling", () => {
@@ -255,14 +278,15 @@ describe("computeLabelChunkRequests", () => {
     const resolved = resolveDefaultLabel(manifest);
     expect(resolved?.label.image.image_id).toBe("img-0:label:seg32");
 
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(2) });
     expect(reqs.every((r) => r.imageId === "img-0:label:seg32")).toBe(true);
   });
 
   it("MAJOR: a uint8-only label set yields no requests (skipped, no pool)", () => {
     const manifest = multiLabelManifest([singleLevelLabel("mask8", "Uint8", [512, 512])]);
     expect(resolveDefaultLabel(manifest)).toBeNull();
-    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 })).toEqual([]);
+    // Even explicitly turned on, an ineligible uint8 mask fetches nothing.
+    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) })).toEqual([]);
   });
 });
 
@@ -293,20 +317,35 @@ describe("resolveVisibleLabels", () => {
     expect(resolveVisibleLabels(manifestWithLabel(), undefined)).toEqual([]);
   });
 
-  it("undefined settings → the first eligible label only, at the default 0.5", () => {
+  it("undefined settings → nothing visible (masks are opt-in)", () => {
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
-    const out = resolveVisibleLabels(m, undefined);
-    expect(out.map((r) => r.name)).toEqual(["a"]);
+    // No settings at all (fresh open / pre-controls snapshot): every mask
+    // defaults hidden, so nothing is drawn until the user turns one on.
+    expect(resolveVisibleLabels(m, undefined)).toEqual([]);
+  });
+
+  it("empty settings → nothing visible (masks are opt-in)", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    expect(resolveVisibleLabels(m, [])).toEqual([]);
+  });
+
+  it("an explicit-on mask shows at the default 0.5 and carries what render/fetch need", () => {
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const out = resolveVisibleLabels(m, allOn(2));
+    expect(out.map((r) => r.name)).toEqual(["a", "b"]);
     expect(out[0].sourceImageId).toBe("img-0");
-    expect(out[0].opacity).toBe(0.5);
+    expect(out.every((r) => r.opacity === 0.5)).toBe(true);
     // Carries what render/fetch need.
     expect(out[0].label.image.image_id).toBe("img-0:label:a");
     expect(out[0].levelIdx).toBe(0);
   });
 
-  it("empty settings → the first eligible label only (unchanged fallback)", () => {
+  it("a label with no explicit setting (short list) defaults hidden", () => {
+    // Settings cover only index 0 (an explicit ON); index 1 has no entry and
+    // follows the hidden-by-default policy (masks are opt-in).
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
-    expect(resolveVisibleLabels(m, []).map((r) => r.name)).toEqual(["a"]);
+    const out = resolveVisibleLabels(m, [{ visible: true, opacity: 0.5 }]);
+    expect(out.map((r) => r.name)).toEqual(["a"]);
   });
 
   it("returns exactly the visible set, each carrying its per-label opacity", () => {
@@ -390,33 +429,35 @@ describe("resolveVisibleLabels", () => {
     expect(ids.has("img-0:label:b")).toBe(true);
   });
 
-  it("the seeded default (first visible, rest hidden) resolves to exactly one label", () => {
-    // Mirrors the Rust `seeded_for` seed: index 0 visible, the rest hidden, all
-    // at 0.5. One clean overlay on open — no fetch/pool fan-out.
+  it("an explicit per-mask config (one on, rest off) resolves to just the on mask", () => {
+    // Explicit settings: only index 0 on. The two explicit-off masks stay off —
+    // an explicit off is never auto-revealed.
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b"), uintLabel("c")]);
-    const seed = [
+    const config = [
       { visible: true, opacity: 0.5 },
       { visible: false, opacity: 0.5 },
       { visible: false, opacity: 0.5 },
     ];
-    const out = resolveVisibleLabels(m, seed);
+    const out = resolveVisibleLabels(m, config);
     expect(out.map((r) => r.name)).toEqual(["a"]);
     expect(out[0].opacity).toBe(0.5);
   });
 
-  it("falls back to the first eligible when the visible-marked label is ineligible", () => {
+  it("returns [] when only ineligible labels are marked visible (no substitution)", () => {
     // Settings mark index 0 (uint8, undrawable) visible and index 1 (uint32,
-    // drawable) hidden — the seed picked an undrawable label. Rather than open
-    // blank, resolve the first eligible label. Guards the non-uint32-first
-    // (and, conceptually, footprint/level-ineligible) blank-open regression.
+    // drawable) explicitly hidden. Nothing is both visible AND eligible, so
+    // nothing is drawn — resolveVisibleLabels never substitutes a stand-in for
+    // the ineligible visible label (that would put an overlay on screen whose own
+    // checkbox reads off).
     const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("region-c", "Uint32")]);
-    const out = resolveVisibleLabels(m, [
-      { visible: true, opacity: 0.5 },
-      { visible: false, opacity: 0.5 },
-    ]);
-    expect(out.map((r) => r.name)).toEqual(["region-c"]);
+    expect(
+      resolveVisibleLabels(m, [
+        { visible: true, opacity: 0.5 },
+        { visible: false, opacity: 0.5 },
+      ]),
+    ).toEqual([]);
 
-    // Fetch agrees — it requests exactly the fallback label's chunks.
+    // Fetch agrees — nothing is requested until a visible eligible label exists.
     const reqs = computeLabelChunkRequests({
       datasetId: "ds-0",
       manifest: m,
@@ -427,14 +468,12 @@ describe("resolveVisibleLabels", () => {
         { visible: false, opacity: 0.5 },
       ],
     });
-    const ids = new Set(reqs.map((r) => r.imageId));
-    expect(ids.has("img-0:label:region-c")).toBe(true);
-    expect(ids.has("img-0:label:mask8")).toBe(false);
+    expect(reqs).toEqual([]);
   });
 
-  it("honors an explicit hide-all: no fallback when NOTHING is marked visible", () => {
-    // Both eligible, both hidden by the user → nothing drawn. The blank-open
-    // fallback must NOT re-show a label the user deliberately hid.
+  it("honors an explicit hide-all: nothing drawn when every mask is explicitly off", () => {
+    // Both eligible, both explicitly hidden by the user → nothing drawn. An
+    // explicit off is sacred and never auto-revealed.
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
     const out = resolveVisibleLabels(m, [
       { visible: false, opacity: 0.5 },
@@ -451,6 +490,76 @@ describe("resolveVisibleLabels", () => {
         { visible: true, opacity: 0.5 },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("resolveVisibleLabels — mode-aware, no stand-in", () => {
+  // The overlay the panel toggle controls and the overlay on screen must never
+  // diverge: resolveVisibleLabels returns exactly the visible + mode-eligible
+  // set, never a stand-in for a visible-but-ineligible mask. A mode switch that
+  // makes a visible mask ineligible draws nothing for it rather than conjuring a
+  // different mask whose own checkbox reads off.
+  const AXES = [
+    { name: "t", kind: "time" }, { name: "c", kind: "channel" },
+    { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
+  ];
+  function img(id: string, dtype: string, shape: number[], chunk: number[]): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: AXES,
+        levels: [{ level_index: 0, shape, chunk_shape: chunk, grid_shape: [1, 1, 1, 1, 1], scale: [1, 1, 1, 1, 1] }],
+        data_type: dtype,
+      },
+    };
+  }
+  // Slice-eligible (small X/Y) but volume-ineligible (Z busts the 3D per-axis
+  // cap) with no coarser level — eligible in 2D, not in 3D.
+  const deepZ = (name: string): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 4096, 64, 64], [1, 1, 1, 64, 64]),
+  });
+  const flat = (name: string): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 1, 64, 64], [1, 1, 1, 64, 64]),
+  });
+  function manifestOf(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "vol", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [img("img-0", "Uint16", [1, 1, 1, 340, 348], [1, 1, 1, 128, 128])],
+      labels,
+    };
+  }
+  const seen = (visibles: boolean[]) => visibles.map((v) => ({ visible: v, opacity: 0.5 }));
+
+  it("a visible-but-volume-ineligible mask with a hidden sibling draws nothing in 3D", () => {
+    // deep-Z (index 0) is visible but can't draw in volume mode; flat (index 1)
+    // is explicitly hidden. Nothing visible + eligible → [], and fetch agrees, so
+    // the screen matches the panel (no un-hideable re-draw of a stand-in).
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(resolveVisibleLabels(m, seen([true, false]), { mode: "volume" })).toEqual([]);
+    expect(
+      computeLabelChunkRequests({
+        datasetId: "ds-0", manifest: m, t: 0, z: 0, mode: "volume",
+        labelSettings: seen([true, false]),
+      }),
+    ).toEqual([]);
+  });
+
+  it("2D-open → 3D-switch: a 2D-only visible label draws nothing in 3D (no stand-in)", () => {
+    // deep-Z (index 0) is visible and slice-eligible; a separate flat label
+    // (index 1) is 3D-eligible but hidden. In 2D the visible deep-Z label draws;
+    // switching to 3D must NOT substitute the flat label (whose checkbox is off)
+    // for the now-ineligible visible one — it draws nothing.
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(resolveVisibleLabels(m, seen([true, false]), { mode: "slice" }).map((r) => r.name)).toEqual([
+      "deep",
+    ]);
+    expect(resolveVisibleLabels(m, seen([true, false]), { mode: "volume" })).toEqual([]);
   });
 });
 
@@ -534,7 +643,7 @@ describe("computeLabelChunkRequests — volume mode", () => {
   }
 
   it("emits EVERY (z, y, x) chunk of the chosen level (the full volume)", () => {
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "volume" });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "volume", labelSettings: allOn(1) });
     // gz=2, gy=2, gx=2 → 8 chunks; slice mode would emit only 4 (single z).
     expect(reqs).toHaveLength(8);
     // Both z-chunks are present (not just the mapped-Z plane).
@@ -548,12 +657,12 @@ describe("computeLabelChunkRequests — volume mode", () => {
     expect(reqs.every((r) => r.level === 0)).toBe(true);
   });
 
-  it("slice mode (and the default) fetches only the mapped z-plane", () => {
-    const sliceReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "slice" });
+  it("slice mode (and the default mode) fetches only the mapped z-plane", () => {
+    const sliceReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "slice", labelSettings: allOn(1) });
     expect(sliceReqs).toHaveLength(4); // gy*gx, single z-chunk
     expect(new Set(sliceReqs.map((r) => r.z))).toEqual(new Set([0]));
     // Omitting `mode` behaves identically to slice (back-compat).
-    const defaultReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0 });
+    const defaultReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, labelSettings: allOn(1) });
     expect(defaultReqs).toHaveLength(4);
     expect(new Set(defaultReqs.map((r) => r.z))).toEqual(new Set([0]));
   });
@@ -570,7 +679,7 @@ describe("computeLabelChunkRequests — volume mode", () => {
       }],
     };
     // Source at t=5, but the label has only t=0 — every z-chunk stays at t=0.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 5, z: 0, mode: "volume" });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 5, z: 0, mode: "volume", labelSettings: allOn(1) });
     expect(reqs).toHaveLength(2); // gz=2, gy=gx=1
     expect(reqs.every((r) => r.t === 0)).toBe(true);
     expect(new Set(reqs.map((r) => r.z))).toEqual(new Set([0, 1]));
@@ -617,17 +726,19 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
       labels: [{ name: "seg", source_image_id: "img-0", image: img("img-0:label:seg", labelLevels, "Uint32") }],
     };
   }
-  const vol = { datasetId: "ds-0", t: 0, z: 0, mode: "volume" as const };
-  const slice = { datasetId: "ds-0", t: 0, z: 0, mode: "slice" as const };
+  // Masks are opt-in; these tests exercise LEVEL SELECTION with the mask turned
+  // on, so `vol`/`slice` carry an explicit all-visible setting (one label each).
+  const vol = { datasetId: "ds-0", t: 0, z: 0, mode: "volume" as const, labelSettings: allOn(1) };
+  const slice = { datasetId: "ds-0", t: 0, z: 0, mode: "slice" as const, labelSettings: allOn(1) };
 
   it("skips a label whose Z exceeds the 3D limit — slice mode stays eligible", () => {
     // 512×512×3000: fine in 2D (Z ignored), but Z>2048 in 3D with no coarser level.
     const m = manifestFor([{ shape: [1, 1, 3000, 512, 512], chunk: [1, 1, 64, 256, 256], scale: SCALE1 }]);
     expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
-    expect(resolveVisibleLabels(m, undefined, { mode: "volume" })).toEqual([]);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })).toEqual([]);
     // Slice is unaffected by the 3D caps.
     expect(computeLabelChunkRequests({ ...slice, manifest: m }).length).toBeGreaterThan(0);
-    expect(resolveVisibleLabels(m, undefined, { mode: "slice" })).toHaveLength(1);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "slice" })).toHaveLength(1);
   });
 
   it("coarsens past a level whose X/Y exceeds the 3D limit", () => {
@@ -638,7 +749,7 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
     const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
     expect(reqs.length).toBeGreaterThan(0);
     expect(reqs.every((r) => r.level === 1)).toBe(true);
-    expect(resolveVisibleLabels(m, undefined, { mode: "volume" })[0].levelIdx).toBe(1);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(1);
   });
 
   it("coarsens past a level with too many chunks AND bounds the request count", () => {
@@ -657,7 +768,7 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
     // 2048·2048·33·4 B = 553 MB > 512 MB; per-axis dims + chunk count are both fine.
     const m = manifestFor([{ shape: [1, 1, 33, 2048, 2048], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }]);
     expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
-    expect(resolveVisibleLabels(m, undefined, { mode: "slice" })).toHaveLength(1);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "slice" })).toHaveLength(1);
   });
 
   it("coarsens past a level that busts the byte budget to one that fits", () => {
@@ -676,7 +787,168 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
       { shape: [1, 1, 4, 128, 128], chunk: [1, 1, 4, 128, 128], scale: [1, 1, 2, 2, 2] }, // 1 chunk
     ]);
     // Default caps accept level 0; a maxChunksPerVolume of 1 forces level 1.
-    expect(resolveVisibleLabels(m, undefined, { mode: "volume" })[0].levelIdx).toBe(0);
-    expect(resolveVisibleLabels(m, undefined, { mode: "volume", maxChunksPerVolume: 1 })[0].levelIdx).toBe(1);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(0);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume", maxChunksPerVolume: 1 })[0].levelIdx).toBe(1);
+  });
+});
+
+describe("resolveVisibleLabels — 3D total-volume memory budget", () => {
+  const AXES = [
+    { name: "t", kind: "time" }, { name: "c", kind: "channel" },
+    { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
+  ];
+  function img(id: string, dtype: string, shape: number[], chunk: number[]): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: AXES,
+        levels: [{ level_index: 0, shape, chunk_shape: chunk, grid_shape: [1, 1, 1, 1, 1], scale: [1, 1, 1, 1, 1] }],
+        data_type: dtype,
+      },
+    };
+  }
+  // A single-level uint32 label of the given voxel dims (Z, Y, X) — each voxel is
+  // 4 bytes, so bytes = Z·Y·X·4. Chunk 64 keeps the per-tick chunk count bounded.
+  const label = (name: string, z: number, y: number, x: number): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, z, y, x], [1, 1, 64, 64, 64]),
+  });
+  function manifestOf(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "vol", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [img("img-0", "Uint16", [1, 1, 1, 512, 512], [1, 1, 1, 128, 128])],
+      labels,
+    };
+  }
+
+  it("keeps a manifest-order prefix that fits and skips the rest in 3D", () => {
+    __resetLabelWarningsForTest();
+    // Three ~192 MB masks (256·256·768·4 ≈ 192 MB); the 512 MB total budget fits
+    // the first two (~384 MB) but not the third (~576 MB).
+    const m = manifestOf([
+      label("a", 768, 256, 256),
+      label("b", 768, 256, 256),
+      label("c", 768, 256, 256),
+    ]);
+    const out = resolveVisibleLabels(m, allOn(3), { mode: "volume" });
+    expect(out.map((r) => r.name)).toEqual(["a", "b"]);
+    // Slice mode ignores the total-volume budget: all three show.
+    expect(resolveVisibleLabels(m, allOn(3), { mode: "slice" }).map((r) => r.name)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("is a strict prefix: a smaller later mask is not slipped in past a skipped one", () => {
+    __resetLabelWarningsForTest();
+    // First mask ~384 MB, second ~384 MB (busts the budget at ~768 MB), third is
+    // tiny. The prefix stops at the second; the tiny third is NOT greedily added.
+    const m = manifestOf([
+      label("big1", 768, 512, 256),
+      label("big2", 768, 512, 256),
+      label("tiny", 1, 64, 64),
+    ]);
+    const out = resolveVisibleLabels(m, allOn(3), { mode: "volume" });
+    expect(out.map((r) => r.name)).toEqual(["big1"]);
+  });
+
+  it("total budget tightened to the per-texture cap: only the first mask fits", () => {
+    __resetLabelWarningsForTest();
+    const m = manifestOf([label("a", 64, 64, 64), label("b", 64, 64, 64)]);
+    // Each mask is 64·64·64·4 = 1 MB. Setting both the per-texture cap and
+    // the total to 1 MB puts the total exactly at the per-texture cap; the
+    // first mask fills it and the second is dropped.
+    const out = resolveVisibleLabels(m, allOn(2), {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,
+      maxTotalVolumeBytes: 1024 * 1024,
+    });
+    expect(out.map((r) => r.name)).toEqual(["a"]);
+  });
+
+  // --- Regression: total-budget floor (Math.max clamp) ---
+  // The three tests below pin the invariant that 3D never opens blank when a
+  // mask is drawable. They FAIL if the clamp in resolveLabelCaps is removed
+  // (reverting to rawTotal) or weakened to Math.min.
+
+  it("never-blank: a single drawable mask renders even when maxTotalVolumeBytes is set below its size", () => {
+    __resetLabelWarningsForTest();
+    // 64·64·64·4 = 1 MB label, within the per-texture cap (1 MB).
+    // Without the clamp, maxTotalVolumeBytes = 1 byte < 1 MB → resolves [].
+    // With the clamp, maxTotalVolumeBytes = max(1, 1 MB) = 1 MB → mask fits.
+    const m = manifestOf([label("only", 64, 64, 64)]);
+    const out = resolveVisibleLabels(m, allOn(1), {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,  // 1 MB per-texture cap
+      maxTotalVolumeBytes: 1,        // far below cap — floor must raise this
+    });
+    expect(out.map((r) => r.name)).toEqual(["only"]);
+  });
+
+  it("total-budget floor: first of several masks renders when total is set below the per-texture cap", () => {
+    __resetLabelWarningsForTest();
+    // Two 1 MB masks; total set to 1 byte (below the 1 MB per-texture cap).
+    // Without the clamp: 1 MB > 1 byte → no mask fits → [].
+    // With the clamp: total raised to 1 MB → first mask fills it exactly; second drops.
+    const m = manifestOf([label("first", 64, 64, 64), label("second", 64, 64, 64)]);
+    const out = resolveVisibleLabels(m, allOn(2), {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,
+      maxTotalVolumeBytes: 1,
+    });
+    expect(out.map((r) => r.name)).toEqual(["first"]);
+  });
+
+  it("floor-not-ceiling: a total already above the per-texture cap is unchanged (multiple masks fit)", () => {
+    __resetLabelWarningsForTest();
+    // Three 1 MB masks; per-texture cap 1 MB; total 3 MB (already above cap).
+    // Math.max(3 MB, 1 MB) = 3 MB — the floor is a no-op and all three fit.
+    // If the clamp were Math.min instead, total would collapse to 1 MB and
+    // only the first mask would fit — this test would then fail.
+    const m = manifestOf([
+      label("x", 64, 64, 64),
+      label("y", 64, 64, 64),
+      label("z", 64, 64, 64),
+    ]);
+    const out = resolveVisibleLabels(m, allOn(3), {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,
+      maxTotalVolumeBytes: 3 * 1024 * 1024,
+    });
+    expect(out.map((r) => r.name)).toEqual(["x", "y", "z"]);
+  });
+
+  it("volumeBudgetPrefix returns the kept manifest indices as a prefix", () => {
+    const m = manifestOf([
+      label("a", 768, 256, 256),
+      label("b", 768, 256, 256),
+      label("c", 768, 256, 256),
+    ]);
+    expect(volumeBudgetPrefix(m, [0, 1, 2])).toEqual(new Set([0, 1]));
+  });
+
+  it("warns once per budget-skipped mask, and the reset re-arms the warning", () => {
+    __resetLabelWarningsForTest();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const m = manifestOf([
+        label("a", 768, 256, 256),
+        label("b", 768, 256, 256),
+        label("c", 768, 256, 256),
+      ]);
+      resolveVisibleLabels(m, allOn(3), { mode: "volume" });
+      resolveVisibleLabels(m, allOn(3), { mode: "volume" });
+      // "c" is the only budget-skipped mask; warned exactly once despite two passes.
+      expect(warn).toHaveBeenCalledTimes(1);
+      __resetLabelWarningsForTest();
+      resolveVisibleLabels(m, allOn(3), { mode: "volume" });
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

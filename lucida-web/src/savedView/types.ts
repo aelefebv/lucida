@@ -106,6 +106,13 @@ export interface DatasetDisplaySettings {
   label_settings?: LabelSettings[];
   channel_blend_mode?: BlendMode;
   detail_level_override?: number | null;
+  /** The author's label names at capture time, positionally parallel to
+   *  `label_settings` (entry `i` names the label `label_settings[i]` describes).
+   *  Mirrors `lucida_core::scene::DatasetDisplaySettings::label_names`
+   *  (serde-skipped when empty), so it is omitted on the wire unless labels are
+   *  present. Lets a restore/adopt path key per-label settings by name+occurrence
+   *  when the current label list differs, instead of by raw index. */
+  label_names?: string[];
 }
 
 export type DatasetId = string;

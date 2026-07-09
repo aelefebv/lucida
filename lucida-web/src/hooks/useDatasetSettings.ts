@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { LayerInfo } from "../components/LayerPanel.tsx";
-import type { DatasetState } from "../types.ts";
+import type { DatasetManifest } from "../manifestTypes.ts";
+import type { DatasetState, ViewMode } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
@@ -10,7 +11,99 @@ import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
-import { eligibleLabelInfos } from "../pipeline/planning/labelRequests.ts";
+import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
+
+/** A per-label overlay row for the layer panel, keyed by manifest index. */
+interface PanelLabelRow {
+  index: number;
+  name: string;
+  visible: boolean;
+  opacity: number;
+  disabledReason?: string;
+}
+
+/**
+ * The per-label rows for one dataset, VIEW-MODE-AWARE.
+ *
+ * The panel lists every label drawable in EITHER view mode (the union of the
+ * slice- and volume-eligible sets), so it is stable across a 2D/3D switch. A
+ * label drawable in the CURRENT mode is a normal, interactive row; a label
+ * drawable ONLY in the other mode carries a `disabledReason` so its controls
+ * render disabled with the reason shown — never an "on" toggle that draws
+ * nothing (the render/fetch paths drop it under this mode's caps). Volume caps
+ * are stricter than slice, so the realistic disabled case is a slice-eligible
+ * label that busts the volume caps, viewed in 3D. Visibility mirrors
+ * `resolveVisibleLabels` (the render path): masks are opt-in, so with settings
+ * the stored flag drives it (a label with no explicit setting defaults to
+ * HIDDEN), and with NO settings every row starts hidden — the panel still lists
+ * every drawable mask so any can be toggled on with one click.
+ *
+ * In 3D there is a second disabled case: a visible + volume-eligible mask that
+ * falls past the TOTAL label-volume memory budget. The panel applies the SAME
+ * manifest-order budget prefix ({@link volumeBudgetPrefix}) the render path
+ * does, and gives each budget-skipped mask a `disabledReason` naming the memory
+ * limit — so it never renders as a plain interactive "on" row that draws
+ * nothing. This is distinct from the "too large to render in 3D" reason a
+ * per-mask volume-INELIGIBLE label carries.
+ */
+function buildLabelRows(
+  manifest: DatasetManifest,
+  rawLabelSettings: { visible: boolean; opacity: number }[] | undefined,
+  viewMode: ViewMode,
+): PanelLabelRow[] {
+  const labels = manifest.labels;
+  if (!labels || labels.length === 0) return [];
+  const sliceEligible = new Set(
+    eligibleLabelInfos(manifest, { mode: "slice" }).map((e) => e.index),
+  );
+  const volumeEligible = new Set(
+    eligibleLabelInfos(manifest, { mode: "volume" }).map((e) => e.index),
+  );
+  const is3d = viewMode === "3d";
+  const currentEligible = is3d ? volumeEligible : sliceEligible;
+  const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
+
+  const rows: PanelLabelRow[] = [];
+  for (let i = 0; i < labels.length; i++) {
+    const drawableInEitherMode = sliceEligible.has(i) || volumeEligible.has(i);
+    if (!drawableInEitherMode) continue; // drawable in neither → omitted
+
+    const drawableNow = currentEligible.has(i);
+    const ls = rawLabelSettings?.[i];
+    const row: PanelLabelRow = {
+      index: i,
+      name: labels[i].name,
+      // Masks are opt-in: a label with no explicit setting defaults to HIDDEN; an
+      // explicit flag is honored. With NO settings, every row starts hidden.
+      // Mirrors `resolveVisibleLabels`.
+      visible: hasLabelSettings ? (ls?.visible ?? false) : false,
+      opacity: ls?.opacity ?? 0.5,
+    };
+    if (!drawableNow) {
+      row.disabledReason = is3d
+        ? "too large to render in 3D"
+        : "too large to render in 2D";
+    }
+    rows.push(row);
+  }
+
+  // 3D total-volume memory fail-safe: over the VISIBLE + volume-eligible rows in
+  // manifest order, keep masks up to the memory budget and mark the rest
+  // disabled — the SAME manifest-order prefix the render path applies, so the
+  // panel and the screen agree on which masks 3D actually shows.
+  if (is3d) {
+    const candidateIndices = rows
+      .filter((r) => volumeEligible.has(r.index) && r.visible)
+      .map((r) => r.index);
+    const kept = volumeBudgetPrefix(manifest, candidateIndices);
+    for (const row of rows) {
+      if (volumeEligible.has(row.index) && row.visible && !kept.has(row.index)) {
+        row.disabledReason = "too large to render in 3D (memory budget)";
+      }
+    }
+  }
+  return rows;
+}
 
 /** Apply a display-settings command and signal the change: the planner's
  *  settings cache is invalidated and the render loop (when mounted) is asked
@@ -61,11 +154,13 @@ interface RawDatasetSettings {
  * `scene.all_dataset_settings()` reach the panel — is unit-testable with a stub
  * scene, which a component-with-injected-props test cannot cover.
  *
- * Label rows expose ONLY the DRAWABLE (eligible) labels via
- * {@link eligibleLabelInfos}, each carrying its MANIFEST index so the toggle /
- * opacity handlers target the right `label_settings` entry even when earlier
- * (ineligible) labels are omitted — a control never lies about a label that
- * can't render.
+ * Label rows are VIEW-MODE-AWARE (see {@link buildLabelRows}): they list every
+ * label drawable in either mode, each carrying its MANIFEST index so the
+ * toggle / opacity handlers target the right `label_settings` entry even when
+ * earlier (ineligible) labels are omitted, and a `disabledReason` when a label
+ * can't draw in the CURRENT mode — a control never lies about a label that
+ * can't render. `viewMode` defaults to `"2d"` (slice caps) so 3-arg callers
+ * keep today's behavior.
  */
 export function buildLayerInfos(
   scene: WasmScene,
@@ -75,6 +170,7 @@ export function buildLayerInfos(
     fullRange: Map<string, boolean>;
     dataRange: Map<string, { min: number; max: number }>;
   },
+  viewMode: ViewMode = "2d",
 ): LayerInfo[] {
   let layerOrder: string[];
   let allSettings: Record<string, RawDatasetSettings>;
@@ -95,24 +191,12 @@ export function buildLayerInfos(
 
     const chSettings = settings?.channel_settings?.[currentC];
 
-    // One row per DRAWABLE label, keyed by manifest index. Visibility mirrors
-    // `resolveVisibleLabels` (the render path) EXACTLY so the toggle state and
-    // the drawn set never disagree: with settings present, the stored flag (a
-    // missing/short entry → hidden); with NO settings (a snapshot predating
-    // per-label seeding), only the FIRST drawable label shows.
+    // One row per label drawable in EITHER view mode, keyed by manifest index
+    // (see buildLabelRows). Visibility mirrors `resolveVisibleLabels` (the
+    // render path); a row not drawable in the CURRENT mode carries a
+    // disabledReason so the panel never shows an "on" toggle that draws nothing.
     const rawLabelSettings = settings?.label_settings;
-    const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
-    const labelRows = ds
-      ? eligibleLabelInfos(ds.manifest).map((e, orderIdx) => {
-          const ls = rawLabelSettings?.[e.index];
-          return {
-            index: e.index,
-            name: e.name,
-            visible: hasLabelSettings ? (ls?.visible ?? false) : orderIdx === 0,
-            opacity: ls?.opacity ?? 0.5,
-          };
-        })
-      : [];
+    const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
 
     return {
       id,
@@ -163,6 +247,9 @@ interface Params {
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   datasetsVersion: number;
   remoteDocumentVersion: number;
+  /** Active view mode. Drives the label rows' eligibility caps (slice vs volume)
+   *  so the panel marks labels that can't draw in the current mode as disabled. */
+  viewMode: ViewMode;
 }
 
 export function useDatasetSettings({
@@ -175,6 +262,7 @@ export function useDatasetSettings({
   datasetCallbacksRef,
   datasetsVersion,
   remoteDocumentVersion,
+  viewMode,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   const [fullRangeMap, setFullRangeMap] = useState<Map<string, boolean>>(new Map());
@@ -523,7 +611,7 @@ export function useDatasetSettings({
         autoContrast: autoContrastMap,
         fullRange: fullRangeMap,
         dataRange: dataRangeMap,
-      })
+      }, viewMode)
     : [];
   void datasetsVersion;
   void remoteDocumentVersion;

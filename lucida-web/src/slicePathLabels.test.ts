@@ -40,8 +40,14 @@ function manifest(labels: LabelSpec[]): DatasetManifest {
 
 const members: MemberRosterEntry[] = [{ imageId: "img-0", position: [0, 0] }];
 
+/** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
+ *  default), so a test that renders every eligible overlay must turn them on. */
+function allOn(n: number): { visible: boolean; opacity: number }[] {
+  return Array.from({ length: n }, () => ({ visible: true, opacity: 0.5 }));
+}
+
 describe("pushLabelLayers", () => {
-  it("emits exactly ONE label layer (the first) by default, not the whole stack", () => {
+  it("emits every eligible label layer when all are on, in manifest order", () => {
     const layers: SliceLayerParams[] = [];
     pushLabelLayers(
       layers,
@@ -51,16 +57,21 @@ describe("pushLabelLayers", () => {
         labelSpec("region-a", "img-0:label:region-a"),
       ]),
       members,
+      allOn(3),
     );
-    expect(layers).toHaveLength(1);
-    expect(layers[0].datasetId).toBe("img-0:label:region-b"); // manifest order = first
-    expect(layers[0].isLabel).toBe(true);
-    expect(layers[0].opacity).toBeCloseTo(0.5);
+    expect(layers).toHaveLength(3);
+    expect(layers.map((l) => l.datasetId)).toEqual([
+      "img-0:label:region-b",
+      "img-0:label:fg",
+      "img-0:label:region-a",
+    ]);
+    expect(layers.every((l) => l.isLabel)).toBe(true);
+    for (const l of layers) expect(l.opacity).toBeCloseTo(0.5);
   });
 
   it("aligns the overlay to the source footprint (4x-coarse label → source extent)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), members);
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), members, allOn(1));
     expect(layers[0].dataW).toBeCloseTo(348, 3); // 87 * 4 / 1
     expect(layers[0].dataH).toBeCloseTo(340, 3);
     expect(layers[0].offsetX).toBe(0);
@@ -70,7 +81,7 @@ describe("pushLabelLayers", () => {
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members);
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, allOn(1));
     expect(layers[0].labelColors).toEqual(colors);
   });
 
@@ -89,6 +100,7 @@ describe("pushLabelLayers", () => {
         labelSpec("seg32", "img-0:label:seg32"),
       ]),
       members,
+      allOn(2),
     );
     expect(layers).toHaveLength(1);
     expect(layers[0].datasetId).toBe("img-0:label:seg32");
@@ -96,7 +108,7 @@ describe("pushLabelLayers", () => {
 
   it("MAJOR: renders nothing for a uint8-only label (matches the fetch skip)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8")]), members);
+    pushLabelLayers(layers, manifest([labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8")]), members, allOn(1));
     expect(layers).toHaveLength(0);
   });
 

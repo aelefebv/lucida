@@ -97,8 +97,9 @@ function makeWorkerCtx(writes: WriteTextureCall[]): WorkerCtx {
 
 describe("label chunk flow: request → pre-sliced delivery → pool", () => {
   it("extracts only the current Z-plane and lands it in the pool with ids intact", () => {
-    // 1. Fetch plan the tickCoordinator merges (source Z=1 in view).
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 1 });
+    // 1. Fetch plan the tickCoordinator merges (source Z=1 in view). Masks are
+    //    opt-in, so the single label is turned on explicitly.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 1, labelSettings: [{ visible: true, opacity: 0.5 }] });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
     expect(req.imageId).toBe("img-0:label:region-b");
@@ -133,6 +134,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     const client = {
       labelSliceChunkData: vi.fn((
         memberId: string,
+        datasetId: string,
         chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
         level: number, t: number, c: number,
         levelWidth: number, levelHeight: number,
@@ -141,7 +143,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       ) => {
         const msg: LabelSliceChunkDataMessage = {
           type: "labelSliceChunkData",
-          epochs, memberId, chunks,
+          epochs, memberId, datasetId, chunks,
           level, t, c,
           levelWidth, levelHeight, chunkX, chunkY,
         };
@@ -155,12 +157,15 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     expect(result!.memberId).toBe("img-0:label:region-b");
     // Only ONE 2x2 plane crosses (16 bytes), never the whole 8-id chunk (32).
     expect(result!.bytes).toBe(16);
+    // The delivery stamped the owning dataset id (from the ManifestEntry key).
+    expect(vi.mocked(client.labelSliceChunkData).mock.calls[0][1]).toBe("ds-0");
 
     // 4. The plane landed in the pool sized to the label's own dims.
     const pool = ctx.state.labelSlicePools.get("img-0:label:region-b");
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);
+    expect(pool!.datasetId).toBe("ds-0"); // stamped for dataset-scoped removal
 
     // 5. The z=1 plane (last 4 ids) reached the texture at full 32-bit width.
     expect(writes.length).toBeGreaterThan(0);
@@ -195,8 +200,9 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
 
 describe("label chunk flow (3D): volume request → whole-chunk delivery → volume pool", () => {
   it("forwards the WHOLE 3D chunk (no plane extraction) and lands it with ids intact", () => {
-    // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume" });
+    // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk. Masks are
+    //    opt-in, so the single label is turned on explicitly.
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume", labelSettings: [{ visible: true, opacity: 0.5 }] });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
     expect(req.imageId).toBe("img-0:label:region-b");

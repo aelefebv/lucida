@@ -864,6 +864,10 @@ fn peer_display_settings() -> DatasetDisplaySettings {
         }],
         channel_blend_mode: BlendMode::Additive,
         detail_level_override: Some(1),
+        // Parallel to `label_settings`: the author's label name for that single
+        // entry, matching `single_manifest()`'s sole `region-a` label so the
+        // name-keyed reconcile has a real name to exercise on the wire.
+        label_names: vec!["region-a".into()],
     }
 }
 

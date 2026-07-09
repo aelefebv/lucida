@@ -18,6 +18,8 @@ export {
   getOrCreateSlicePool,
   getOrCreateLabelSlicePool,
   removeLabelSlicePool,
+  removeLabelSlicePoolsForDataset,
+  resetLabelSliceAllocWarnings,
   removeSliceAtlas,
   resizeSliceIndirection,
 } from "./atlas.ts";
@@ -42,7 +44,7 @@ export { computeTargetChunkZ } from "./zRetarget.ts";
 import {
   destroyAllSliceAtlasResources,
   destroyAllLabelSlicePools,
-  removeLabelSlicePool,
+  removeLabelSlicePoolsForDataset,
   removeSliceAtlas,
 } from "./atlas.ts";
 import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
@@ -52,13 +54,15 @@ import type { WorkerCtx } from "../workerContext.ts";
  * Remove resources for a removed entity or dataset.
  * Pass either a poolKey (removes the whole pool) or a memberId (removes per-entity state).
  *
- * Composed from `removeSliceAtlas` (atlas pool teardown) and
- * `clearCameraUVForMember` (per-entity camera-UV cleanup) so the
+ * Composed from `removeSliceAtlas` (atlas pool teardown),
+ * `removeLabelSlicePoolsForDataset` (label pool teardown — matched by owning
+ * dataset since label pools are keyed by the label image id, not the dataset
+ * id), and `clearCameraUVForMember` (per-entity camera-UV cleanup) so the
  * atlas module stays independent of the eviction module.
  */
 export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
   removeSliceAtlas(ctx, idOrMember);
-  removeLabelSlicePool(ctx, idOrMember);
+  removeLabelSlicePoolsForDataset(ctx, idOrMember);
   clearCameraUVForMember(ctx.state, idOrMember);
 }
 

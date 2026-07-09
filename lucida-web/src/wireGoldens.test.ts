@@ -526,6 +526,7 @@ const expectedDisplaySettings: WireDatasetDisplaySettings = {
   label_settings: [{ visible: true, opacity: 0.35 }],
   channel_blend_mode: "additive",
   detail_level_override: 1,
+  label_names: ["region-a"],
 };
 
 const expectedSliceCamera: SliceCamera = {

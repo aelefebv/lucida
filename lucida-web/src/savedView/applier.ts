@@ -169,6 +169,11 @@ export class SavedViewApplier {
    *  scene's volume shape). Optional: when absent, t/c pass through
    *  unclamped — see `clampViewIndices`. */
   private readonly dimensionExtentsFor?: DimensionExtentsResolver;
+  /** Resolves the recipient's CURRENT label names (manifest order) for a
+   *  dataset, so per-label settings in an applied view are keyed by label
+   *  name+occurrence rather than raw index. Optional: when absent, per-label
+   *  settings apply positionally (legacy). */
+  private readonly labelNamesFor?: LabelNamesResolver;
 
   constructor(
     bridge: ApplierBridge,
@@ -186,6 +191,10 @@ export class SavedViewApplier {
      *  always derived from `dataset_volume_shape`; this only adds T/C.
      *  Optional — omit (e.g. in tests) to leave t/c unclamped. */
     dimensionExtentsFor?: DimensionExtentsResolver,
+    /** Resolves the recipient's current label names (manifest order) per
+     *  dataset so per-label settings restore by name+occurrence. Optional —
+     *  omit (e.g. in tests) to leave per-label settings positional. */
+    labelNamesFor?: LabelNamesResolver,
   ) {
     this.bridge = bridge;
     this.getScene = getScene;
@@ -194,6 +203,7 @@ export class SavedViewApplier {
     this.allowDocumentLayoutMutation = allowDocumentLayoutMutation;
     this.openTimeoutMs = openTimeoutMs;
     this.dimensionExtentsFor = dimensionExtentsFor;
+    this.labelNamesFor = labelNamesFor;
   }
 
   // State subscription (used by LoadingViewBanner)
@@ -563,7 +573,7 @@ export class SavedViewApplier {
     // gamma, blend), shared with the light path via `datasetDisplayCommands`.
     this.applyViewport(scene, { type: "set_dataset_visible", dataset_id: id, visible: s.visible });
     this.applyViewport(scene, { type: "set_dataset_opacity", dataset_id: id, opacity: s.opacity });
-    for (const cmd of datasetDisplayCommands(id, s)) {
+    for (const cmd of datasetDisplayCommands(id, s, this.labelNamesFor?.(id))) {
       this.applyViewport(scene, cmd);
     }
   }
@@ -658,10 +668,21 @@ export function labelDisplayCommands(
  * detail level, every channel's display, and every label's overlay) for one
  * dataset — i.e. everything `applyDatasetSettings` emits EXCEPT
  * `set_dataset_visible` / `set_dataset_opacity`. Shared by the heavy applier and
- * the light restore. */
+ * the light restore.
+ *
+ * `currentLabelNames` is the recipient dataset's CURRENT label names in manifest
+ * order. When it AND the author's captured `s.label_names` are both present, the
+ * per-label overlay commands are keyed by label NAME and occurrence rather than
+ * by raw array index: each current label takes the author's per-label settings
+ * for the same name (matched by occurrence for a repeated name), so a view whose
+ * label list was reordered / had a label added or removed still lands each
+ * setting on the right current label. Without both (a legacy view with no
+ * captured names, or a caller that can't supply the current names) it falls back
+ * to the positional index-for-index behaviour. */
 export function datasetDisplayCommands(
   id: string,
   s: DatasetDisplaySettings,
+  currentLabelNames?: string[],
 ): ViewportCommand[] {
   const cmds: ViewportCommand[] = [
     { type: "set_dataset_contrast", dataset_id: id, min: s.contrast_min, max: s.contrast_max },
@@ -687,9 +708,38 @@ export function datasetDisplayCommands(
   // Per-label overlay state — restored so a saved view reproduces the visible
   // label set + opacities (a hidden label stays hidden on restore).
   if (s.label_settings) {
-    s.label_settings.forEach((ls, i) => {
-      for (const cmd of labelDisplayCommands(id, i, ls)) cmds.push(cmd);
-    });
+    const authorNames = s.label_names;
+    if (authorNames && authorNames.length > 0 && currentLabelNames) {
+      // Name-keyed, occurrence-aware: emit for each CURRENT label the author's
+      // settings for the same name (k-th current occurrence takes the k-th
+      // author occurrence). A current label with no matching author entry emits
+      // nothing — it keeps whatever the recipient already had.
+      const occurrencesTaken = new Map<string, number>();
+      currentLabelNames.forEach((name, currentIndex) => {
+        const targetOccurrence = occurrencesTaken.get(name) ?? 0;
+        occurrencesTaken.set(name, targetOccurrence + 1);
+        let matched = 0;
+        let authorIndex = -1;
+        for (let ai = 0; ai < authorNames.length; ai++) {
+          if (authorNames[ai] === name) {
+            if (matched === targetOccurrence) {
+              authorIndex = ai;
+              break;
+            }
+            matched++;
+          }
+        }
+        if (authorIndex === -1) return;
+        const ls = s.label_settings?.[authorIndex];
+        if (!ls) return;
+        for (const cmd of labelDisplayCommands(id, currentIndex, ls)) cmds.push(cmd);
+      });
+    } else {
+      // Legacy / no current names available: positional index-for-index.
+      s.label_settings.forEach((ls, i) => {
+        for (const cmd of labelDisplayCommands(id, i, ls)) cmds.push(cmd);
+      });
+    }
   }
   return cmds;
 }
@@ -724,6 +774,15 @@ export interface ClampedView {
 export type DimensionExtentsResolver = (
   datasetId: string,
 ) => { z?: number; t?: number; c?: number };
+
+/**
+ * Resolves a dataset's CURRENT label names, in manifest (`labels[]`) order —
+ * the same order the per-label settings index into. Returns `undefined` (or an
+ * empty array) for an unknown/unloaded dataset or one with no labels, which
+ * makes the per-label restore fall back to positional application. Backed by the
+ * recipient's loaded manifests (see `useDimensions` / `App.tsx`).
+ */
+export type LabelNamesResolver = (datasetId: string) => string[] | undefined;
 
 /**
  * The datasets a view actually addresses AND keeps visible — i.e. the

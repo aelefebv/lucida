@@ -42,9 +42,13 @@ export function handleLabelSliceChunkData(
   // wrong T/Z — same stale guard the intensity path uses.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
 
-  const { memberId, levelWidth, levelHeight, chunkX, chunkY } = msg;
+  const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
-  const pool = getOrCreateLabelSlicePool(ctx, memberId, levelWidth, levelHeight);
+  // Returns null if the texture can't be allocated — skip the label rather
+  // than throw through the upload path (defense in depth; level selection
+  // already bounds the size).
+  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
+  if (!pool) return;
 
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;

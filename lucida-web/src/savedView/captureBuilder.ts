@@ -35,6 +35,11 @@ import { SAVED_VIEW_VERSION } from "./types.ts";
  */
 export type UrlByDatasetId = ReadonlyMap<DatasetId, string>;
 export type AutoContrastByDatasetId = ReadonlyMap<DatasetId, boolean>;
+/** Resolves a dataset's CURRENT label names, in manifest (`labels[]`) order —
+ *  the order the per-label settings index into. Used to stamp `label_names`
+ *  onto each captured dataset's display settings so a later restore can key
+ *  per-label state by name+occurrence. */
+export type LabelNamesByDatasetId = (datasetId: DatasetId) => string[] | undefined;
 
 export interface CaptureInputs {
   scene: WasmScene;
@@ -68,6 +73,11 @@ export interface CaptureInputs {
    * export (legacy behavior) so other callers are unaffected.
    */
   liveView?: ViewState;
+  /** Resolves the current label names (manifest order) for a dataset, so each
+   *  captured dataset's display settings records the label names its per-label
+   *  settings describe. Optional — when omitted, `label_names` is left as
+   *  whatever the scene export already carried (positional restore downstream). */
+  labelNamesFor?: LabelNamesByDatasetId;
 }
 
 /**
@@ -83,6 +93,7 @@ export function buildCapture({
   datasetReferenceMode = "source-url",
   autoContrastByDatasetId,
   liveView,
+  labelNamesFor,
 }: CaptureInputs): SavedView {
   const presence = JSON.parse(scene.export_presence()) as {
     camera: Camera;
@@ -101,6 +112,20 @@ export function buildCapture({
     dataset_order: DatasetId[];
     dataset_settings: Record<DatasetId, DatasetDisplaySettings>;
   };
+
+  // Stamp each dataset's current label names (manifest order) alongside its
+  // per-label settings, so a recipient can key the per-label state by label
+  // name+occurrence when its own label list differs. Only set it when the
+  // resolver yields names (a dataset with no labels leaves the field absent,
+  // matching the Rust `skip_serializing_if = "Vec::is_empty"`).
+  if (labelNamesFor) {
+    for (const [id, s] of Object.entries(datasetPresence.dataset_settings)) {
+      const names = labelNamesFor(id);
+      if (names && names.length > 0) {
+        s.label_names = names;
+      }
+    }
+  }
 
   // Active layouts — read from WASM. `dataset_ids()` returns ALL loaded
   // datasets; `available_layouts(id)` is keyed by dataset and includes

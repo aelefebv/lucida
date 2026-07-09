@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type { CpuCache } from "./fetch/index.ts";
@@ -6,9 +6,34 @@ import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
 import type { ColdStateMessage } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
+import { TickCoordinator } from "./tickCoordinator.ts";
+import { Uploader } from "./upload/uploader.ts";
+import { plan } from "./planning/index.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
+import { configStore } from "./planning/configStore.ts";
+import { debugStats } from "../debug/debugStats.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
+//
+// The planner-mocking describes below INJECT their `plan` spy into the
+// TickCoordinator constructor rather than `vi.resetModules()`-mocking the
+// planning singleton. That older pattern (async `vi.doMock` factory + dynamic
+// imports) raced under `--sequence.shuffle`: a spy from one test could be
+// invoked before another test's own `planAndFetch`, inflating its call count
+// (lucida-i7r). Direct injection removes the module-registry indirection
+// entirely — each orchestrator calls exactly the spy it was handed.
+//
+// Because injection means the describes now share the real module singletons
+// (no per-test module reset), reset the ones tests mutate after every test so
+// order can't leak: configStore (which persists `coarseDetailEnabled` to
+// happy-dom localStorage), debugStats (`enabled`/`orch`), and localStorage.
+afterEach(() => {
+  configStore.__resetForTesting();
+  debugStats.enabled = false;
+  debugStats.orch = null;
+  if (typeof localStorage !== "undefined") localStorage.clear();
+});
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(entries: Parameters<AssetCatalog["applyInitial"]>[1]["entries"] = []): AssetCatalog {
@@ -258,28 +283,14 @@ function createMockContentWithTiles(n: number): DatasetManifest {
 // ===========================================================================
 
 describe("epoch caching", () => {
-  // We dynamically import and spy on plan() to verify caching behavior.
-  // The TickCoordinator should skip plan() when epochs haven't changed.
+  // Inject a fresh `plan` spy into each orchestrator (no module mocking) to
+  // verify caching behavior: the TickCoordinator should skip plan() when
+  // epochs haven't changed.
 
-  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
-  let Uploader: typeof import("./upload/uploader.ts").Uploader;
   let planSpy: ReturnType<typeof vi.fn>;
 
-  beforeEach(async () => {
-    // Reset modules so we can spy on plan() freshly.
-    vi.resetModules();
-
-    const planningModule = await import("./planning/index.ts");
-    planSpy = vi.fn(planningModule.plan);
-
-    // Mock the planning module's plan function.
-    vi.doMock("./planning/index.ts", async () => {
-      const actual = await import("./planning/index.ts");
-      return { ...actual, plan: planSpy };
-    });
-
-    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
-    Uploader = (await import("./upload/uploader.ts")).Uploader;
+  beforeEach(() => {
+    planSpy = vi.fn(plan);
   });
 
   function makeCtx(
@@ -298,8 +309,8 @@ describe("epoch caching", () => {
     } as unknown as TickContext;
   }
 
-  function makeOrch(): InstanceType<typeof TickCoordinator> {
-    return new TickCoordinator(new Uploader());
+  function makeOrch(): TickCoordinator {
+    return new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan);
   }
 
   function makeTickCoordinatorDeps(epochOverrides?: Partial<{ content: number; layout: number; view: number; selection: number }>) {
@@ -395,9 +406,7 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("submits only budget-admitted legacy proxies while preserving detail requests", async () => {
-    const { debugStats } = await import("../debug/debugStats.ts");
-    const { configStore } = await import("./planning/configStore.ts");
+  it("submits only budget-admitted legacy proxies while preserving detail requests", () => {
     const previousDebugEnabled = debugStats.enabled;
     debugStats.enabled = true;
     debugStats.orch = null;
@@ -473,8 +482,26 @@ describe("epoch caching", () => {
     return submitted.requests.filter((r) => r.imageId === "img-0:label:region-b");
   }
 
+  // Scene settings that turn the single label ON — masks are opt-in (hidden by
+  // default), so the fetch-merge tests below must explicitly reveal the mask.
+  function labeledSettings() {
+    return {
+      ds1: {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 1,
+        gamma: 1,
+        blend_mode: "alpha",
+        channel_settings: [],
+        channel_blend_mode: "additive",
+        label_settings: [{ visible: true, opacity: 0.5 }],
+      },
+    };
+  }
+
   it("merges the label's FULL z-grid into the fetch plan in volume mode", () => {
-    const scene = createMockScene();
+    const scene = createMockScene({ allSettings: labeledSettings() });
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: labeledContent() }]]);
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -482,6 +509,9 @@ describe("epoch caching", () => {
     ctx.cpuCache = cpuCache;
     ctx.mode = "volume";
 
+    // Force a fresh read of this scene's settings (the module cache persists
+    // across tests); in the app a settings change bumps this generation.
+    bumpSettingsGeneration();
     orch.planAndFetch(ctx, emptyMinimap);
 
     const labelReqs = labelRequestsFromSubmit(cpuCache);
@@ -493,7 +523,7 @@ describe("epoch caching", () => {
   });
 
   it("merges only the mapped z-plane in slice mode (unchanged)", () => {
-    const scene = createMockScene();
+    const scene = createMockScene({ allSettings: labeledSettings() });
     const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: labeledContent() }]]);
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -501,6 +531,9 @@ describe("epoch caching", () => {
     ctx.cpuCache = cpuCache;
     ctx.mode = "slice";
 
+    // Force a fresh read of this scene's settings (the module cache persists
+    // across tests); in the app a settings change bumps this generation.
+    bumpSettingsGeneration();
     orch.planAndFetch(ctx, emptyMinimap);
 
     const labelReqs = labelRequestsFromSubmit(cpuCache);
@@ -514,27 +547,14 @@ describe("epoch caching", () => {
 // ===========================================================================
 
 describe("multi-dataset planning", () => {
-  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
-  let Uploader: typeof import("./upload/uploader.ts").Uploader;
   let planSpy: ReturnType<typeof vi.fn>;
 
-  beforeEach(async () => {
-    vi.resetModules();
-
-    const planningModule = await import("./planning/index.ts");
-    planSpy = vi.fn(planningModule.plan);
-
-    vi.doMock("./planning/index.ts", async () => {
-      const actual = await import("./planning/index.ts");
-      return { ...actual, plan: planSpy };
-    });
-
-    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
-    Uploader = (await import("./upload/uploader.ts")).Uploader;
+  beforeEach(() => {
+    planSpy = vi.fn(plan);
   });
 
-  function makeOrch(): InstanceType<typeof TickCoordinator> {
-    return new TickCoordinator(new Uploader());
+  function makeOrch(): TickCoordinator {
+    return new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan);
   }
 
   function makeMultiDatasetScene() {

@@ -1814,6 +1814,7 @@ mod tests {
             misses: 3,
             evictions: 2,
             backend_errors: 1,
+            coalesced: 5,
         });
 
         assert_eq!(stats.used_percent, 92);

@@ -29,8 +29,8 @@ export interface LabelVolumeScene {
  * Append a first-hit categorical overlay layer for each of the dataset's
  * VISIBLE labels, composited over the intensity volume already pushed. The
  * visible set + each label's opacity come from `labelSettings` (the dataset's
- * per-label display state); with no settings this falls back to the single
- * default label at the default opacity, so behavior matches the 2D path.
+ * per-label display state); with no settings every eligible label is shown at
+ * the default opacity (see {@link resolveVisibleLabels}).
  *
  * The set drawn here MUST match what {@link computeLabelChunkRequests}
  * fetches in `volume` mode, so both resolve through the shared

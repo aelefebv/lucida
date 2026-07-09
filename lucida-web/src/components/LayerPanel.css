@@ -255,6 +255,16 @@
   flex-shrink: 0;
 }
 
+/* Reason a label overlay is inert in the current view mode (e.g. too large to
+   render in 3D). Shown under the disabled eye/opacity controls so the user sees
+   WHY the overlay can't be toggled here. */
+.label-disabled-reason {
+  font-size: 0.7rem;
+  color: #e3a008;
+  padding: 0 0 0.2rem 0;
+  font-style: italic;
+}
+
 /* Discoverability count pill on a layer row that carries segmentation labels. */
 .layer-label-badge {
   flex-shrink: 0;

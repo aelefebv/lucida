@@ -219,8 +219,17 @@ export class TickCoordinator {
 
   private configStoreUnsub: () => void;
 
-  constructor(uploader: Uploader) {
+  /**
+   * The planner entry point. Defaults to the module-level {@link plan};
+   * injectable so tests can pass a spy/stub directly instead of
+   * `vi.resetModules()`-mocking the planning singleton (that pattern raced
+   * across shuffled tests — see lucida-i7r). Production never passes it.
+   */
+  private readonly planFn: typeof plan;
+
+  constructor(uploader: Uploader, planFn: typeof plan = plan) {
     this.uploader = uploader;
+    this.planFn = planFn;
     // Config tweaks don't bump any WASM epoch, so without this hook the
     // epoch fast-path would keep returning the cached plan and the
     // user's slider would have no visible effect until something else
@@ -375,7 +384,7 @@ export class TickCoordinator {
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? { previousActiveSet: [] };
-      const result = plan(snapshot, planningStateForDataset, planningConfig);
+      const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
       this._lastRequests = result.requests;

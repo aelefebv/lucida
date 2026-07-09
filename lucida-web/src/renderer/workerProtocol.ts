@@ -77,6 +77,12 @@ export interface LabelSliceChunkDataMessage {
   epochs: SceneEpochs;
   /** Label overlay member id (the label image id, possibly source-scoped). */
   memberId: string;
+  /**
+   * Owning dataset id (the `ctx.datasets` key / `removeLayerResources` id).
+   * Stamped on the label slice pool so dataset removal can free it — the pool
+   * is keyed by {@link memberId} (the label image id), which removal never sees.
+   */
+  datasetId: string;
   chunks: Chunk[];
   level: number;
   t: number;

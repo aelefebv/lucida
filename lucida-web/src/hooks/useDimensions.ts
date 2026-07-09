@@ -60,6 +60,22 @@ export function useDimensions({
     [datasetsRef],
   );
 
+  // Current label names (manifest `labels[]` order) for a dataset — the order
+  // the per-label settings index into. Saved-view capture stamps these onto the
+  // per-label display, and restore keys per-label settings by name+occurrence
+  // against them, so a view whose label list changed still lands each setting on
+  // the right current label. An unknown/unloaded dataset (or one with no labels)
+  // returns `undefined`, which leaves the per-label handling positional.
+  const labelNamesFor = useCallback(
+    (datasetId: string): string[] | undefined => {
+      const ds = datasetsRef.current.get(datasetId);
+      const labels = ds?.manifest.labels;
+      if (!labels || labels.length === 0) return undefined;
+      return labels.map((l) => l.name);
+    },
+    [datasetsRef],
+  );
+
   // Clamp slider values when union dimensions shrink, and sync to WASM scene.
   // The clamp is a synchronization with external state (manifest dim union),
   // not a derivation — z/c/t are user-controlled but must follow the open
@@ -159,6 +175,7 @@ export function useDimensions({
     multiChannel, setMultiChannel,
     dimZ, dimC, dimT,
     dimensionExtentsFor,
+    labelNamesFor,
     handleViewModeToggle,
     handleZChange, handleCChange, handleTChange, handleMultiChannelToggle,
   };

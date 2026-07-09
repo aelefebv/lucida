@@ -48,7 +48,7 @@ import type { WasmScene } from "lucida-core";
 import type { ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import { clampViewIndices, clampNotice, datasetDisplayCommands } from "./applier.ts";
-import type { DimensionExtentsResolver } from "./applier.ts";
+import type { DimensionExtentsResolver, LabelNamesResolver } from "./applier.ts";
 import type { Camera, DatasetId, SavedView } from "./types.ts";
 
 /** Apply one viewport/display command locally (never sent to peers). Kept inline
@@ -155,6 +155,10 @@ export interface RestoreAnnotationViewParams {
    *  volume shape). Optional — omit to leave t/c unclamped (as the heavy applier
    *  does without it). */
   dimensionExtentsFor?: DimensionExtentsResolver;
+  /** Resolves the recipient's CURRENT label names (manifest order) per dataset
+   *  so the captured per-label display restores by label name+occurrence rather
+   *  than by raw index. Optional — omit to leave per-label restore positional. */
+  labelNamesFor?: LabelNamesResolver;
 }
 
 /**
@@ -184,6 +188,7 @@ export function restoreAnnotationView({
   view,
   datasetId,
   dimensionExtentsFor,
+  labelNamesFor,
 }: RestoreAnnotationViewParams): RestoreResult {
   // 1. Camera MODE first (2D<->3D), before anything reads/writes the camera.
   const mode = switchCameraMode(scene, view.camera);
@@ -206,7 +211,7 @@ export function restoreAnnotationView({
   // `datasetDisplayCommands`, never `set_dataset_visible`/`set_dataset_opacity`)
   // for the datasets that are LOADED. The pin's own dataset goes first so its
   // channel display always wins even when other captured datasets are clean too.
-  restoreDatasetDisplay(scene, view, datasetId);
+  restoreDatasetDisplay(scene, view, datasetId, labelNamesFor);
 
   // 3. z/t/c — clamp to the PIN'S dataset extents. When `datasetId` is absent
   // (the pin's dataset couldn't be resolved — the null-selection / inbox
@@ -266,6 +271,7 @@ function restoreDatasetDisplay(
   scene: WasmScene,
   view: SavedView,
   pinDatasetId?: DatasetId | null,
+  labelNamesFor?: LabelNamesResolver,
 ): void {
   const settings = view.dataset_settings;
   if (!settings || Object.keys(settings).length === 0) return;
@@ -291,7 +297,7 @@ function restoreDatasetDisplay(
   for (const id of order) {
     if (seen.has(id) || !loaded.has(id)) continue;
     seen.add(id);
-    for (const cmd of datasetDisplayCommands(id, settings[id])) {
+    for (const cmd of datasetDisplayCommands(id, settings[id], labelNamesFor?.(id))) {
       applyLocal(scene, cmd);
     }
   }

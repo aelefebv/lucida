@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { Scheduler, type InFlightEntry } from "./scheduler.ts";
 import { BurstLogger } from "./telemetry.ts";
@@ -8,6 +8,14 @@ vi.mock("../../debug/logging.ts", async (importOriginal) => {
   return { ...actual, debugLog: vi.fn() };
 });
 import { debugLog } from "../../debug/logging.ts";
+
+// Clear the debugLog spy before every test. The backpressure-log specs below
+// assert exact `cache.backpressure` call counts; without this, a
+// backpressure emit from an earlier test inflates the count under
+// `--sequence.shuffle` (expected 1, got 3) — lucida-ig7.
+beforeEach(() => {
+  vi.mocked(debugLog).mockClear();
+});
 
 // ---------------------------------------------------------------------------
 // Test fixtures

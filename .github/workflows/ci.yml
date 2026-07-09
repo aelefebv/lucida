@@ -63,7 +63,14 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: latest
+          # Pin an explicit version. `version: latest` resolves via a GitHub
+          # API call from the runner; under rate limits the action silently
+          # falls back to wasm-pack v0.9.1 (2020), whose generated
+          # pkg/package.json vitest cannot resolve — the wasm-importing test
+          # files then fail with "Failed to resolve entry for lucida-core"
+          # while build/install/tsc/lint pass (lucida-cuk). Keep this in lockstep
+          # with the wasm-pack pin in Dockerfile.
+          version: 'v0.15.0'
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4

@@ -639,17 +639,49 @@ impl Scene {
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
 
-                        // Display settings — seed the COMPLETE per-channel +
-                        // per-label settings from the manifest via the SAME
-                        // constructor `load_document` uses on restore, so the
-                        // layer panel + render path always find full-length
-                        // `channel_settings` / `label_settings` regardless of how
-                        // the dataset entered the scene (fresh open vs. restore).
-                        self.dataset_settings
-                            .entry(dataset_id.clone())
-                            .or_insert_with(|| {
-                                crate::scene::DatasetDisplaySettings::seeded_for(&event.manifest)
-                            });
+                        // Display settings. For a dataset not yet present, seed
+                        // the COMPLETE per-channel + per-label settings from the
+                        // manifest via the SAME constructor `load_document` uses
+                        // on restore, so the layer panel + render path always
+                        // find full-length `channel_settings` / `label_settings`
+                        // regardless of how the dataset entered the scene (fresh
+                        // open vs. restore).
+                        //
+                        // For a dataset whose settings ALREADY exist (e.g.
+                        // adopted from a peer's presence before its manifest
+                        // arrived), realign any per-label settings that carry the
+                        // author's label names onto THIS manifest's current label
+                        // order (occurrence-aware), so the adopted state lands on
+                        // the matching current label rather than by raw index. A
+                        // settings entry with no `label_names` (a legacy adopter)
+                        // is left positional.
+                        match self.dataset_settings.entry(dataset_id.clone()) {
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                slot.insert(crate::scene::DatasetDisplaySettings::seeded_for(
+                                    &event.manifest,
+                                ));
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                                let settings = slot.get_mut();
+                                if !settings.label_names.is_empty() {
+                                    let current: Vec<String> = event
+                                        .manifest
+                                        .label_specs()
+                                        .iter()
+                                        .map(|l| l.name.clone())
+                                        .collect();
+                                    if settings.label_names != current {
+                                        settings.label_settings =
+                                            crate::scene::DatasetDisplaySettings::reconcile_label_settings(
+                                                &settings.label_settings,
+                                                &settings.label_names,
+                                                &current,
+                                            );
+                                        settings.label_names = current;
+                                    }
+                                }
+                            }
+                        }
 
                         // Build derived state
                         let layout = crate::scene::resolve_layout(
@@ -2175,49 +2207,44 @@ mod tests {
     }
 
     #[test]
-    fn dataset_opened_seeds_label_settings_first_visible() {
+    fn dataset_opened_seeds_all_labels_hidden() {
         let mut scene = Scene::new([800, 600]);
-        // All-uint32 labels: the first DRAWABLE label is index 0.
+        // All-uint32 labels: every one is drawable, yet none seeds visible.
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
         let ls = &scene.dataset_settings[&ds_id].label_settings;
         // One settings entry per attached label, seeded on open.
         assert_eq!(ls.len(), 3);
-        // Only the first drawable label is visible by default (one clean overlay
-        // on open, no fetch/pool fan-out, no muddy stack); the rest start hidden.
-        // All at opacity 0.5.
-        assert!(ls[0].visible);
-        assert!(!ls[1].visible);
-        assert!(!ls[2].visible);
+        // Masks are opt-in: every one seeds HIDDEN, so a dataset opens with no
+        // overlays until the user reveals a mask via the per-label toggle. All at
+        // 0.5 (the opacity a mask composites at once turned on).
+        assert!(ls.iter().all(|l| !l.visible));
         for l in ls {
             assert_eq!(l.opacity, 0.5);
         }
     }
 
     #[test]
-    fn seeded_for_marks_only_first_label_visible() {
+    fn seeded_for_marks_all_labels_hidden() {
         // The shared seeding constructor (used by BOTH the DatasetOpened apply
         // path and the document-restore path) produces complete channel + label
-        // settings, with the first drawable (uint32) label visible.
+        // settings, with every label hidden by default (opt-in per mask).
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 2, 3);
         let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
         // Channels seeded full-length from the C dimension.
         assert_eq!(s.channel_settings.len(), 2);
-        // Labels: one entry each, first visible, rest hidden, all at 0.5.
+        // Labels: one entry each, all hidden, all at 0.5.
         assert_eq!(s.label_settings.len(), 3);
-        assert!(s.label_settings[0].visible);
-        assert!(!s.label_settings[1].visible);
-        assert!(!s.label_settings[2].visible);
+        assert!(s.label_settings.iter().all(|l| !l.visible));
         assert!(s.label_settings.iter().all(|l| l.opacity == 0.5));
     }
 
     #[test]
-    fn seeded_for_picks_first_uint32_label_over_an_earlier_non_uint32() {
-        // A uint16 mask sorts first but the render path can only draw uint32, so
-        // seeding index 0 visible would open BLANK. The first uint32 label
-        // (index 1) is the one shown instead — regression guard for a non-
-        // uint32-first dataset.
+    fn seeded_for_hides_every_label_regardless_of_dtype() {
+        // The hidden default is dtype-agnostic: a drawable (uint32) mask seeds
+        // hidden just like an undrawable (uint16) one — masks are opt-in, so the
+        // seed reveals nothing and the user turns on the masks they want.
         let reg = test_helpers::make_dataset_opened_with_label_dtypes(
             "ds1",
             "test",
@@ -2225,18 +2252,19 @@ mod tests {
             &[
                 lucida_content::DataType::Uint16,
                 lucida_content::DataType::Uint32,
+                lucida_content::DataType::Uint32,
             ],
         );
         let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
-        assert_eq!(s.label_settings.len(), 2);
-        assert!(!s.label_settings[0].visible); // uint16 — undrawable, hidden
-        assert!(s.label_settings[1].visible); // uint32 — drawable, shown
+        assert_eq!(s.label_settings.len(), 3);
+        assert!(s.label_settings.iter().all(|l| !l.visible));
     }
 
     #[test]
     fn seeded_for_hides_all_labels_when_none_are_uint32() {
-        // No drawable label → none visible (nothing can render); the layer
-        // panel's count badge still surfaces that labels exist.
+        // No drawable label → still none visible; the hidden default holds for
+        // undrawable masks too. The layer panel's count badge still surfaces that
+        // labels exist.
         let reg = test_helpers::make_dataset_opened_with_label_dtypes(
             "ds1",
             "test",
@@ -2266,7 +2294,7 @@ mod tests {
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
-        // Label 1 starts hidden (only the first label is visible by default).
+        // Label 1 starts hidden (masks are opt-in — none is shown by default).
         assert!(!scene.dataset_settings[&ds_id].label_settings[1].visible);
         // Reveal it.
         scene.apply(
@@ -2420,7 +2448,9 @@ mod tests {
             ViewportCommand::SetLabelVisible {
                 dataset_id: "ds1".into(),
                 label: 0,
-                visible: false,
+                // A real change from the hidden default (masks are opt-in), so
+                // the selection epoch actually bumps.
+                visible: true,
             }
             .into(),
         );

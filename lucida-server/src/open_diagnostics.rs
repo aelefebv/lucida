@@ -247,4 +247,37 @@ mod tests {
         };
         assert_eq!(store_error_status(&generic), SourceChunkStatus::Unavailable);
     }
+
+    #[test]
+    fn reconstructed_follower_errors_classify_like_their_leader() {
+        // A single-flight follower reconstructs a coalesced failure carrying
+        // the leader's error *variant* but an empty path (the real path lives
+        // in the preserved message). Both classifiers must key off the variant
+        // so a follower triages identically to the leader that produced it —
+        // otherwise a coalesced 403 could self-heal into a retry storm, or a
+        // coalesced 404 could look like a hard failure instead of sparse data.
+        let not_found = object_store::Error::NotFound {
+            path: String::new(),
+            source: boxed("object at gs://bucket/chunk not found"),
+        };
+        // Recognized by variant, not a fragile message substring.
+        assert!(is_not_found(&not_found));
+
+        let denied = object_store::Error::PermissionDenied {
+            path: String::new(),
+            source: boxed("403 Forbidden"),
+        };
+        assert!(!is_not_found(&denied));
+        assert_eq!(
+            store_error_status(&denied),
+            SourceChunkStatus::FailedPermanent
+        );
+
+        let other = object_store::Error::Generic {
+            store: "source",
+            source: boxed("503 Service Unavailable"),
+        };
+        assert!(!is_not_found(&other));
+        assert_eq!(store_error_status(&other), SourceChunkStatus::Unavailable);
+    }
 }

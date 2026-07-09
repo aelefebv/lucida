@@ -16,6 +16,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use lucida_content::url::{is_local_dataset_url, normalize_dataset_url};
 use object_store::aws::AmazonS3Builder;
@@ -23,7 +24,48 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
-use object_store::{ClientOptions, ObjectStore};
+use object_store::{BackoffConfig, ClientOptions, ObjectStore, RetryConfig};
+
+/// Retry policy for remote source-path reads (GCS, S3, HTTP).
+///
+/// object_store's default policy retries up to 10 times over 3 minutes. A
+/// single struggling object can therefore keep a request alive for minutes —
+/// far past the client's fetch timeout, which surfaces to the user as a hang
+/// rather than a prompt, retryable failure. This policy instead fails fast:
+/// a small number of retries bounded by a total budget comfortably under the
+/// client's timeout, so a bad object gives up quickly and the client can move
+/// on or retry itself.
+///
+/// The exponential backoff (100 ms → 1 s, base 2) leaves room for two retries
+/// within the `retry_timeout` budget while still absorbing transient blips.
+pub fn source_retry_config() -> RetryConfig {
+    RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+            base: 2.0,
+        },
+        max_retries: 2,
+        retry_timeout: Duration::from_secs(3),
+    }
+}
+
+/// Per-attempt request timeout for remote source reads (GCS, S3, HTTP).
+///
+/// [`source_retry_config`] only bounds the time *between* attempts; the
+/// per-attempt timeout is a separate `ClientOptions` knob. object_store's
+/// default of 30s means a source that connects but never sends a body would
+/// hang for ~30s — far past the client's fetch timeout, surfacing as a stall
+/// rather than a prompt, retryable failure. Bounding each attempt well under
+/// the client's timeout makes such a stall fail fast so the client can move
+/// on or self-heal.
+const SOURCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `ClientOptions` shared by the remote source backends, pinning the
+/// per-attempt request timeout. HTTP layers its plain-`http` opt-in on top.
+fn source_client_options() -> ClientOptions {
+    ClientOptions::new().with_timeout(SOURCE_REQUEST_TIMEOUT)
+}
 
 /// Errors from storage backend operations.
 #[derive(Debug)]
@@ -144,6 +186,8 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
         // the GCE metadata server (Workload Identity).
         let store = GoogleCloudStorageBuilder::from_env()
             .with_bucket_name(bucket)
+            .with_client_options(source_client_options())
+            .with_retry(source_retry_config())
             .build()?;
         match prefix {
             Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
@@ -153,6 +197,8 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
         let (bucket, prefix) = parse_s3_url(&canonical)?;
         let store = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
+            .with_client_options(source_client_options())
+            .with_retry(source_retry_config())
             .build()?;
         match prefix {
             Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
@@ -163,10 +209,12 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
         // endpoint (a static file server on localhost or a LAN) must opt in
         // explicitly or every request fails with a scheme error before it is
         // even sent. `https://` URLs need no opt-in and keep the default.
-        let client_options = ClientOptions::new().with_allow_http(canonical.starts_with("http://"));
+        let client_options =
+            source_client_options().with_allow_http(canonical.starts_with("http://"));
         let store = HttpBuilder::new()
             .with_url(&canonical)
             .with_client_options(client_options)
+            .with_retry(source_retry_config())
             .build()?;
         Ok(Arc::new(store))
     } else {
@@ -367,5 +415,42 @@ mod tests {
         // until an actual I/O operation is performed).
         let store = open("gs://test-bucket/some/prefix");
         assert!(store.is_ok());
+    }
+
+    // --- Retry policy ---
+
+    #[test]
+    fn source_retry_config_is_capped_below_client_timeout() {
+        let cfg = source_retry_config();
+        // Few retries — nowhere near object_store's default of 10.
+        assert!(
+            cfg.max_retries >= 2 && cfg.max_retries <= 3,
+            "expected 2-3 retries, got {}",
+            cfg.max_retries
+        );
+        // Total budget must stay comfortably under the client's 10s fetch
+        // timeout so a struggling object fails fast instead of hanging.
+        assert!(
+            cfg.retry_timeout <= Duration::from_secs(4),
+            "retry_timeout {:?} must be <= 4s",
+            cfg.retry_timeout
+        );
+        // Exponential backoff that still fits inside the timeout budget.
+        assert!(cfg.backoff.base > 1.0);
+        assert!(cfg.backoff.init_backoff > Duration::ZERO);
+        assert!(cfg.backoff.max_backoff >= cfg.backoff.init_backoff);
+    }
+
+    #[test]
+    fn source_request_timeout_bounds_a_stalling_connection() {
+        // The retry budget only gates *between* attempts; a source that
+        // connects but never sends a body is bounded by this per-attempt
+        // timeout instead. It must stay comfortably under the client's 10s
+        // fetch timeout so a stall fails fast rather than hanging.
+        assert!(
+            SOURCE_REQUEST_TIMEOUT >= Duration::from_secs(1)
+                && SOURCE_REQUEST_TIMEOUT <= Duration::from_secs(8),
+            "per-attempt timeout {SOURCE_REQUEST_TIMEOUT:?} must be a fail-fast value under 10s",
+        );
     }
 }

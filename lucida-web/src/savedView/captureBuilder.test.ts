@@ -162,4 +162,76 @@ describe("buildCapture workspace dataset references", () => {
     expect(Object.keys(view.dataset_settings)).toEqual(["wds-a"]);
     expect(view.active_layouts).toEqual({ "wds-a": "source" });
   });
+
+  it("stamps each dataset's current label names onto its display settings", () => {
+    const scene = {
+      export_presence: () => JSON.stringify({
+        camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
+        view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+        display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
+      }),
+      export_dataset_presence: () => JSON.stringify({
+        dataset_order: ["wds-a"],
+        dataset_settings: {
+          "wds-a": {
+            visible: true,
+            opacity: 1,
+            contrast_min: 0,
+            contrast_max: 65535,
+            gamma: 1,
+            blend_mode: "alpha",
+            label_settings: [
+              { visible: true, opacity: 0.5 },
+              { visible: false, opacity: 0.5 },
+            ],
+          },
+        },
+      }),
+      dataset_ids: () => JSON.stringify(["wds-a"]),
+      available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+    };
+
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+      labelNamesFor: (id) => (id === "wds-a" ? ["region-a", "region-b"] : undefined),
+    });
+
+    expect(view.dataset_settings["wds-a"].label_names).toEqual(["region-a", "region-b"]);
+  });
+
+  it("leaves label_names absent when the dataset has no labels", () => {
+    const scene = {
+      export_presence: () => JSON.stringify({
+        camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
+        view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+        display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
+      }),
+      export_dataset_presence: () => JSON.stringify({
+        dataset_order: ["wds-a"],
+        dataset_settings: {
+          "wds-a": {
+            visible: true,
+            opacity: 1,
+            contrast_min: 0,
+            contrast_max: 65535,
+            gamma: 1,
+            blend_mode: "alpha",
+          },
+        },
+      }),
+      dataset_ids: () => JSON.stringify(["wds-a"]),
+      available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+    };
+
+    const view = buildCapture({
+      scene: scene as never,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+      labelNamesFor: () => undefined,
+    });
+
+    expect(view.dataset_settings["wds-a"].label_names).toBeUndefined();
+  });
 });

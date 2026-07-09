@@ -14,10 +14,24 @@ export type FetchErrorKind = "permanent" | "transient" | "pending" | "abort";
 
 export class FetchError extends Error {
   readonly kind: FetchErrorKind;
+  /**
+   * True when the source itself answered the request with a failure — a
+   * `source_chunk_status` frame — rather than the client giving up locally
+   * (timeout, disconnect, abort). Such a failure feeds the delivery-failure
+   * streak regardless of its `kind`: a source that keeps reporting failures
+   * must surface even when each report is individually retryable, whereas an
+   * ordinary client-side transient stays streak-exempt so a connection blip
+   * cannot masquerade as a dead source. Independent of retry classification.
+   */
+  readonly serverReported: boolean;
 
-  constructor(message: string, opts: { kind: FetchErrorKind; cause?: unknown }) {
+  constructor(
+    message: string,
+    opts: { kind: FetchErrorKind; serverReported?: boolean; cause?: unknown },
+  ) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
     this.kind = opts.kind;
+    this.serverReported = opts.serverReported ?? false;
     this.name = "FetchError";
   }
 }

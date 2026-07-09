@@ -131,13 +131,19 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /**
-   * Server-reported terminal failure for a source chunk: the store read
-   * failed with a non-not-found error. Both statuses reject the pending
-   * fetch as `permanent` — the bytes will not arrive on this request and a
-   * client-side retry cannot help — so the delivery-failure streak counts
-   * it. This frame is what distinguishes a dead source (revoked access,
-   * broken backend) from an ordinary transient timeout, which stays
-   * excluded from the streak.
+   * Server-reported failure for a source chunk: the store read failed with a
+   * non-not-found error. Both statuses reject the pending fetch — the bytes
+   * will not arrive on this request — but with distinct classifications so a
+   * retry is attempted only where it can help:
+   *
+   * - `failed_permanent` (revoked access, invalid credentials) → `permanent`.
+   *   The store answered and will keep answering the same way, so a retry is
+   *   futile; the delivery-failure streak counts it and the failure sticks.
+   * - `unavailable` (backend fault, throttling, timeout, unreachable service)
+   *   → `transient`. The store may recover, so this must self-heal like an
+   *   ordinary blip rather than dark-holing the chunk until the dataset is
+   *   reopened. This is the frame the server now emits when its own bounded
+   *   retry budget is exhausted before the client's fetch would time out.
    */
   handleSourceChunkStatus(
     datasetId: string,
@@ -150,13 +156,22 @@ export class ProxiedContentSource implements ContentSource {
     const entries = this.takePending(compositeKey);
     if (entries.length === 0) return;
 
-    const reason = status === "failed_permanent" ? "failed permanently" : "unavailable";
     const detail = message ? `: ${message}` : "";
+    const { reason, kind } =
+      status === "failed_permanent"
+        ? { reason: "failed permanently", kind: "permanent" as const }
+        : { reason: "unavailable", kind: "transient" as const };
     for (const entry of entries) {
       clearTimeout(entry.timeoutId);
+      // `serverReported` regardless of `kind`: the store answered with a
+      // failure, so this feeds the delivery-failure streak even when the
+      // classification is transient (so a persistently-unavailable source
+      // still surfaces) — while the transient/permanent split keeps driving
+      // retry as before.
       entry.reject(
         new FetchError(`Source chunk ${chunkKey} ${reason}${detail}`, {
-          kind: "permanent",
+          kind,
+          serverReported: true,
         }),
       );
     }
