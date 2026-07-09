@@ -117,6 +117,27 @@ const VIEWER_INTEREST_TTL_MS = 2_000;
 const VIEWER_INTEREST_KEY_CAP = 512;
 
 /**
+ * Coalescing window for interactive view changes (pan/zoom). During a
+ * continuous camera move the render pass already reflects the fresh
+ * camera every frame from the cached roster, so the O(visible-entities)
+ * residency rebuild is skipped and only re-run at this coarse cadence —
+ * enough to fetch tiles that scroll into view while the view keeps
+ * moving. The trailing rebuild after the view settles applies the final
+ * viewport.
+ */
+const VIEW_REPLAN_INTERVAL_MS = 200;
+
+/**
+ * Coalescing window for interactive selection changes (T/C/Z scrub,
+ * contrast/gamma/colormap/display drag). The leading change rebuilds
+ * promptly; further changes within this window coalesce so a continuous
+ * scrub updates content at this cadence instead of rebuilding every
+ * frame. The trailing rebuild after the window guarantees the settled
+ * value always renders.
+ */
+const SELECTION_COALESCE_INTERVAL_MS = 150;
+
+/**
  * Minimum spacing between per-member sent-count refreshes on epoch-hit
  * ticks. Sent counts advance between rebuilds as the upload path drains
  * the cache, so the replayed rows are recomputed from the delivery
@@ -184,6 +205,30 @@ export class TickCoordinator {
   private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
   private cachedResult: TickCoordinatorResult | null = null;
+  /**
+   * Timestamp (`performance.now()`) at the COMPLETION of the last full
+   * rebuild. Interactive view/selection changes within a coalescing
+   * window of this are served from the cached result instead of paying
+   * another O(visible-entities) rebuild. Stamped at completion — not at
+   * the start of the tick — so the window measures idle time since the
+   * rebuild finished. Anchoring it at the start would charge the
+   * rebuild's own wall-clock cost against the window, so a rebuild that
+   * runs longer than the window (routine on a wide collection, where a
+   * single rebuild is tens to hundreds of ms) would leave every
+   * following interactive frame already past the window and coalescing
+   * would never engage on exactly the collections it exists to protect.
+   */
+  private lastRebuildAt = Number.NEGATIVE_INFINITY;
+  /**
+   * True when an interactive (view/selection) change was coalesced —
+   * skipped this tick — and its trailing rebuild has not yet run. The
+   * render loop reads this to keep ticking until the coalescing window
+   * elapses and the rebuild fires, so the settled state always renders
+   * even if the user has stopped interacting (the trailing-edge
+   * guarantee). While it is set, `lastEpochs` is deliberately left stale
+   * so the pending change is re-detected next tick and never lost.
+   */
+  private pendingDeferredRebuild = false;
   /**
    * Debug member stats from the most recent non-cache-hit run. Replayed
    * onto `debugStats` on epoch cache hits so the panel doesn't flash
@@ -282,7 +327,57 @@ export class TickCoordinator {
       isHit = causes.length === 0;
     }
 
-    if (isHit) {
+    // Coalescing gate. A full rebuild is O(visible-entities) (descriptor
+    // build + O(N) worker cold-state message), so paying it on every
+    // interactive frame collapses frame rate on a wide collection. When
+    // only interactive-class epochs moved, serve the cached result and
+    // defer the rebuild:
+    //   - view only (pan/zoom): the render pass reads the camera fresh
+    //     every frame and transforms the cached roster's world-space
+    //     positions at draw time, so a moved camera renders correctly
+    //     from the cached roster. Replan only at a coarse cadence to
+    //     fetch tiles that scroll into view.
+    //   - selection (T/C/Z, contrast/gamma/colormap/display): the
+    //     leading change rebuilds promptly, then further changes within
+    //     the window coalesce so a continuous scrub doesn't rebuild
+    //     every frame.
+    // Structural changes (content/layout/asset) are never coalesced —
+    // a newly-added dataset, layout change, or catalog change must
+    // render immediately.
+    let coalescedSkip = false;
+    if (!isHit && hasPrior) {
+      const structural =
+        causes.includes("content") ||
+        causes.includes("layout") ||
+        causes.includes("asset");
+      if (!structural) {
+        const interval = causes.includes("selection")
+          ? SELECTION_COALESCE_INTERVAL_MS
+          : VIEW_REPLAN_INTERVAL_MS;
+        if (tickStart - this.lastRebuildAt < interval) {
+          coalescedSkip = true;
+          // Leave `lastEpochs` stale so the change is re-detected next
+          // tick, and flag the deferral so the render loop keeps ticking
+          // until the window elapses and the trailing rebuild lands.
+          this.pendingDeferredRebuild = true;
+        }
+      }
+    }
+
+    if (isHit || coalescedSkip) {
+      // A genuine cache hit (no interactive epochs moved) clears any owed
+      // deferral: nothing is left to rebuild, so the loop must be free to
+      // go idle. A coalesced skip is the opposite — it keeps the flag set
+      // (assigned above) so the render loop keeps ticking until the
+      // trailing rebuild lands. The two are mutually exclusive
+      // (`coalescedSkip` is only ever set when `!isHit`), so clearing here
+      // can never drop a live deferral. Without this, a cache hit that
+      // arrives while a deferral is still owed (reachable only if an epoch
+      // counter regresses, e.g. a scene reset) would leave the flag stuck
+      // true forever and spin the loop at full frame rate.
+      if (isHit) {
+        this.pendingDeferredRebuild = false;
+      }
       // Cold-state window telemetry aggregates only while someone can
       // observe it — the panel (debugStats) or the `orch` log category.
       if (orchTelemetryActive()) {
@@ -322,6 +417,14 @@ export class TickCoordinator {
       }
       return this.cachedResult;
     }
+
+    // A full rebuild runs this tick (structural change, coalescing
+    // window elapsed, or the first/forced plan). Clear any pending
+    // deferral — the settled state is being applied now. The coalescing
+    // anchor (`lastRebuildAt`) is stamped at rebuild COMPLETION further
+    // below, not here, so the window measures idle time since the rebuild
+    // finished rather than charging the rebuild's own duration against it.
+    this.pendingDeferredRebuild = false;
 
     // Cold-state rebuild path. CpuCache owns wanted-generation and
     // delivery/rejection state, so the rebuild lifecycle advances there
@@ -763,14 +866,21 @@ export class TickCoordinator {
       };
     }
 
+    // Stamp the coalescing anchor at rebuild COMPLETION. The window then
+    // measures idle time since the rebuild finished, so coalescing engages
+    // for the next interactive frame regardless of how long this rebuild
+    // took — the property that makes the fast-path effective on a wide
+    // collection, where a single rebuild can exceed the window on its own.
+    const rebuildEnd = performance.now();
+    this.lastRebuildAt = rebuildEnd;
+
     // Record cause + duration after step 4 so the OrchDebug published
     // this tick reflects this rebuild. Gated like recordHit above: the
     // rebuild window, cause attribution, and churn detector only run
     // while observable.
     if (orchTelemetryActive()) {
-      const tickEnd = performance.now();
       this.uploader.coldStateTelemetry.recordRebuild(
-        tickStart, causes, tickEnd - tickStart,
+        tickStart, causes, rebuildEnd - tickStart,
       );
     }
     if (debugStats.enabled && debugStats.orch) {
@@ -801,6 +911,17 @@ export class TickCoordinator {
   /** Per-dataset snapshot of the most recent `plan()` output. Live Map — do not mutate. */
   getLastPlans(): ReadonlyMap<string, RequestPlan> {
     return this._lastPlanByDataset;
+  }
+
+  /**
+   * True when an interactive change was coalesced this tick and its
+   * trailing rebuild is still owed. The render loop keeps ticking while
+   * this holds so the rebuild fires — and renders — once the coalescing
+   * window elapses, even if the user has stopped interacting. Clears the
+   * next time a full rebuild runs.
+   */
+  hasPendingRebuild(): boolean {
+    return this.pendingDeferredRebuild;
   }
 
   /**

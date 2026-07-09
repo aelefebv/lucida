@@ -350,18 +350,36 @@ describe("epoch caching", () => {
     expect(result2).toBe(result1);
   });
 
-  it("re-plans when viewEpoch changes", () => {
-    const { datasets } = makeTickCoordinatorDeps();
-    const orch = makeOrch();
+  it("coalesces rapid view changes and re-plans once the view settles", () => {
+    // A camera move (viewEpoch) no longer pays the O(visible-entities)
+    // rebuild every frame: the render pass reflects the fresh camera from
+    // the cached roster, so a rapid pan is coalesced. The change is not
+    // lost — a trailing rebuild is owed and fires once the view settles
+    // past the coalescing window.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const orch = makeOrch();
 
-    const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
-    orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
-    planSpy.mockClear();
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      planSpy.mockClear();
 
-    const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
-    orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      // Within the coalescing window: skipped, no rebuild, but a trailing
+      // rebuild is owed.
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(true);
 
-    expect(planSpy).toHaveBeenCalledTimes(1);
+      // Past the window: the settled view rebuilds and the deferral clears.
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("re-plans when contentEpoch changes", () => {
@@ -392,18 +410,163 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("re-plans when selectionEpoch changes", () => {
-    const { datasets } = makeTickCoordinatorDeps();
-    const orch = makeOrch();
+  it("rebuilds on the leading selection change, coalesces the rest, then re-plans on settle", () => {
+    // Selection (T/C/Z, contrast/gamma/colormap/display) changes what's
+    // shown, so the leading change rebuilds promptly. A continuous scrub
+    // then coalesces — no per-frame rebuild — and a trailing rebuild
+    // applies the settled value.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const orch = makeOrch();
 
-    const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
-    orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
-    planSpy.mockClear();
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      planSpy.mockClear();
 
-    const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 2 } });
-    orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      // Leading selection change after a settled baseline rebuilds promptly.
+      vi.advanceTimersByTime(500);
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 2 } });
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+      planSpy.mockClear();
 
-    expect(planSpy).toHaveBeenCalledTimes(1);
+      // A further change within the window coalesces (mid-scrub).
+      const scene3 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 3 } });
+      orch.planAndFetch(makeCtx(scene3, datasets), emptyMinimap);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // Past the window: the settled selection rebuilds.
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(makeCtx(scene3, datasets), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never coalesces a structural change, even inside the coalescing window", () => {
+    // Structural changes (content/layout/asset) must render immediately —
+    // a newly-added dataset or layout change can't wait for a window.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const orch = makeOrch();
+
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      planSpy.mockClear();
+
+      // No time advance — well inside every coalescing window. A content
+      // change still rebuilds immediately and owes no deferral.
+      const scene2 = createMockScene({ epochs: { content: 2, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps coalescing when a single rebuild runs longer than the window", () => {
+    // The coalescing anchor is stamped at rebuild COMPLETION, so the
+    // window measures idle time since the rebuild finished. A single
+    // rebuild that itself takes longer than the window — routine on a
+    // wide collection, where one rebuild is tens to hundreds of ms —
+    // must still coalesce the frames that follow it. If the anchor were
+    // the tick start, the rebuild's own duration would consume the whole
+    // window and every interactive frame would rebuild, which is the
+    // frame-rate collapse the fast-path exists to prevent.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+
+      // Plan spy that consumes 210ms of (fake) wall clock per call —
+      // longer than the 200ms view window.
+      const slowPlan = vi.fn((...args: Parameters<typeof plan>) => {
+        vi.advanceTimersByTime(210);
+        return plan(...args);
+      });
+      const orch = new TickCoordinator(
+        new Uploader(),
+        slowPlan as unknown as typeof plan,
+      );
+
+      // Leading rebuild. Runs 210ms; the anchor lands at its completion.
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      expect(slowPlan).toHaveBeenCalledTimes(1);
+      slowPlan.mockClear();
+
+      // The very next interactive frame lands right after the long
+      // rebuild finished. Because the window is measured from rebuild
+      // END, it coalesces instead of paying another rebuild.
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(slowPlan).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // A run of further interactive frames (still faster than the
+      // 200ms window since the rebuild finished) all coalesce too.
+      for (let view = 3; view <= 6; view++) {
+        vi.advanceTimersByTime(20);
+        const s = createMockScene({ epochs: { content: 1, layout: 1, view, selection: 1 } });
+        orch.planAndFetch(makeCtx(s, datasets), emptyMinimap);
+      }
+      expect(slowPlan).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // Once the view settles past the window, the trailing rebuild fires
+      // and applies the settled view.
+      vi.advanceTimersByTime(300);
+      const settled = createMockScene({ epochs: { content: 1, layout: 1, view: 6, selection: 1 } });
+      orch.planAndFetch(makeCtx(settled, datasets), emptyMinimap);
+      expect(slowPlan).toHaveBeenCalledTimes(1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears an owed deferral on a genuine cache hit so the loop can idle", () => {
+    // Defensive invariant: `pendingDeferredRebuild` drives the render
+    // loop to keep ticking. It is set on a coalesced skip and must be
+    // cleared on a real cache hit — otherwise a cache hit that arrives
+    // while a deferral is still owed (reachable only if an epoch counter
+    // regresses, e.g. a future scene reset) would leave the loop spinning
+    // at full frame rate with no way to recover. A cache hit means the
+    // current scene already matches the last rebuilt state, so there is
+    // nothing left to defer.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const orch = makeOrch();
+
+      // Rebuild at view=1 (anchors lastEpochs at view=1).
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      planSpy.mockClear();
+
+      // view=2 within the window coalesces; the deferral is now owed and
+      // `lastEpochs` is deliberately left at view=1.
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // The view epoch regresses back to 1 — now matching `lastEpochs`, so
+      // this tick is a genuine cache hit. It must serve the cache AND
+      // clear the owed deferral.
+      const sceneReset = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(sceneReset, datasets), emptyMinimap);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("submits only budget-admitted legacy proxies while preserving detail requests", () => {
@@ -705,9 +868,12 @@ describe("multi-dataset planning", () => {
     >;
 
     planSpy.mockClear();
+    // Bump a structural epoch (content) so tick 2 does a full rebuild —
+    // interactive-only epochs (view/selection) coalesce and would skip
+    // the rebuild this test needs to observe state threading across.
     const scene2 = createMockScene({
       datasetOrder: ["ds1", "ds2"],
-      epochs: { content: 1, layout: 1, view: 2, selection: 1 },
+      epochs: { content: 2, layout: 1, view: 1, selection: 1 },
       allSettings: {
         ds1: {
           visible: true,

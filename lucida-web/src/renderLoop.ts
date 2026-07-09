@@ -576,6 +576,16 @@ export class RenderLoop {
       }
     }
 
+    // A coalesced view/selection change still owes a trailing rebuild.
+    // Mark interactive so the loop re-ticks and the rebuild renders
+    // immediately once the coalescing window elapses — otherwise the
+    // change would be lost if the user stopped moving. This is the
+    // interactive-class continuation ADR-0009 describes: the render stays
+    // immediate; only the residency-class rebuild is what was throttled.
+    if (this.tickCoordinator.hasPendingRebuild()) {
+      this.setDirty("interactive", "pending_residency_rebuild");
+    }
+
     if (debugStats.enabled) {
       debugStats.frameTimeMs = performance.now() - now;
       this.recordFrameSample(now, debugStats.frameTimeMs, debugStats.planTimeMs, debugStats.uploadTimeMs, debugStats.renderPasses.total, shouldRender);
