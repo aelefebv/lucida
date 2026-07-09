@@ -46,9 +46,28 @@ RUN apt-get update \
 # wasm32 target for wasm-pack to compile lucida-core into.
 RUN rustup target add wasm32-unknown-unknown
 
-# wasm-pack via the upstream installer (precompiled binary; faster than
-# `cargo install`).
-RUN curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+# wasm-pack, pinned to an explicit version (precompiled binary; faster than
+# `cargo install`). Must match the wasm-pack pin in .github/workflows/ci.yml
+# so the container's lucida-core pkg is built by the SAME wasm-pack that CI's
+# vitest resolves against (lucida-tm2). The upstream `installer/init.sh` can't
+# be pinned — its served copy hardcodes an older version (was v0.13.1) — so
+# fetch the tagged release tarball directly. musl builds are static, so they
+# run fine on this glibc (bookworm) builder.
+ARG WASM_PACK_VERSION=v0.15.0
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)  target="x86_64-unknown-linux-musl" ;; \
+      aarch64) target="aarch64-unknown-linux-musl" ;; \
+      *) echo "unsupported arch for wasm-pack pin: $arch" >&2; exit 1 ;; \
+    esac; \
+    dir="wasm-pack-${WASM_PACK_VERSION}-${target}"; \
+    curl -fsSL "https://github.com/rustwasm/wasm-pack/releases/download/${WASM_PACK_VERSION}/${dir}.tar.gz" \
+      -o /tmp/wasm-pack.tar.gz; \
+    tar -xzf /tmp/wasm-pack.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/${dir}/wasm-pack" /usr/local/bin/wasm-pack; \
+    rm -rf /tmp/wasm-pack.tar.gz "/tmp/${dir}"; \
+    wasm-pack --version
 
 WORKDIR /workspace
 
