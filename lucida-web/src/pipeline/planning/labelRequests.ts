@@ -57,6 +57,11 @@ const DEFAULT_MAX_CHUNKS_PER_VOLUME = 512;
  * (r32uint, 4 B/voxel), mirroring the intensity volume atlas budget (512 MB).
  * The per-axis clamp alone still allows a multi-GB texture (e.g. 1024²·512 =
  * 2.15 GB), which `createTexture` would reject — this bounds total memory.
+ *
+ * Invariant: the total label-volume budget
+ * ({@link DEFAULT_MAX_TOTAL_VOLUME_BYTES}) must be >= this value so the first
+ * eligible mask always fits and 3D never opens blank when a mask is drawable.
+ * {@link resolveLabelCaps} enforces this floor for any caller-supplied caps.
  */
 const DEFAULT_MAX_VOLUME_BYTES = 512 * 1024 * 1024;
 /**
@@ -67,6 +72,10 @@ const DEFAULT_MAX_VOLUME_BYTES = 512 * 1024 * 1024;
  * OOM. This caps the total: masks are shown in manifest order until the budget
  * is reached, and the rest are skipped (a fail-safe, never a crash). Mirrors the
  * intensity volume atlas budget (512 MB). SLICE mode is unaffected.
+ *
+ * Must be >= {@link DEFAULT_MAX_VOLUME_BYTES} (the per-texture cap) so the
+ * first eligible mask always fits; {@link resolveLabelCaps} clamps any
+ * caller-supplied total up to the per-texture cap to enforce this.
  */
 const DEFAULT_MAX_TOTAL_VOLUME_BYTES = 512 * 1024 * 1024;
 /** Bytes per label voxel (r32uint). */
@@ -172,6 +181,11 @@ export interface LabelSelectionCaps {
    * Volume-mode TOTAL byte budget across every mask shown at once (default
    * {@link DEFAULT_MAX_TOTAL_VOLUME_BYTES}). Masks are shown in manifest order
    * until this is reached; the rest are skipped. SLICE mode ignores it.
+   *
+   * Floored to {@link maxVolumeBytes} (the per-texture cap) by
+   * {@link resolveLabelCaps}, so a value below the per-texture cap is silently
+   * raised — guaranteeing the first drawable mask always fits and 3D never
+   * opens blank.
    */
   maxTotalVolumeBytes?: number;
 }
@@ -189,14 +203,21 @@ interface ResolvedLabelCaps {
 }
 
 function resolveLabelCaps(caps?: LabelSelectionCaps): ResolvedLabelCaps {
+  const maxVolumeBytes = caps?.maxVolumeBytes ?? DEFAULT_MAX_VOLUME_BYTES;
+  const rawTotal = caps?.maxTotalVolumeBytes ?? DEFAULT_MAX_TOTAL_VOLUME_BYTES;
+  // Clamp total up to the per-texture cap so the first eligible mask always
+  // fits: a caller-supplied total smaller than the per-texture cap would cause
+  // resolveVisibleLabels to return [] for a drawable mask (blank 3D). This is
+  // a floor — a total already larger than the per-texture cap is unchanged.
+  const maxTotalVolumeBytes = Math.max(rawTotal, maxVolumeBytes);
   return {
     mode: caps?.mode ?? "slice",
     maxLevelDim: caps?.maxLevelDim ?? DEFAULT_MAX_LEVEL_DIM,
     maxChunksPerPlane: caps?.maxChunksPerPlane ?? DEFAULT_MAX_CHUNKS_PER_PLANE,
     maxLevelDim3D: caps?.maxLevelDim3D ?? DEFAULT_MAX_LEVEL_DIM_3D,
     maxChunksPerVolume: caps?.maxChunksPerVolume ?? DEFAULT_MAX_CHUNKS_PER_VOLUME,
-    maxVolumeBytes: caps?.maxVolumeBytes ?? DEFAULT_MAX_VOLUME_BYTES,
-    maxTotalVolumeBytes: caps?.maxTotalVolumeBytes ?? DEFAULT_MAX_TOTAL_VOLUME_BYTES,
+    maxVolumeBytes,
+    maxTotalVolumeBytes,
   };
 }
 

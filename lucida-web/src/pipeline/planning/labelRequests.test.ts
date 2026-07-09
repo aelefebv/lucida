@@ -827,15 +827,70 @@ describe("resolveVisibleLabels — 3D total-volume memory budget", () => {
     expect(out.map((r) => r.name)).toEqual(["big1"]);
   });
 
-  it("a caller-supplied total budget can be tightened", () => {
+  it("total budget tightened to the per-texture cap: only the first mask fits", () => {
     __resetLabelWarningsForTest();
     const m = manifestOf([label("a", 64, 64, 64), label("b", 64, 64, 64)]);
-    // Each mask is 64·64·64·4 = 1 MB. A 1 MB total budget fits only the first.
+    // Each mask is 64·64·64·4 = 1 MB. Setting both the per-texture cap and
+    // the total to 1 MB puts the total exactly at the per-texture cap; the
+    // first mask fills it and the second is dropped.
     const out = resolveVisibleLabels(m, undefined, {
       mode: "volume",
+      maxVolumeBytes: 1024 * 1024,
       maxTotalVolumeBytes: 1024 * 1024,
     });
     expect(out.map((r) => r.name)).toEqual(["a"]);
+  });
+
+  // --- Regression: total-budget floor (Math.max clamp) ---
+  // The three tests below pin the invariant that 3D never opens blank when a
+  // mask is drawable. They FAIL if the clamp in resolveLabelCaps is removed
+  // (reverting to rawTotal) or weakened to Math.min.
+
+  it("never-blank: a single drawable mask renders even when maxTotalVolumeBytes is set below its size", () => {
+    __resetLabelWarningsForTest();
+    // 64·64·64·4 = 1 MB label, within the per-texture cap (1 MB).
+    // Without the clamp, maxTotalVolumeBytes = 1 byte < 1 MB → resolves [].
+    // With the clamp, maxTotalVolumeBytes = max(1, 1 MB) = 1 MB → mask fits.
+    const m = manifestOf([label("only", 64, 64, 64)]);
+    const out = resolveVisibleLabels(m, undefined, {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,  // 1 MB per-texture cap
+      maxTotalVolumeBytes: 1,        // far below cap — floor must raise this
+    });
+    expect(out.map((r) => r.name)).toEqual(["only"]);
+  });
+
+  it("total-budget floor: first of several masks renders when total is set below the per-texture cap", () => {
+    __resetLabelWarningsForTest();
+    // Two 1 MB masks; total set to 1 byte (below the 1 MB per-texture cap).
+    // Without the clamp: 1 MB > 1 byte → no mask fits → [].
+    // With the clamp: total raised to 1 MB → first mask fills it exactly; second drops.
+    const m = manifestOf([label("first", 64, 64, 64), label("second", 64, 64, 64)]);
+    const out = resolveVisibleLabels(m, undefined, {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,
+      maxTotalVolumeBytes: 1,
+    });
+    expect(out.map((r) => r.name)).toEqual(["first"]);
+  });
+
+  it("floor-not-ceiling: a total already above the per-texture cap is unchanged (multiple masks fit)", () => {
+    __resetLabelWarningsForTest();
+    // Three 1 MB masks; per-texture cap 1 MB; total 3 MB (already above cap).
+    // Math.max(3 MB, 1 MB) = 3 MB — the floor is a no-op and all three fit.
+    // If the clamp were Math.min instead, total would collapse to 1 MB and
+    // only the first mask would fit — this test would then fail.
+    const m = manifestOf([
+      label("x", 64, 64, 64),
+      label("y", 64, 64, 64),
+      label("z", 64, 64, 64),
+    ]);
+    const out = resolveVisibleLabels(m, undefined, {
+      mode: "volume",
+      maxVolumeBytes: 1024 * 1024,
+      maxTotalVolumeBytes: 3 * 1024 * 1024,
+    });
+    expect(out.map((r) => r.name)).toEqual(["x", "y", "z"]);
   });
 
   it("volumeBudgetPrefix returns the kept manifest indices as a prefix", () => {
