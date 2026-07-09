@@ -24,10 +24,45 @@ export interface MinimapState {
   overviewActive: boolean;
   size: number;
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
-  /** Hash of inputs that affect minimap output — skip render if unchanged. */
-  lastRenderKey: string | null;
+  /**
+   * Hash of the inputs that change the overview IMAGE (the GPU top-down redraw):
+   * mode, z/channel, dataset order + settings, upload generation, the scene's
+   * content + layout epochs, and — in volume mode only — the camera
+   * orientation. When this is unchanged the cached overview is reused and no
+   * members are re-read and no GPU overview is redrawn.
+   */
+  overviewRenderKey: string | null;
+  /**
+   * Hash of the camera inputs that only move the viewport/frustum rectangle on
+   * the 2D overlay (slice zoom/center; volume dolly). A change here recomputes
+   * just the cheap overlay and reuses the cached overview.
+   */
+  overlayRenderKey: string | null;
+  /** Camera-invariant overview outputs, cached keyed by `overviewRenderKey`. */
+  overviewCache: MinimapOverviewCache | null;
   /** Set by tickMinimapOverview when new chunks are uploaded to GPU. */
   uploadGeneration: number;
+}
+
+/**
+ * The overview-derived outputs that do not depend on the main camera's
+ * pan/zoom (slice) or dolly (volume). Cached across ticks so a camera-only
+ * change recomputes only the 2D overlay instead of re-reading every member and
+ * re-issuing the O(N) GPU overview render.
+ */
+export interface MinimapOverviewCache {
+  /** minimap camera view-projection (for the overlay draw). */
+  viewProj: Float32Array;
+  /** Per-member overlay layers (bounding boxes, slice planes). */
+  overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[];
+  /** Per-dataset overlay layers (volume frustum). */
+  datasetOverlayLayers: MinimapOverlayData["datasetLayers"];
+  /** Per-member inputs for the slice-viewport intersection. */
+  sliceViewportMembers: SliceViewportMemberInput[];
+  /** Per-member tile dimensions for the overlay. */
+  datasetDims: Map<string, { width: number; height: number; depth: number }>;
+  /** Backing pixel size the cached camera/overview were rendered at. */
+  backingSize: number;
 }
 
 export function createMinimapState(): MinimapState {
@@ -40,7 +75,9 @@ export function createMinimapState(): MinimapState {
     overviewActive: false,
     size: 200,
     overlayCallback: null,
-    lastRenderKey: null,
+    overviewRenderKey: null,
+    overlayRenderKey: null,
+    overviewCache: null,
     uploadGeneration: 0,
   };
 }
@@ -331,30 +368,22 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   return budgetRemaining <= 0;
 }
 
-export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: number): void {
-  if (!state.enabled) return;
+/**
+ * Read every member and issue the O(N) GPU overview redraw, returning the
+ * camera-invariant outputs to cache. Split out of `tickMinimap` so a
+ * camera-only change can reuse the cache and skip all of this work.
+ */
+function buildMinimapOverview(
+  ctx: TickContext,
+  cssSize: number,
+  activeC: number,
+  orderSnap: string,
+  settingsSnap: string,
+  theta: number,
+  phi: number,
+): MinimapOverviewCache {
+  const { scene, client, datasets } = ctx;
 
-  const { scene, client, canvas, datasets, mode } = ctx;
-
-  const theta = scene.camera_theta();
-  const phi = scene.camera_phi();
-
-  // Build a key from minimap-relevant state; skip if unchanged.
-  // uploadGeneration ensures we re-render when new overview chunks arrive.
-  const settingsSnap = scene.all_dataset_settings();
-  const orderSnap = scene.dataset_order();
-  // The active channel selects which channel_settings the layer contrast comes
-  // from (resolveMinimapLayerContrast), so it is a minimap render input — keep it
-  // in the key or switching channels leaves the minimap stale (see the
-  // minimap-render-key gotcha).
-  const activeC = scene.c();
-  // In volume mode, the main camera position affects the frustum overlay
-  const mainCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
-  const renderKey = `${theta}|${phi}|${mode}|${sliceZ}|${activeC}|${mainCamSnap}|${orderSnap}|${settingsSnap}|${state.uploadGeneration}`;
-  if (renderKey === state.lastRenderKey) return;
-  state.lastRenderKey = renderKey;
-
-  const cssSize = state.size;
   const backingSize = Math.round(cssSize * devicePixelRatio);
 
   const camData = new Float32Array(scene.minimap_camera(theta, phi, backingSize, backingSize));
@@ -439,29 +468,124 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     client.minimapRender(layers, invViewProj, eye, backingSize, backingSize);
   }
 
-  if (state.overlayCallback) {
-    // Dataset dimensions (per member — all members share the same tile shape).
-    // Member id → owning dataset's first-image level-0 shape, built in one
-    // pass over the datasets: resolving each overlay layer by scanning every
-    // dataset's image list would be quadratic in member count.
-    const shapeByMember = new Map<string, number[] | undefined>();
-    for (const [, ds] of datasets) {
-      const shape = ds.manifest.images[0]?.multiscale.levels[0]?.shape; // [T, C, Z, Y, X]
-      for (const img of ds.manifest.images) {
-        if (!shapeByMember.has(img.image_id)) {
-          shapeByMember.set(img.image_id, shape);
-        }
+  // Dataset dimensions (per member — all members share the same tile shape).
+  // Member id → owning dataset's first-image level-0 shape, built in one pass
+  // over the datasets: resolving each overlay layer by scanning every dataset's
+  // image list would be quadratic in member count.
+  const shapeByMember = new Map<string, number[] | undefined>();
+  for (const [, ds] of datasets) {
+    const shape = ds.manifest.images[0]?.multiscale.levels[0]?.shape; // [T, C, Z, Y, X]
+    for (const img of ds.manifest.images) {
+      if (!shapeByMember.has(img.image_id)) {
+        shapeByMember.set(img.image_id, shape);
       }
     }
-    const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
-    for (const layer of overlayLayers) {
-      const shape = shapeByMember.get(layer.datasetId);
-      if (shape) {
-        datasetDims.set(layer.datasetId, { width: shape[Axis.X], height: shape[Axis.Y], depth: shape[Axis.Z] });
-      }
+  }
+  const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
+  for (const layer of overlayLayers) {
+    const shape = shapeByMember.get(layer.datasetId);
+    if (shape) {
+      datasetDims.set(layer.datasetId, { width: shape[Axis.X], height: shape[Axis.Y], depth: shape[Axis.Z] });
     }
+  }
 
-    // Slice view bounds (2D only), expressed in scene XY coordinates.
+  return {
+    viewProj: new Float32Array(viewProj),
+    overlayLayers,
+    datasetOverlayLayers,
+    sliceViewportMembers,
+    datasetDims,
+    backingSize,
+  };
+}
+
+/**
+ * Read the scene's `content` and `layout` epoch counters — the placement/set
+ * inputs the overview key must track.
+ *
+ * The overview draws every member at its render matrix and reflects the current
+ * dataset set. A layout switch reflows member positions + render matrices and
+ * bumps `layout`; a dataset add/remove bumps `content` (and `layout`). Neither
+ * necessarily changes the other overview inputs (dataset order, settings,
+ * upload generation, channel, z), so without the epochs a camera-only tick
+ * would keep reusing a cache that draws the *old* placement/set. Folding both
+ * epochs into the overview key forces a rebuild whenever placement or the
+ * dataset set moves, even on a pure pan/zoom, and guarantees the cache can
+ * never serve a removed dataset.
+ *
+ * Parsed once per tick. Mirrors how `tickCoordinator` reads `epochs()`
+ * defensively: an older build without the binding (or a malformed payload)
+ * falls back to a stable constant so the key stays well-formed and the
+ * remaining inputs still drive rebuilds.
+ */
+export function readMinimapOverviewEpochs(scene: WasmScene): { content: number; layout: number } {
+  if (typeof scene.epochs !== "function") return { content: 0, layout: 0 };
+  try {
+    const raw = JSON.parse(scene.epochs());
+    return { content: raw.content ?? 0, layout: raw.layout ?? 0 };
+  } catch {
+    return { content: 0, layout: 0 };
+  }
+}
+
+export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: number): void {
+  if (!state.enabled) return;
+
+  const { scene, canvas, mode } = ctx;
+
+  const theta = scene.camera_theta();
+  const phi = scene.camera_phi();
+
+  const settingsSnap = scene.all_dataset_settings();
+  const orderSnap = scene.dataset_order();
+  // The active channel selects which channel_settings the layer contrast comes
+  // from (resolveMinimapLayerContrast), so it is an overview render input — keep
+  // it in the overview key or switching channels leaves the minimap stale (see
+  // the minimap-render-key gotcha).
+  const activeC = scene.c();
+
+  // The content + layout epochs cover placement/set changes that do NOT move any
+  // other overview input: a layout switch reflows member matrices and bumps
+  // `layout` only; a dataset add/remove bumps `content` (and `layout`). Folding
+  // them in rebuilds the overview when placement or the dataset set moves even on
+  // a camera-only tick (see readMinimapOverviewEpochs).
+  const { content: contentEpoch, layout: layoutEpoch } = readMinimapOverviewEpochs(scene);
+
+  // Two keys split the per-tick work by what each input actually affects:
+  //  - overview key: inputs that change the overview IMAGE (the GPU top-down
+  //    redraw). In slice mode the overview is camera-invariant; in volume mode
+  //    rotating the camera (theta/phi) reorients it, so those join this key.
+  //    uploadGeneration re-renders when new overview chunks arrive; the content +
+  //    layout epochs re-render when the dataset set or member placement changes.
+  //  - overlay key: the camera inputs that only move the viewport/frustum
+  //    rectangle on the 2D overlay — slice zoom/center, volume dolly
+  //    (eye_position). theta/phi live in the overview key (a rotation also moves
+  //    the frustum, and the overview must redraw anyway).
+  const overviewCamSnap = mode === "volume" ? `${theta}|${phi}` : "";
+  const overviewKey = `${mode}|${sliceZ}|${activeC}|${overviewCamSnap}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${settingsSnap}|${state.uploadGeneration}`;
+  const overlayCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
+  const overlayKey = `${mode}|${overlayCamSnap}`;
+
+  const overviewChanged = overviewKey !== state.overviewRenderKey;
+  const overlayChanged = overlayKey !== state.overlayRenderKey;
+  if (!overviewChanged && !overlayChanged && state.overviewCache) return;
+
+  if (overviewChanged || !state.overviewCache) {
+    // Overview changed (or first render): re-read members and redraw the GPU
+    // overview, caching the camera-invariant outputs for later camera-only ticks.
+    state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, orderSnap, settingsSnap, theta, phi);
+  }
+  // A camera-only change falls through: the cached overview texture already sits
+  // on the minimap canvas, so we skip readMemberRenderMatrices + minimapRender
+  // and recompute only the cheap 2D overlay below.
+  state.overviewRenderKey = overviewKey;
+  state.overlayRenderKey = overlayKey;
+
+  const cache = state.overviewCache;
+
+  if (state.overlayCallback) {
+    // Slice view bounds (2D only), expressed in scene XY coordinates. Recomputed
+    // every camera change from the fresh zoom/center over the cached members.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
     if (mode === "slice") {
       const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
@@ -471,27 +595,27 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       const halfW = mainW / (2 * z);
       const halfH = mainH / (2 * z);
       const sceneBounds = { minX: c[0] - halfW, minY: c[1] - halfH, maxX: c[0] + halfW, maxY: c[1] + halfH };
-      sliceViewports = sliceViewportMembers
+      sliceViewports = cache.sliceViewportMembers
         .map((member) => intersectSliceViewWithMember(sceneBounds, member))
         .filter((viewport): viewport is MinimapOverlayData["sliceViewports"][number] => viewport !== null);
     }
 
-    // Main camera inv view-proj (3D only)
+    // Main camera inv view-proj (3D only) — tracks the dolly on a camera-only tick.
     const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj()) : null;
     const currentZ = mode === "slice" ? sliceZ : scene.z();
 
     state.overlayCallback({
-      viewProj,
-      layers: overlayLayers,
-      datasetLayers: datasetOverlayLayers,
+      viewProj: cache.viewProj,
+      layers: cache.overlayLayers,
+      datasetLayers: cache.datasetOverlayLayers,
       sliceViewports,
       mode,
       theta,
       phi,
-      canvasW: backingSize,
-      canvasH: backingSize,
+      canvasW: cache.backingSize,
+      canvasH: cache.backingSize,
       currentZ,
-      datasetDims,
+      datasetDims: cache.datasetDims,
       mainInvViewProj,
     });
   }

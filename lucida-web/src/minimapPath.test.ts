@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
-import { identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, resolveMinimapLayerContrast, resolveMinimapLayerColormap } from "./minimapPath.ts";
+import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, readMinimapOverviewEpochs, resolveMinimapLayerContrast, resolveMinimapLayerColormap, tickMinimap } from "./minimapPath.ts";
+import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
+import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
+import type { RenderClient } from "./renderer/renderClient.ts";
 
 function multiscale(coarseLevelIndex?: number | null): Pick<MultiscaleInfo, "levels" | "coarse_level_index"> {
   return {
@@ -213,5 +216,296 @@ describe("identityModelMatrix", () => {
     const a = identityModelMatrix();
     expect(Array.from(a)).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
     expect(identityModelMatrix()).not.toBe(a);
+  });
+});
+
+describe("readMinimapOverviewEpochs", () => {
+  it("reads content and layout from the epochs JSON", () => {
+    const scene = {
+      epochs: () => JSON.stringify({ content: 7, layout: 3, view: 99, selection: 5, asset: 2 }),
+    } as unknown as WasmScene;
+    expect(readMinimapOverviewEpochs(scene)).toEqual({ content: 7, layout: 3 });
+  });
+
+  it("falls back to a stable constant when epochs() is absent (older build)", () => {
+    const scene = {} as unknown as WasmScene;
+    expect(readMinimapOverviewEpochs(scene)).toEqual({ content: 0, layout: 0 });
+  });
+
+  it("falls back to a stable constant when the payload is malformed", () => {
+    const scene = { epochs: () => "not json" } as unknown as WasmScene;
+    expect(readMinimapOverviewEpochs(scene)).toEqual({ content: 0, layout: 0 });
+  });
+});
+
+describe("tickMinimap overview/overlay split", () => {
+  /**
+   * A mutable fake scene exposing just the surface `tickMinimap` reads, so a
+   * test can move the main camera and observe which work reruns.
+   */
+  interface FakeScene {
+    theta: number;
+    phi: number;
+    activeC: number;
+    z: number;
+    zoom: number;
+    center: [number, number];
+    eye: [number, number, number];
+    order: string;
+    settings: string;
+    /** Bumped by a dataset add/remove (see readMinimapOverviewEpochs). */
+    contentEpoch: number;
+    /** Bumped by a layout switch / member reflow. */
+    layoutEpoch: number;
+    wasm: WasmScene;
+  }
+
+  function makeScene(): FakeScene {
+    const s: FakeScene = {
+      theta: 0.5,
+      phi: 1.2,
+      activeC: 0,
+      z: 0,
+      zoom: 1,
+      center: [0, 0],
+      eye: [0, 0, 10],
+      order: JSON.stringify(["ds"]),
+      settings: JSON.stringify({
+        ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+      }),
+      contentEpoch: 0,
+      layoutEpoch: 0,
+      wasm: undefined as unknown as WasmScene,
+    };
+    s.wasm = {
+      camera_theta: () => s.theta,
+      camera_phi: () => s.phi,
+      all_dataset_settings: () => s.settings,
+      dataset_order: () => s.order,
+      c: () => s.activeC,
+      z: () => s.z,
+      t: () => 0,
+      zoom: () => s.zoom,
+      center: () => s.center,
+      eye_position: () => new Float32Array(s.eye),
+      epochs: () =>
+        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0, asset: 0 }),
+      // 35 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj.
+      minimap_camera: () => new Float32Array(35),
+      member_positions: () => JSON.stringify({ m0: [0, 0] }),
+      member_render_ids: () => JSON.stringify(["m0"]),
+      member_render_matrices: () => new Float32Array(32),
+      scene_model_matrix_for: () => new Float32Array(16),
+      inv_scene_model_matrix_for: () => new Float32Array(16),
+      dataset_volume_shape: () => new Float32Array([9, 500, 500]),
+      inv_view_proj: () => new Float32Array(16),
+    } as unknown as WasmScene;
+    return s;
+  }
+
+  function makeDatasets(): TickContext["datasets"] {
+    return new Map([
+      [
+        "ds",
+        {
+          manifest: {
+            images: [
+              {
+                image_id: "m0",
+                owner: "m0",
+                // shape is [T, C, Z, Y, X]
+                multiscale: { levels: [{ shape: [1, 1, 9, 500, 500] }] },
+              },
+            ],
+          },
+        },
+      ],
+    ]) as unknown as TickContext["datasets"];
+  }
+
+  function makeCtx(scene: FakeScene, mode: "slice" | "volume", renderCount: { n: number }): TickContext {
+    const client = {
+      minimapRender: () => {
+        renderCount.n++;
+      },
+    } as unknown as RenderClient;
+    const canvas = { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement;
+    return {
+      scene: scene.wasm,
+      datasets: makeDatasets(),
+      client,
+      canvas,
+      mode,
+    } as unknown as TickContext;
+  }
+
+  function makeState(overlay: (d: MinimapOverlayData) => void): MinimapState {
+    const state = createMinimapState();
+    state.enabled = true;
+    state.overlayCallback = overlay;
+    return state;
+  }
+
+  beforeEach(() => {
+    globalThis.devicePixelRatio = 2;
+  });
+
+  it("skips the O(N) overview redraw on a slice-mode pan but still updates the viewport overlay", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(1);
+    const firstBounds = overlay.mock.calls[0][0].sliceViewports[0].bounds;
+
+    // Pan the main camera: overlay must recompute, overview must NOT redraw.
+    scene.center = [1000, 1000];
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(2);
+    const secondBounds = overlay.mock.calls[1][0].sliceViewports[0].bounds;
+    expect(secondBounds).not.toEqual(firstBounds);
+  });
+
+  it("skips the O(N) overview redraw on a slice-mode zoom", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    scene.zoom = 4;
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(2);
+  });
+
+  it("early-returns when neither the overview nor the camera changed", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(1);
+  });
+
+  it("redraws the overview when an overview input changes (active channel, upload, order, settings)", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+
+    scene.activeC = 1;
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(2);
+
+    state.uploadGeneration++;
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(3);
+
+    scene.settings = JSON.stringify({
+      ds: { visible: true, opacity: 0.5, blend_mode: "normal", contrast_min: 0, contrast_max: 100, gamma: 1 },
+    });
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(4);
+  });
+
+  it("redraws the overview when the slice z changes", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    tickMinimap(ctx, state, 3);
+    expect(renderCount.n).toBe(2);
+  });
+
+  it("redraws the overview when the layout epoch changes, even on a camera-only tick", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+
+    // A layout switch reflows member placement + render matrices and bumps the
+    // layout epoch WITHOUT touching order/settings/upload/channel/z. The next
+    // tick moves only the camera, yet the overview must rebuild — otherwise it
+    // keeps drawing the old placement (and a stale "you are here" rectangle).
+    scene.layoutEpoch++;
+    scene.center = [1000, 1000];
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(2);
+  });
+
+  it("redraws the overview when the content epoch changes on a camera-only tick", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+
+    // A dataset add/remove bumps the content epoch; the overview must rebuild so
+    // the cache can never serve a removed dataset.
+    scene.contentEpoch++;
+    scene.center = [500, 500];
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(2);
+  });
+
+  it("in volume mode reuses the overview on a dolly but redraws on a rotation", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "volume", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+
+    // Dolly (eye moves, orientation fixed): overlay recomputes, overview reused.
+    scene.eye = [0, 0, 20];
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(2);
+    expect(overlay.mock.calls[1][0].mainInvViewProj).not.toBeNull();
+
+    // Rotation (theta/phi): the overview reorients, so it must redraw.
+    scene.theta = 1.0;
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(2);
+  });
+
+  it("does nothing when the minimap is disabled", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    state.enabled = false;
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(0);
+    expect(overlay).not.toHaveBeenCalled();
   });
 });
