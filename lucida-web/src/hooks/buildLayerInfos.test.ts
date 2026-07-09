@@ -154,3 +154,89 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
     expect(infos[0].labelRows).toBeUndefined();
   });
 });
+
+// A single-level uint32 label that is slice-eligible (small X/Y) but
+// volume-ineligible (Z busts the 3D per-axis cap), with no coarser level.
+function deepZLabel(name: string): LabelSpec {
+  return {
+    name,
+    source_image_id: "img-0",
+    image: {
+      image_id: `img-0:label:${name}`,
+      owner: "ent-0",
+      multiscale: {
+        axes: [
+          { name: "t", kind: "time" },
+          { name: "c", kind: "channel" },
+          { name: "z", kind: "space" },
+          { name: "y", kind: "space" },
+          { name: "x", kind: "space" },
+        ],
+        levels: [
+          {
+            level_index: 0,
+            shape: [1, 1, 4096, 64, 64],
+            chunk_shape: [1, 1, 1, 64, 64],
+            grid_shape: [1, 1, 1, 1, 1],
+            scale: [1, 1, 1, 1, 1],
+          },
+        ],
+        data_type: "Uint32",
+      },
+    },
+  } as LabelSpec;
+}
+
+describe("buildLayerInfos view-mode-aware label rows", () => {
+  it("lists a slice-eligible/volume-ineligible label as a normal row in 2D", () => {
+    const scene = stubScene(["ds-0"], settingsWith([{ visible: true, opacity: 0.5 }]));
+    const infos = buildLayerInfos(
+      scene,
+      datasetsWith([deepZLabel("deep")]),
+      emptyMaps,
+      "2d",
+    );
+    expect(infos[0].labelRows).toEqual([
+      { index: 0, name: "deep", visible: true, opacity: 0.5 },
+    ]);
+  });
+
+  it("marks the same label disabled with the reason in 3D (union still lists it)", () => {
+    const scene = stubScene(["ds-0"], settingsWith([{ visible: true, opacity: 0.5 }]));
+    const infos = buildLayerInfos(
+      scene,
+      datasetsWith([deepZLabel("deep")]),
+      emptyMaps,
+      "3d",
+    );
+    expect(infos[0].labelRows).toEqual([
+      { index: 0, name: "deep", visible: true, opacity: 0.5, disabledReason: "too large to render in 3D" },
+    ]);
+  });
+
+  it("defaults viewMode to 2d for 3-arg callers (no disabledReason)", () => {
+    const scene = stubScene(["ds-0"], settingsWith([{ visible: true, opacity: 0.5 }]));
+    const infos = buildLayerInfos(scene, datasetsWith([deepZLabel("deep")]), emptyMaps);
+    expect(infos[0].labelRows?.[0].disabledReason).toBeUndefined();
+  });
+
+  it("keeps a fully-eligible label interactive in both modes; disables only the over-cap one in 3D", () => {
+    const scene = stubScene(
+      ["ds-0"],
+      settingsWith([
+        { visible: true, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+      ]),
+    );
+    const infos = buildLayerInfos(
+      scene,
+      datasetsWith([deepZLabel("deep"), label("flat")]),
+      emptyMaps,
+      "3d",
+    );
+    expect(infos[0].labelRows).toEqual([
+      { index: 0, name: "deep", visible: true, opacity: 0.5, disabledReason: "too large to render in 3D" },
+      { index: 1, name: "flat", visible: true, opacity: 0.5 },
+    ]);
+  });
+});

@@ -586,4 +586,51 @@ describe("LayerPanel labels", () => {
     expect(screen.queryByTestId("labels-section-wds-1")).toBeNull();
     expect(screen.queryByTestId("layer-label-count-wds-1")).toBeNull();
   });
+
+  it("disables the controls and shows the reason for a row with disabledReason", () => {
+    const onLabelSetVisible = vi.fn();
+    render(
+      <LayerPanel
+        {...labelProps(
+          {
+            labelRows: [
+              { index: 0, name: "deep", visible: true, opacity: 0.5, disabledReason: "too large to render in 3D" },
+            ],
+          },
+          { onLabelSetVisible },
+        )}
+      />,
+    );
+    const eye = screen.getByTestId("label-eye-wds-1-0") as HTMLButtonElement;
+    const slider = screen.getByTestId("label-opacity-wds-1-0") as HTMLInputElement;
+    // Both controls carry the disabled attribute (the browser-enforced gate).
+    expect(eye.disabled).toBe(true);
+    expect(slider.disabled).toBe(true);
+    // Nothing is drawn in this mode, so the toggle reports not-pressed even
+    // though the label's persisted visible flag is true.
+    expect(eye.getAttribute("aria-pressed")).toBe("false");
+    // The reason is visible text in the row.
+    expect(screen.getByText("too large to render in 3D")).toBeTruthy();
+    // A disabled button does not fire its click handler.
+    fireEvent.click(eye);
+    expect(onLabelSetVisible).not.toHaveBeenCalled();
+  });
+
+  it("leaves a row WITHOUT disabledReason fully interactive", () => {
+    const onLabelSetVisible = vi.fn();
+    render(
+      <LayerPanel
+        {...labelProps(
+          { labelRows: [{ index: 0, name: "flat", visible: true, opacity: 0.5 }] },
+          { onLabelSetVisible },
+        )}
+      />,
+    );
+    const eye = screen.getByTestId("label-eye-wds-1-0") as HTMLButtonElement;
+    expect(eye.disabled).toBe(false);
+    // Drawable and visible → the toggle reports pressed.
+    expect(eye.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(eye);
+    expect(onLabelSetVisible).toHaveBeenCalledWith("wds-1", 0, false);
+  });
 });

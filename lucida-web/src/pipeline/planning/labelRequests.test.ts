@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeLabelChunkRequests,
   eligibleLabelInfos,
+  planLabelRescue,
   resolveDefaultLabel,
   resolveVisibleLabels,
 } from "./labelRequests.ts";
@@ -404,19 +405,21 @@ describe("resolveVisibleLabels", () => {
     expect(out[0].opacity).toBe(0.5);
   });
 
-  it("falls back to the first eligible when the visible-marked label is ineligible", () => {
+  it("returns [] when only ineligible labels are marked visible (no substitution)", () => {
     // Settings mark index 0 (uint8, undrawable) visible and index 1 (uint32,
-    // drawable) hidden — the seed picked an undrawable label. Rather than open
-    // blank, resolve the first eligible label. Guards the non-uint32-first
-    // (and, conceptually, footprint/level-ineligible) blank-open regression.
+    // drawable) hidden. Nothing is both visible AND eligible, so nothing is drawn
+    // — resolveVisibleLabels never substitutes a stand-in for the ineligible
+    // visible label (that would put an overlay on screen whose own checkbox reads
+    // off). The one-shot fresh-open rescue owns blank-open repair instead.
     const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("region-c", "Uint32")]);
-    const out = resolveVisibleLabels(m, [
-      { visible: true, opacity: 0.5 },
-      { visible: false, opacity: 0.5 },
-    ]);
-    expect(out.map((r) => r.name)).toEqual(["region-c"]);
+    expect(
+      resolveVisibleLabels(m, [
+        { visible: true, opacity: 0.5 },
+        { visible: false, opacity: 0.5 },
+      ]),
+    ).toEqual([]);
 
-    // Fetch agrees — it requests exactly the fallback label's chunks.
+    // Fetch agrees — nothing is requested until a visible eligible label exists.
     const reqs = computeLabelChunkRequests({
       datasetId: "ds-0",
       manifest: m,
@@ -427,9 +430,7 @@ describe("resolveVisibleLabels", () => {
         { visible: false, opacity: 0.5 },
       ],
     });
-    const ids = new Set(reqs.map((r) => r.imageId));
-    expect(ids.has("img-0:label:region-c")).toBe(true);
-    expect(ids.has("img-0:label:mask8")).toBe(false);
+    expect(reqs).toEqual([]);
   });
 
   it("honors an explicit hide-all: no fallback when NOTHING is marked visible", () => {
@@ -451,6 +452,77 @@ describe("resolveVisibleLabels", () => {
         { visible: true, opacity: 0.5 },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("resolveVisibleLabels — no per-tick substitution (mode-aware)", () => {
+  // The overlay the panel toggle controls and the overlay on screen must never
+  // diverge. These guard the two ways a per-tick "show something anyway" fallback
+  // used to break that: a label left visible-but-ineligible could not be hidden
+  // (the fallback re-drew it), and a mode switch could conjure a different label
+  // whose own checkbox read off.
+  const AXES = [
+    { name: "t", kind: "time" }, { name: "c", kind: "channel" },
+    { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
+  ];
+  function img(id: string, dtype: string, shape: number[], chunk: number[]): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: AXES,
+        levels: [{ level_index: 0, shape, chunk_shape: chunk, grid_shape: [1, 1, 1, 1, 1], scale: [1, 1, 1, 1, 1] }],
+        data_type: dtype,
+      },
+    };
+  }
+  // Slice-eligible (small X/Y) but volume-ineligible (Z busts the 3D per-axis
+  // cap) with no coarser level — eligible in 2D, not in 3D.
+  const deepZ = (name: string): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 4096, 64, 64], [1, 1, 1, 64, 64]),
+  });
+  const flat = (name: string): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 1, 64, 64], [1, 1, 1, 64, 64]),
+  });
+  function manifestOf(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "vol", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [img("img-0", "Uint16", [1, 1, 1, 340, 348], [1, 1, 1, 128, 128])],
+      labels,
+    };
+  }
+  const seen = (visibles: boolean[]) => visibles.map((v) => ({ visible: v, opacity: 0.5 }));
+
+  it("hide-after-rescue: an ineligible seed left visible is not re-substituted", () => {
+    // The fresh-open rescue revealed the flat label (index 1); the user then hid
+    // it. The ineligible deep-Z seed (index 0) is still visible:true but can't
+    // draw in volume mode. Nothing visible+eligible → [], so the hidden overlay
+    // stays hidden (no un-hideable re-draw) and the screen matches the panel.
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(resolveVisibleLabels(m, seen([true, false]), { mode: "volume" })).toEqual([]);
+    expect(
+      computeLabelChunkRequests({
+        datasetId: "ds-0", manifest: m, t: 0, z: 0, mode: "volume",
+        labelSettings: seen([true, false]),
+      }),
+    ).toEqual([]);
+  });
+
+  it("2D-open → 3D-switch: a 2D-only visible label draws nothing in 3D (no stand-in)", () => {
+    // deep-Z (index 0) is visible and slice-eligible; a separate flat label
+    // (index 1) is 3D-eligible but hidden. In 2D the visible deep-Z label draws;
+    // switching to 3D must NOT substitute the flat label (whose checkbox is off)
+    // for the now-ineligible visible one — it draws nothing.
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(resolveVisibleLabels(m, seen([true, false]), { mode: "slice" }).map((r) => r.name)).toEqual([
+      "deep",
+    ]);
+    expect(resolveVisibleLabels(m, seen([true, false]), { mode: "volume" })).toEqual([]);
   });
 });
 
@@ -678,5 +750,80 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
     // Default caps accept level 0; a maxChunksPerVolume of 1 forces level 1.
     expect(resolveVisibleLabels(m, undefined, { mode: "volume" })[0].levelIdx).toBe(0);
     expect(resolveVisibleLabels(m, undefined, { mode: "volume", maxChunksPerVolume: 1 })[0].levelIdx).toBe(1);
+  });
+});
+
+describe("planLabelRescue", () => {
+  const AXES = [
+    { name: "t", kind: "time" }, { name: "c", kind: "channel" },
+    { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
+  ];
+  function img(id: string, dtype: string, shape: number[], chunk: number[]): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: AXES,
+        levels: [{ level_index: 0, shape, chunk_shape: chunk, grid_shape: [1, 1, 1, 1, 1], scale: [1, 1, 1, 1, 1] }],
+        data_type: dtype,
+      },
+    };
+  }
+  // A single-level label that is slice-eligible (small X/Y) but volume-ineligible
+  // (Z busts the 3D per-axis cap), with no coarser level — the pathological shape
+  // the rescue exists for.
+  const deepZ = (name: string): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 4096, 64, 64], [1, 1, 1, 64, 64]),
+  });
+  const flat = (name: string): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 1, 64, 64], [1, 1, 1, 64, 64]),
+  });
+  function manifestOf(labels: LabelSpec[]): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "vol", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [img("img-0", "Uint16", [1, 1, 1, 340, 348], [1, 1, 1, 128, 128])],
+      labels,
+    };
+  }
+  const seen = (visibles: boolean[]) => visibles.map((v) => ({ visible: v, opacity: 0.5 }));
+
+  it("returns the first mode-eligible index when the visible-marked label can't draw here", () => {
+    // Seed marked the deep-Z label (index 0) visible; in VOLUME mode it can't
+    // draw, but the flat label (index 1) can → rescue picks 1.
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(planLabelRescue(m, seen([true, false]), "volume")).toBe(1);
+  });
+
+  it("returns null when the visible-marked label IS eligible in the mode", () => {
+    // In SLICE mode the deep-Z label is drawable, so there's no blank-open.
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(planLabelRescue(m, seen([true, false]), "slice")).toBeNull();
+  });
+
+  it("honors an explicit hide-all (nothing marked visible → null)", () => {
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(planLabelRescue(m, seen([false, false]), "volume")).toBeNull();
+  });
+
+  it("returns null when NO label is eligible in the mode", () => {
+    // Only a deep-Z label, marked visible, in volume mode: nothing to rescue to.
+    const m = manifestOf([deepZ("deep")]);
+    expect(planLabelRescue(m, seen([true]), "volume")).toBeNull();
+  });
+
+  it("returns null for undefined settings", () => {
+    const m = manifestOf([deepZ("deep"), flat("flat")]);
+    expect(planLabelRescue(m, undefined, "volume")).toBeNull();
+  });
+
+  it("returns null when the visible-marked label is already eligible even if a later one is too", () => {
+    // flat(0) visible + eligible in volume → no blank-open, no rescue.
+    const m = manifestOf([flat("a"), flat("b")]);
+    expect(planLabelRescue(m, seen([true, false]), "volume")).toBeNull();
   });
 });

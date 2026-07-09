@@ -244,7 +244,12 @@ function eligibleLabel(
  * (`pushLabelLayers`), so they never disagree (which would fetch one label but
  * draw a different — blank — one). Returns one entry per label that is VISIBLE
  * (per `labelSettings`) AND eligible (see {@link eligibleLabel}), in manifest
- * (OME `labels`) order, each carrying its per-label overlay opacity.
+ * (OME `labels`) order, each carrying its per-label overlay opacity — and
+ * NOTHING ELSE. It never substitutes a stand-in for a label that is marked
+ * visible but ineligible in the current mode: when only ineligible labels are
+ * marked visible, it returns `[]` (nothing drawn/fetched). So the panel's toggle
+ * state and the screen never diverge, a hidden label stays hidden, and switching
+ * modes never conjures a label whose own checkbox reads off.
  *
  * When `labelSettings` is undefined/empty — a snapshot that predates the
  * per-label controls — this falls back to the pre-controls default: the FIRST
@@ -255,13 +260,11 @@ function eligibleLabel(
  * is the SAME rule the layer panel uses (see `buildLayerInfos`), so the panel's
  * toggle state and the drawn set never diverge.
  *
- * Blank-open guard: if settings mark SOME label visible but none of the
- * visible-marked labels are drawable (e.g. the seed picked a uint32 label that
- * fails a render-only footprint/level check, or — defensively — a non-uint32
- * one), yet a drawable label exists, this falls back to the first eligible label
- * (like the empty-settings default) so the dataset never opens blank while it
- * has something to draw. It does NOT fire when the user has hidden EVERY label
- * (nothing marked visible), so an explicit "hide all" is honored.
+ * A fresh open where the seed marked an ineligible label visible is repaired
+ * ONCE, up front, by persisting a real visible+eligible label (see
+ * {@link planLabelRescue} / `useLabelRescueOnOpen`) — not per tick here — so a
+ * later hide or mode switch is honored exactly rather than fought each tick by a
+ * substitution the user cannot dismiss.
  */
 export function resolveVisibleLabels(
   manifest: DatasetManifest,
@@ -275,19 +278,15 @@ export function resolveVisibleLabels(
   const hasSettings = labelSettings !== undefined && labelSettings.length > 0;
 
   const out: ResolvedVisibleLabel[] = [];
-  let firstEligible: ResolvedVisibleLabel | null = null;
-  // Whether the settings mark ANY label visible — including an INELIGIBLE one
-  // (a visible-but-undrawable label is exactly the blank-open case the fallback
-  // below repairs). Distinguishes "the seed/settings wanted something shown" from
-  // "the user hid everything".
-  let anyMarkedVisible = false;
+  // Track whether we've passed the first eligible label — the ONLY label the
+  // pre-controls (no-settings) default reveals.
+  let seenEligible = false;
   for (let i = 0; i < labels.length; i++) {
     const label = labels[i];
-    if (hasSettings && labelSettings[i]?.visible === true) anyMarkedVisible = true;
-
     const elig = eligibleLabel(manifest, label, resolvedCaps);
     if (!elig) continue;
-    const isFirstEligible = firstEligible === null;
+    const isFirstEligible = !seenEligible;
+    seenEligible = true;
 
     let visible: boolean;
     let opacity: number;
@@ -300,25 +299,68 @@ export function resolveVisibleLabels(
       visible = isFirstEligible;
       opacity = DEFAULT_LABEL_OPACITY;
     }
-    const resolved: ResolvedVisibleLabel = {
+    if (!visible) continue;
+    out.push({
       label,
       source: elig.source,
       levelIdx: elig.levelIdx,
       name: label.name,
       sourceImageId: label.source_image_id,
       opacity,
-    };
-    if (isFirstEligible) firstEligible = resolved;
-    if (visible) out.push(resolved);
-  }
-
-  // Blank-open guard (see the doc): settings wanted something shown, but nothing
-  // visible-marked is drawable, while a drawable label exists → show the first
-  // eligible one. Never overrides an explicit "hide all".
-  if (out.length === 0 && hasSettings && anyMarkedVisible && firstEligible !== null) {
-    return [firstEligible];
+    });
   }
   return out;
+}
+
+/**
+ * The manifest index of the label to reveal so a freshly-opened dataset never
+ * shows an "on" overlay it can't draw in the OPEN view mode.
+ *
+ * The seed (mode-agnostic) may mark a label visible that is ineligible under the
+ * web's mode-specific caps ({@link eligibleLabel}) while a LATER label is
+ * eligible — the dataset would then open with its panel checkbox "on" but
+ * nothing drawn. This returns the first `mode`-eligible label to persist as
+ * visible, iff ALL of:
+ *   (a) the settings mark at least one label visible (an explicit "hide all" is
+ *       honored — nothing marked visible yields `null`),
+ *   (b) NONE of the visible-marked labels is eligible in `mode` (so there is a
+ *       genuine blank-open to repair), and
+ *   (c) at least one label IS eligible in `mode` (there is something to reveal).
+ * Otherwise (incl. undefined settings) returns `null`.
+ *
+ * This is the SOLE blank-open repair: {@link resolveVisibleLabels} returns
+ * exactly the visible+eligible set and never substitutes per tick, so a fresh
+ * open where the seed marked an ineligible label visible is fixed HERE, once, by
+ * persisting a real visible+eligible label (see `useLabelRescueOnOpen`) rather
+ * than by a fallback that would re-fire on hide or mode switch. Returns the
+ * INDEX to persist, not a resolved render entry.
+ */
+export function planLabelRescue(
+  manifest: DatasetManifest,
+  labelSettings: LabelViewSetting[] | undefined,
+  mode: "slice" | "volume",
+): number | null {
+  if (labelSettings === undefined) return null;
+  const labels = manifest.labels;
+  if (!labels || labels.length === 0) return null;
+  const resolvedCaps = resolveLabelCaps({ mode });
+
+  let anyMarkedVisible = false;
+  let anyVisibleEligible = false;
+  let firstEligibleIndex = -1;
+  for (let i = 0; i < labels.length; i++) {
+    const eligible = eligibleLabel(manifest, labels[i], resolvedCaps) !== null;
+    if (eligible && firstEligibleIndex < 0) firstEligibleIndex = i;
+    if (labelSettings[i]?.visible === true) {
+      anyMarkedVisible = true;
+      if (eligible) anyVisibleEligible = true;
+    }
+  }
+
+  if (anyMarkedVisible && !anyVisibleEligible && firstEligibleIndex >= 0) {
+    return firstEligibleIndex;
+  }
+  return null;
 }
 
 /** A DRAWABLE (eligible) label: its manifest index + name. */

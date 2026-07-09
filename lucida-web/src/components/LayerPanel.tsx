@@ -31,14 +31,19 @@ export interface LayerInfo {
    */
   channelInfos?: { label: string; color?: string | null }[];
   /**
-   * Per-label overlay rows for the "Labels" subsection + count badge — ONLY the
-   * DRAWABLE (renderable) labels, so a control never lies about a label that
-   * can't draw (e.g. a uint8/uint16 mask). Each row carries its MANIFEST index
-   * (the key the toggle/opacity handlers pass), name, and current visibility +
-   * opacity. Absent/empty when the dataset has no drawable labels — the
-   * subsection + badge are gated on this having entries.
+   * Per-label overlay rows for the "Labels" subsection + count badge — every
+   * label drawable in EITHER view mode (2D or 3D), so the panel is stable across
+   * a mode switch and a control never lies about a label that can't draw (a
+   * uint8/uint16 mask, an orphan, or one over-caps in both modes is omitted).
+   * Each row carries its MANIFEST index (the key the toggle/opacity handlers
+   * pass), name, and current visibility + opacity. A row NOT drawable in the
+   * CURRENT view mode carries a `disabledReason`: its controls render disabled
+   * and the reason shows as text, so the user sees WHY the overlay is inert
+   * rather than toggling a control that draws nothing. Absent/empty when the
+   * dataset has no drawable labels — the subsection + badge are gated on this
+   * having entries.
    */
-  labelRows?: { index: number; name: string; visible: boolean; opacity: number }[];
+  labelRows?: { index: number; name: string; visible: boolean; opacity: number; disabledReason?: string }[];
   channelBlendMode: string;
   detailLevelOverride: number | null;
   detailLevelOptions: { level: number; label: string }[];
@@ -512,14 +517,31 @@ export function LayerPanel({
                       {layer.labelRows.map((row) => {
                         const labelName = row.name.trim() || `Label ${row.index}`;
                         const labelPct = Math.round((row.opacity ?? 0.5) * 100);
+                        // A label drawable only in the OTHER view mode: its
+                        // controls are inert here, so disable them and show the
+                        // reason as text. This keeps the panel honest — no eye
+                        // toggle or slider that "works" but draws nothing.
+                        const disabled = row.disabledReason !== undefined;
                         return (
                           <div key={row.index} className="label-sublayer">
                             <div className="label-sublayer-header">
                               <button
                                 className="layer-eye-btn"
-                                title={row.visible ? "Hide label" : "Show label"}
-                                aria-label={`${row.visible ? "Hide" : "Show"} ${layer.name} ${labelName}`}
-                                aria-pressed={row.visible}
+                                title={disabled ? row.disabledReason : row.visible ? "Hide label" : "Show label"}
+                                // When disabled the toggle can't act, so name the
+                                // STATE (why it's off) instead of a "Hide/Show"
+                                // action a screen-reader user cannot perform.
+                                aria-label={
+                                  disabled
+                                    ? `${layer.name} ${labelName} — ${row.disabledReason}`
+                                    : `${row.visible ? "Hide" : "Show"} ${layer.name} ${labelName}`
+                                }
+                                // A disabled label draws nothing in the current
+                                // mode, so the toggle is not "pressed" here
+                                // regardless of the persisted visible flag —
+                                // report the state the user actually sees.
+                                aria-pressed={disabled ? false : row.visible}
+                                disabled={disabled}
                                 data-testid={`label-eye-${layer.id}-${row.index}`}
                                 onClick={() => onLabelSetVisible?.(layer.id, row.index, !row.visible)}
                               >
@@ -534,10 +556,14 @@ export function LayerPanel({
                                 min={0}
                                 max={100}
                                 value={labelPct}
-                                title={`Label opacity: ${labelPct}%`}
+                                disabled={disabled}
+                                title={disabled ? row.disabledReason : `Label opacity: ${labelPct}%`}
                                 onChange={(e) => onLabelSetOpacity?.(layer.id, row.index, Number(e.target.value) / 100)}
                               />
                             </div>
+                            {disabled && (
+                              <div className="label-disabled-reason">{row.disabledReason}</div>
+                            )}
                           </div>
                         );
                       })}
