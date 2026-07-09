@@ -2159,9 +2159,11 @@ describe("CpuCache", () => {
     it("server-reported source-chunk failures feed the streak (dead source becomes visible)", async () => {
       // End-to-end through the real ProxiedContentSource: the server's
       // `source_chunk_status` frames (store failures after a successful
-      // open — revoked access, backend down) reject the pending fetches
-      // as permanent, so the streak fires instead of the requests dying
-      // as streak-exempt transient timeouts.
+      // open — revoked access, backend down) are server-reported failures,
+      // so both the permanent (`failed_permanent`) and the self-healing
+      // transient (`unavailable`) frames feed the streak. A persistently
+      // dead source thus surfaces instead of dying as streak-exempt
+      // client-side transient timeouts.
       const onChunkFailureStreak = vi.fn();
       const sentMessages: string[] = [];
       const realSource = new ProxiedContentSource((json) => sentMessages.push(json));
@@ -2193,6 +2195,140 @@ describe("CpuCache", () => {
       expect(onChunkFailureStreak.mock.calls[0][1]).toContain(
         "access to the dataset store was denied",
       );
+    });
+
+    it("a server-reported unavailable failure feeds the streak yet stays self-healing", async () => {
+      // `unavailable` is server-reported, so it must surface a persistently
+      // dead source through the streak — but it keeps its transient
+      // classification: it retries, recovers on the retry, and is never
+      // recorded as a sticky permanent failure. Both properties at once.
+      vi.useFakeTimers();
+      try {
+        const onChunkFailureStreak = vi.fn();
+        const onChunkFailureRecovered = vi.fn();
+        const realSource = new ProxiedContentSource(() => {});
+        realSource.registerImage("image-1", { Raw: { data_type: "uint16" } });
+        const cache = new CpuCache(realSource, createSyncDecode(), {
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+          onChunkFailureRecovered,
+        });
+
+        const reqs = Array.from({ length: CHUNK_FAILURE_STREAK_THRESHOLD }, (_, i) =>
+          makeRequest({ x: i }),
+        );
+        cache.submit(makePlan(reqs));
+
+        // Every chunk comes back `unavailable` — a transient, retryable
+        // failure that nonetheless feeds the streak because the source
+        // itself reported it.
+        for (let i = 0; i < reqs.length; i++) {
+          realSource.handleSourceChunkStatus(
+            "entity-1",
+            "image-1",
+            `0/0/0/0/0/${i}`,
+            "unavailable",
+            "backend temporarily unavailable",
+          );
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Surfaced: a source that keeps answering `unavailable` is visibly
+        // failing rather than silently self-healing forever.
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+        expect(onChunkFailureStreak.mock.calls[0][0]).toBe(CHUNK_FAILURE_STREAK_THRESHOLD);
+        expect(onChunkFailureStreak.mock.calls[0][1]).toContain(
+          "backend temporarily unavailable",
+        );
+
+        // Self-healing: the transient classification is intact, so each chunk
+        // is retried. When the backend recovers, the retries deliver…
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        for (let i = 0; i < reqs.length; i++) {
+          realSource.handleChunkData(`entity-1/image-1/0/0/0/0/0/${i}`, new ArrayBuffer(64));
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        // …which retires the surfaced signal and proves the failures were
+        // never turned into sticky permanent entries.
+        expect(onChunkFailureRecovered).toHaveBeenCalledTimes(1);
+        expect(cache.telemetry().failedChunks.permanent).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a server-reported transient that also fails its retry feeds the streak once, not twice", async () => {
+      // The recoverable-throttle case: every chunk comes back `unavailable`
+      // (server-reported, transient), is retried once, and
+      // the retry ALSO comes back `unavailable`. Each such chunk produces two
+      // physical rejections but is a single failed delivery: it must feed the
+      // streak exactly once. If the retry double-counted, half a threshold of
+      // distinct throttled chunks would trip the aggregate "loading is failing"
+      // signal on a source that is merely rate-limiting and self-heals.
+      vi.useFakeTimers();
+      try {
+        const onChunkFailureStreak = vi.fn();
+        const realSource = new ProxiedContentSource(() => {});
+        realSource.registerImage("image-1", { Raw: { data_type: "uint16" } });
+        const cache = new CpuCache(realSource, createSyncDecode(), {
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+        });
+
+        const half = CHUNK_FAILURE_STREAK_THRESHOLD / 2;
+        const throttled = Array.from({ length: half }, (_, i) => makeRequest({ x: i }));
+        cache.submit(makePlan(throttled));
+
+        // First attempt: every chunk is reported `unavailable`.
+        for (let i = 0; i < throttled.length; i++) {
+          realSource.handleSourceChunkStatus(
+            "entity-1", "image-1", `0/0/0/0/0/${i}`,
+            "unavailable", "backend throttled",
+          );
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Retry attempt (still within the fetch timeout window): the source
+        // reports `unavailable` a second time for the same chunks. Two physical
+        // rejections per chunk, but the streak must not double-count them.
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        for (let i = 0; i < throttled.length; i++) {
+          realSource.handleSourceChunkStatus(
+            "entity-1", "image-1", `0/0/0/0/0/${i}`,
+            "unavailable", "backend throttled",
+          );
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        // `half` distinct throttled chunks contribute `half` to the streak —
+        // below the threshold — so a self-healing throttle stays quiet even
+        // though it emitted a full threshold of physical rejections.
+        expect(onChunkFailureStreak).not.toHaveBeenCalled();
+        // No sticky permanents: the transient classification survived intact.
+        expect(cache.telemetry().failedChunks.permanent).toBe(0);
+
+        // Proof each throttled chunk contributed exactly one (not zero): a
+        // further batch of distinct server-reported failures completes exactly
+        // one full threshold and fires the signal once.
+        const dead = Array.from(
+          { length: CHUNK_FAILURE_STREAK_THRESHOLD - half },
+          (_, i) => makeRequest({ y: 1, x: i }),
+        );
+        cache.submit(makePlan(dead));
+        for (let i = 0; i < dead.length; i++) {
+          realSource.handleSourceChunkStatus(
+            "entity-1", "image-1", `0/0/0/0/1/${i}`,
+            "failed_permanent", "credentials revoked",
+          );
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+        expect(onChunkFailureStreak.mock.calls[0][0]).toBe(CHUNK_FAILURE_STREAK_THRESHOLD);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("a delivered chunk retires a notified streak exactly once and re-arms the notifier", async () => {

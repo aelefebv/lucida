@@ -163,7 +163,17 @@ export class ProxiedContentSource implements ContentSource {
         : { reason: "unavailable", kind: "transient" as const };
     for (const entry of entries) {
       clearTimeout(entry.timeoutId);
-      entry.reject(new FetchError(`Source chunk ${chunkKey} ${reason}${detail}`, { kind }));
+      // `serverReported` regardless of `kind`: the store answered with a
+      // failure, so this feeds the delivery-failure streak even when the
+      // classification is transient (so a persistently-unavailable source
+      // still surfaces) — while the transient/permanent split keeps driving
+      // retry as before.
+      entry.reject(
+        new FetchError(`Source chunk ${chunkKey} ${reason}${detail}`, {
+          kind,
+          serverReported: true,
+        }),
+      );
     }
   }
 

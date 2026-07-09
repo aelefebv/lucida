@@ -80,12 +80,13 @@ export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
 /** Consecutive chunk-delivery failures with no delivered chunk in between
  *  before the `onChunkFailureStreak` config callback fires. What counts:
- *  permanent-kind fetch rejections — including the server's per-chunk
- *  `source_chunk_status` reports for store failures (revoked access,
- *  backend faults) — plus decode failures. Transient-kind failures
- *  (timeouts, disconnect rejections) never count. High enough that a few
- *  isolated misses never trip it; a systemically dead source crosses it
- *  within one viewport's requests. */
+ *  permanent-kind fetch rejections, every server-reported per-chunk
+ *  `source_chunk_status` failure (store failures — revoked access, backend
+ *  faults, throttling — whether classified permanent or transient), and
+ *  decode failures. Client-side transient failures (timeouts, disconnect
+ *  rejections) never count. High enough that a few isolated misses never
+ *  trip it; a systemically dead source crosses it within one viewport's
+ *  requests. */
 export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
 /** Minimum spacing between `onChunkFailureStreak` calls while a streak
  *  persists — an aggregate signal, never per-chunk spam. */
@@ -962,6 +963,22 @@ export class CpuCache {
         return;
       }
 
+      // A server-reported failure (a `source_chunk_status` frame: the source
+      // answered the request with a failure) is a real delivery failure and
+      // feeds the streak now, before the retry branch and regardless of its
+      // retry classification. A persistently-failing source thus surfaces
+      // even when each failure is individually transient (self-healing), and
+      // the count still resets the moment any chunk is delivered. It counts
+      // once per chunk, on the first attempt only (`retryCount === 0`): a
+      // server-reported transient that also fails its single retry must not
+      // feed the streak a second time for the same physical chunk — that would
+      // halve the effective threshold, tripping the aggregate signal on a mere
+      // self-healing throttle. The transient/permanent split below is left to
+      // drive retry unchanged.
+      if (fe.serverReported && retryCount === 0) {
+        this.recordChunkFailureForStreak(fe.message);
+      }
+
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
@@ -972,13 +989,14 @@ export class CpuCache {
       this.recordFailure(key, isPermanent);
       this.counters.recordFetchFailure(isPermanent, fe.message);
       this.recordFailureForBurstDetection(isPermanent, fe.message);
-      // Transient-kind failures (network blips, timeouts, the transport's
-      // own disconnect rejections) belong to the reconnect machinery —
-      // counting them would let an ordinary connection drop or laptop
-      // sleep masquerade as a failing data source. Only permanent
-      // failures feed the streak here; decode failures are counted at the
-      // decode boundary below.
-      if (isPermanent) this.recordChunkFailureForStreak(fe.message);
+      // Client-side transient failures (network blips, timeouts, the
+      // transport's own disconnect rejections) belong to the reconnect
+      // machinery — counting them would let an ordinary connection drop or
+      // laptop sleep masquerade as a failing data source. A permanent fetch
+      // failure feeds the streak here (unless it was already counted above as
+      // server-reported, to avoid double-counting the same failure); decode
+      // failures are counted at the decode boundary below.
+      if (isPermanent && !fe.serverReported) this.recordChunkFailureForStreak(fe.message);
       this.chunkScheduler.markInFlightDone(key);
       this.inFlightChunkMeta.delete(key);
       return;
@@ -1341,9 +1359,10 @@ export class CpuCache {
    * owner once it crosses the threshold — throttled while the streak
    * persists. This is the user-visible complement to the per-chunk failure
    * map: individual misses stay quiet, but a source that fails everything
-   * (e.g. credentials lost after a successful open, which the server
-   * reports per chunk as `source_chunk_status` and the content source
-   * rejects as permanent) must not present as a silently stalling canvas.
+   * (e.g. credentials lost after a successful open, or a backend that stays
+   * unavailable — both reported per chunk as `source_chunk_status`, whether
+   * the content source rejects them as permanent or as self-healing
+   * transient) must not present as a silently stalling canvas.
    */
   private recordChunkFailureForStreak(message: string): void {
     this.chunkFailureStreak += 1;
