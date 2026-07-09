@@ -3,14 +3,130 @@
 //! Caches chunk bytes fetched from an ObjectStore to reduce repeated reads
 //! when multiple Clients view the same region.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use bytes::Bytes;
 use lru::LruCache;
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Semaphore, broadcast};
+
+/// Default cap on concurrent backend source reads when no operator override
+/// is supplied. Chosen from the conservative middle of the intended 8–16
+/// range: enough parallelism to keep a remote store busy without letting a
+/// burst of misses fan out into hundreds of simultaneous connections.
+const DEFAULT_SOURCE_READ_CONCURRENCY: usize = 12;
+
+/// Environment variable an operator can set to override the process-global
+/// concurrent-source-read cap. Read once, the first time the limiter is used.
+const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
+
+/// The process-global limiter shared by every [`CachedStore`] built via
+/// [`CachedStore::new`].
+///
+/// There is one `CachedStore` per dataset/binding, so a per-instance
+/// semaphore would let the effective concurrency scale with the number of
+/// open datasets and defeat the cap entirely. A single shared limiter keeps
+/// the bound over the whole process regardless of how many datasets are open.
+fn global_source_read_limiter() -> &'static Arc<Semaphore> {
+    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    LIMITER.get_or_init(|| Arc::new(Semaphore::new(configured_source_read_limit())))
+}
+
+/// Resolve the source-read cap from the operator override, falling back to
+/// [`DEFAULT_SOURCE_READ_CONCURRENCY`]. A non-numeric or zero value is
+/// ignored in favour of the default so a typo can never wedge all reads.
+fn configured_source_read_limit() -> usize {
+    std::env::var(SOURCE_READ_CONCURRENCY_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&limit| limit > 0)
+        .unwrap_or(DEFAULT_SOURCE_READ_CONCURRENCY)
+}
+
+/// The classification-relevant shape of a captured backend error.
+///
+/// The downstream triage of a source-chunk read failure (not-found →
+/// zero-filled, permission/credentials → sticky-permanent, everything else →
+/// transient/self-healing) is driven by the `object_store::Error` *variant*.
+/// A single-flight follower reconstructs its error from a broadcast snapshot,
+/// so the snapshot must carry enough of the leader's variant that the
+/// follower's reconstructed error triages identically — otherwise a coalesced
+/// 403 could look transient (retry storm) or a coalesced 404 could look like a
+/// hard failure instead of legitimate sparse data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SharedErrorKind {
+    /// The object does not exist. Reconstructs to `NotFound` so it is treated
+    /// as legitimate sparse data (zero-filled), matched by variant rather than
+    /// a fragile message substring.
+    NotFound,
+    /// The store refused the read for lack of permission or valid credentials
+    /// (403/401). Reconstructs to `PermissionDenied` so it stays permanent.
+    PermissionDenied,
+    /// Any other failure — backend fault, throttling, timeout, unreachable
+    /// service. Reconstructs to `Generic`, classified as unavailable/transient.
+    Other,
+}
+
+impl SharedErrorKind {
+    fn classify(err: &object_store::Error) -> Self {
+        match err {
+            object_store::Error::NotFound { .. } => SharedErrorKind::NotFound,
+            object_store::Error::PermissionDenied { .. }
+            | object_store::Error::Unauthenticated { .. } => SharedErrorKind::PermissionDenied,
+            _ => SharedErrorKind::Other,
+        }
+    }
+}
+
+/// A cloneable snapshot of a backend error, broadcast to single-flight
+/// followers. `object_store::Error` is not `Clone`, so the leader captures the
+/// error's classification [`kind`](SharedErrorKind) plus its display form and
+/// each follower reconstructs an equivalent `object_store::Error` — same
+/// variant, same message — to surface to its own caller.
+#[derive(Clone)]
+struct SharedError {
+    kind: SharedErrorKind,
+    message: Arc<str>,
+}
+
+impl SharedError {
+    fn capture(err: &object_store::Error) -> Self {
+        SharedError {
+            kind: SharedErrorKind::classify(err),
+            message: Arc::from(err.to_string()),
+        }
+    }
+
+    fn into_object_store_error(self) -> object_store::Error {
+        let source: Box<dyn std::error::Error + Send + Sync> = self.message.to_string().into();
+        match self.kind {
+            // Path is left empty: it is not part of the reconstruction's
+            // purpose (classification is by variant, the leader's message is
+            // preserved verbatim) and the true path is already in the message.
+            SharedErrorKind::NotFound => object_store::Error::NotFound {
+                path: String::new(),
+                source,
+            },
+            SharedErrorKind::PermissionDenied => object_store::Error::PermissionDenied {
+                path: String::new(),
+                source,
+            },
+            SharedErrorKind::Other => object_store::Error::Generic {
+                store: "source",
+                source,
+            },
+        }
+    }
+}
+
+/// Result shared over the in-flight broadcast. Success carries `Bytes`
+/// (cheap, reference-counted clones); failure carries a [`SharedError`].
+type ShareResult = Result<Bytes, SharedError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheStats {
@@ -21,12 +137,23 @@ pub struct CacheStats {
     pub misses: u64,
     pub evictions: u64,
     pub backend_errors: u64,
+    /// Single-flight followers served a leader's result without issuing
+    /// their own backend read.
+    pub coalesced: u64,
 }
 
 /// A memory-bounded LRU cache wrapping an ObjectStore.
 pub struct CachedStore {
     inner: Arc<dyn ObjectStore>,
     cache: Mutex<LruState>,
+    /// In-flight backend reads keyed by object path. Concurrent misses for
+    /// the same path subscribe to the leader's broadcast instead of each
+    /// hitting the backend.
+    in_flight: Mutex<HashMap<String, broadcast::Sender<ShareResult>>>,
+    /// Caps concurrent backend reads. Shared process-wide by default (see
+    /// [`global_source_read_limiter`]); a dedicated limiter can be threaded
+    /// in via [`CachedStore::with_source_limiter`].
+    source_read: Arc<Semaphore>,
 }
 
 struct LruState {
@@ -37,11 +164,90 @@ struct LruState {
     misses: u64,
     evictions: u64,
     backend_errors: u64,
+    coalesced: u64,
+}
+
+/// The shared in-flight registry keyed by object path.
+type InFlight = Mutex<HashMap<String, broadcast::Sender<ShareResult>>>;
+
+/// RAII owner of a leader's in-flight entry.
+///
+/// The broadcast sender lives in the shared `in_flight` map, not on the
+/// leader's stack, so if the leader future is dropped, cancelled, or panics
+/// between registering the entry and broadcasting its result, nothing would
+/// otherwise remove the entry or drop the sender — every current follower and
+/// every future caller taking the single-flight path for that key would await
+/// `rx.recv()` forever (a permanent wedge). This guard, held on the leader's
+/// stack from the moment the entry is registered, closes that gap:
+///
+/// - On normal completion the leader calls [`LeaderGuard::complete`], which
+///   removes the entry and broadcasts the result exactly once.
+/// - On any early exit (drop/cancel/panic) `Drop` removes the entry and drops
+///   the sender, so followers observe a `RecvError` and fall back to their own
+///   backend read, and a later request for the same key starts fresh.
+struct LeaderGuard<'a> {
+    in_flight: &'a InFlight,
+    key: String,
+    /// Set once [`complete`](Self::complete) has removed the entry, so `Drop`
+    /// does not remove it a second time.
+    completed: bool,
+}
+
+impl<'a> LeaderGuard<'a> {
+    fn new(in_flight: &'a InFlight, key: String) -> Self {
+        LeaderGuard {
+            in_flight,
+            key,
+            completed: false,
+        }
+    }
+
+    /// Publish the leader's outcome to all current followers and remove the
+    /// in-flight entry. Called exactly once on the normal-completion path.
+    fn complete(&mut self, result: &Result<Bytes, object_store::Error>) {
+        let mut in_flight = self.in_flight.lock().unwrap();
+        if let Some(tx) = in_flight.remove(&self.key) {
+            let payload: ShareResult = match result {
+                Ok(bytes) => Ok(bytes.clone()),
+                Err(error) => Err(SharedError::capture(error)),
+            };
+            let _ = tx.send(payload);
+        }
+        self.completed = true;
+    }
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        // Leader vanished before broadcasting (dropped/cancelled/panicked).
+        // Remove the entry and let the sender drop so every current and future
+        // waiter observes `RecvError` and falls back to its own fetch, rather
+        // than awaiting a result that will never be sent.
+        let mut in_flight = self.in_flight.lock().unwrap();
+        in_flight.remove(&self.key);
+    }
 }
 
 impl CachedStore {
-    /// Create a new CachedStore wrapping `inner` with a maximum cache size of `max_bytes`.
+    /// Create a new CachedStore wrapping `inner` with a maximum cache size of
+    /// `max_bytes`. Backend-read concurrency is bounded by the process-global
+    /// limiter shared with every other `CachedStore` built this way.
     pub fn new(inner: Arc<dyn ObjectStore>, max_bytes: usize) -> Self {
+        Self::with_source_limiter(inner, max_bytes, global_source_read_limiter().clone())
+    }
+
+    /// Like [`CachedStore::new`], but with an explicit source-read limiter.
+    /// Production code uses [`CachedStore::new`] so all instances share one
+    /// process-global cap; threading in a dedicated semaphore is useful for
+    /// callers that need an isolated, independently sized bound.
+    pub fn with_source_limiter(
+        inner: Arc<dyn ObjectStore>,
+        max_bytes: usize,
+        source_read: Arc<Semaphore>,
+    ) -> Self {
         Self {
             inner,
             cache: Mutex::new(LruState {
@@ -52,7 +258,10 @@ impl CachedStore {
                 misses: 0,
                 evictions: 0,
                 backend_errors: 0,
+                coalesced: 0,
             }),
+            in_flight: Mutex::new(HashMap::new()),
+            source_read,
         }
     }
 
@@ -66,14 +275,23 @@ impl CachedStore {
             misses: state.misses,
             evictions: state.evictions,
             backend_errors: state.backend_errors,
+            coalesced: state.coalesced,
         }
     }
 
-    /// Get bytes by path, returning cached data on hit or fetching from the inner store on miss.
+    /// Get bytes by path, returning cached data on hit or fetching from the
+    /// inner store on miss.
+    ///
+    /// Concurrent misses for the same path are coalesced: one caller becomes
+    /// the leader and performs the single backend read while the others wait
+    /// for its result. On success every waiter receives the same bytes and
+    /// the value is inserted into the LRU once. On failure the leader's error
+    /// is surfaced to all current waiters and is **not** cached, so a later
+    /// read re-attempts the backend.
     pub async fn get_bytes(&self, path: &Path) -> Result<Bytes, object_store::Error> {
         let key = path.to_string();
 
-        // Check cache
+        // Cache hit — served without touching the backend or a permit.
         {
             let mut state = self.cache.lock().unwrap();
             if let Some(bytes) = state.lru.get(&key) {
@@ -84,16 +302,77 @@ impl CachedStore {
             state.misses += 1;
         }
 
-        // Cache miss — fetch from inner store
-        let bytes = match self.inner.get(path).await {
-            Ok(object) => match object.bytes().await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    let mut state = self.cache.lock().unwrap();
-                    state.backend_errors += 1;
-                    return Err(error);
+        // Single-flight: claim leadership by registering a broadcast sender,
+        // or subscribe to an existing leader's channel as a follower.
+        let follower_rx: Option<broadcast::Receiver<ShareResult>> = {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            match in_flight.get(&key) {
+                Some(tx) => Some(tx.subscribe()),
+                None => {
+                    let (tx, _rx) = broadcast::channel::<ShareResult>(1);
+                    in_flight.insert(key.clone(), tx);
+                    None
                 }
-            },
+            }
+        };
+
+        if let Some(mut rx) = follower_rx {
+            return match rx.recv().await {
+                // Served by the leader — count the coalesce and surface the
+                // leader's outcome, reconstructed with the leader's error
+                // variant so it triages identically. A shared failure is not
+                // cached.
+                Ok(shared) => {
+                    {
+                        let mut state = self.cache.lock().unwrap();
+                        state.coalesced += 1;
+                    }
+                    shared.map_err(SharedError::into_object_store_error)
+                }
+                // Leader vanished without broadcasting (dropped/cancelled/
+                // panicked). The guard has removed the in-flight entry, so
+                // fall back to a direct backend read: this waiter still gets a
+                // real answer and the path is not wedged.
+                Err(_) => self.fetch_from_backend(path, &key).await,
+            };
+        }
+
+        // Leader path. Install the cancel-safe guard on the stack immediately
+        // — before the first `.await` — so a dropped/cancelled/panicking
+        // leader can never leave the in-flight entry stranded. On normal
+        // completion `complete` removes the entry and broadcasts the result
+        // exactly once; the guard's `Drop` is then a no-op.
+        let mut guard = LeaderGuard::new(&self.in_flight, key.clone());
+        let result = self.fetch_from_backend(path, &key).await;
+        guard.complete(&result);
+        result
+    }
+
+    /// Perform a single backend read under a source-read permit and, on
+    /// success, insert the bytes into the LRU. The permit is held only for
+    /// the actual network I/O so cache hits and followers never consume one.
+    async fn fetch_from_backend(
+        &self,
+        path: &Path,
+        key: &str,
+    ) -> Result<Bytes, object_store::Error> {
+        let fetch = {
+            // Bound concurrent backend reads process-wide. Scoped to just the
+            // GET + body read so the permit is released before the (fast,
+            // synchronous) cache insert below.
+            let _permit = self
+                .source_read
+                .acquire()
+                .await
+                .expect("source-read semaphore is never closed");
+            match self.inner.get(path).await {
+                Ok(object) => object.bytes().await,
+                Err(error) => Err(error),
+            }
+        };
+
+        let bytes = match fetch {
+            Ok(bytes) => bytes,
             Err(error) => {
                 let mut state = self.cache.lock().unwrap();
                 state.backend_errors += 1;
@@ -101,11 +380,11 @@ impl CachedStore {
             }
         };
 
-        // Insert into cache, evict LRU entries if over budget
+        // Insert into cache, evicting LRU entries to stay within budget.
         {
             let mut state = self.cache.lock().unwrap();
-            if let Some(bytes) = state.lru.get(&key) {
-                return Ok(bytes.clone());
+            if let Some(existing) = state.lru.get(key) {
+                return Ok(existing.clone());
             }
             let new_size = bytes.len();
 
@@ -120,7 +399,7 @@ impl CachedStore {
             }
 
             state.current_bytes += new_size;
-            state.lru.put(key, bytes.clone());
+            state.lru.put(key.to_string(), bytes.clone());
         }
 
         Ok(bytes)
@@ -205,5 +484,433 @@ mod tests {
         assert_eq!(stats.backend_errors, 1);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Single-flight, cap, and failure-sharing tests ---
+    //
+    // These use a counting mock `ObjectStore` with a per-GET delay so
+    // concurrent reads genuinely overlap. Assertions are on GET counts and
+    // observed max concurrency, never wall-clock time.
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use futures_util::stream::BoxStream;
+    use object_store::{
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
+        PutOptions, PutPayload, PutResult,
+    };
+
+    /// `ObjectStore` wrapper that counts `get_opts` calls, tracks peak
+    /// concurrency, sleeps before each read so overlaps are deterministic,
+    /// and can be toggled to fail every read.
+    #[derive(Debug)]
+    struct CountingStore {
+        inner: Arc<dyn ObjectStore>,
+        get_count: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        delay_ms: u64,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl CountingStore {
+        fn new(delay_ms: u64) -> Self {
+            Self {
+                inner: Arc::new(object_store::memory::InMemory::new()),
+                get_count: Arc::new(AtomicUsize::new(0)),
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                delay_ms,
+                fail: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        async fn seed(&self, path: &str, bytes: &'static [u8]) {
+            self.inner
+                .put(&Path::from(path), PutPayload::from_static(bytes))
+                .await
+                .unwrap();
+        }
+    }
+
+    impl std::fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "CountingStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.get_count.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            let result = if self.fail.load(Ordering::SeqCst) {
+                Err(object_store::Error::Generic {
+                    store: "counting",
+                    source: "injected failure".into(),
+                })
+            } else {
+                self.inner.get_opts(location, options).await
+            };
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        async fn delete(&self, location: &Path) -> object_store::Result<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_path_misses_collapse_to_one_backend_get() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("chunk", b"payload").await;
+        let get_count = store.get_count.clone();
+
+        // Generous limiter so the cap never masks single-flight behavior.
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            Arc::new(Semaphore::new(64)),
+        ));
+
+        let waiters = 8;
+        let mut handles = Vec::new();
+        for _ in 0..waiters {
+            let cached = cached.clone();
+            handles.push(tokio::spawn(async move {
+                cached.get_bytes(&Path::from("chunk")).await
+            }));
+        }
+
+        for handle in handles {
+            let bytes = handle.await.unwrap().unwrap();
+            assert_eq!(&bytes[..], b"payload");
+        }
+
+        // Exactly one backend read despite `waiters` concurrent misses.
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+
+        let stats = cached.stats();
+        assert_eq!(stats.coalesced, waiters - 1);
+        assert_eq!(stats.entry_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shared_failure_is_not_cached_and_reattempts() {
+        let store = Arc::new(CountingStore::new(50));
+        store.seed("chunk", b"payload").await;
+        store.fail.store(true, Ordering::SeqCst);
+        let get_count = store.get_count.clone();
+        let fail = store.fail.clone();
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            Arc::new(Semaphore::new(64)),
+        ));
+
+        // Concurrent failing misses collapse to one backend GET; every
+        // waiter surfaces an error.
+        let waiters = 6;
+        let mut handles = Vec::new();
+        for _ in 0..waiters {
+            let cached = cached.clone();
+            handles.push(tokio::spawn(async move {
+                cached.get_bytes(&Path::from("chunk")).await
+            }));
+        }
+        for handle in handles {
+            assert!(handle.await.unwrap().is_err());
+        }
+
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        {
+            let stats = cached.stats();
+            // Only the leader records a backend error; followers are spared
+            // the GET but still surface the shared failure.
+            assert_eq!(stats.backend_errors, 1);
+            assert_eq!(stats.coalesced, waiters - 1);
+            // The failure was not cached.
+            assert_eq!(stats.entry_count, 0);
+        }
+
+        // A later read re-attempts the backend and now succeeds.
+        fail.store(false, Ordering::SeqCst);
+        let bytes = cached.get_bytes(&Path::from("chunk")).await.unwrap();
+        assert_eq!(&bytes[..], b"payload");
+        assert_eq!(get_count.load(Ordering::SeqCst), 2);
+        assert_eq!(cached.stats().entry_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_distinct_misses_are_bounded_by_the_cap() {
+        let store = Arc::new(CountingStore::new(50));
+        let distinct = 8usize;
+        for i in 0..distinct {
+            // Static leak keeps a `'static` slice for the seed helper; fine
+            // for a small, single-run test.
+            let bytes: &'static [u8] = Box::leak(vec![b'x'; 4].into_boxed_slice());
+            store.seed(&format!("chunk-{i}"), bytes).await;
+        }
+        let get_count = store.get_count.clone();
+        let max_active = store.max_active.clone();
+
+        let cap = 3;
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024 * 1024,
+            Arc::new(Semaphore::new(cap)),
+        ));
+
+        let mut handles = Vec::new();
+        for i in 0..distinct {
+            let cached = cached.clone();
+            handles.push(tokio::spawn(async move {
+                cached.get_bytes(&Path::from(format!("chunk-{i}"))).await
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        // All distinct paths → no dedup; every one hit the backend.
+        assert_eq!(get_count.load(Ordering::SeqCst), distinct);
+        // Never more than `cap` backend reads in flight at once.
+        assert!(
+            max_active.load(Ordering::SeqCst) <= cap,
+            "observed max concurrency {} exceeded cap {cap}",
+            max_active.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn shared_error_preserves_error_variant_for_classification() {
+        use object_store::Error;
+
+        fn boxed(msg: &str) -> Box<dyn std::error::Error + Send + Sync> {
+            msg.to_string().into()
+        }
+
+        let not_found = Error::NotFound {
+            path: "chunk".into(),
+            source: boxed("missing"),
+        };
+        let denied = Error::PermissionDenied {
+            path: "chunk".into(),
+            source: boxed("403 Forbidden"),
+        };
+        let unauth = Error::Unauthenticated {
+            path: "chunk".into(),
+            source: boxed("401 credentials expired"),
+        };
+        let throttled = Error::Generic {
+            store: "source",
+            source: boxed("503 Service Unavailable"),
+        };
+
+        // Not-found survives as the NotFound *variant*, so a coalesced 404
+        // follower is still recognized by variant match (not a brittle
+        // message substring) and served as zero-filled sparse data.
+        assert!(matches!(
+            SharedError::capture(&not_found).into_object_store_error(),
+            Error::NotFound { .. }
+        ));
+        // Both 403 and 401 stay permission-class, so a coalesced follower of a
+        // permission failure is still classified permanent — no retry storm.
+        assert!(matches!(
+            SharedError::capture(&denied).into_object_store_error(),
+            Error::PermissionDenied { .. }
+        ));
+        assert!(matches!(
+            SharedError::capture(&unauth).into_object_store_error(),
+            Error::PermissionDenied { .. }
+        ));
+        // Everything else collapses to Generic → unavailable → client
+        // transient, so a throttled follower self-heals.
+        assert!(matches!(
+            SharedError::capture(&throttled).into_object_store_error(),
+            Error::Generic { .. }
+        ));
+
+        // The leader's message is preserved verbatim for downstream detail.
+        let reconstructed = SharedError::capture(&throttled).into_object_store_error();
+        assert!(
+            reconstructed
+                .to_string()
+                .contains("503 Service Unavailable"),
+            "reconstructed error dropped the leader's message: {reconstructed}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_leader_does_not_wedge_the_path() {
+        let store = Arc::new(CountingStore::new(200));
+        store.seed("chunk", b"payload").await;
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            Arc::new(Semaphore::new(64)),
+        ));
+
+        // A leader registers the in-flight entry and begins the (slow) backend
+        // read, then is cancelled by the timeout before it can broadcast.
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(20),
+            cached.get_bytes(&Path::from("chunk")),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "leader should have been cancelled mid-fetch"
+        );
+
+        // The guard cleared the in-flight entry rather than leaking it.
+        {
+            let in_flight = cached.in_flight.lock().unwrap();
+            assert!(
+                in_flight.is_empty(),
+                "cancelled leader left a stranded in-flight entry"
+            );
+        }
+
+        // A subsequent request for the same path completes normally instead of
+        // awaiting a broadcast that will never come.
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            cached.get_bytes(&Path::from("chunk")),
+        )
+        .await
+        .expect("subsequent request must not be wedged")
+        .expect("subsequent request should succeed");
+        assert_eq!(&bytes[..], b"payload");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn follower_falls_back_when_leader_is_cancelled() {
+        let store = Arc::new(CountingStore::new(200));
+        store.seed("chunk", b"payload").await;
+
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            Arc::new(Semaphore::new(64)),
+        ));
+
+        // Leader claims the path and starts its slow read.
+        let leader = {
+            let cached = cached.clone();
+            tokio::spawn(async move { cached.get_bytes(&Path::from("chunk")).await })
+        };
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Follower subscribes to the leader's in-flight channel and parks.
+        let follower = {
+            let cached = cached.clone();
+            tokio::spawn(async move { cached.get_bytes(&Path::from("chunk")).await })
+        };
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Cancel the leader mid-read; awaiting the aborted handle guarantees
+        // its guard has run (entry removed, sender dropped) before we proceed.
+        leader.abort();
+        let _ = leader.await;
+
+        // The follower observed the dropped sender, fell back to its own read,
+        // and still gets the bytes — a cancelled leader does not dark-hole the
+        // coalesced waiters.
+        let bytes = tokio::time::timeout(Duration::from_secs(5), follower)
+            .await
+            .expect("follower must not be wedged")
+            .expect("follower task panicked")
+            .expect("follower fetch should succeed");
+        assert_eq!(&bytes[..], b"payload");
+    }
+
+    #[test]
+    fn configured_source_read_limit_defaults_and_overrides() {
+        // Default when unset.
+        // SAFETY: single-threaded test; no other thread reads the env here.
+        unsafe {
+            std::env::remove_var(SOURCE_READ_CONCURRENCY_ENV);
+        }
+        assert_eq!(
+            configured_source_read_limit(),
+            DEFAULT_SOURCE_READ_CONCURRENCY
+        );
+
+        unsafe {
+            std::env::set_var(SOURCE_READ_CONCURRENCY_ENV, "5");
+        }
+        assert_eq!(configured_source_read_limit(), 5);
+
+        // Garbage and zero fall back to the default rather than wedging reads.
+        unsafe {
+            std::env::set_var(SOURCE_READ_CONCURRENCY_ENV, "not-a-number");
+        }
+        assert_eq!(
+            configured_source_read_limit(),
+            DEFAULT_SOURCE_READ_CONCURRENCY
+        );
+        unsafe {
+            std::env::set_var(SOURCE_READ_CONCURRENCY_ENV, "0");
+        }
+        assert_eq!(
+            configured_source_read_limit(),
+            DEFAULT_SOURCE_READ_CONCURRENCY
+        );
+
+        unsafe {
+            std::env::remove_var(SOURCE_READ_CONCURRENCY_ENV);
+        }
     }
 }

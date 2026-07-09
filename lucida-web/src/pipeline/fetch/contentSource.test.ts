@@ -220,12 +220,19 @@ describe("ProxiedContentSource.fetch", () => {
     }
   });
 
-  it("a server source-chunk status rejects the pending fetch as permanent (both statuses)", async () => {
-    // The server only reports terminal store failures here (not-found is
-    // served as zero-filled bytes); both statuses must land as `permanent`
-    // so the delivery-failure streak counts them, instead of a transient
-    // timeout hiding a dead source.
-    for (const status of ["failed_permanent", "unavailable"] as const) {
+  it("a server source-chunk status classifies failed_permanent as permanent and unavailable as transient", async () => {
+    // The server only reports store failures here (not-found is served as
+    // zero-filled bytes). A revoked-access/credentials failure sticks
+    // (`permanent`); a backend fault / throttle / timeout must self-heal
+    // (`transient`) instead of dark-holing the chunk until reopen — the
+    // server now emits `unavailable` when its bounded retry budget is spent
+    // before the client's own fetch timeout would fire.
+    const cases = [
+      ["failed_permanent", "permanent"],
+      ["unavailable", "transient"],
+    ] as const;
+
+    for (const [status, kind] of cases) {
       const ctrl = new AbortController();
       const chunkKey = `2/0/0/0/1/${status.length}`;
       const promise = source.fetch(
@@ -242,7 +249,7 @@ describe("ProxiedContentSource.fetch", () => {
 
       await expect(promise).rejects.toMatchObject({
         name: "FetchError",
-        kind: "permanent",
+        kind,
         message: expect.stringContaining("store rejected the read"),
       });
     }
@@ -255,8 +262,8 @@ describe("ProxiedContentSource.fetch", () => {
     const second = source.fetch(request, ctrl.signal);
 
     source.handleSourceChunkStatus("ds-1", "image-1", "2/0/0/0/0/0", "unavailable");
-    await expect(first).rejects.toMatchObject({ kind: "permanent" });
-    await expect(second).rejects.toMatchObject({ kind: "permanent" });
+    await expect(first).rejects.toMatchObject({ kind: "transient" });
+    await expect(second).rejects.toMatchObject({ kind: "transient" });
 
     // The slot was consumed: a re-fetch sends a fresh chunk_request.
     const framesBefore = sentMessages.length;
