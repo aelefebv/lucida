@@ -149,6 +149,27 @@ pub struct DatasetDisplaySettings {
     pub channel_blend_mode: BlendMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail_level_override: Option<u32>,
+    /// The author's label names at capture time, positionally parallel to
+    /// `label_settings` (entry `i` names the label `label_settings[i]`
+    /// controls). Stamped from the dataset's current `label_specs()` order when
+    /// these settings are seeded, so it rides presence and saved views next to
+    /// the per-label state it describes.
+    ///
+    /// This is what lets an adopted settings blob key its per-label state by
+    /// label NAME instead of by raw array index: when the recipient's current
+    /// label list differs (reordered, a label added or removed, or repeated
+    /// names across a collection), [`Self::reconcile_label_settings`] uses these
+    /// names to place each saved entry on the matching current label rather than
+    /// the one that merely shares its old index.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]` keeps this
+    /// strictly additive: a presence snapshot or saved view persisted before
+    /// this field existed carries no `label_names` key and deserializes as an
+    /// empty Vec — which the reconcile treats as "legacy, positional" — and a
+    /// settings blob with no labels serializes byte-identically to a pre-field
+    /// one (the key is omitted). No wire break.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label_names: Vec<String>,
 }
 
 impl DatasetDisplaySettings {
@@ -229,8 +250,78 @@ impl DatasetDisplaySettings {
                     opacity: 0.5,
                 })
                 .collect(),
+            // Stamp the current label names alongside the per-label settings so
+            // the pair travels together on presence / saved views. This does
+            // NOT alter the visibility policy above; it only records which label
+            // each seeded entry describes, so an adopter can key by name.
+            label_names: labels.iter().map(|l| l.name.clone()).collect(),
             ..Default::default()
         }
+    }
+
+    /// Remap a saved per-label settings list onto a recipient's CURRENT label
+    /// order, keyed by label NAME and aware of repeated names.
+    ///
+    /// The result is always aligned to `current_names`: `result.len() ==
+    /// current_names.len()`, with `result[i]` the settings that should apply to
+    /// the current label at index `i`.
+    ///
+    /// - `author_names` EMPTY → **legacy, positional**. A settings blob captured
+    ///   before label names were recorded carries no names, so the only mapping
+    ///   available is by index: `result[i] = saved.get(i)` (or the default when
+    ///   the saved list is shorter). This preserves the old behaviour exactly.
+    /// - `author_names` non-empty → **name-keyed, occurrence-aware**. `saved` is
+    ///   positionally parallel to `author_names` (the pair captured together).
+    ///   For the current label at index `i` with name `N` — being the `k`-th
+    ///   occurrence of `N` within `current_names[0..=i]` — the mapping picks the
+    ///   `k`-th entry of `saved` whose `author_names` entry equals `N`. A current
+    ///   label with no matching author entry (a label the author never had, or
+    ///   one occurrence too many of a repeated name) takes
+    ///   [`LabelSettings::default`].
+    ///
+    /// Occurrence-awareness is what keeps a collection whose plate repeats a
+    /// name (e.g. two labels both called `region-a`) from collapsing both onto
+    /// the author's first `region-a`: the first current `region-a` takes the
+    /// author's first, the second takes the author's second, and so on.
+    pub fn reconcile_label_settings(
+        saved: &[LabelSettings],
+        author_names: &[String],
+        current_names: &[String],
+    ) -> Vec<LabelSettings> {
+        if author_names.is_empty() {
+            // Legacy blob: no names to key on, so fall back to positional.
+            return (0..current_names.len())
+                .map(|i| saved.get(i).cloned().unwrap_or_default())
+                .collect();
+        }
+
+        // For each name, how many current labels of that name we have already
+        // placed — so the k-th current occurrence claims the k-th author entry.
+        let mut occurrences_taken: HashMap<&str, usize> = HashMap::new();
+        current_names
+            .iter()
+            .map(|name| {
+                let want = occurrences_taken.entry(name.as_str()).or_insert(0);
+                let target_occurrence = *want;
+                *want += 1;
+
+                // Walk the author's names in order; the `target_occurrence`-th
+                // entry whose name matches supplies this current label's saved
+                // settings (via the positionally-parallel `saved`).
+                let mut matched = 0usize;
+                for (author_index, author_name) in author_names.iter().enumerate() {
+                    if author_name == name {
+                        if matched == target_occurrence {
+                            return saved.get(author_index).cloned().unwrap_or_default();
+                        }
+                        matched += 1;
+                    }
+                }
+                // No matching author entry (or not enough occurrences of a
+                // repeated name): this current label starts at the default.
+                LabelSettings::default()
+            })
+            .collect()
     }
 }
 
@@ -248,6 +339,7 @@ impl Default for DatasetDisplaySettings {
             label_settings: Vec::new(),
             channel_blend_mode: BlendMode::Additive,
             detail_level_override: None,
+            label_names: Vec::new(),
         }
     }
 }
@@ -1784,5 +1876,152 @@ mod annotation_view_tests {
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod reconcile_label_settings_tests {
+    //! Name-keyed, occurrence-aware remap of saved per-label settings onto a
+    //! recipient's current label order. These lock the contract that a saved
+    //! view / bookmark / peer restore matches per-label visibility+opacity to
+    //! the RIGHT current label after the label list changed, and that a legacy
+    //! blob (no captured names) still applies positionally.
+
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A visible marker settings value, so a reconciled entry is trivially
+    /// distinguishable from the `default()` a miss produces.
+    fn marked(opacity: f32) -> LabelSettings {
+        LabelSettings {
+            visible: false,
+            opacity,
+        }
+    }
+
+    #[test]
+    fn result_is_always_aligned_to_current_names() {
+        // Even a total mismatch produces exactly one entry per current label.
+        let saved = vec![marked(0.1)];
+        let out = DatasetDisplaySettings::reconcile_label_settings(
+            &saved,
+            &names(&["a"]),
+            &names(&["x", "y", "z"]),
+        );
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|s| *s == LabelSettings::default()));
+    }
+
+    #[test]
+    fn legacy_empty_author_names_is_positional() {
+        let saved = vec![marked(0.1), marked(0.2), marked(0.3)];
+        let out = DatasetDisplaySettings::reconcile_label_settings(
+            &saved,
+            &[],
+            &names(&["whatever", "these", "are"]),
+        );
+        // Index-for-index, exactly the old behaviour.
+        assert_eq!(out, saved);
+    }
+
+    #[test]
+    fn legacy_positional_pads_and_truncates_to_current_len() {
+        let saved = vec![marked(0.1), marked(0.2)];
+        // Current is LONGER: extra current labels take the default.
+        let longer =
+            DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a", "b", "c"]));
+        assert_eq!(
+            longer,
+            vec![marked(0.1), marked(0.2), LabelSettings::default()]
+        );
+        // Current is SHORTER: trailing saved entries are dropped.
+        let shorter = DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a"]));
+        assert_eq!(shorter, vec![marked(0.1)]);
+    }
+
+    #[test]
+    fn reordered_names_follow_the_name_not_the_index() {
+        let author = names(&["region-a", "region-b", "region-c"]);
+        let saved = vec![marked(0.11), marked(0.22), marked(0.33)];
+        // Current order is a rotation of the author's.
+        let current = names(&["region-c", "region-a", "region-b"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        assert_eq!(out, vec![marked(0.33), marked(0.11), marked(0.22)]);
+    }
+
+    #[test]
+    fn added_current_label_takes_the_default() {
+        let author = names(&["region-a", "region-b"]);
+        let saved = vec![marked(0.11), marked(0.22)];
+        // "region-c" is new to the recipient — the author never had it.
+        let current = names(&["region-a", "region-c", "region-b"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        assert_eq!(
+            out,
+            vec![marked(0.11), LabelSettings::default(), marked(0.22)]
+        );
+    }
+
+    #[test]
+    fn removed_current_label_drops_its_saved_entry() {
+        let author = names(&["region-a", "region-b", "region-c"]);
+        let saved = vec![marked(0.11), marked(0.22), marked(0.33)];
+        // "region-b" is gone from the recipient; its saved entry is not applied
+        // to any surviving label.
+        let current = names(&["region-a", "region-c"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        assert_eq!(out, vec![marked(0.11), marked(0.33)]);
+    }
+
+    #[test]
+    fn repeated_names_are_matched_by_occurrence() {
+        // A plate that repeats a label name: each current occurrence claims the
+        // matching author occurrence, in order.
+        let author = names(&["region-a", "region-a", "region-a"]);
+        let saved = vec![marked(0.11), marked(0.22), marked(0.33)];
+        let current = names(&["region-a", "region-a", "region-a"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        assert_eq!(out, saved);
+
+        // More current occurrences than the author had: the surplus defaults.
+        let current_more = names(&["region-a", "region-a", "region-a", "region-a"]);
+        let out_more =
+            DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current_more);
+        assert_eq!(
+            out_more,
+            vec![
+                marked(0.11),
+                marked(0.22),
+                marked(0.33),
+                LabelSettings::default()
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_repeats_and_uniques_stay_occurrence_aligned() {
+        let author = names(&["region-a", "region-b", "region-a"]);
+        let saved = vec![marked(0.11), marked(0.22), marked(0.33)];
+        // Recipient reorders and the two "region-a"s swap relative screen order:
+        // occurrence order is preserved, so the FIRST current "region-a" still takes
+        // the author's FIRST "region-a".
+        let current = names(&["region-a", "region-a", "region-b"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        assert_eq!(out, vec![marked(0.11), marked(0.33), marked(0.22)]);
+    }
+
+    #[test]
+    fn shorter_saved_than_author_names_defaults_the_gap() {
+        // Defensive: a malformed blob whose `saved` is shorter than its
+        // `label_names` must not panic — a name whose parallel saved slot is
+        // missing yields the default.
+        let author = names(&["a", "b", "c"]);
+        let saved = vec![marked(0.11)]; // only "a" has a settings entry
+        let current = names(&["c", "a"]);
+        let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
+        assert_eq!(out, vec![LabelSettings::default(), marked(0.11)]);
     }
 }

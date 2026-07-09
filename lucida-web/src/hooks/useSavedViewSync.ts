@@ -13,7 +13,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { dataset_id_for_url } from "lucida-core";
-import { SavedViewApplier, type DimensionExtentsResolver } from "../savedView/applier.ts";
+import {
+  SavedViewApplier,
+  type DimensionExtentsResolver,
+  type LabelNamesResolver,
+} from "../savedView/applier.ts";
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
@@ -59,6 +63,11 @@ interface Params {
    *  applier via the scene's volume shape. Optional — omit to leave t/c
    *  unclamped. */
   dimensionExtentsFor?: DimensionExtentsResolver;
+  /** Resolves the recipient's CURRENT label names (manifest order) per dataset.
+   *  Read at capture (to stamp `label_names`) and at apply (to restore per-label
+   *  settings by name+occurrence). Sourced from the loaded manifests; optional —
+   *  omit to leave per-label handling positional. */
+  labelNamesFor?: LabelNamesResolver;
   /** React-side dim mirrors. The applier writes set_c/set_t/set_z_range
    *  to WASM; without these the C/T/Z sliders stay stale (e.g. bookmark
    *  saved on ch2 opens with the C slider showing 0; Bug #3 root cause). */
@@ -111,6 +120,7 @@ export function useSavedViewSync({
   loopRef,
   getLiveView,
   dimensionExtentsFor,
+  labelNamesFor,
   setC,
   setT,
   setZ,
@@ -151,10 +161,13 @@ export function useSavedViewSync({
   // that track the latest props without relifting the bundle initializer.
   const getLiveViewRef = useRef(getLiveView);
   const dimensionExtentsForRef = useRef(dimensionExtentsFor);
+  const labelNamesForRef = useRef(labelNamesFor);
   // eslint-disable-next-line react-hooks/refs
   getLiveViewRef.current = getLiveView;
   // eslint-disable-next-line react-hooks/refs
   dimensionExtentsForRef.current = dimensionExtentsFor;
+  // eslint-disable-next-line react-hooks/refs
+  labelNamesForRef.current = labelNamesFor;
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
   // eslint-disable-next-line react-hooks/refs
@@ -188,6 +201,7 @@ export function useSavedViewSync({
           // Authoritative live Z/T/C from React; falls back to the scene's
           // presence view inside buildCapture when null.
           liveView: getLiveViewRef.current?.() ?? undefined,
+          labelNamesFor: (id) => labelNamesForRef.current?.(id),
         });
       } catch (e) {
         console.warn("[SavedView] capture failed:", e);
@@ -212,6 +226,10 @@ export function useSavedViewSync({
       // Read the resolver from the ref at call time so updates to the
       // recipient's manifest-derived extents take effect across applies.
       (datasetId) => dimensionExtentsForRef.current?.(datasetId) ?? {},
+      // Same ref-at-call-time discipline for the label-name resolver, so
+      // per-label restore keys by name+occurrence against the recipient's
+      // current label order.
+      (datasetId) => labelNamesForRef.current?.(datasetId),
     );
     const urlSync = new UrlSync(captureFn, applier, {
       debounceMs,
@@ -243,6 +261,7 @@ export function useSavedViewSync({
         // button captures the user's actual slab/timepoint/channel even if
         // it hasn't been flushed to the scene yet).
         liveView: getLiveViewRef.current?.() ?? undefined,
+        labelNamesFor: (id) => labelNamesForRef.current?.(id),
       });
     } catch (e) {
       console.warn("[SavedView] capture failed:", e);

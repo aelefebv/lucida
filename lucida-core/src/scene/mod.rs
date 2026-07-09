@@ -1064,6 +1064,34 @@ impl Scene {
         self.dataset_settings
             .retain(|id, _| dataset_ids.contains(id));
 
+        // Realign any KEPT per-label settings that carry the author's label
+        // names onto the restored manifest's CURRENT label order (occurrence-
+        // aware), so a settings entry adopted before this document arrived (e.g.
+        // from a peer whose label list differs) lands on the matching current
+        // label rather than by raw index. Freshly seeded entries already match
+        // their manifest; a legacy entry (empty `label_names`) is left
+        // positional. Fresh-seed policy is untouched.
+        for (id, settings) in self.dataset_settings.iter_mut() {
+            if settings.label_names.is_empty() {
+                continue;
+            }
+            if let Some(manifest) = self.document.manifests.get(id) {
+                let current: Vec<String> = manifest
+                    .label_specs()
+                    .iter()
+                    .map(|l| l.name.clone())
+                    .collect();
+                if settings.label_names != current {
+                    settings.label_settings = DatasetDisplaySettings::reconcile_label_settings(
+                        &settings.label_settings,
+                        &settings.label_names,
+                        &current,
+                    );
+                    settings.label_names = current;
+                }
+            }
+        }
+
         self.epochs.content += 1;
         self.epochs.layout += 1;
         self.epochs.asset += 1;
@@ -1111,8 +1139,35 @@ impl Scene {
     pub fn import_dataset_presence(
         &mut self,
         dataset_order: Vec<DatasetId>,
-        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+        mut dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     ) {
+        // Remap each incoming per-dataset settings blob that carries the peer's
+        // label names onto THIS scene's current label order for that dataset
+        // (occurrence-aware), so a peer whose label list differs (reordered, a
+        // label added/removed, or repeated names on a collection) has its
+        // per-label visibility/opacity land on the matching current label rather
+        // than by raw index. A blob with no `label_names` (a peer that predates
+        // the field) stays positional. When the recipient does not yet hold the
+        // dataset's manifest, the blob is left as-is; a later `DatasetOpened`
+        // for that dataset reconciles it against the arriving manifest.
+        for (id, settings) in dataset_settings.iter_mut() {
+            if settings.label_names.is_empty() {
+                continue;
+            }
+            if let Some(manifest) = self.document.manifests.get(id) {
+                let current: Vec<String> = manifest
+                    .label_specs()
+                    .iter()
+                    .map(|l| l.name.clone())
+                    .collect();
+                settings.label_settings = DatasetDisplaySettings::reconcile_label_settings(
+                    &settings.label_settings,
+                    &settings.label_names,
+                    &current,
+                );
+                settings.label_names = current;
+            }
+        }
         if self.dataset_order != dataset_order || self.dataset_settings != dataset_settings {
             self.dataset_order = dataset_order;
             self.dataset_settings = dataset_settings;
@@ -3612,6 +3667,87 @@ mod tests {
         // Identical rebroadcast: no further bump.
         scene.import_dataset_presence(order, settings);
         assert_eq!(scene.epochs.selection, baseline.selection + 1);
+    }
+
+    #[test]
+    fn import_dataset_presence_reconciles_per_label_by_name() {
+        // The recipient holds a dataset whose labels are, in order,
+        // label-0, label-1, label-2.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        // A peer broadcasts settings whose label list is in a DIFFERENT order
+        // (label-2, label-0, label-1), with per-label opacity parallel to that
+        // order. Applied positionally this would land each opacity on the wrong
+        // label; keyed by name it must follow the name.
+        let mut settings = scene.dataset_settings.clone();
+        {
+            let s = settings.get_mut(&ds_id).unwrap();
+            s.label_names = vec!["label-2".into(), "label-0".into(), "label-1".into()];
+            s.label_settings = vec![
+                LabelSettings {
+                    visible: true,
+                    opacity: 0.2,
+                },
+                LabelSettings {
+                    visible: true,
+                    opacity: 0.0,
+                },
+                LabelSettings {
+                    visible: true,
+                    opacity: 0.1,
+                },
+            ];
+        }
+
+        scene.import_dataset_presence(vec![ds_id.clone()], settings);
+
+        let applied = &scene.dataset_settings[&ds_id];
+        // Remapped onto the recipient's [label-0, label-1, label-2] order.
+        assert_eq!(applied.label_settings[0].opacity, 0.0); // label-0
+        assert_eq!(applied.label_settings[1].opacity, 0.1); // label-1
+        assert_eq!(applied.label_settings[2].opacity, 0.2); // label-2
+        // The stored names now describe the recipient's current order.
+        assert_eq!(applied.label_names, vec!["label-0", "label-1", "label-2"]);
+    }
+
+    #[test]
+    fn import_dataset_presence_legacy_blob_stays_positional() {
+        // A peer that predates label-name capture sends no label_names; the
+        // per-label settings must apply index-for-index (back-compat).
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        let mut settings = scene.dataset_settings.clone();
+        {
+            let s = settings.get_mut(&ds_id).unwrap();
+            s.label_names = Vec::new(); // legacy
+            s.label_settings = vec![
+                LabelSettings {
+                    visible: true,
+                    opacity: 0.0,
+                },
+                LabelSettings {
+                    visible: true,
+                    opacity: 0.1,
+                },
+                LabelSettings {
+                    visible: true,
+                    opacity: 0.2,
+                },
+            ];
+        }
+
+        scene.import_dataset_presence(vec![ds_id.clone()], settings);
+
+        let applied = &scene.dataset_settings[&ds_id];
+        assert_eq!(applied.label_settings[0].opacity, 0.0);
+        assert_eq!(applied.label_settings[1].opacity, 0.1);
+        assert_eq!(applied.label_settings[2].opacity, 0.2);
     }
 
     // --- Indexed-lookup equivalence ---

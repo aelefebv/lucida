@@ -93,7 +93,10 @@
             }
           ],
           "channel_blend_mode": "additive",
-          "detail_level_override": 1
+          "detail_level_override": 1,
+          "label_names": [
+            "region-a"
+          ]
         }
       },
       "auto_contrast": {

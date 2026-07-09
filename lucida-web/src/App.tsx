@@ -383,6 +383,7 @@ function App({
     loopRef: render.loopRef,
     getLiveView,
     dimensionExtentsFor: dims.dimensionExtentsFor,
+    labelNamesFor: dims.labelNamesFor,
     setC: dims.setC,
     setT: dims.setT,
     setZ: dims.setZ,
@@ -705,6 +706,7 @@ function App({
       view: pin.view,
       datasetId: pinDatasetId,
       dimensionExtentsFor: dims.dimensionExtentsFor,
+      labelNamesFor: dims.labelNamesFor,
     });
 
     // Mirror the restored scene state into React (the restore wrote to WASM
@@ -744,7 +746,7 @@ function App({
       focus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/render refs/scene ref; reactive deps listed.
-  }, [dims.viewMode, dims.dimensionExtentsFor, annotationsVisible, selectedDatasetId, gentleOnContext, focusPinForMode]);
+  }, [dims.viewMode, dims.dimensionExtentsFor, dims.labelNamesFor, annotationsVisible, selectedDatasetId, gentleOnContext, focusPinForMode]);
 
   // Explicit navigation to a mentioning comment (issue #526) now performs the
   // FULL restore when the pin carries the author's captured view, and falls back

@@ -639,17 +639,49 @@ impl Scene {
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
 
-                        // Display settings — seed the COMPLETE per-channel +
-                        // per-label settings from the manifest via the SAME
-                        // constructor `load_document` uses on restore, so the
-                        // layer panel + render path always find full-length
-                        // `channel_settings` / `label_settings` regardless of how
-                        // the dataset entered the scene (fresh open vs. restore).
-                        self.dataset_settings
-                            .entry(dataset_id.clone())
-                            .or_insert_with(|| {
-                                crate::scene::DatasetDisplaySettings::seeded_for(&event.manifest)
-                            });
+                        // Display settings. For a dataset not yet present, seed
+                        // the COMPLETE per-channel + per-label settings from the
+                        // manifest via the SAME constructor `load_document` uses
+                        // on restore, so the layer panel + render path always
+                        // find full-length `channel_settings` / `label_settings`
+                        // regardless of how the dataset entered the scene (fresh
+                        // open vs. restore).
+                        //
+                        // For a dataset whose settings ALREADY exist (e.g.
+                        // adopted from a peer's presence before its manifest
+                        // arrived), realign any per-label settings that carry the
+                        // author's label names onto THIS manifest's current label
+                        // order (occurrence-aware), so the adopted state lands on
+                        // the matching current label rather than by raw index. A
+                        // settings entry with no `label_names` (a legacy adopter)
+                        // is left positional.
+                        match self.dataset_settings.entry(dataset_id.clone()) {
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                slot.insert(crate::scene::DatasetDisplaySettings::seeded_for(
+                                    &event.manifest,
+                                ));
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                                let settings = slot.get_mut();
+                                if !settings.label_names.is_empty() {
+                                    let current: Vec<String> = event
+                                        .manifest
+                                        .label_specs()
+                                        .iter()
+                                        .map(|l| l.name.clone())
+                                        .collect();
+                                    if settings.label_names != current {
+                                        settings.label_settings =
+                                            crate::scene::DatasetDisplaySettings::reconcile_label_settings(
+                                                &settings.label_settings,
+                                                &settings.label_names,
+                                                &current,
+                                            );
+                                        settings.label_names = current;
+                                    }
+                                }
+                            }
+                        }
 
                         // Build derived state
                         let layout = crate::scene::resolve_layout(
