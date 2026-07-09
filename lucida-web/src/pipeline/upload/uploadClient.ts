@@ -70,10 +70,12 @@ export interface UploadClient {
    * (categorical overlay path). Distinct from {@link sliceChunkData}: routed
    * by the label image id; each `chunk.data` is a single 2D Z-plane already
    * extracted for the current view (so only ~64 KB crosses, not the ~8 MB
-   * 3D chunk).
+   * 3D chunk). `datasetId` is stamped on the pool so dataset removal can free
+   * it — the pool is keyed by the label image id, which removal never sees.
    */
   labelSliceChunkData(
     memberId: string,
+    datasetId: string,
     chunks: {
       data: ArrayBuffer;
       dataType: string;

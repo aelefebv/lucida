@@ -240,6 +240,7 @@ export class RenderClient implements UploadClient {
 
   labelSliceChunkData(
     memberId: string,
+    datasetId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     level: number,
     t: number,
@@ -263,6 +264,7 @@ export class RenderClient implements UploadClient {
         type: "labelSliceChunkData",
         epochs,
         memberId,
+        datasetId,
         chunks: workerChunks,
         level,
         t, c,

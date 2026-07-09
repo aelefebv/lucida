@@ -31,6 +31,12 @@ export interface LabelSlicePool {
   texture: GPUTexture; // r32uint, size [width, height]
   /** Single-entry indirection ([0]) so the one tile is always slot 0. */
   indirectionBuf: GPUBuffer;
+  /**
+   * Owning dataset id (the `removeLayerResources` id). The pool is keyed by
+   * the label image id — which dataset removal never sees — so this is how
+   * {@link removeLabelSlicePoolsForDataset} finds + frees it on removal.
+   */
+  datasetId: string;
   width: number;
   height: number;
   /**
@@ -48,20 +54,42 @@ export interface LabelSlicePool {
   labelColorCount?: number;
 }
 
+/** Warn once per member when its label slice texture can't be allocated,
+ *  so a failing device doesn't spam the console each delivery. */
+const warnedLabelSliceAlloc = new Set<string>();
+
+/**
+ * Clear the per-member alloc-failure warn-once set. Test-only, so a case
+ * that provokes an allocation failure doesn't suppress the warning (and the
+ * skip path it guards) for a later case reusing the same member id.
+ */
+export function resetLabelSliceAllocWarnings(): void {
+  warnedLabelSliceAlloc.clear();
+}
+
 /**
  * Get or create a label slice pool for `memberId` sized to the label
  * level's 2D dimensions (clamped to the device's max 2D texture dimension
- * so an oversized/whole-slide level can never throw at `createTexture`).
- * Reused IN PLACE when the dims are unchanged — a Z/T scrub overwrites the
- * existing texture rather than destroying + recreating it, so the overlay
- * never blanks. Recreated only when the dims actually change (a new level).
+ * so an oversized/whole-slide level can never exceed the limit). Reused IN
+ * PLACE when the dims are unchanged — a Z/T scrub overwrites the existing
+ * texture rather than destroying + recreating it, so the overlay never
+ * blanks. Recreated only when the dims actually change (a new level).
+ * `datasetId` is stamped on the pool so dataset removal can free it (the
+ * pool is keyed by the label image id).
+ *
+ * Returns `null` when either the texture or its indirection buffer fails to
+ * allocate (e.g. an out-of-budget device) — a partial allocation is unwound
+ * so nothing leaks, and the caller skips the label rather than throwing
+ * through the upload path. Level selection already bounds the size, so this
+ * is defense in depth.
  */
 export function getOrCreateLabelSlicePool(
   ctx: WorkerCtx,
   memberId: string,
+  datasetId: string,
   width: number,
   height: number,
-): LabelSlicePool {
+): LabelSlicePool | null {
   const limit = getDeviceLimits(ctx.device).maxTextureDimension2D;
   const w = Math.max(1, Math.min(width, limit));
   const h = Math.max(1, Math.min(height, limit));
@@ -69,19 +97,40 @@ export function getOrCreateLabelSlicePool(
   const pools = ctx.state.labelSlicePools;
   const existing = pools.get(memberId);
   if (existing && existing.width === w && existing.height === h) {
+    existing.datasetId = datasetId;
     return existing;
   }
   if (existing) destroyLabelSlicePool(existing);
 
-  const texture = createSliceTexture(ctx.device, w, h, null, "r32uint");
-  const indirectionBuf = ctx.device.createBuffer({
-    size: 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
+  let texture: GPUTexture | undefined;
+  let indirectionBuf: GPUBuffer;
+  try {
+    texture = createSliceTexture(ctx.device, w, h, null, "r32uint");
+    indirectionBuf = ctx.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+  } catch (err) {
+    // Free an already-created texture so a later-step failure (e.g. the
+    // indirection buffer) can't orphan it. If the texture itself failed,
+    // `texture` is still undefined and this is a no-op.
+    texture?.destroy();
+    if (!warnedLabelSliceAlloc.has(memberId)) {
+      warnedLabelSliceAlloc.add(memberId);
+      const failed = texture
+        ? "an indirection buffer"
+        : `a ${w}×${h} r32uint slice texture`;
+      console.warn(
+        `[labels] skipping "${memberId}": could not allocate ${failed} ` +
+        `(${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+    return null;
+  }
   // Single tile lives at slot 0.
   ctx.device.queue.writeBuffer(indirectionBuf, 0, new Uint32Array([0]));
 
-  const pool: LabelSlicePool = { texture, indirectionBuf, width: w, height: h };
+  const pool: LabelSlicePool = { texture, indirectionBuf, datasetId, width: w, height: h };
   pools.set(memberId, pool);
   return pool;
 }
@@ -99,6 +148,23 @@ export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
   if (pool) {
     destroyLabelSlicePool(pool);
     ctx.state.labelSlicePools.delete(memberId);
+  }
+}
+
+/**
+ * Free every label slice pool matching `idOrDataset`, matched EITHER by the
+ * pool's member key (the label image id) OR by its owning `datasetId`. Dataset
+ * removal calls `removeLayerResources` with the dataset id, which never equals
+ * a label pool's key — so matching on the stamped `datasetId` is what actually
+ * frees the label texture. Also accepts a member id so a per-member removal
+ * still works.
+ */
+export function removeLabelSlicePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
+  for (const [memberId, pool] of ctx.state.labelSlicePools) {
+    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      destroyLabelSlicePool(pool);
+      ctx.state.labelSlicePools.delete(memberId);
+    }
   }
 }
 
