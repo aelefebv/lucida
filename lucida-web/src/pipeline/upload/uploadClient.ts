@@ -6,6 +6,7 @@
 import type {
   ChunkFeedbackReason,
   ColdStateMessage,
+  ColdStateDisplayMessage,
   ViewHotStateMessage,
   MissingChunk,
   MissingProxy,
@@ -32,6 +33,14 @@ export type WantedSetHandler = (
 
 export interface UploadClient {
   coldState(msg: ColdStateMessage): void;
+
+  /**
+   * Push a display-only update (contrast / gamma / colormap / opacity) for
+   * a dataset whose geometry and residency are unchanged. The worker
+   * re-applies it to the resident descriptor buffer without re-ingesting
+   * cold state. See {@link ColdStateDisplayMessage}.
+   */
+  coldStateDisplay(msg: ColdStateDisplayMessage): void;
 
   /**
    * Must be sent before subsequent render messages so the worker's

@@ -6,6 +6,7 @@ import type {
   MinimapLayerParams,
   WorkerToMainMessage,
   ColdStateMessage,
+  ColdStateDisplayMessage,
   ViewHotStateMessage,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
@@ -276,6 +277,10 @@ export class RenderClient implements UploadClient {
   }
 
   coldState(msg: ColdStateMessage) {
+    this.worker.postMessage(msg);
+  }
+
+  coldStateDisplay(msg: ColdStateDisplayMessage) {
     this.worker.postMessage(msg);
   }
 

@@ -18,6 +18,7 @@ import type { TickContext } from "../../renderLoopTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import type {
   ChunkFeedbackReason,
+  ColdStateDisplayState,
   ColdStateMessage,
   MissingChunk,
   MissingProxy,
@@ -99,6 +100,26 @@ export class Uploader {
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;
     return msg;
+  }
+
+  /**
+   * Push a display-only update to the worker for a dataset whose geometry
+   * and residency are unchanged (a contrast / gamma / colormap / opacity
+   * edit). Does not touch `lastEpochs`: no cold state was rebuilt and no
+   * chunk residency changed, so in-flight chunk deliveries stay stamped
+   * with the epochs of the last real cold state — exactly what the worker
+   * still expects.
+   */
+  sendColdStateDisplay(args: {
+    ctx: TickContext;
+    datasetId: string;
+    displayStateByChannel: Record<number, ColdStateDisplayState>;
+  }): void {
+    args.ctx.client.coldStateDisplay({
+      type: "coldStateDisplay",
+      datasetId: args.datasetId,
+      displayStateByChannel: args.displayStateByChannel,
+    });
   }
 
   /**

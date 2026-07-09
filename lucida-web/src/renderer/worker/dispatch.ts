@@ -19,7 +19,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { MainToWorkerMessage } from "../workerProtocol.ts";
 import { destroyProxyAtlas } from "../proxyAtlas.ts";
 import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
-import { applyColdState } from "../coldState/index.ts";
+import { applyColdState, applyColdStateDisplay } from "../coldState/index.ts";
 import { handleProxyUpload } from "../proxy/index.ts";
 import {
   handleLabelSliceChunkData,
@@ -171,8 +171,16 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "coldState":
       ctx.state.currentColdState = msg;
       ctx.state.currentEpochs = msg.epochs;
+      ctx.state.coldStateByDataset.set(msg.datasetId, msg);
       applyColdState(ctx, msg);
       ctx.postWantedSet();
+      return;
+
+    case "coldStateDisplay":
+      // Display-only edit: re-apply contrast/gamma/colormap/opacity to the
+      // resident descriptor buffer without re-ingesting cold state. No
+      // residency changed, so no wanted-set is posted.
+      applyColdStateDisplay(ctx, msg);
       return;
 
     case "removeLayerResources": {
@@ -192,6 +200,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         ctx.state.descriptorBuffersByDataset.delete(msg.datasetId);
       }
       ctx.state.currentEntityMetasByDataset.delete(msg.datasetId);
+      ctx.state.coldStateByDataset.delete(msg.datasetId);
 
       // Clear member-id routing for entries owned by this dataset so
       // dropped layers don't keep stale memberToDataset / memberToPool
