@@ -465,6 +465,19 @@ export class CpuCache {
     this.drainSchedulers();
   }
 
+  /**
+   * Abort a still-active entity's in-flight chunks that the entity's own
+   * newest plan no longer wants. `submit` runs once per dataset with that
+   * dataset's complete request set, so for an entity present in this
+   * submit's active set, `plannedChunkKeys` is authoritative: any of its
+   * in-flight chunks absent from it (scrubbed-away T/Z/channel work) is
+   * genuinely unwanted and must release its concurrency slot now rather
+   * than hold it until the transfer timeout. Entities NOT in this submit's
+   * active set are left untouched here — another still-visible dataset may
+   * simply be submitted in a separate call this rebuild; departure of an
+   * entity from the view entirely is handled at the rebuild boundary in
+   * {@link onPlanRebuildStart}.
+   */
   private cancelOmittedChunkWork(
     activeEntityIds: Set<string>,
     plannedChunkKeys: Set<string>,
@@ -474,6 +487,24 @@ export class CpuCache {
       activeEntityIds.has(entry.request.entityId) &&
       !plannedChunkKeys.has(this.inFlightKey(entry.request))
     ));
+    for (const key of cancelled) {
+      this.inFlightChunkMeta.delete(key);
+    }
+  }
+
+  /**
+   * Abort every in-flight (and drop every pending) chunk fetch for
+   * `entityId` and clear its in-flight metadata. Used when an entity
+   * leaves the view entirely: its outstanding fetches would otherwise
+   * hold their concurrency slots until the transfer timeout, starving
+   * the current view. Proxy fetches are deliberately left alone — the
+   * starvation report is chunk-specific. A returning entity re-enqueues
+   * normally on its next submit.
+   */
+  private cancelChunkWorkForEntity(entityId: string): void {
+    const cancelled = this.chunkScheduler.cancelWhere(
+      (entry) => entry.request.entityId === entityId,
+    );
     for (const key of cancelled) {
       this.inFlightChunkMeta.delete(key);
     }
@@ -550,6 +581,13 @@ export class CpuCache {
     for (const entityId of this.activeEntityIds) {
       if (!this.activeEntityIdsThisRebuild.has(entityId)) {
         this.chunkStore.demoteEntity(entityId);
+        // The entity was active last rebuild but the just-completed one
+        // never requested it: it has left the view entirely. Abort its
+        // in-flight chunk fetches so they release their concurrency slots
+        // to the current view immediately, rather than holding them until
+        // the transfer timeout. Its already-cached chunks are only demoted
+        // (kept, evictable); if it returns, its next submit re-enqueues.
+        this.cancelChunkWorkForEntity(entityId);
       }
     }
     this.activeEntityIds = this.activeEntityIdsThisRebuild;
@@ -908,9 +946,19 @@ export class CpuCache {
       const fe = classifyFetchError(err);
 
       if (fe.kind === "abort" || fe.kind === "pending") {
-        this.chunkScheduler.markInFlightDone(key);
-        this.inFlightChunkMeta.delete(key);
-        if (fe.kind === "pending") this.drainSchedulers();
+        // This settle can land a microtask after its key was cancelled and
+        // re-enqueued under a fresh controller — the same tile scrubbed out
+        // of the active set and straight back within one rebuild's detection
+        // lag. The cancel path already freed this fetch's slot and meta
+        // synchronously; releasing them again by key alone would clobber the
+        // live successor, under-counting concurrency (letting effective
+        // in-flight exceed the cap against a throttling backend) and dropping
+        // the dedup record so the next rebuild starts a duplicate fetch. Only
+        // free the slot + meta this settle still owns.
+        if (this.chunkScheduler.markInFlightDoneIfCurrent(key, controller)) {
+          this.inFlightChunkMeta.delete(key);
+          if (fe.kind === "pending") this.drainSchedulers();
+        }
         return;
       }
 

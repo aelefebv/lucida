@@ -201,6 +201,21 @@ export class Scheduler<Req extends SchedulableRequest> {
     this.inFlight.delete(key);
   }
 
+  /**
+   * Release the slot for `key` only when the live entry is still the one
+   * `controller` started. A settle arriving after its key was cancelled
+   * and re-enqueued under a fresh controller (the same tile scrubbed away
+   * and straight back within a rebuild) must not free the successor's
+   * slot. Returns whether this controller's slot was found and released.
+   */
+  markInFlightDoneIfCurrent(key: string, controller: AbortController): boolean {
+    const entry = this.inFlight.get(key);
+    if (!entry || entry.controller !== controller) return false;
+    this.inFlightBytesCounter -= entry.estimatedBytes;
+    this.inFlight.delete(key);
+    return true;
+  }
+
   /** Abort and drop a single in-flight request by key. */
   cancelOne(key: string): void {
     const entry = this.inFlight.get(key);

@@ -759,6 +759,156 @@ describe("CpuCache", () => {
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
     });
 
+    it("cancels an entity's in-flight once it leaves the view, freeing the slot the current view needs", async () => {
+      // One concurrency slot models the wide-collection queue: the current
+      // view cannot start a fetch until a scrolled-away one releases its slot.
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      const away = makeRequest({
+        datasetId: "entity-1", entityId: "entity-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0",
+      });
+      const current = makeRequest({
+        datasetId: "entity-2", entityId: "entity-2", imageId: "image-2", chunkKey: "0/0/0/0/0/0",
+      });
+
+      // entity-1 is the active view; its fetch takes the single slot.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([away], [makeActiveEntry("entity-1", "image-1")]));
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+
+      // entity-1 leaves the view; entity-2 is the current view now, but its
+      // fetch cannot start — entity-1 still holds the only slot.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([current], [makeActiveEntry("entity-2", "image-2")]));
+      expect(source.pendingFetches.has("entity-2/image-2/0/0/0/0/0/0")).toBe(false);
+
+      // Next rebuild: entity-1 has been absent for a full rebuild, so its
+      // in-flight is aborted at the boundary. The freed slot lets the current
+      // view acquire it at once — no wait for the transfer timeout.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([current], [makeActiveEntry("entity-2", "image-2")]));
+      await flush();
+
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-2/image-2/0/0/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+    });
+
+    it("does not cancel a still-visible dataset's in-flight when another dataset submits separately", () => {
+      // Two datasets, submitted in separate calls within one rebuild — the
+      // per-dataset submit loop. Neither submit may cancel the other's fetch.
+      const { cache, source } = createTestCache();
+      const dsA = makeRequest({
+        datasetId: "entity-A", entityId: "entity-A", imageId: "image-A", chunkKey: "0/0/0/0/0/0",
+      });
+      const dsB = makeRequest({
+        datasetId: "entity-B", entityId: "entity-B", imageId: "image-B", chunkKey: "0/0/0/0/0/0",
+      });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([dsA], [makeActiveEntry("entity-A", "image-A")]));
+      cache.submit(makePlan([dsB], [makeActiveEntry("entity-B", "image-B")]));
+      expect(cache.telemetry().inFlightCount).toBe(2);
+
+      // Both datasets stay visible and are each re-submitted next rebuild.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([dsA], [makeActiveEntry("entity-A", "image-A")]));
+      cache.submit(makePlan([dsB], [makeActiveEntry("entity-B", "image-B")]));
+
+      // Nothing was cancelled at the boundary: both fetches are still live.
+      expect(cache.telemetry().inFlightCount).toBe(2);
+      expect(source.pendingFetches.has("entity-A/image-A/0/0/0/0/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-B/image-B/0/0/0/0/0/0")).toBe(true);
+    });
+
+    it("does not cancel a still-wanted in-flight chunk when the plan is re-submitted", () => {
+      const { cache, source } = createTestCache();
+      const keep = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
+      const drop = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([keep, drop]));
+      expect(cache.telemetry().inFlightCount).toBe(2);
+
+      // Re-plan the same active entity but drop one chunk. The still-wanted
+      // chunk stays; only the omitted one is cancelled.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([keep]));
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/1")).toBe(false);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+    });
+
+    it("re-enqueues a returned entity's chunk after its scrolled-away in-flight was cancelled", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({
+        entityId: "entity-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0",
+      });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([req], [makeActiveEntry("entity-1", "image-1")]));
+      expect(source.fetchCount).toBe(1);
+
+      // entity-1 leaves the view for a full rebuild → its in-flight is aborted.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+      await flush();
+      expect(cache.telemetry().inFlightCount).toBe(0);
+
+      // entity-1 returns (scrub oscillation): the cancelled key must re-fetch
+      // — a client re-enqueue the server single-flights onto any still-running
+      // task — not stay permanently suppressed.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([req], [makeActiveEntry("entity-1", "image-1")]));
+      expect(source.fetchCount).toBe(2);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+    });
+
+    it("a returning entity re-enqueued the same tick as its cancel keeps its live slot when the abort settles", async () => {
+      // Scrub away from a tile and straight back within one rebuild's
+      // detection lag: the departed-entity cancel aborts the in-flight fetch
+      // synchronously, but the abort's rejection settles a microtask later —
+      // after the returning submit has already started a fresh fetch under a
+      // new controller. That late settle must not free the successor's slot.
+      const { cache, source } = createTestCache();
+      const req = makeRequest({
+        entityId: "entity-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0",
+      });
+      const key = "entity-1/image-1/0/0/0/0/0/0";
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([req], [makeActiveEntry("entity-1", "image-1")]));
+      expect(source.fetchCount).toBe(1);
+
+      // entity-1 scrolls out of the active set (detection lag, not cancelled yet).
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+
+      // Rebuild boundary detects the departure and aborts the fetch. Its
+      // rejection is queued as a microtask; it has not run yet.
+      cache.onPlanRebuildStart();
+      // Same tick: entity-1 returns and re-requests the same chunk. The just-
+      // cancelled key is no longer in flight, so a fresh fetch starts.
+      cache.submit(makePlan([req], [makeActiveEntry("entity-1", "image-1")]));
+      expect(source.fetchCount).toBe(2);
+      expect(source.pendingFetches.has(key)).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+
+      // The superseded fetch's abort now settles. It owns nothing anymore, so
+      // it must leave the live fetch's slot and dedup record untouched.
+      await flush();
+      expect(cache.telemetry().inFlightCount).toBe(1);
+      expect(source.pendingFetches.has(key)).toBe(true);
+
+      // A later rebuild that still wants the chunk dedups onto the live fetch —
+      // no second concurrent fetch of the same chunk.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([req], [makeActiveEntry("entity-1", "image-1")]));
+      expect(source.fetchCount).toBe(2);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+    });
+
     it("omitted stale work frees scheduler capacity for the newer request", async () => {
       const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
       const staleT = makeRequest({ t: 0, chunkKey: "0/0/0/0/0/0" });
