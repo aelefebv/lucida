@@ -26,8 +26,6 @@ import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
-import { useLabelRescueOnOpen } from "./hooks/useLabelRescueOnOpen.ts";
-import type { LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
 import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
@@ -443,59 +441,6 @@ function App({
     initialDatasetUrls,
     ready: bridge.sessionReady,
     openDataset: datasets.handleUrlSubmit,
-  });
-
-  // The currently-open dataset ids — the same live set the layer panel lists
-  // (dataset order). Derived from the reactive layer infos so it tracks opens /
-  // closes; a fresh array per render is fine (the rescue hook's per-id latch
-  // makes re-evaluation idempotent).
-  const openDatasetIds = layers.layerInfos.map((info) => info.id);
-
-  // Read a dataset's manifest (undefined until it has loaded) and its persisted
-  // per-label settings from the scene for the label-rescue hook. Plain deferred
-  // getters (called at effect time, never during render); the rescue hook's
-  // per-id latch makes re-evaluation idempotent, so their identity need not be
-  // stable across renders.
-  const manifestOf = (id: string) => datasetsRef.current.get(id)?.manifest;
-  const labelSettingsOf = (id: string): LabelViewSetting[] | undefined => {
-    const ws = scene.wasmSceneRef.current;
-    if (!ws) return undefined;
-    try {
-      const all = JSON.parse(ws.all_dataset_settings()) as Record<
-        string,
-        { label_settings?: LabelViewSetting[] }
-      >;
-      return all[id]?.label_settings;
-    } catch {
-      return undefined;
-    }
-  };
-
-  // Reveal the rescued label as a LOCAL view correction (like auto-fit-on-open):
-  // apply the visibility flag to the scene WITHOUT sending to the server or
-  // breaking follow, then invalidate so the planner re-reads and the panel
-  // re-derives. This makes the panel checkbox and the drawn overlay agree; the
-  // user can then hide it (the one-shot latch never re-arms).
-  const emitLabelRescue = (id: string, label: number) => {
-    const ws = scene.wasmSceneRef.current;
-    if (!ws) return;
-    applyViewportCommand(ws, { type: "set_label_visible", dataset_id: id, label, visible: true });
-    invalidateDisplaySettings(render.loopRef.current, "label_rescue");
-    layers.bumpLayerSettingsVersion();
-  };
-
-  // Repair a fresh open where the seed marked a caps-ineligible label visible
-  // while a later label is eligible: reveal the first mode-eligible label so the
-  // dataset never opens with an "on" checkbox and a blank overlay. App-level (it
-  // survives 2D/3D toggles) and gated on the same transport-ready signal as the
-  // seed open; the per-datasetId latch inside makes it fresh-open-only.
-  useLabelRescueOnOpen({
-    openDatasetIds,
-    ready: bridge.sessionReady,
-    viewMode: dims.viewMode,
-    manifestOf,
-    labelSettingsOf,
-    emitRescue: emitLabelRescue,
   });
 
   // Layout registry — null until WasmScene is set up; subscribe so the

@@ -41,7 +41,7 @@ function manifest(labels: LabelSpec[]): DatasetManifest {
 const members: MemberRosterEntry[] = [{ imageId: "img-0", position: [0, 0] }];
 
 describe("pushLabelLayers", () => {
-  it("emits exactly ONE label layer (the first) by default, not the whole stack", () => {
+  it("emits every eligible label layer by default, in manifest order", () => {
     const layers: SliceLayerParams[] = [];
     pushLabelLayers(
       layers,
@@ -52,10 +52,14 @@ describe("pushLabelLayers", () => {
       ]),
       members,
     );
-    expect(layers).toHaveLength(1);
-    expect(layers[0].datasetId).toBe("img-0:label:region-b"); // manifest order = first
-    expect(layers[0].isLabel).toBe(true);
-    expect(layers[0].opacity).toBeCloseTo(0.5);
+    expect(layers).toHaveLength(3);
+    expect(layers.map((l) => l.datasetId)).toEqual([
+      "img-0:label:region-b",
+      "img-0:label:fg",
+      "img-0:label:region-a",
+    ]);
+    expect(layers.every((l) => l.isLabel)).toBe(true);
+    for (const l of layers) expect(l.opacity).toBeCloseTo(0.5);
   });
 
   it("aligns the overlay to the source footprint (4x-coarse label → source extent)", () => {

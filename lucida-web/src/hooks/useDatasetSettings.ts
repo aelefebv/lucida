@@ -11,7 +11,7 @@ import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
-import { eligibleLabelInfos } from "../pipeline/planning/labelRequests.ts";
+import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -34,8 +34,16 @@ interface PanelLabelRow {
  * are stricter than slice, so the realistic disabled case is a slice-eligible
  * label that busts the volume caps, viewed in 3D. Visibility mirrors
  * `resolveVisibleLabels` (the render path): with settings, the stored flag (a
- * missing/short entry counts as hidden); with NO settings, only the first label
- * eligible in the CURRENT mode.
+ * label with no explicit setting defaults to visible-if-eligible); with NO
+ * settings, every label eligible in the CURRENT mode.
+ *
+ * In 3D there is a second disabled case: a visible + volume-eligible mask that
+ * falls past the TOTAL label-volume memory budget. The panel applies the SAME
+ * manifest-order budget prefix ({@link volumeBudgetPrefix}) the render path
+ * does, and gives each budget-skipped mask a `disabledReason` naming the memory
+ * limit — so it never renders as a plain interactive "on" row that draws
+ * nothing. This is distinct from the "too large to render in 3D" reason a
+ * per-mask volume-INELIGIBLE label carries.
  */
 function buildLabelRows(
   manifest: DatasetManifest,
@@ -54,16 +62,6 @@ function buildLabelRows(
   const currentEligible = is3d ? volumeEligible : sliceEligible;
   const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
 
-  // First label drawable in the CURRENT mode — the no-settings default that
-  // matches the render path's single-default fallback.
-  let firstCurrentEligible = -1;
-  for (let i = 0; i < labels.length; i++) {
-    if (currentEligible.has(i)) {
-      firstCurrentEligible = i;
-      break;
-    }
-  }
-
   const rows: PanelLabelRow[] = [];
   for (let i = 0; i < labels.length; i++) {
     const drawableInEitherMode = sliceEligible.has(i) || volumeEligible.has(i);
@@ -74,7 +72,10 @@ function buildLabelRows(
     const row: PanelLabelRow = {
       index: i,
       name: labels[i].name,
-      visible: hasLabelSettings ? (ls?.visible ?? false) : i === firstCurrentEligible,
+      // A label with no explicit setting defaults to visible-if-eligible-now; an
+      // explicit flag is honored. With NO settings, every current-eligible label
+      // is visible. Mirrors `resolveVisibleLabels`.
+      visible: hasLabelSettings ? (ls?.visible ?? true) : drawableNow,
       opacity: ls?.opacity ?? 0.5,
     };
     if (!drawableNow) {
@@ -83,6 +84,22 @@ function buildLabelRows(
         : "too large to render in 2D";
     }
     rows.push(row);
+  }
+
+  // 3D total-volume memory fail-safe: over the VISIBLE + volume-eligible rows in
+  // manifest order, keep masks up to the memory budget and mark the rest
+  // disabled — the SAME manifest-order prefix the render path applies, so the
+  // panel and the screen agree on which masks 3D actually shows.
+  if (is3d) {
+    const candidateIndices = rows
+      .filter((r) => volumeEligible.has(r.index) && r.visible)
+      .map((r) => r.index);
+    const kept = volumeBudgetPrefix(manifest, candidateIndices);
+    for (const row of rows) {
+      if (volumeEligible.has(row.index) && row.visible && !kept.has(row.index)) {
+        row.disabledReason = "too large to render in 3D (memory budget)";
+      }
+    }
   }
   return rows;
 }

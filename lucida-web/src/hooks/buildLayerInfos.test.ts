@@ -138,12 +138,12 @@ describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
     expect(infos[0].labelRows).toEqual([{ index: 1, name: "region-c", visible: true, opacity: 0.7 }]);
   });
 
-  it("with NO label_settings (empty), the first drawable label shows (render fallback)", () => {
+  it("with NO label_settings (empty), every drawable label shows (render fallback)", () => {
     const scene = stubScene(["ds-0"], settingsWith([]));
     const infos = buildLayerInfos(scene, datasetsWith([label("region-b"), label("region-c")]), emptyMaps);
     expect(infos[0].labelRows).toEqual([
       { index: 0, name: "region-b", visible: true, opacity: 0.5 },
-      { index: 1, name: "region-c", visible: false, opacity: 0.5 },
+      { index: 1, name: "region-c", visible: true, opacity: 0.5 },
     ]);
   });
 
@@ -238,5 +238,104 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
       { index: 0, name: "deep", visible: true, opacity: 0.5, disabledReason: "too large to render in 3D" },
       { index: 1, name: "flat", visible: true, opacity: 0.5 },
     ]);
+  });
+
+  // A single-level uint32 label of the given voxel dims (Z, Y, X): 4 B/voxel, so
+  // bytes = Z·Y·X·4. Volume-eligible on its own but heavy enough to exercise the
+  // total-volume budget when several are shown at once.
+  function bigVolumeLabel(name: string, z: number, y: number, x: number): LabelSpec {
+    return {
+      name,
+      source_image_id: "img-0",
+      image: {
+        image_id: `img-0:label:${name}`,
+        owner: "ent-0",
+        multiscale: {
+          axes: [
+            { name: "t", kind: "time" },
+            { name: "c", kind: "channel" },
+            { name: "z", kind: "space" },
+            { name: "y", kind: "space" },
+            { name: "x", kind: "space" },
+          ],
+          levels: [
+            {
+              level_index: 0,
+              shape: [1, 1, z, y, x],
+              chunk_shape: [1, 1, 64, 64, 64],
+              grid_shape: [1, 1, 1, 1, 1],
+              scale: [1, 1, 1, 1, 1],
+            },
+          ],
+          data_type: "Uint32",
+        },
+      },
+    } as LabelSpec;
+  }
+
+  it("disables an over-budget mask in 3D with a memory reason, distinct from the per-mask reason", () => {
+    // Three ~192 MB masks; the 512 MB total budget fits the first two, so the
+    // third is disabled with a memory-budget reason (NOT the volume-ineligible
+    // "too large to render in 3D" reason).
+    const scene = stubScene(
+      ["ds-0"],
+      settingsWith([
+        { visible: true, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+      ]),
+    );
+    const infos = buildLayerInfos(
+      scene,
+      datasetsWith([
+        bigVolumeLabel("a", 768, 256, 256),
+        bigVolumeLabel("b", 768, 256, 256),
+        bigVolumeLabel("c", 768, 256, 256),
+      ]),
+      emptyMaps,
+      "3d",
+    );
+    const rows = infos[0].labelRows!;
+    expect(rows[0].disabledReason).toBeUndefined();
+    expect(rows[1].disabledReason).toBeUndefined();
+    expect(rows[2].disabledReason).toContain("memory");
+    // The same masks are fully interactive in 2D (budget is 3D-only).
+    const infos2d = buildLayerInfos(
+      scene,
+      datasetsWith([
+        bigVolumeLabel("a", 768, 256, 256),
+        bigVolumeLabel("b", 768, 256, 256),
+        bigVolumeLabel("c", 768, 256, 256),
+      ]),
+      emptyMaps,
+      "2d",
+    );
+    expect(infos2d[0].labelRows!.every((r) => r.disabledReason === undefined)).toBe(true);
+  });
+
+  it("does not budget-skip a mask the user has explicitly hidden in 3D", () => {
+    // The heavy first two are hidden; the third (visible) then fits alone, so it
+    // stays interactive — a hidden mask never counts toward the 3D budget.
+    const scene = stubScene(
+      ["ds-0"],
+      settingsWith([
+        { visible: false, opacity: 0.5 },
+        { visible: false, opacity: 0.5 },
+        { visible: true, opacity: 0.5 },
+      ]),
+    );
+    const infos = buildLayerInfos(
+      scene,
+      datasetsWith([
+        bigVolumeLabel("a", 768, 256, 256),
+        bigVolumeLabel("b", 768, 256, 256),
+        bigVolumeLabel("c", 768, 256, 256),
+      ]),
+      emptyMaps,
+      "3d",
+    );
+    const rows = infos[0].labelRows!;
+    expect(rows[2].visible).toBe(true);
+    expect(rows[2].disabledReason).toBeUndefined();
   });
 });

@@ -1,10 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  __resetLabelWarningsForTest,
   computeLabelChunkRequests,
   eligibleLabelInfos,
-  planLabelRescue,
   resolveDefaultLabel,
   resolveVisibleLabels,
+  volumeBudgetPrefix,
 } from "./labelRequests.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../../manifestTypes.ts";
 
@@ -236,7 +237,7 @@ describe("computeLabelChunkRequests", () => {
     expect(reqs.every((r) => r.imageId === "img-0:label:ok")).toBe(true);
   });
 
-  it("MAJOR: fetches chunks for ONLY the one resolved label, not every label", () => {
+  it("MAJOR: fetches chunks for EVERY eligible label by default", () => {
     const manifest = multiLabelManifest([
       singleLevelLabel("a", "Uint32", [512, 512]),
       singleLevelLabel("b", "Uint32", [512, 512]),
@@ -244,8 +245,10 @@ describe("computeLabelChunkRequests", () => {
     ]);
     const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 });
     const ids = new Set(reqs.map((r) => r.imageId));
-    expect(ids.size).toBe(1); // only the first resolved label
-    expect(ids.has("img-0:label:a")).toBe(true);
+    // Default (no settings) shows every eligible mask, so all three are fetched.
+    expect(ids).toEqual(
+      new Set(["img-0:label:a", "img-0:label:b", "img-0:label:c"]),
+    );
   });
 
   it("MAJOR: skips a non-uint32 (uint8) label and resolves a uint32 sibling", () => {
@@ -294,20 +297,28 @@ describe("resolveVisibleLabels", () => {
     expect(resolveVisibleLabels(manifestWithLabel(), undefined)).toEqual([]);
   });
 
-  it("undefined settings → the first eligible label only, at the default 0.5", () => {
+  it("undefined settings → every eligible label, at the default 0.5", () => {
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
     const out = resolveVisibleLabels(m, undefined);
-    expect(out.map((r) => r.name)).toEqual(["a"]);
+    expect(out.map((r) => r.name)).toEqual(["a", "b"]);
     expect(out[0].sourceImageId).toBe("img-0");
-    expect(out[0].opacity).toBe(0.5);
+    expect(out.every((r) => r.opacity === 0.5)).toBe(true);
     // Carries what render/fetch need.
     expect(out[0].label.image.image_id).toBe("img-0:label:a");
     expect(out[0].levelIdx).toBe(0);
   });
 
-  it("empty settings → the first eligible label only (unchanged fallback)", () => {
+  it("empty settings → every eligible label at the default", () => {
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
-    expect(resolveVisibleLabels(m, []).map((r) => r.name)).toEqual(["a"]);
+    expect(resolveVisibleLabels(m, []).map((r) => r.name)).toEqual(["a", "b"]);
+  });
+
+  it("a label with no explicit setting (short list) defaults visible", () => {
+    // Settings cover only index 0 (an explicit off); index 1 has no entry and
+    // follows the shown-by-default policy.
+    const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
+    const out = resolveVisibleLabels(m, [{ visible: false, opacity: 0.5 }]);
+    expect(out.map((r) => r.name)).toEqual(["b"]);
   });
 
   it("returns exactly the visible set, each carrying its per-label opacity", () => {
@@ -391,26 +402,26 @@ describe("resolveVisibleLabels", () => {
     expect(ids.has("img-0:label:b")).toBe(true);
   });
 
-  it("the seeded default (first visible, rest hidden) resolves to exactly one label", () => {
-    // Mirrors the Rust `seeded_for` seed: index 0 visible, the rest hidden, all
-    // at 0.5. One clean overlay on open — no fetch/pool fan-out.
+  it("an explicit per-mask config (one on, rest off) resolves to just the on mask", () => {
+    // Explicit settings: only index 0 on. The two explicit-off masks stay off —
+    // an explicit off is never auto-revealed.
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b"), uintLabel("c")]);
-    const seed = [
+    const config = [
       { visible: true, opacity: 0.5 },
       { visible: false, opacity: 0.5 },
       { visible: false, opacity: 0.5 },
     ];
-    const out = resolveVisibleLabels(m, seed);
+    const out = resolveVisibleLabels(m, config);
     expect(out.map((r) => r.name)).toEqual(["a"]);
     expect(out[0].opacity).toBe(0.5);
   });
 
   it("returns [] when only ineligible labels are marked visible (no substitution)", () => {
     // Settings mark index 0 (uint8, undrawable) visible and index 1 (uint32,
-    // drawable) hidden. Nothing is both visible AND eligible, so nothing is drawn
-    // — resolveVisibleLabels never substitutes a stand-in for the ineligible
-    // visible label (that would put an overlay on screen whose own checkbox reads
-    // off). The one-shot fresh-open rescue owns blank-open repair instead.
+    // drawable) explicitly hidden. Nothing is both visible AND eligible, so
+    // nothing is drawn — resolveVisibleLabels never substitutes a stand-in for
+    // the ineligible visible label (that would put an overlay on screen whose own
+    // checkbox reads off).
     const m = manifestWithLabels([uintLabel("mask8", "Uint8"), uintLabel("region-c", "Uint32")]);
     expect(
       resolveVisibleLabels(m, [
@@ -433,9 +444,9 @@ describe("resolveVisibleLabels", () => {
     expect(reqs).toEqual([]);
   });
 
-  it("honors an explicit hide-all: no fallback when NOTHING is marked visible", () => {
-    // Both eligible, both hidden by the user → nothing drawn. The blank-open
-    // fallback must NOT re-show a label the user deliberately hid.
+  it("honors an explicit hide-all: nothing drawn when every mask is explicitly off", () => {
+    // Both eligible, both explicitly hidden by the user → nothing drawn. An
+    // explicit off is sacred and never auto-revealed.
     const m = manifestWithLabels([uintLabel("a"), uintLabel("b")]);
     const out = resolveVisibleLabels(m, [
       { visible: false, opacity: 0.5 },
@@ -455,12 +466,12 @@ describe("resolveVisibleLabels", () => {
   });
 });
 
-describe("resolveVisibleLabels — no per-tick substitution (mode-aware)", () => {
+describe("resolveVisibleLabels — mode-aware, no stand-in", () => {
   // The overlay the panel toggle controls and the overlay on screen must never
-  // diverge. These guard the two ways a per-tick "show something anyway" fallback
-  // used to break that: a label left visible-but-ineligible could not be hidden
-  // (the fallback re-drew it), and a mode switch could conjure a different label
-  // whose own checkbox read off.
+  // diverge: resolveVisibleLabels returns exactly the visible + mode-eligible
+  // set, never a stand-in for a visible-but-ineligible mask. A mode switch that
+  // makes a visible mask ineligible draws nothing for it rather than conjuring a
+  // different mask whose own checkbox reads off.
   const AXES = [
     { name: "t", kind: "time" }, { name: "c", kind: "channel" },
     { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
@@ -498,11 +509,10 @@ describe("resolveVisibleLabels — no per-tick substitution (mode-aware)", () =>
   }
   const seen = (visibles: boolean[]) => visibles.map((v) => ({ visible: v, opacity: 0.5 }));
 
-  it("hide-after-rescue: an ineligible seed left visible is not re-substituted", () => {
-    // The fresh-open rescue revealed the flat label (index 1); the user then hid
-    // it. The ineligible deep-Z seed (index 0) is still visible:true but can't
-    // draw in volume mode. Nothing visible+eligible → [], so the hidden overlay
-    // stays hidden (no un-hideable re-draw) and the screen matches the panel.
+  it("a visible-but-volume-ineligible mask with a hidden sibling draws nothing in 3D", () => {
+    // deep-Z (index 0) is visible but can't draw in volume mode; flat (index 1)
+    // is explicitly hidden. Nothing visible + eligible → [], and fetch agrees, so
+    // the screen matches the panel (no un-hideable re-draw of a stand-in).
     const m = manifestOf([deepZ("deep"), flat("flat")]);
     expect(resolveVisibleLabels(m, seen([true, false]), { mode: "volume" })).toEqual([]);
     expect(
@@ -753,7 +763,7 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
   });
 });
 
-describe("planLabelRescue", () => {
+describe("resolveVisibleLabels — 3D total-volume memory budget", () => {
   const AXES = [
     { name: "t", kind: "time" }, { name: "c", kind: "channel" },
     { name: "z", kind: "space" }, { name: "y", kind: "space" }, { name: "x", kind: "space" },
@@ -769,61 +779,92 @@ describe("planLabelRescue", () => {
       },
     };
   }
-  // A single-level label that is slice-eligible (small X/Y) but volume-ineligible
-  // (Z busts the 3D per-axis cap), with no coarser level — the pathological shape
-  // the rescue exists for.
-  const deepZ = (name: string): LabelSpec => ({
+  // A single-level uint32 label of the given voxel dims (Z, Y, X) — each voxel is
+  // 4 bytes, so bytes = Z·Y·X·4. Chunk 64 keeps the per-tick chunk count bounded.
+  const label = (name: string, z: number, y: number, x: number): LabelSpec => ({
     name,
     source_image_id: "img-0",
-    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 4096, 64, 64], [1, 1, 1, 64, 64]),
-  });
-  const flat = (name: string): LabelSpec => ({
-    name,
-    source_image_id: "img-0",
-    image: img(`img-0:label:${name}`, "Uint32", [1, 1, 1, 64, 64], [1, 1, 1, 64, 64]),
+    image: img(`img-0:label:${name}`, "Uint32", [1, 1, z, y, x], [1, 1, 64, 64, 64]),
   });
   function manifestOf(labels: LabelSpec[]): DatasetManifest {
     return {
       dataset_id: "ds-0", name: "vol", kind: "Single",
       entities: [], transforms: [], source_layouts: [], default_layout_id: null,
-      images: [img("img-0", "Uint16", [1, 1, 1, 340, 348], [1, 1, 1, 128, 128])],
+      images: [img("img-0", "Uint16", [1, 1, 1, 512, 512], [1, 1, 1, 128, 128])],
       labels,
     };
   }
-  const seen = (visibles: boolean[]) => visibles.map((v) => ({ visible: v, opacity: 0.5 }));
 
-  it("returns the first mode-eligible index when the visible-marked label can't draw here", () => {
-    // Seed marked the deep-Z label (index 0) visible; in VOLUME mode it can't
-    // draw, but the flat label (index 1) can → rescue picks 1.
-    const m = manifestOf([deepZ("deep"), flat("flat")]);
-    expect(planLabelRescue(m, seen([true, false]), "volume")).toBe(1);
+  it("keeps a manifest-order prefix that fits and skips the rest in 3D", () => {
+    __resetLabelWarningsForTest();
+    // Three ~192 MB masks (256·256·768·4 ≈ 192 MB); the 512 MB total budget fits
+    // the first two (~384 MB) but not the third (~576 MB).
+    const m = manifestOf([
+      label("a", 768, 256, 256),
+      label("b", 768, 256, 256),
+      label("c", 768, 256, 256),
+    ]);
+    const out = resolveVisibleLabels(m, undefined, { mode: "volume" });
+    expect(out.map((r) => r.name)).toEqual(["a", "b"]);
+    // Slice mode ignores the total-volume budget: all three show.
+    expect(resolveVisibleLabels(m, undefined, { mode: "slice" }).map((r) => r.name)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
   });
 
-  it("returns null when the visible-marked label IS eligible in the mode", () => {
-    // In SLICE mode the deep-Z label is drawable, so there's no blank-open.
-    const m = manifestOf([deepZ("deep"), flat("flat")]);
-    expect(planLabelRescue(m, seen([true, false]), "slice")).toBeNull();
+  it("is a strict prefix: a smaller later mask is not slipped in past a skipped one", () => {
+    __resetLabelWarningsForTest();
+    // First mask ~384 MB, second ~384 MB (busts the budget at ~768 MB), third is
+    // tiny. The prefix stops at the second; the tiny third is NOT greedily added.
+    const m = manifestOf([
+      label("big1", 768, 512, 256),
+      label("big2", 768, 512, 256),
+      label("tiny", 1, 64, 64),
+    ]);
+    const out = resolveVisibleLabels(m, undefined, { mode: "volume" });
+    expect(out.map((r) => r.name)).toEqual(["big1"]);
   });
 
-  it("honors an explicit hide-all (nothing marked visible → null)", () => {
-    const m = manifestOf([deepZ("deep"), flat("flat")]);
-    expect(planLabelRescue(m, seen([false, false]), "volume")).toBeNull();
+  it("a caller-supplied total budget can be tightened", () => {
+    __resetLabelWarningsForTest();
+    const m = manifestOf([label("a", 64, 64, 64), label("b", 64, 64, 64)]);
+    // Each mask is 64·64·64·4 = 1 MB. A 1 MB total budget fits only the first.
+    const out = resolveVisibleLabels(m, undefined, {
+      mode: "volume",
+      maxTotalVolumeBytes: 1024 * 1024,
+    });
+    expect(out.map((r) => r.name)).toEqual(["a"]);
   });
 
-  it("returns null when NO label is eligible in the mode", () => {
-    // Only a deep-Z label, marked visible, in volume mode: nothing to rescue to.
-    const m = manifestOf([deepZ("deep")]);
-    expect(planLabelRescue(m, seen([true]), "volume")).toBeNull();
+  it("volumeBudgetPrefix returns the kept manifest indices as a prefix", () => {
+    const m = manifestOf([
+      label("a", 768, 256, 256),
+      label("b", 768, 256, 256),
+      label("c", 768, 256, 256),
+    ]);
+    expect(volumeBudgetPrefix(m, [0, 1, 2])).toEqual(new Set([0, 1]));
   });
 
-  it("returns null for undefined settings", () => {
-    const m = manifestOf([deepZ("deep"), flat("flat")]);
-    expect(planLabelRescue(m, undefined, "volume")).toBeNull();
-  });
-
-  it("returns null when the visible-marked label is already eligible even if a later one is too", () => {
-    // flat(0) visible + eligible in volume → no blank-open, no rescue.
-    const m = manifestOf([flat("a"), flat("b")]);
-    expect(planLabelRescue(m, seen([true, false]), "volume")).toBeNull();
+  it("warns once per budget-skipped mask, and the reset re-arms the warning", () => {
+    __resetLabelWarningsForTest();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const m = manifestOf([
+        label("a", 768, 256, 256),
+        label("b", 768, 256, 256),
+        label("c", 768, 256, 256),
+      ]);
+      resolveVisibleLabels(m, undefined, { mode: "volume" });
+      resolveVisibleLabels(m, undefined, { mode: "volume" });
+      // "c" is the only budget-skipped mask; warned exactly once despite two passes.
+      expect(warn).toHaveBeenCalledTimes(1);
+      __resetLabelWarningsForTest();
+      resolveVisibleLabels(m, undefined, { mode: "volume" });
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

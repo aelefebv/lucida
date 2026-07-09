@@ -54,7 +54,7 @@ function makeScene(model = IDENTITY, inv = INV_MARK): LabelVolumeScene {
 const members: MemberRosterEntry[] = [{ imageId: "img-0", position: [0, 0] }];
 
 describe("pushLabelVolumeLayers", () => {
-  it("emits exactly ONE label layer (the first) by default, as a first-hit surface", () => {
+  it("emits every eligible label layer by default, each a first-hit surface", () => {
     const scene = makeScene();
     const layers: VolumeLayerParams[] = [];
     pushLabelVolumeLayers(
@@ -70,15 +70,18 @@ describe("pushLabelVolumeLayers", () => {
       800,
       600,
     );
-    expect(layers).toHaveLength(1);
+    expect(layers.map((l) => l.datasetId)).toEqual([
+      "img-0:label:region-b",
+      "img-0:label:fg",
+    ]);
     const layer = layers[0];
-    expect(layer.datasetId).toBe("img-0:label:region-b"); // manifest order = first
     expect(layer.isLabel).toBe(true);
     expect(layer.blendMode).toBe("alpha");
     expect(layer.renderMode).toBe("translucent");
     expect(layer.opacity).toBeCloseTo(0.5);
     expect(layer.entityIndex).toBe(0);
     expect(layer.scissorRect).toBeDefined();
+    expect(layers.every((l) => l.isLabel)).toBe(true);
   });
 
   it("places the overlay at the SOURCE member's model matrix (+ inverse)", () => {

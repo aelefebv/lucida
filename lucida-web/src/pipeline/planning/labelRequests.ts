@@ -59,6 +59,16 @@ const DEFAULT_MAX_CHUNKS_PER_VOLUME = 512;
  * 2.15 GB), which `createTexture` would reject — this bounds total memory.
  */
 const DEFAULT_MAX_VOLUME_BYTES = 512 * 1024 * 1024;
+/**
+ * Byte budget for the SUM of all label volume textures shown at once in VOLUME
+ * mode. Showing every eligible mask in 3D means one monolithic r32uint texture
+ * per visible mask, so the per-texture cap ({@link DEFAULT_MAX_VOLUME_BYTES})
+ * alone does not bound total device memory — N masks near that cap would still
+ * OOM. This caps the total: masks are shown in manifest order until the budget
+ * is reached, and the rest are skipped (a fail-safe, never a crash). Mirrors the
+ * intensity volume atlas budget (512 MB). SLICE mode is unaffected.
+ */
+const DEFAULT_MAX_TOTAL_VOLUME_BYTES = 512 * 1024 * 1024;
 /** Bytes per label voxel (r32uint). */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
 
@@ -126,6 +136,19 @@ function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): num
 /** Warn once per non-uint32 label so the console isn't spammed each tick. */
 const warnedNonUint32 = new Set<string>();
 
+/** Warn once per label whose volume is dropped by the 3D total-memory budget,
+ *  so the console isn't spammed each tick. */
+const warnedVolumeBudgetSkipped = new Set<string>();
+
+/**
+ * Clear the module-scoped warn-once sets (non-uint32 skips AND 3D memory-budget
+ * skips) so tests can assert warning behavior deterministically. Test-only.
+ */
+export function __resetLabelWarningsForTest(): void {
+  warnedNonUint32.clear();
+  warnedVolumeBudgetSkipped.clear();
+}
+
 export interface LabelSelectionCaps {
   /**
    * View mode. `"slice"` (default) bounds the chosen level per Z-plane (2D
@@ -145,6 +168,12 @@ export interface LabelSelectionCaps {
   maxChunksPerVolume?: number;
   /** Volume-mode texture byte budget (default {@link DEFAULT_MAX_VOLUME_BYTES}). */
   maxVolumeBytes?: number;
+  /**
+   * Volume-mode TOTAL byte budget across every mask shown at once (default
+   * {@link DEFAULT_MAX_TOTAL_VOLUME_BYTES}). Masks are shown in manifest order
+   * until this is reached; the rest are skipped. SLICE mode ignores it.
+   */
+  maxTotalVolumeBytes?: number;
 }
 
 /** All label-selection caps with defaults applied — the shape threaded to
@@ -156,6 +185,7 @@ interface ResolvedLabelCaps {
   maxLevelDim3D: number;
   maxChunksPerVolume: number;
   maxVolumeBytes: number;
+  maxTotalVolumeBytes: number;
 }
 
 function resolveLabelCaps(caps?: LabelSelectionCaps): ResolvedLabelCaps {
@@ -166,6 +196,7 @@ function resolveLabelCaps(caps?: LabelSelectionCaps): ResolvedLabelCaps {
     maxLevelDim3D: caps?.maxLevelDim3D ?? DEFAULT_MAX_LEVEL_DIM_3D,
     maxChunksPerVolume: caps?.maxChunksPerVolume ?? DEFAULT_MAX_CHUNKS_PER_VOLUME,
     maxVolumeBytes: caps?.maxVolumeBytes ?? DEFAULT_MAX_VOLUME_BYTES,
+    maxTotalVolumeBytes: caps?.maxTotalVolumeBytes ?? DEFAULT_MAX_TOTAL_VOLUME_BYTES,
   };
 }
 
@@ -239,6 +270,58 @@ function eligibleLabel(
 }
 
 /**
+ * The chosen-level volume byte size of one label in VOLUME mode: `X·Y·Z` of the
+ * `levelIdx` level times {@link LABEL_VOLUME_BYTES_PER_VOXEL} (r32uint). The
+ * single accounting the total-memory budget is measured in.
+ */
+function labelVolumeBytes(level: LevelGeometry): number {
+  return (
+    level.shape[Axis.X] *
+    level.shape[Axis.Y] *
+    level.shape[Axis.Z] *
+    LABEL_VOLUME_BYTES_PER_VOXEL
+  );
+}
+
+/**
+ * The manifest-order PREFIX of `candidateIndices` (labels already known to be
+ * visible + volume-eligible) that fits the TOTAL label-volume memory budget.
+ *
+ * Accumulates each label's chosen-level {@link labelVolumeBytes} in the given
+ * order and STOPS at the first mask whose inclusion would exceed
+ * `maxTotalVolumeBytes` — that mask AND every mask after it are dropped. It is a
+ * strict prefix, never a greedy pack: a smaller later mask is not slipped in
+ * past a skipped larger one, so fetch, render, and the layer panel all agree on
+ * the exact same 3D set. Returns the set of indices that fit.
+ *
+ * This is the single source of truth for the 3D fail-safe, shared by the
+ * fetch/render selection ({@link resolveVisibleLabels}) and the layer panel, so
+ * neither can drift from the other on which masks a memory-tight dataset shows.
+ */
+export function volumeBudgetPrefix(
+  manifest: DatasetManifest,
+  candidateIndices: number[],
+  caps?: LabelSelectionCaps,
+): Set<number> {
+  const resolvedCaps = resolveLabelCaps({ ...caps, mode: "volume" });
+  const labels = manifest.labels ?? [];
+  const kept = new Set<number>();
+  let total = 0;
+  for (const i of candidateIndices) {
+    const label = labels[i];
+    if (!label) continue;
+    const elig = eligibleLabel(manifest, label, resolvedCaps);
+    if (!elig) continue; // caller pre-filters to eligible; defensive
+    const bytes = labelVolumeBytes(label.image.multiscale.levels[elig.levelIdx]);
+    // Prefix stop: once a mask would bust the budget, it and all after it drop.
+    if (total + bytes > resolvedCaps.maxTotalVolumeBytes) break;
+    total += bytes;
+    kept.add(i);
+  }
+  return kept;
+}
+
+/**
  * The labels a dataset draws, resolved by a single criterion shared by the
  * fetch path ({@link computeLabelChunkRequests}) and the render path
  * (`pushLabelLayers`), so they never disagree (which would fetch one label but
@@ -251,20 +334,20 @@ function eligibleLabel(
  * state and the screen never diverge, a hidden label stays hidden, and switching
  * modes never conjures a label whose own checkbox reads off.
  *
- * When `labelSettings` is undefined/empty — a snapshot that predates the
- * per-label controls — this falls back to the pre-controls default: the FIRST
- * eligible label only, at {@link DEFAULT_LABEL_OPACITY}, so behavior is
- * unchanged until the user interacts. With settings present, a label is shown
- * iff its entry is `visible` AND it is eligible; a missing entry (settings
- * shorter than the label list — a stale/short snapshot) counts as HIDDEN. This
- * is the SAME rule the layer panel uses (see `buildLayerInfos`), so the panel's
- * toggle state and the drawn set never diverge.
+ * When `labelSettings` is undefined/empty — a fresh open, or a snapshot that
+ * predates the per-label controls — this shows EVERY eligible label at
+ * {@link DEFAULT_LABEL_OPACITY}. With settings present, a label is shown iff its
+ * entry is `visible` AND it is eligible; a label with NO explicit entry (an
+ * absent/short-snapshot slot) defaults to visible-if-eligible, and an explicit
+ * `visible: false` is honored (and never auto-revealed). This is the SAME rule
+ * the layer panel uses (see `buildLayerInfos`), so the panel's toggle state and
+ * the drawn set never diverge.
  *
- * A fresh open where the seed marked an ineligible label visible is repaired
- * ONCE, up front, by persisting a real visible+eligible label (see
- * {@link planLabelRescue} / `useLabelRescueOnOpen`) — not per tick here — so a
- * later hide or mode switch is honored exactly rather than fought each tick by a
- * substitution the user cannot dismiss.
+ * In VOLUME mode the visible + eligible set is then capped by the total
+ * label-volume memory budget ({@link volumeBudgetPrefix}): masks are kept in
+ * manifest order until the budget is reached and the rest are skipped (warned
+ * once), so showing every mask in 3D can never allocate an unbounded stack of
+ * monolithic volume textures. SLICE mode shows the full visible + eligible set.
  */
 export function resolveVisibleLabels(
   manifest: DatasetManifest,
@@ -277,90 +360,72 @@ export function resolveVisibleLabels(
 
   const hasSettings = labelSettings !== undefined && labelSettings.length > 0;
 
-  const out: ResolvedVisibleLabel[] = [];
-  // Track whether we've passed the first eligible label — the ONLY label the
-  // pre-controls (no-settings) default reveals.
-  let seenEligible = false;
+  // Visible + eligible labels in manifest order, each tagged with its manifest
+  // index so the volume-memory budget can be applied by position.
+  const candidates: { index: number; resolved: ResolvedVisibleLabel }[] = [];
   for (let i = 0; i < labels.length; i++) {
     const label = labels[i];
     const elig = eligibleLabel(manifest, label, resolvedCaps);
     if (!elig) continue;
-    const isFirstEligible = !seenEligible;
-    seenEligible = true;
 
     let visible: boolean;
     let opacity: number;
     if (hasSettings) {
       const setting = labelSettings[i];
-      visible = setting?.visible ?? false;
+      // A label with no explicit setting (absent/short-snapshot slot) defaults
+      // to visible-if-eligible; an explicit `false` stays hidden.
+      visible = setting?.visible ?? true;
       opacity = normalizeLabelOpacity(setting?.opacity);
     } else {
-      // No settings at all: pre-controls default — only the first eligible.
-      visible = isFirstEligible;
+      // No settings at all: show every eligible label at the default opacity.
+      visible = true;
       opacity = DEFAULT_LABEL_OPACITY;
     }
     if (!visible) continue;
-    out.push({
-      label,
-      source: elig.source,
-      levelIdx: elig.levelIdx,
-      name: label.name,
-      sourceImageId: label.source_image_id,
-      opacity,
+    candidates.push({
+      index: i,
+      resolved: {
+        label,
+        source: elig.source,
+        levelIdx: elig.levelIdx,
+        name: label.name,
+        sourceImageId: label.source_image_id,
+        opacity,
+      },
     });
+  }
+
+  if (resolvedCaps.mode !== "volume") {
+    return candidates.map((c) => c.resolved);
+  }
+
+  // 3D fail-safe: cap total monolithic volume-texture memory. Keep masks in
+  // manifest order up to the budget; skip the rest (warn once). Never OOM.
+  const kept = volumeBudgetPrefix(
+    manifest,
+    candidates.map((c) => c.index),
+    resolvedCaps,
+  );
+  const out: ResolvedVisibleLabel[] = [];
+  for (const c of candidates) {
+    if (kept.has(c.index)) {
+      out.push(c.resolved);
+    } else {
+      warnVolumeBudgetSkipped(manifest.labels?.[c.index]?.image.image_id, c.resolved.name);
+    }
   }
   return out;
 }
 
-/**
- * The manifest index of the label to reveal so a freshly-opened dataset never
- * shows an "on" overlay it can't draw in the OPEN view mode.
- *
- * The seed (mode-agnostic) may mark a label visible that is ineligible under the
- * web's mode-specific caps ({@link eligibleLabel}) while a LATER label is
- * eligible — the dataset would then open with its panel checkbox "on" but
- * nothing drawn. This returns the first `mode`-eligible label to persist as
- * visible, iff ALL of:
- *   (a) the settings mark at least one label visible (an explicit "hide all" is
- *       honored — nothing marked visible yields `null`),
- *   (b) NONE of the visible-marked labels is eligible in `mode` (so there is a
- *       genuine blank-open to repair), and
- *   (c) at least one label IS eligible in `mode` (there is something to reveal).
- * Otherwise (incl. undefined settings) returns `null`.
- *
- * This is the SOLE blank-open repair: {@link resolveVisibleLabels} returns
- * exactly the visible+eligible set and never substitutes per tick, so a fresh
- * open where the seed marked an ineligible label visible is fixed HERE, once, by
- * persisting a real visible+eligible label (see `useLabelRescueOnOpen`) rather
- * than by a fallback that would re-fire on hide or mode switch. Returns the
- * INDEX to persist, not a resolved render entry.
- */
-export function planLabelRescue(
-  manifest: DatasetManifest,
-  labelSettings: LabelViewSetting[] | undefined,
-  mode: "slice" | "volume",
-): number | null {
-  if (labelSettings === undefined) return null;
-  const labels = manifest.labels;
-  if (!labels || labels.length === 0) return null;
-  const resolvedCaps = resolveLabelCaps({ mode });
-
-  let anyMarkedVisible = false;
-  let anyVisibleEligible = false;
-  let firstEligibleIndex = -1;
-  for (let i = 0; i < labels.length; i++) {
-    const eligible = eligibleLabel(manifest, labels[i], resolvedCaps) !== null;
-    if (eligible && firstEligibleIndex < 0) firstEligibleIndex = i;
-    if (labelSettings[i]?.visible === true) {
-      anyMarkedVisible = true;
-      if (eligible) anyVisibleEligible = true;
-    }
-  }
-
-  if (anyMarkedVisible && !anyVisibleEligible && firstEligibleIndex >= 0) {
-    return firstEligibleIndex;
-  }
-  return null;
+/** Emit a one-time console warning that a mask was dropped by the 3D total
+ *  label-volume memory budget, keyed so it fires at most once per label. */
+function warnVolumeBudgetSkipped(imageId: string | undefined, name: string): void {
+  const key = imageId ?? name;
+  if (warnedVolumeBudgetSkipped.has(key)) return;
+  warnedVolumeBudgetSkipped.add(key);
+  console.warn(
+    `[labels] skipping "${name}" in 3D: total label-volume memory budget exceeded`,
+  );
 }
 
 /** A DRAWABLE (eligible) label: its manifest index + name. */
@@ -397,10 +462,10 @@ export function eligibleLabelInfos(
 }
 
 /**
- * The ONE label a dataset shows by default (the first eligible, at the default
- * opacity). A thin wrapper over {@link resolveVisibleLabels} with no settings —
- * kept for callers/paths that only need the single default label. Returns
- * `null` when none qualifies.
+ * The FIRST eligible label of a dataset (in manifest order), at the default
+ * opacity — a thin wrapper over {@link resolveVisibleLabels} with no settings,
+ * for callers/paths that need a single representative label rather than the full
+ * default set. Returns `null` when none qualifies.
  */
 export function resolveDefaultLabel(
   manifest: DatasetManifest,
@@ -418,9 +483,9 @@ export interface LabelRequestArgs {
   z: number;
   /**
    * Per-label visibility/opacity from the dataset's display settings
-   * (`dataset_settings.label_settings`). Undefined/empty falls back to the
-   * single default label (see {@link resolveVisibleLabels}), so fetch keeps
-   * pace with what render draws — a hidden label is neither fetched nor drawn.
+   * (`dataset_settings.label_settings`). Undefined/empty falls back to every
+   * eligible label (see {@link resolveVisibleLabels}), so fetch keeps pace with
+   * what render draws — a hidden label is neither fetched nor drawn.
    */
   labelSettings?: LabelViewSetting[];
   maxLevelDim?: number;
