@@ -25,34 +25,77 @@ export interface MinimapState {
   size: number;
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
   /**
-   * Hash of the inputs that change the overview IMAGE (the GPU top-down redraw):
-   * mode, z/channel, dataset order + settings, upload generation, the scene's
-   * content + layout epochs, and — in volume mode only — the camera
-   * orientation. When this is unchanged the cached overview is reused and no
-   * members are re-read and no GPU overview is redrawn.
+   * Hash of the GEOMETRY inputs that change what the overview draws, where, and
+   * at what backing resolution: mode, z/channel, dataset order, upload
+   * generation, the scene's content + layout epochs, the minimap size and
+   * devicePixelRatio (which set the backing pixel size the camera and overview
+   * are rendered at), and — in volume mode only — the camera orientation. When
+   * this is unchanged the cached member geometry is reused and no members are
+   * re-read. Per-layer display values (contrast/gamma/colormap/opacity) are NOT
+   * here — those ride the settings snapshot below so a display-only edit skips
+   * the O(N) member re-read.
    */
-  overviewRenderKey: string | null;
+  overviewGeometryKey: string | null;
+  /**
+   * The raw `all_dataset_settings()` snapshot the cached overview was rendered
+   * from. A change flags a settings edit; whether that edit is display-only (a
+   * cheap re-render from cached geometry) or a visibility change (a full
+   * rebuild) is decided against `overviewVisibilitySig`.
+   */
+  overviewSettingsSnap: string | null;
+  /**
+   * Signature of which datasets are drawn (visible) in draw order. Recomputed
+   * only when the settings snapshot changes; it distinguishes a geometry change
+   * (a layer appears/disappears → full rebuild) from a display-only edit (same
+   * drawn set → cheap display re-render).
+   */
+  overviewVisibilitySig: string | null;
   /**
    * Hash of the camera inputs that only move the viewport/frustum rectangle on
    * the 2D overlay (slice zoom/center; volume dolly). A change here recomputes
    * just the cheap overlay and reuses the cached overview.
    */
   overlayRenderKey: string | null;
-  /** Camera-invariant overview outputs, cached keyed by `overviewRenderKey`. */
+  /** Camera-invariant overview outputs, cached keyed by `overviewGeometryKey`. */
   overviewCache: MinimapOverviewCache | null;
   /** Set by tickMinimapOverview when new chunks are uploaded to GPU. */
   uploadGeneration: number;
 }
 
 /**
+ * One drawn member's placement, with the owning dataset id so the per-layer
+ * display params (contrast/gamma/colormap) can be resolved from fresh settings
+ * without re-reading the member. Display values are deliberately absent — they
+ * are applied at render time, so a display-only edit reuses this unchanged.
+ */
+export interface MinimapRenderLayerGeometry {
+  memberId: string;
+  ownerDatasetId: string;
+  modelMatrix: Float32Array;
+  invModelMatrix: Float32Array;
+}
+
+/**
  * The overview-derived outputs that do not depend on the main camera's
  * pan/zoom (slice) or dolly (volume). Cached across ticks so a camera-only
  * change recomputes only the 2D overlay instead of re-reading every member and
- * re-issuing the O(N) GPU overview render.
+ * re-issuing the O(N) GPU overview render, and so a display-only edit re-issues
+ * the overview render from the cached geometry without re-reading members.
  */
 export interface MinimapOverviewCache {
   /** minimap camera view-projection (for the overlay draw). */
   viewProj: Float32Array;
+  /**
+   * The camera-invariant per-layer GEOMETRY the GPU overview render needs
+   * (member id, owning dataset, placement matrices) with NO display values
+   * baked in. A display-only edit rebuilds the overview render from these plus
+   * the fresh settings — no members are re-read. In draw order.
+   */
+  renderLayers: MinimapRenderLayerGeometry[];
+  /** minimap camera inverse view-projection passed to the overview render. */
+  invViewProj: Float32Array;
+  /** minimap camera eye position passed to the overview render. */
+  eye: Float32Array;
   /** Per-member overlay layers (bounding boxes, slice planes). */
   overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[];
   /** Per-dataset overlay layers (volume frustum). */
@@ -75,7 +118,9 @@ export function createMinimapState(): MinimapState {
     overviewActive: false,
     size: 200,
     overlayCallback: null,
-    overviewRenderKey: null,
+    overviewGeometryKey: null,
+    overviewSettingsSnap: null,
+    overviewVisibilitySig: null,
     overlayRenderKey: null,
     overviewCache: null,
     uploadGeneration: 0,
@@ -368,17 +413,107 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   return budgetRemaining <= 0;
 }
 
+/** Parsed per-dataset settings, keyed by dataset id (from `all_dataset_settings`). */
+type MinimapAllSettings = Record<string, {
+  visible: boolean;
+  opacity: number;
+  blend_mode: string;
+} & MinimapDatasetSettings>;
+
 /**
- * Read every member and issue the O(N) GPU overview redraw, returning the
- * camera-invariant outputs to cache. Split out of `tickMinimap` so a
- * camera-only change can reuse the cache and skip all of this work.
+ * Build the per-layer display params from cached member geometry + the current
+ * settings and issue the GPU overview render. The one place layer params are
+ * assembled, so the full rebuild and the display-only re-render produce a
+ * byte-identical render call: same layer order, same resolved
+ * contrast/gamma/colormap, same camera. Only the display values differ between
+ * calls — the geometry (ids, matrices) is reused verbatim.
+ */
+function issueMinimapRender(
+  client: TickContext["client"],
+  renderLayers: MinimapRenderLayerGeometry[],
+  allSettings: MinimapAllSettings,
+  activeC: number,
+  invViewProj: Float32Array,
+  eye: Float32Array,
+  backingSize: number,
+): void {
+  const layers: MinimapLayerParams[] = [];
+  for (const geom of renderLayers) {
+    const settings = allSettings[geom.ownerDatasetId];
+    if (!settings) continue;
+    const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
+    layers.push({
+      datasetId: geom.memberId,
+      modelMatrix: geom.modelMatrix,
+      invModelMatrix: geom.invModelMatrix,
+      contrastMin,
+      contrastMax,
+      gamma,
+      colormap: resolveMinimapLayerColormap(settings, activeC),
+    });
+  }
+  if (layers.length > 0) {
+    client.minimapRender(layers, invViewProj, eye, backingSize, backingSize);
+  }
+}
+
+/**
+ * Re-issue the overview render for a display-only edit (contrast/gamma/colormap/
+ * opacity): reuse the cached member geometry and camera, recompute only the
+ * per-layer display params from the fresh settings. No members are re-read and
+ * no geometry is rebuilt — the O(N) `member_render_*` / `member_positions` /
+ * `scene_model_matrix_for` reads are skipped entirely.
+ */
+function updateMinimapDisplay(
+  client: TickContext["client"],
+  cache: MinimapOverviewCache,
+  allSettings: MinimapAllSettings,
+  activeC: number,
+): void {
+  issueMinimapRender(
+    client,
+    cache.renderLayers,
+    allSettings,
+    activeC,
+    cache.invViewProj,
+    cache.eye,
+    cache.backingSize,
+  );
+}
+
+/**
+ * Signature of the drawn (visible) dataset set in draw order. Recomputed only
+ * when the settings snapshot changes, it separates a display-only edit (same
+ * signature → cheap `updateMinimapDisplay`) from a visibility change (a layer
+ * appears/disappears → full `buildMinimapOverview`). The dataset SET and order
+ * are covered by the geometry key (content/layout epochs + dataset order), so
+ * this only needs to track each drawn dataset's `visible` flag.
+ */
+function minimapVisibilitySignature(layerOrder: string[], allSettings: MinimapAllSettings): string {
+  // JSON-encode [dsId, flag] pairs in draw order rather than delimiter-joining
+  // them: a raw `${dsId}:${flag}` join could alias two distinct visibility states
+  // if a dataset id contained the delimiter. Structural encoding removes that
+  // collision class entirely, mirroring how the geometry key embeds JSON.
+  const entries: [string, 0 | 1][] = [];
+  for (const dsId of layerOrder) {
+    const settings = allSettings[dsId];
+    entries.push([dsId, settings && settings.visible ? 1 : 0]);
+  }
+  return JSON.stringify(entries);
+}
+
+/**
+ * Read every member, cache the camera-invariant + display-invariant GEOMETRY,
+ * and issue the O(N) GPU overview redraw. Split out of `tickMinimap` so a
+ * camera-only change reuses the cache and skips all of this, and a display-only
+ * change reuses `cache.renderLayers` via `updateMinimapDisplay` instead.
  */
 function buildMinimapOverview(
   ctx: TickContext,
   cssSize: number,
   activeC: number,
-  orderSnap: string,
-  settingsSnap: string,
+  layerOrder: string[],
+  allSettings: MinimapAllSettings,
   theta: number,
   phi: number,
 ): MinimapOverviewCache {
@@ -387,18 +522,11 @@ function buildMinimapOverview(
   const backingSize = Math.round(cssSize * devicePixelRatio);
 
   const camData = new Float32Array(scene.minimap_camera(theta, phi, backingSize, backingSize));
-  const invViewProj = camData.subarray(0, 16);
-  const eye = camData.subarray(16, 19);
+  const invViewProj = new Float32Array(camData.subarray(0, 16));
+  const eye = new Float32Array(camData.subarray(16, 19));
   const viewProj = camData.subarray(19, 35);
 
-  const layerOrder: string[] = JSON.parse(orderSnap);
-  const allSettings: Record<string, {
-    visible: boolean;
-    opacity: number;
-    blend_mode: string;
-  } & MinimapDatasetSettings> = JSON.parse(settingsSnap);
-
-  const layers: MinimapLayerParams[] = [];
+  const renderLayers: MinimapRenderLayerGeometry[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
   const datasetOverlayLayers: MinimapOverlayData["datasetLayers"] = [];
   const sliceViewportMembers: SliceViewportMemberInput[] = [];
@@ -425,16 +553,7 @@ function buildMinimapOverview(
       const invModel = mats?.invModel ?? identityModelMatrix();
       const level0 = img.multiscale.levels[0];
 
-      const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
-      layers.push({
-        datasetId: memberId,
-        modelMatrix: model,
-        invModelMatrix: invModel,
-        contrastMin,
-        contrastMax,
-        gamma,
-        colormap: resolveMinimapLayerColormap(settings, activeC),
-      });
+      renderLayers.push({ memberId, ownerDatasetId: dsId, modelMatrix: model, invModelMatrix: invModel });
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
       if (level0) {
@@ -464,9 +583,7 @@ function buildMinimapOverview(
     });
   }
 
-  if (layers.length > 0) {
-    client.minimapRender(layers, invViewProj, eye, backingSize, backingSize);
-  }
+  issueMinimapRender(client, renderLayers, allSettings, activeC, invViewProj, eye, backingSize);
 
   // Dataset dimensions (per member — all members share the same tile shape).
   // Member id → owning dataset's first-image level-0 shape, built in one pass
@@ -491,6 +608,9 @@ function buildMinimapOverview(
 
   return {
     viewProj: new Float32Array(viewProj),
+    renderLayers,
+    invViewProj,
+    eye,
     overlayLayers,
     datasetOverlayLayers,
     sliceViewportMembers,
@@ -551,39 +671,81 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // a camera-only tick (see readMinimapOverviewEpochs).
   const { content: contentEpoch, layout: layoutEpoch } = readMinimapOverviewEpochs(scene);
 
-  // Two keys split the per-tick work by what each input actually affects:
-  //  - overview key: inputs that change the overview IMAGE (the GPU top-down
-  //    redraw). In slice mode the overview is camera-invariant; in volume mode
-  //    rotating the camera (theta/phi) reorients it, so those join this key.
-  //    uploadGeneration re-renders when new overview chunks arrive; the content +
-  //    layout epochs re-render when the dataset set or member placement changes.
+  // Three keys split the per-tick work by what each input actually affects:
+  //  - geometry key: inputs that change WHAT the overview draws, WHERE, and at
+  //    what backing resolution. In slice mode the placement is camera-invariant;
+  //    in volume mode rotating the camera (theta/phi) reorients it, so those join
+  //    this key. uploadGeneration re-renders when new overview chunks arrive; the
+  //    content + layout epochs re-render when the dataset set or member placement
+  //    changes; devicePixelRatio + size re-render when the backing pixel size
+  //    moves (monitor DPR change or resize). Per-layer display values are
+  //    deliberately NOT here.
+  //  - settings snapshot: any per-dataset display/visibility edit. A display-only
+  //    edit (contrast/gamma/colormap/opacity) re-issues the overview render from
+  //    the cached geometry with no member re-read; a visibility edit (a drawn
+  //    layer appears/disappears, detected via the visibility signature) forces a
+  //    full geometry rebuild.
   //  - overlay key: the camera inputs that only move the viewport/frustum
   //    rectangle on the 2D overlay — slice zoom/center, volume dolly
-  //    (eye_position). theta/phi live in the overview key (a rotation also moves
+  //    (eye_position). theta/phi live in the geometry key (a rotation also moves
   //    the frustum, and the overview must redraw anyway).
   const overviewCamSnap = mode === "volume" ? `${theta}|${phi}` : "";
-  const overviewKey = `${mode}|${sliceZ}|${activeC}|${overviewCamSnap}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${settingsSnap}|${state.uploadGeneration}`;
+  // devicePixelRatio and the minimap size set the backing pixel size the camera
+  // and overview are rendered at (backingSize = round(size × devicePixelRatio)),
+  // so a DPR change (window dragged across monitors) or a resize must force a
+  // full rebuild — otherwise a later display-only edit re-issues the render with
+  // the stale backing size/camera cached from the old DPR (see the retina DPR 2
+  // gotcha). This repo is DPR-sensitive.
+  const geometryKey = `${mode}|${sliceZ}|${activeC}|${overviewCamSnap}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${state.uploadGeneration}|${devicePixelRatio}|${state.size}`;
   const overlayCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
   const overlayKey = `${mode}|${overlayCamSnap}`;
 
-  const overviewChanged = overviewKey !== state.overviewRenderKey;
+  const geometryChanged = geometryKey !== state.overviewGeometryKey;
+  const settingsChanged = settingsSnap !== state.overviewSettingsSnap;
   const overlayChanged = overlayKey !== state.overlayRenderKey;
-  if (!overviewChanged && !overlayChanged && state.overviewCache) return;
+  if (!geometryChanged && !settingsChanged && !overlayChanged && state.overviewCache) return;
 
-  if (overviewChanged || !state.overviewCache) {
-    // Overview changed (or first render): re-read members and redraw the GPU
-    // overview, caching the camera-invariant outputs for later camera-only ticks.
-    state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, orderSnap, settingsSnap, theta, phi);
+  let rebuilt = false;
+  if (geometryChanged || !state.overviewCache) {
+    // Geometry changed (or first render): re-read members and redraw the GPU
+    // overview, caching the camera- and display-invariant geometry for later
+    // camera-only and display-only ticks. Parsed here so the visibility signature
+    // and the build share one parse.
+    const layerOrder: string[] = JSON.parse(orderSnap);
+    const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
+    state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, layerOrder, allSettings, theta, phi);
+    state.overviewVisibilitySig = minimapVisibilitySignature(layerOrder, allSettings);
+    rebuilt = true;
+  } else if (settingsChanged) {
+    // Settings moved but the geometry key did not. Parse to tell a visibility
+    // change (a drawn layer in/out → full rebuild) from a display-only edit
+    // (same drawn set → cheap re-render from cached geometry).
+    const layerOrder: string[] = JSON.parse(orderSnap);
+    const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
+    const visibilitySig = minimapVisibilitySignature(layerOrder, allSettings);
+    if (visibilitySig !== state.overviewVisibilitySig) {
+      state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, layerOrder, allSettings, theta, phi);
+      state.overviewVisibilitySig = visibilitySig;
+      rebuilt = true;
+    } else {
+      // Display-only edit: reuse cached member geometry + camera, recompute only
+      // the per-layer display params. No member re-read, no geometry rebuild.
+      updateMinimapDisplay(ctx.client, state.overviewCache, allSettings, activeC);
+    }
   }
   // A camera-only change falls through: the cached overview texture already sits
   // on the minimap canvas, so we skip readMemberRenderMatrices + minimapRender
   // and recompute only the cheap 2D overlay below.
-  state.overviewRenderKey = overviewKey;
+  state.overviewGeometryKey = geometryKey;
+  state.overviewSettingsSnap = settingsSnap;
   state.overlayRenderKey = overlayKey;
 
   const cache = state.overviewCache;
 
-  if (state.overlayCallback) {
+  // The overlay (viewport/frustum rectangle) depends on camera + geometry, not
+  // display values — so a display-only edit skips it; only a geometry rebuild or
+  // a camera move recomputes it.
+  if (state.overlayCallback && cache && (rebuilt || overlayChanged)) {
     // Slice view bounds (2D only), expressed in scene XY coordinates. Recomputed
     // every camera change from the fresh zoom/center over the cached members.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];

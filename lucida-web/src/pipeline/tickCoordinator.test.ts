@@ -706,6 +706,275 @@ describe("epoch caching", () => {
 });
 
 // ===========================================================================
+// 1b. Display-only fast path
+// ===========================================================================
+
+describe("display-only fast path", () => {
+  // Once the coalescing window elapses a rebuild is normally due, but a pure
+  // per-channel intensity edit (contrast/gamma/colormap/opacity) needs only
+  // a small descriptor patch — the roster, active set, and residency are
+  // unchanged, so no plan()/cold-state/submit runs. The path fires ONLY when
+  // it can prove nothing else changed: a bundled label toggle, a z-slab
+  // extension, a T/C move, or a view move all fall through to a full rebuild.
+
+  let planSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    planSpy = vi.fn(plan);
+  });
+
+  function makeOrch(): TickCoordinator {
+    return new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan);
+  }
+
+  const emptyMinimap = new Map<string, never[]>();
+
+  function makeCtx(
+    scene: unknown,
+    datasets: Map<string, DatasetEntry>,
+    over?: {
+      cpuCache?: CpuCache;
+      coldState?: ReturnType<typeof vi.fn>;
+      coldStateDisplay?: ReturnType<typeof vi.fn>;
+    },
+  ): TickContext {
+    return {
+      scene,
+      datasets,
+      client: {
+        coldState: over?.coldState ?? vi.fn(),
+        coldStateDisplay: over?.coldStateDisplay ?? vi.fn(),
+        viewHotState: vi.fn(),
+      } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: over?.cpuCache ?? createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  const baseSettings = (over: Record<string, unknown> = {}) => ({
+    ds1: {
+      visible: true,
+      opacity: 1,
+      contrast_min: 0,
+      contrast_max: 1,
+      gamma: 1,
+      blend_mode: "alpha",
+      channel_settings: [],
+      channel_blend_mode: "additive",
+      ...over,
+    },
+  });
+
+  it("serves a display-only edit with a descriptor patch, no plan or cold state", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+
+      // Leading full rebuild at the baseline display.
+      bumpSettingsGeneration();
+      const scene1 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+      });
+      orch.planAndFetch(makeCtx(scene1, datasets, { coldState, coldStateDisplay }), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+
+      // Past the window: selection bumps and contrast changes, but T/C/Z,
+      // z-range, and every non-display setting are unchanged — a pure
+      // intensity-display edit.
+      vi.advanceTimersByTime(500);
+      bumpSettingsGeneration();
+      const scene2 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 2 },
+        allSettings: baseSettings({ contrast_min: 1000 }),
+      });
+      orch.planAndFetch(makeCtx(scene2, datasets, { coldState, coldStateDisplay }), emptyMinimap);
+
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(coldState).not.toHaveBeenCalled();
+      expect(coldStateDisplay).toHaveBeenCalledTimes(1);
+      const pushed = coldStateDisplay.mock.calls[0][0] as {
+        datasetId: string;
+        displayStateByChannel: Record<number, { contrastMin: number }>;
+      };
+      expect(pushed.datasetId).toBe("ds1");
+      expect(pushed.displayStateByChannel[0].contrastMin).toBe(1000);
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does a full rebuild when a selection edit changes T (different chunks)", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+
+      bumpSettingsGeneration();
+      const scene1 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+        t: 0,
+      });
+      orch.planAndFetch(makeCtx(scene1, datasets, { coldState, coldStateDisplay }), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+
+      // A T scrub bumps selection AND moves T — the chunks differ, so this
+      // must NOT take the display-only path.
+      vi.advanceTimersByTime(500);
+      const scene2 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 2 },
+        allSettings: baseSettings(),
+        t: 5,
+      });
+      orch.planAndFetch(makeCtx(scene2, datasets, { coldState, coldStateDisplay }), emptyMinimap);
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).toHaveBeenCalledTimes(1);
+      expect(coldStateDisplay).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does a full rebuild on a view move (the display-only path never fires)", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets, { cpuCache, coldState, coldStateDisplay }), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+      vi.mocked(cpuCache.onPlanRebuildStart).mockClear();
+
+      // Past the window: a pure camera move (view epoch advanced). This is
+      // not a selection change, so the display-only path is not eligible and
+      // the full rebuild runs — roster, cold state, and submit all fire.
+      vi.advanceTimersByTime(500);
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene2, datasets, { cpuCache, coldState, coldStateDisplay }), emptyMinimap);
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).toHaveBeenCalledTimes(1);
+      expect(coldStateDisplay).not.toHaveBeenCalled();
+      expect(cpuCache.submit).toHaveBeenCalledTimes(1);
+      expect(cpuCache.onPlanRebuildStart).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does a full rebuild when a label-settings change rides the same selection diff", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+
+      bumpSettingsGeneration();
+      const scene1 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings({ label_settings: [{ visible: false, opacity: 1 }] }),
+      });
+      orch.planAndFetch(makeCtx(scene1, datasets, { cpuCache, coldState, coldStateDisplay }), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+
+      // Past the window: a label toggle (visible false → true) bundled with
+      // a contrast edit in one selection diff. The label chunk-fetch must
+      // not be skipped, so this falls through to a full rebuild — not the
+      // display-only patch.
+      vi.advanceTimersByTime(500);
+      bumpSettingsGeneration();
+      const scene2 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 2 },
+        allSettings: baseSettings({
+          contrast_min: 1000,
+          label_settings: [{ visible: true, opacity: 1 }],
+        }),
+      });
+      orch.planAndFetch(makeCtx(scene2, datasets, { cpuCache, coldState, coldStateDisplay }), emptyMinimap);
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).toHaveBeenCalledTimes(1);
+      expect(cpuCache.submit).toHaveBeenCalledTimes(1);
+      expect(coldStateDisplay).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does a full rebuild when a z-slab extension rides the same selection diff", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+
+      const singlePlaneRegion = {
+        xy_bounds: [0, 0, 1024, 1024] as [number, number, number, number],
+        z_range: [0, 1] as [number, number],
+        effective_zoom: 1.0,
+        sort_center: null,
+        frustum_planes: null,
+      };
+      bumpSettingsGeneration();
+      const scene1 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+        visibleRegion: singlePlaneRegion,
+      });
+      orch.planAndFetch(makeCtx(scene1, datasets, { cpuCache, coldState, coldStateDisplay }), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+
+      // Past the window: the slab deepens (z_range end 1 → 4) bundled with a
+      // contrast edit in one selection diff. `scene.z()` (the slab start) is
+      // unchanged, so only the full z-range reveals the extension — the
+      // deeper z-chunks must be fetched, so this falls through to a rebuild.
+      vi.advanceTimersByTime(500);
+      bumpSettingsGeneration();
+      const scene2 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 2 },
+        allSettings: baseSettings({ contrast_min: 1000 }),
+        visibleRegion: { ...singlePlaneRegion, z_range: [0, 4] },
+      });
+      orch.planAndFetch(makeCtx(scene2, datasets, { cpuCache, coldState, coldStateDisplay }), emptyMinimap);
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).toHaveBeenCalledTimes(1);
+      expect(cpuCache.submit).toHaveBeenCalledTimes(1);
+      expect(coldStateDisplay).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ===========================================================================
 // 2. Multi-dataset
 // ===========================================================================
 

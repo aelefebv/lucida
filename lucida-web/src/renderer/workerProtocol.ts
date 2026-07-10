@@ -617,6 +617,28 @@ export interface ViewHotStateMessage {
   rayHitsByEntity: Array<[entityId: string, hit: [number, number, number]]>;
 }
 
+/**
+ * Display-only update for a dataset whose geometry, active set, and
+ * residency are unchanged (a contrast / gamma / colormap / opacity edit).
+ *
+ * Carries just the per-channel display state — no active set, no matrices,
+ * no LOD geometry — so the sender builds it in O(visible-channels) and the
+ * worker re-applies it to the resident entity descriptor buffer without
+ * re-ingesting cold state (no pool/atlas/indirection work). The descriptor
+ * is rebuilt from the dataset's most recent {@link ColdStateMessage} with
+ * these values swapped in, so the result is byte-identical to a full cold
+ * state carrying the same display values.
+ *
+ * Keyed by channel index exactly like
+ * {@link ColdStateActiveEntryBase.displayStateByChannel}; the worker indexes
+ * it by `visibleChannels[ch]` per yielded (entry, channel) combination.
+ */
+export interface ColdStateDisplayMessage {
+  type: "coldStateDisplay";
+  datasetId: string;
+  displayStateByChannel: Record<number, ColdStateDisplayState>;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -636,6 +658,7 @@ export type MainToWorkerMessage =
   | UpdateCursorDataMessage
   | DestroyMessage
   | ColdStateMessage
+  | ColdStateDisplayMessage
   | ViewHotStateMessage;
 
 // --- Worker -> Main ---

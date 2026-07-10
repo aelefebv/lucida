@@ -80,6 +80,13 @@ export interface RendererState {
   currentEpochs: SceneEpochs | null;
   /** Last cold-state message (replaced on every cold state). */
   currentColdState: ColdStateMessage | null;
+  /**
+   * Per-dataset most-recent cold-state message. A display-only update
+   * (`coldStateDisplay`) patches this dataset's entry and rebuilds its
+   * descriptor buffer from it, so display edits get the full active set
+   * without re-sending it. Cleared on dataset removal.
+   */
+  coldStateByDataset: Map<string, ColdStateMessage>;
 
   // ── Devtools counter (worker-side HITL) ──────────────────────────
   /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
@@ -115,6 +122,7 @@ export function createInitialState(): RendererState {
     cameraUVPerEntity: new Map(),
     currentEpochs: null,
     currentColdState: null,
+    coldStateByDataset: new Map(),
     proxyStats: {
       uploaded: 0,
       dropped: 0,

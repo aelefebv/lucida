@@ -423,6 +423,61 @@ describe("tickMinimap overview/overlay split", () => {
     expect(renderCount.n).toBe(4);
   });
 
+  it("re-renders the overview on a display-only edit without re-reading members", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    const overlayCallsBefore = overlay.mock.calls.length;
+
+    // Contrast-only edit (same active channel + visibility): the overview must
+    // re-render with the new display values, but the O(N) member geometry
+    // (positions + matrices) is reused from the cache — no re-read.
+    const readSpy = vi.spyOn(scene.wasm, "member_positions");
+    const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
+    scene.settings = JSON.stringify({
+      ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 100, gamma: 1 },
+    });
+    tickMinimap(ctx, state, 0);
+
+    expect(renderCount.n).toBe(2);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(matSpy).not.toHaveBeenCalled();
+    // The overlay (viewport/frustum) does not depend on display values.
+    expect(overlay.mock.calls.length).toBe(overlayCallsBefore);
+  });
+
+  it("rebuilds and re-reads members when a dataset's visibility changes", () => {
+    const scene = makeScene();
+    scene.settings = JSON.stringify({
+      ds: { visible: false, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+    });
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    // Hidden dataset draws nothing.
+    expect(renderCount.n).toBe(0);
+
+    // Showing it adds a drawn layer — a geometry change, not a display-only edit —
+    // so members must be re-read and the overview rebuilt, even though order/z/
+    // channel/upload/epochs are all unchanged.
+    const readSpy = vi.spyOn(scene.wasm, "member_positions");
+    scene.settings = JSON.stringify({
+      ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+    });
+    tickMinimap(ctx, state, 0);
+
+    expect(readSpy).toHaveBeenCalled();
+    expect(renderCount.n).toBe(1);
+  });
+
   it("redraws the overview when the slice z changes", () => {
     const scene = makeScene();
     const renderCount = { n: 0 };
@@ -471,6 +526,43 @@ describe("tickMinimap overview/overlay split", () => {
     scene.center = [500, 500];
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(2);
+  });
+
+  it("rebuilds at the new backing size when devicePixelRatio changes before a display-only edit", () => {
+    const scene = makeScene();
+    // Capture the backing size each overview render is issued at.
+    const renderSizes: number[] = [];
+    const client = {
+      minimapRender: (_l: unknown, _iv: unknown, _e: unknown, w: number) => {
+        renderSizes.push(w);
+      },
+    } as unknown as RenderClient;
+    const canvas = { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement;
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = {
+      scene: scene.wasm,
+      datasets: makeDatasets(),
+      client,
+      canvas,
+      mode: "slice",
+    } as unknown as TickContext;
+
+    // First rebuild at DPR 2 → backing size = round(200 × 2) = 400.
+    tickMinimap(ctx, state, 0);
+    expect(renderSizes).toEqual([400]);
+
+    // Window dragged onto a DPR-1 monitor, then a display-only contrast edit. The
+    // DPR change must force a full rebuild at the new backing size (200), not a
+    // display-only re-render at the stale 400 cached from the old DPR.
+    globalThis.devicePixelRatio = 1;
+    const readSpy = vi.spyOn(scene.wasm, "member_positions");
+    scene.settings = JSON.stringify({
+      ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 100, gamma: 1 },
+    });
+    tickMinimap(ctx, state, 0);
+    expect(renderSizes).toEqual([400, 200]);
+    expect(readSpy).toHaveBeenCalled();
   });
 
   it("in volume mode reuses the overview on a dolly but redraws on a rotation", () => {

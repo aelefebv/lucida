@@ -12,11 +12,14 @@
  * `cold.activeSet × cold.visibleChannels` in the same canonical order
  * (see {@link iterateColdMembers}), so no readback is needed.
  *
- * Display-state changes (contrast slider, colormap dropdown, etc.)
- * bump `epochs.selection`. The orchestrator's epoch-cache check re-runs
- * `plan()`, re-emits cold state, and the worker rebuilds the descriptor
- * buffer — display-state changes flow through the cold-state seam
- * rather than a dedicated patch message.
+ * Display-state changes (contrast slider, colormap dropdown, etc.) bump
+ * `epochs.selection`. When only the per-channel intensity display changed,
+ * the orchestrator sends a dedicated {@link ColdStateDisplayMessage}: the
+ * worker rebuilds just this descriptor buffer from the dataset's most
+ * recent cold state with the new display values swapped in, skipping the
+ * pool/atlas/active-set work. Any other change (geometry, active set, label
+ * overlays, z-range, …) re-runs `plan()` and re-emits full cold state,
+ * which rebuilds the descriptor the same way.
  */
 
 import type {
