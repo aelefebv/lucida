@@ -615,6 +615,56 @@ describe("tickMinimap overview/overlay split", () => {
     expect(renderCount.n).toBe(2);
   });
 
+  it("in volume mode re-renders an orbit from cached geometry without re-reading members", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "volume", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(1);
+    const firstViewProj = overlay.mock.calls[0][0].viewProj;
+
+    // A pure orbit changes only theta/phi. Member geometry is camera-invariant,
+    // so the O(members) reads (positions + render matrices + per-dataset scene
+    // matrices + volume shape) must NOT rerun — yet the overview MUST redraw for
+    // the new angle and the overlay MUST refresh (frustum + boxes reorient).
+    const posSpy = vi.spyOn(scene.wasm, "member_positions");
+    const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
+    const idSpy = vi.spyOn(scene.wasm, "member_render_ids");
+    const dsMatSpy = vi.spyOn(scene.wasm, "scene_model_matrix_for");
+    const volShapeSpy = vi.spyOn(scene.wasm, "dataset_volume_shape");
+    // Return a distinct camera for the new angle so the overlay's viewProj moves.
+    const camSpy = vi.spyOn(scene.wasm, "minimap_camera").mockReturnValue(
+      new Float32Array(35).fill(7),
+    );
+
+    scene.theta = 1.0;
+    scene.phi = 0.3;
+    tickMinimap(ctx, state, 0);
+
+    expect(renderCount.n).toBe(2);
+    expect(posSpy).not.toHaveBeenCalled();
+    expect(matSpy).not.toHaveBeenCalled();
+    expect(idSpy).not.toHaveBeenCalled();
+    expect(dsMatSpy).not.toHaveBeenCalled();
+    expect(volShapeSpy).not.toHaveBeenCalled();
+    // The minimap camera was recomputed for the new orientation.
+    expect(camSpy).toHaveBeenCalled();
+
+    // Overlay refreshed: static layer re-stroked (boxes/frustum moved), the
+    // frustum tracks the new angle, and viewProj reflects the new camera.
+    expect(overlay).toHaveBeenCalledTimes(2);
+    const orbitCall = overlay.mock.calls[1][0];
+    expect(orbitCall.staticDirty).toBe(true);
+    expect(orbitCall.theta).toBe(1.0);
+    expect(orbitCall.phi).toBe(0.3);
+    expect(orbitCall.mainInvViewProj).not.toBeNull();
+    expect(Array.from(orbitCall.viewProj)).not.toEqual(Array.from(firstViewProj));
+  });
+
   it("does nothing when the minimap is disabled", () => {
     const scene = makeScene();
     const renderCount = { n: 0 };

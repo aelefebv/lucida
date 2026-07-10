@@ -26,16 +26,29 @@ export interface MinimapState {
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
   /**
    * Hash of the GEOMETRY inputs that change what the overview draws, where, and
-   * at what backing resolution: mode, z/channel, dataset order, upload
+   * at what backing resolution: mode, channel, dataset order, upload
    * generation, the scene's content + layout epochs, the minimap size and
    * devicePixelRatio (which set the backing pixel size the camera and overview
-   * are rendered at), and — in volume mode only — the camera orientation. When
-   * this is unchanged the cached member geometry is reused and no members are
-   * re-read. Per-layer display values (contrast/gamma/colormap/opacity) are NOT
-   * here — those ride the settings snapshot below so a display-only edit skips
-   * the O(N) member re-read.
+   * are rendered at). When this is unchanged the cached member geometry is
+   * reused and no members are re-read. Per-layer display values
+   * (contrast/gamma/colormap/opacity) are NOT here — those ride the settings
+   * snapshot below so a display-only edit skips the O(N) member re-read. The
+   * volume camera orientation is NOT here either — it rides the camera key so a
+   * pure orbit recomputes only the minimap camera and re-issues the overview
+   * render from the cached member geometry (see {@link overviewCameraKey}).
    */
   overviewGeometryKey: string | null;
+  /**
+   * Hash of the minimap camera ORIENTATION (volume mode `theta`/`phi`; empty in
+   * slice mode, whose minimap camera is fixed). Member geometry is camera-
+   * invariant, so a pure orbit changes only this: the camera-only path recomputes
+   * `scene.minimap_camera(...)` and re-issues the overview render from the cached
+   * geometry, skipping the O(members) re-read. The backing pixel size the camera
+   * is computed at lives in the geometry key (size + devicePixelRatio), so when
+   * the geometry key is unchanged an orbit recomputes the camera at the same
+   * backing size.
+   */
+  overviewCameraKey: string | null;
   /**
    * The raw `all_dataset_settings()` snapshot the cached overview was rendered
    * from. A change flags a settings edit; whether that edit is display-only (a
@@ -140,6 +153,7 @@ export function createMinimapState(): MinimapState {
     size: 200,
     overlayCallback: null,
     overviewGeometryKey: null,
+    overviewCameraKey: null,
     overviewSettingsSnap: null,
     overviewVisibilitySig: null,
     overlayRenderKey: null,
@@ -542,6 +556,65 @@ function minimapVisibilitySignature(layerOrder: string[], allSettings: MinimapAl
   return JSON.stringify(entries);
 }
 
+/** The minimap camera outputs for one orientation at one backing size. */
+interface MinimapCamera {
+  viewProj: Float32Array;
+  invViewProj: Float32Array;
+  eye: Float32Array;
+  backingSize: number;
+}
+
+/**
+ * Compute the minimap camera for the given orientation and CSS size — the ONE
+ * place `scene.minimap_camera(...)` is unpacked, so the full-rebuild and the
+ * camera-only orbit path produce byte-identical camera outputs. Member geometry
+ * is camera-invariant, so an orbit calls only this and re-issues the overview
+ * render from the cached geometry. The 35-float payload is
+ * [0..16) invViewProj, [16..19) eye, [19..35) viewProj.
+ */
+function computeMinimapCamera(
+  scene: WasmScene,
+  cssSize: number,
+  theta: number,
+  phi: number,
+): MinimapCamera {
+  const backingSize = Math.round(cssSize * devicePixelRatio);
+  const camData = new Float32Array(scene.minimap_camera(theta, phi, backingSize, backingSize));
+  return {
+    viewProj: new Float32Array(camData.subarray(19, 35)),
+    invViewProj: new Float32Array(camData.subarray(0, 16)),
+    eye: new Float32Array(camData.subarray(16, 19)),
+    backingSize,
+  };
+}
+
+/**
+ * Recompute ONLY the minimap camera for a new orientation and re-issue the
+ * overview render from the CACHED member geometry, mutating the cached camera
+ * outputs in place. This is the volume-mode orbit path: the O(members)
+ * `member_positions` / `member_render_*` / `scene_model_matrix_for` reads are
+ * skipped entirely (member geometry does not depend on the camera), and the
+ * render call is byte-identical to a full rebuild for the same orientation +
+ * settings because it reuses the same geometry and the same camera math.
+ */
+function updateMinimapCamera(
+  scene: WasmScene,
+  client: TickContext["client"],
+  cache: MinimapOverviewCache,
+  cssSize: number,
+  activeC: number,
+  allSettings: MinimapAllSettings,
+  theta: number,
+  phi: number,
+): void {
+  const cam = computeMinimapCamera(scene, cssSize, theta, phi);
+  cache.viewProj = cam.viewProj;
+  cache.invViewProj = cam.invViewProj;
+  cache.eye = cam.eye;
+  cache.backingSize = cam.backingSize;
+  issueMinimapRender(client, cache.renderLayers, allSettings, activeC, cache.invViewProj, cache.eye, cache.backingSize);
+}
+
 /**
  * Read every member, cache the camera-invariant + display-invariant GEOMETRY,
  * and issue the O(N) GPU overview redraw. Split out of `tickMinimap` so a
@@ -559,12 +632,7 @@ function buildMinimapOverview(
 ): MinimapOverviewCache {
   const { scene, client, datasets } = ctx;
 
-  const backingSize = Math.round(cssSize * devicePixelRatio);
-
-  const camData = new Float32Array(scene.minimap_camera(theta, phi, backingSize, backingSize));
-  const invViewProj = new Float32Array(camData.subarray(0, 16));
-  const eye = new Float32Array(camData.subarray(16, 19));
-  const viewProj = camData.subarray(19, 35);
+  const { viewProj, invViewProj, eye, backingSize } = computeMinimapCamera(scene, cssSize, theta, phi);
 
   const renderLayers: MinimapRenderLayerGeometry[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
@@ -647,7 +715,7 @@ function buildMinimapOverview(
   }
 
   return {
-    viewProj: new Float32Array(viewProj),
+    viewProj,
     renderLayers,
     invViewProj,
     eye,
@@ -711,15 +779,19 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // a camera-only tick (see readMinimapOverviewEpochs).
   const { content: contentEpoch, layout: layoutEpoch } = readMinimapOverviewEpochs(scene);
 
-  // Three keys split the per-tick work by what each input actually affects:
+  // Four keys split the per-tick work by what each input actually affects:
   //  - geometry key: inputs that change WHAT the overview draws, WHERE, and at
-  //    what backing resolution. In slice mode the placement is camera-invariant;
-  //    in volume mode rotating the camera (theta/phi) reorients it, so those join
-  //    this key. uploadGeneration re-renders when new overview chunks arrive; the
-  //    content + layout epochs re-render when the dataset set or member placement
-  //    changes; devicePixelRatio + size re-render when the backing pixel size
-  //    moves (monitor DPR change or resize). Per-layer display values are
-  //    deliberately NOT here.
+  //    what backing resolution — but NOT the camera orientation. Placement is
+  //    camera-invariant, so the volume orbit (theta/phi) is excluded here and
+  //    tracked by the camera key below. uploadGeneration re-renders when new
+  //    overview chunks arrive; the content + layout epochs re-render when the
+  //    dataset set or member placement changes; devicePixelRatio + size
+  //    re-render when the backing pixel size moves (monitor DPR change or
+  //    resize). Per-layer display values are deliberately NOT here.
+  //  - camera key: the volume minimap camera orientation (theta/phi). Member
+  //    geometry is camera-invariant, so a pure orbit recomputes only the minimap
+  //    camera and re-issues the overview render from the cached geometry — no
+  //    O(members) re-read. Empty in slice mode (that minimap camera is fixed).
   //  - settings snapshot: any per-dataset display/visibility edit. A display-only
   //    edit (contrast/gamma/colormap/opacity) re-issues the overview render from
   //    the cached geometry with no member re-read; a visibility edit (a drawn
@@ -727,9 +799,9 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   //    full geometry rebuild.
   //  - overlay key: the camera inputs that only move the viewport/frustum
   //    rectangle on the 2D overlay — slice zoom/center, volume dolly
-  //    (eye_position). theta/phi live in the geometry key (a rotation also moves
-  //    the frustum, and the overview must redraw anyway).
-  const overviewCamSnap = mode === "volume" ? `${theta}|${phi}` : "";
+  //    (eye_position). An orbit is handled by the camera key (it re-renders the
+  //    overview AND refreshes the overlay).
+  const cameraKey = mode === "volume" ? `${theta}|${phi}` : "";
   // devicePixelRatio and the minimap size set the backing pixel size the camera
   // and overview are rendered at (backingSize = round(size × devicePixelRatio)),
   // so a DPR change (window dragged across monitors) or a resize must force a
@@ -744,7 +816,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // (it only moves the current-plane indicator), so a continuous Z-scrub
   // refreshes the cheap overlay and reuses the cached overview instead of
   // paying the O(members) re-read + a redundant overview redraw every plane.
-  const geometryKey = `${mode}|${activeC}|${overviewCamSnap}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${state.uploadGeneration}|${devicePixelRatio}|${state.size}`;
+  const geometryKey = `${mode}|${activeC}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${state.uploadGeneration}|${devicePixelRatio}|${state.size}`;
   // The overlay's current-plane indicator tracks Z in SLICE mode only (the
   // scrubbed plane's slice-plane + viewport rectangle). The volume overlay draws
   // no Z-dependent element, so Z is excluded from its key entirely. `overlayCamKey`
@@ -757,9 +829,10 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const overlayKey = `${overlayCamKey}|${zForOverlay}`;
 
   const geometryChanged = geometryKey !== state.overviewGeometryKey;
+  const cameraChanged = cameraKey !== state.overviewCameraKey;
   const settingsChanged = settingsSnap !== state.overviewSettingsSnap;
   const overlayChanged = overlayKey !== state.overlayRenderKey;
-  if (!geometryChanged && !settingsChanged && !overlayChanged && state.overviewCache) return;
+  if (!geometryChanged && !cameraChanged && !settingsChanged && !overlayChanged && state.overviewCache) return;
 
   let rebuilt = false;
   if (geometryChanged || !state.overviewCache) {
@@ -783,15 +856,30 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, layerOrder, allSettings, theta, phi);
       state.overviewVisibilitySig = visibilitySig;
       rebuilt = true;
+    } else if (cameraChanged) {
+      // Display-only edit AND an orbit in the same tick: recompute the minimap
+      // camera and re-issue the overview render from the cached geometry with the
+      // new camera + fresh display values. No member re-read.
+      updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, activeC, allSettings, theta, phi);
     } else {
       // Display-only edit: reuse cached member geometry + camera, recompute only
       // the per-layer display params. No member re-read, no geometry rebuild.
       updateMinimapDisplay(ctx.client, state.overviewCache, allSettings, activeC);
     }
+  } else if (cameraChanged) {
+    // Camera-only orbit: member geometry is camera-invariant, so recompute ONLY
+    // the minimap camera and re-issue the overview render from the cached
+    // geometry — skipping the entire O(members) re-read. The overview MUST still
+    // redraw (a rotated volume looks different), and the overlay below refreshes
+    // to the new angle. Settings are parsed (cheap next to the member reads) to
+    // resolve the same per-layer display params the cached render used, keeping
+    // the render call byte-identical.
+    const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
+    updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, activeC, allSettings, theta, phi);
   }
-  // A camera-only change falls through: the cached overview texture already sits
-  // on the minimap canvas, so we skip readMemberRenderMatrices + minimapRender
-  // and recompute only the cheap 2D overlay below.
+  // A dolly / pan / zoom / Z-scrub falls through: the cached overview texture
+  // already sits on the minimap canvas, so we skip readMemberRenderMatrices +
+  // minimapRender and recompute only the cheap 2D overlay below.
   //
   // The static overlay layer (member bounding boxes + axis arrows) is drawn in
   // the minimap's OWN viewProj, which a 2D pan/zoom of the MAIN view never moves
@@ -800,18 +888,19 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // re-stroked only on a geometry rebuild (member set / placement / DPR / size,
   // all folded into the geometry key → `rebuilt`); a pure pan/zoom reuses it.
   //
-  // In volume mode the static layer additionally carries the main camera's view
-  // frustum, which tracks the main camera independently of the minimap camera:
-  // an orbit reorients the minimap camera (theta/phi → geometry key → rebuilt),
-  // and a dolly moves the frustum without a rebuild (→ overlayCamKey). So it
-  // must re-stroke whenever the main camera moves there. Computed before the key
-  // is advanced so it compares against the previous camera key.
+  // In volume mode the static layer additionally carries the minimap camera's
+  // own boxes/arrows AND the main camera's view frustum. An orbit reorients the
+  // minimap camera (cameraChanged → the boxes/arrows/frustum all move); a dolly
+  // moves the frustum without a rebuild (→ overlayCamKey). So it must re-stroke
+  // whenever either the minimap camera or the main camera moves there. Computed
+  // before the keys are advanced so it compares against the previous camera keys.
   const staticDirty =
     mode === "volume"
-      ? rebuilt || overlayCamKey !== state.overlayCamKey
+      ? rebuilt || cameraChanged || overlayCamKey !== state.overlayCamKey
       : rebuilt;
 
   state.overviewGeometryKey = geometryKey;
+  state.overviewCameraKey = cameraKey;
   state.overviewSettingsSnap = settingsSnap;
   state.overlayRenderKey = overlayKey;
   state.overlayCamKey = overlayCamKey;
@@ -819,9 +908,10 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const cache = state.overviewCache;
 
   // The overlay (viewport/frustum rectangle) depends on camera + geometry, not
-  // display values — so a display-only edit skips it; only a geometry rebuild or
-  // a camera move recomputes it.
-  if (state.overlayCallback && cache && (rebuilt || overlayChanged)) {
+  // display values — so a display-only edit skips it; only a geometry rebuild, an
+  // orbit (cameraChanged), or a dolly/pan/zoom/Z move (overlayChanged) recomputes
+  // it.
+  if (state.overlayCallback && cache && (rebuilt || cameraChanged || overlayChanged)) {
     // Slice view bounds (2D only), expressed in scene XY coordinates. Recomputed
     // every camera change from the fresh zoom/center over the cached members.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
