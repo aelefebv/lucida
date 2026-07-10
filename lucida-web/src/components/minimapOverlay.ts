@@ -192,10 +192,19 @@ function drawSliceViewportRect(
   ctx.stroke();
 }
 
-// Entry point
+// Entry points
 
-export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, datasetLayers, sliceViewports, mode, canvasW, canvasH, currentZ, datasetDims, mainInvViewProj, theta, phi } = data;
+/**
+ * Draw the Z-INVARIANT overlay layer — member bounding boxes, axis arrows, and
+ * (in volume mode) the camera frustum. These depend only on the minimap camera
+ * and member geometry, never on the current Z-plane, so on a Z-scrub the
+ * consumer reuses a cached copy of this layer instead of re-stroking it.
+ *
+ * Clears the target first, so it owns the full background of whatever surface
+ * it draws onto (a dedicated offscreen cache canvas).
+ */
+export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
+  const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, mainInvViewProj } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
@@ -206,6 +215,27 @@ export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: Minimap
 
   // Axis arrows (once, not per-dataset)
   drawAxisArrows(ctx, viewProj, canvasW, canvasH);
+
+  if (mode === "volume" && mainInvViewProj) {
+    // Frustum intersection (per-dataset)
+    for (const dl of datasetLayers) {
+      drawFrustumIntersection(
+        ctx, viewProj, dl.modelMatrix, dl.invModelMatrix, mainInvViewProj,
+        canvasW, canvasH, "rgba(100,200,255,0.5)",
+      );
+    }
+  }
+}
+
+/**
+ * Draw the Z-DEPENDENT overlay layer — the per-member slice plane and viewport
+ * rectangle (slice mode) — plus the orientation cube, on top of the (already
+ * composited) static layer. Does NOT clear: it strokes over the static layer.
+ * Re-run every overlay callback, including a pure Z-scrub, because the slice
+ * plane / viewport indicators track the current plane.
+ */
+export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
+  const { viewProj, layers, sliceViewports, mode, canvasW, canvasH, currentZ, datasetDims, theta, phi } = data;
 
   if (mode === "slice") {
     // Slice plane (per-member — shows Z within each tile)
@@ -225,16 +255,17 @@ export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: Minimap
     }
   }
 
-  if (mode === "volume" && mainInvViewProj) {
-    // Frustum intersection (per-dataset)
-    for (const dl of datasetLayers) {
-      drawFrustumIntersection(
-        ctx, viewProj, dl.modelMatrix, dl.invModelMatrix, mainInvViewProj,
-        canvasW, canvasH, "rgba(100,200,255,0.5)",
-      );
-    }
-  }
-
   // Orientation cube (drawn last, on top of everything)
   drawOrientationCube(ctx, theta, phi, canvasW, canvasH);
+}
+
+/**
+ * Full overlay redraw (static layer + dynamic layer) onto a single context, in
+ * the original draw order. Retained for callers that don't cache the static
+ * layer; the minimap component splits the two so a Z-scrub reuses the cached
+ * static layer.
+ */
+export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
+  drawStaticMinimapOverlays(ctx, data);
+  drawDynamicMinimapOverlays(ctx, data);
 }

@@ -7,6 +7,7 @@ import type {
   ChunkFeedbackReason,
   ColdStateMessage,
   ColdStateDisplayMessage,
+  ColdStateSelectionMessage,
   ViewHotStateMessage,
   MissingChunk,
   MissingProxy,
@@ -41,6 +42,15 @@ export interface UploadClient {
    * cold state. See {@link ColdStateDisplayMessage}.
    */
   coldStateDisplay(msg: ColdStateDisplayMessage): void;
+
+  /**
+   * Push a selection-scrub update (T / Z move with an unchanged visible set,
+   * geometry, LOD, matrices, and display state). The worker re-points the
+   * dataset's most recent cold state at the new selection and re-ingests it,
+   * without the sender rebuilding or re-transmitting the O(active-set)
+   * descriptor array. See {@link ColdStateSelectionMessage}.
+   */
+  coldStateSelection(msg: ColdStateSelectionMessage): void;
 
   /**
    * Must be sent before subsequent render messages so the worker's

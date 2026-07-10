@@ -42,6 +42,15 @@ export interface MinimapOverlayData {
   currentZ: number;
   datasetDims: Map<string, { width: number; height: number; depth: number }>;
   mainInvViewProj: Float32Array | null;
+  /**
+   * True when the camera- and geometry-derived (Z-invariant) overlay layer —
+   * member bounding boxes, axis arrows, the volume frustum — changed since the
+   * last overlay callback and must be re-stroked. False on a pure Z-scrub: the
+   * consumer reuses the cached static layer and re-strokes only the cheap
+   * Z-dependent indicators (slice plane + viewport rect), skipping the O(N)
+   * bounding-box redraw each Z step.
+   */
+  staticDirty: boolean;
 }
 
 /** Minimum interval between residency-triggered renders (ms). Interactive renders are immediate. */

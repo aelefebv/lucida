@@ -639,6 +639,32 @@ export interface ColdStateDisplayMessage {
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
 
+/**
+ * Selection-scrub update for a dataset whose visible set, per-entity geometry,
+ * LOD, matrices, and display state are all unchanged — only the current
+ * timepoint (T) and/or Z-plane moved.
+ *
+ * `currentT` / `currentZ` are top-level scalars on {@link ColdStateMessage},
+ * never part of a per-entity descriptor, so a pure scrub carries just the new
+ * selection scalars, the new visible region, and the budget-admitted proxy
+ * keys for that selection — no active set, no matrices, no LOD geometry. The
+ * worker re-points the dataset's most recent {@link ColdStateMessage} at the
+ * new selection and re-ingests it (repacking the atlas indirection for the new
+ * plane/timepoint), so the result is identical to a full cold state at the new
+ * T / Z without the sender building or re-transmitting the O(active-set)
+ * descriptor array.
+ */
+export interface ColdStateSelectionMessage {
+  type: "coldStateSelection";
+  datasetId: string;
+  currentT: number;
+  currentZ: number;
+  visibleRegion: VisibleRegion;
+  /** Budget-admitted proxy residency keys for the new selection. */
+  desiredProxyKeys: string[];
+  epochs: SceneEpochs;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -659,6 +685,7 @@ export type MainToWorkerMessage =
   | DestroyMessage
   | ColdStateMessage
   | ColdStateDisplayMessage
+  | ColdStateSelectionMessage
   | ViewHotStateMessage;
 
 // --- Worker -> Main ---

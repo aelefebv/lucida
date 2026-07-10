@@ -123,6 +123,39 @@ export class Uploader {
   }
 
   /**
+   * Push a selection-scrub update to the worker for a dataset whose visible
+   * set, geometry, LOD, matrices, and display state are unchanged — only the
+   * current T and/or Z moved. The worker re-points the dataset's most recent
+   * cold state at the new selection and re-ingests it, repacking the atlas
+   * indirection for the new plane/timepoint without re-transmitting the
+   * O(active-set) descriptor array.
+   *
+   * Snapshots `epochs` (like {@link sendColdState}) so a later
+   * {@link deliverToWorker} stamps the freshly-fetched T/Z chunks with the
+   * selection's epochs — the worker's retained cold state now expects them.
+   */
+  sendColdStateSelection(args: {
+    ctx: TickContext;
+    datasetId: string;
+    currentT: number;
+    currentZ: number;
+    visibleRegion: VisibleRegion;
+    desiredProxyKeys: Iterable<string>;
+    epochs: SceneEpochs;
+  }): void {
+    args.ctx.client.coldStateSelection({
+      type: "coldStateSelection",
+      datasetId: args.datasetId,
+      currentT: args.currentT,
+      currentZ: args.currentZ,
+      visibleRegion: args.visibleRegion,
+      desiredProxyKeys: Array.from(args.desiredProxyKeys).sort(),
+      epochs: args.epochs,
+    });
+    this.lastEpochs = args.epochs;
+  }
+
+  /**
    * Build and send a viewEpoch hot-state message. Must be posted before
    * subsequent render messages so the worker's `rayHitPerEntity` is
    * current when chunk-data eviction fires. Returns `false` (and emits

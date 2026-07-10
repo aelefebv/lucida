@@ -5,13 +5,23 @@ import type { WorkerToMainMessage } from "../workerProtocol.ts";
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
 
-function makeCtx(): { ctx: WorkerCtx; posts: WorkerToMainMessage[] } {
+function makeCtx(): {
+  ctx: WorkerCtx;
+  posts: WorkerToMainMessage[];
+  wantedSetPosts: number;
+} {
   const posts: WorkerToMainMessage[] = [];
+  const counters = { wantedSet: 0 };
   const ctx = {
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
+    postWantedSet() { counters.wantedSet++; },
   } as unknown as WorkerCtx;
-  return { ctx, posts };
+  return {
+    ctx,
+    posts,
+    get wantedSetPosts() { return counters.wantedSet; },
+  };
 }
 
 describe("worker dispatch upload feedback", () => {
@@ -115,5 +125,35 @@ describe("worker dispatch upload feedback", () => {
         reason: "missing-pool",
       },
     ]);
+  });
+
+  it("treats a selection scrub for an un-ingested dataset as a safe no-op", async () => {
+    // A scrub patch can race ahead of the dataset's first full cold state
+    // (nothing retained yet). It must not touch GPU state or throw — the
+    // following full cold state carries the selection itself — but it still
+    // posts the wanted set, matching the full cold-state path.
+    const harness = makeCtx();
+    const { ctx, posts } = harness;
+
+    await dispatchMessage(ctx, {
+      type: "coldStateSelection",
+      datasetId: "ds-not-yet-ingested",
+      currentT: 7,
+      currentZ: 2,
+      visibleRegion: {
+        xyBoundsVox: [0, 0, 1024, 1024],
+        zRangeVox: [2, 3],
+        effectiveZoom: 1,
+        sortCenterVox: null,
+        frustumPlanes: null,
+      },
+      desiredProxyKeys: [],
+      epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
+    });
+
+    expect(posts).toEqual([]);
+    expect(ctx.state.coldStateByDataset.size).toBe(0);
+    expect(ctx.state.currentColdState).toBeNull();
+    expect(harness.wantedSetPosts).toBe(1);
   });
 });

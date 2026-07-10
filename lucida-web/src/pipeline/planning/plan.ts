@@ -15,9 +15,11 @@ import {
 import { assignCoarseDetailModes, assignModes } from "./modes.ts";
 import {
   emptyPlanStats,
+  type ActiveSetEntry,
   type ChunkRequest,
   type EntitySnapshot,
   type PlanningSnapshot,
+  type PlanStats,
   type PlanningState,
   type ProxyRequest,
   type RequestPlan,
@@ -55,41 +57,30 @@ function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
 }
 
 /**
- * Top-level pure planner. `state` is the opaque carry-forward the
- * caller stored from the previous tick's {@link RequestPlan.nextState}.
+ * Emit the chunk + proxy request streams for an ALREADY-RESOLVED active set.
  *
- * Postconditions:
- *   - `requests` and `proxyRequests` are sorted ascending by `priority`
- *     (lower = more urgent).
- *   - Output objects are freshly allocated; the caller may mutate them.
- *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
- *   - `epochs.request` = input + 1; other epoch tiles forwarded unchanged.
- *   - `stats` reflects this call only.
+ * This is steps 2–7 of {@link plan} — every lane emission plus the final
+ * priority sort — factored out so a caller that already holds a valid active
+ * set can regenerate its requests for a changed selection (a T-scrub or
+ * Z-plane move) WITHOUT re-resolving modes or rebuilding the snapshot. Pure in
+ * `(activeSet, snapshot, config)`; mutates only the supplied `stats`.
+ *
+ * The requests are a pure function of the active set, the entities, the visible
+ * region, and the selection, so reusing an unchanged active set with a snapshot
+ * whose only difference is `selection.t` / `selection.z` (and, on a Z move,
+ * `visibleRegion.zRangeVox`) yields exactly the requests a full {@link plan}
+ * would produce for that selection — with none of `assignModes`' work.
+ *
+ * Postconditions match {@link plan}: `requests` and `proxyRequests` are sorted
+ * ascending by priority; output objects are freshly allocated and carry
+ * `datasetId` from {@link PlanningSnapshot.datasetId}.
  */
-export function plan(
+export function emitPlanRequests(
+  activeSet: ActiveSetEntry[],
   snapshot: PlanningSnapshot,
-  state: PlanningState,
+  stats: PlanStats,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
-): RequestPlan {
-  // Dev-mode boundary check (see ADR 0031). Vite dead-code-eliminates
-  // this branch in production builds; the validator's source is
-  // absent from the shipped bundle.
-  if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);
-
-  const stats = emptyPlanStats();
-
-  // Step 1: Resolve residency entries. The coarse/detail bridge bypasses
-  // proxy promotion while the legacy path preserves the three-tier model.
-  const activeSet = config.coarseDetailEnabled
-    ? assignCoarseDetailModes(snapshot.entities)
-    : assignModes(
-        snapshot.entities,
-        state.previousActiveSet,
-        snapshot.assetCatalog,
-        stats,
-        config,
-      );
-
+): { requests: ChunkRequest[]; proxyRequests: ProxyRequest[] } {
   // Step 2: Build entity lookup.
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
@@ -156,6 +147,48 @@ export function plan(
   allRequests.sort(compareChunkRequests);
   proxyRequests.sort(compareProxyRequests);
 
+  return { requests: allRequests, proxyRequests };
+}
+
+/**
+ * Top-level pure planner. `state` is the opaque carry-forward the
+ * caller stored from the previous tick's {@link RequestPlan.nextState}.
+ *
+ * Postconditions:
+ *   - `requests` and `proxyRequests` are sorted ascending by `priority`
+ *     (lower = more urgent).
+ *   - Output objects are freshly allocated; the caller may mutate them.
+ *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
+ *   - `epochs.request` = input + 1; other epoch tiles forwarded unchanged.
+ *   - `stats` reflects this call only.
+ */
+export function plan(
+  snapshot: PlanningSnapshot,
+  state: PlanningState,
+  config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
+): RequestPlan {
+  // Dev-mode boundary check (see ADR 0031). Vite dead-code-eliminates
+  // this branch in production builds; the validator's source is
+  // absent from the shipped bundle.
+  if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);
+
+  const stats = emptyPlanStats();
+
+  // Step 1: Resolve residency entries. The coarse/detail bridge bypasses
+  // proxy promotion while the legacy path preserves the three-tier model.
+  const activeSet = config.coarseDetailEnabled
+    ? assignCoarseDetailModes(snapshot.entities)
+    : assignModes(
+        snapshot.entities,
+        state.previousActiveSet,
+        snapshot.assetCatalog,
+        stats,
+        config,
+      );
+
+  // Steps 2–7: emit + sort the request streams for the resolved active set.
+  const { requests, proxyRequests } = emitPlanRequests(activeSet, snapshot, stats, config);
+
   // Step 8: Epoch propagation.
   const epochs: SceneEpochs = {
     ...snapshot.epochs,
@@ -166,5 +199,5 @@ export function plan(
   // hand back on the next tick — today derived from `activeSet`, but
   // future planner-internal state lands here without churning callers.
   const nextState: PlanningState = { previousActiveSet: activeSet };
-  return { requests: allRequests, activeSet, epochs, proxyRequests, stats, nextState };
+  return { requests, activeSet, epochs, proxyRequests, stats, nextState };
 }
