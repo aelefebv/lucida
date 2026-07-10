@@ -410,6 +410,78 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("re-derives manifest-based planning inputs when ds.manifest is replaced without an epoch bump", () => {
+    // The per-dataset snapshot-input cache keys camera-independent positions on
+    // the content|layout|asset epoch, but the manifest-derived maps
+    // (imageSpecById / parentByEntityId) track ds.manifest — which the
+    // generated-availability path replaces with a NEW manifest object WITHOUT
+    // bumping any scene epoch (renderLoop.updateDatasetManifest only setDirty()s).
+    // The cache must therefore also invalidate on ds.manifest reference identity;
+    // an epoch-only key would serve a stale ImageSpec and the planner would never
+    // request the progressively-generated coarse level (a silent wrong LOD set).
+    const manifestFor = (coarseLevelIndex: number | null): DatasetManifest =>
+      ({
+        dataset_id: "ds1",
+        name: "test",
+        kind: "Single",
+        entities: [
+          { id: "group-0", kind: "Group", parent: null, labels: {} },
+          { id: "tile-0", kind: "Tile", parent: "group-0", labels: {} },
+        ],
+        transforms: [],
+        images: [
+          {
+            image_id: "img-0",
+            owner: "tile-0",
+            multiscale: {
+              axes: [],
+              data_type: "uint16",
+              coarse_level_index: coarseLevelIndex,
+              generated_levels: [],
+              levels: [
+                { level_index: 0, shape: [1, 1, 1, 1024, 1024], chunk_shape: [1, 1, 1, 256, 256], grid_shape: [1, 1, 1, 4, 4], scale: [1, 1, 1, 1, 1] },
+                { level_index: 1, shape: [1, 1, 1, 512, 512], chunk_shape: [1, 1, 1, 256, 256], grid_shape: [1, 1, 1, 2, 2], scale: [1, 1, 1, 2, 2] },
+              ],
+            },
+          },
+        ],
+        source_layouts: [],
+        default_layout_id: null,
+      }) as unknown as DatasetManifest;
+
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const orch = makeOrch();
+      // v1: no coarse level advertised.
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: manifestFor(null) }]]);
+      orch.planAndFetch(
+        makeCtx(createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } }), datasets),
+        emptyMinimap,
+      );
+      planSpy.mockClear();
+
+      // Generated-availability arrives: ds.manifest is REPLACED (new object) with
+      // coarse level 1 now advertised. No scene epoch changes.
+      datasets.set("ds1", { manifest: manifestFor(1) });
+
+      // A settled camera move (view epoch only) forces a full replan at the
+      // unchanged content|layout|asset key.
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(
+        makeCtx(createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } }), datasets),
+        emptyMinimap,
+      );
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      const snapshot = planSpy.mock.calls[planSpy.mock.calls.length - 1][0] as { entities: Array<{ entityId: string; coarseLevel: number | null }> };
+      const entity = snapshot.entities.find((e) => e.entityId === "tile-0");
+      // A stale (epoch-only) cache would serve the v1 ImageSpec → coarseLevel null.
+      expect(entity?.coarseLevel).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rebuilds on the leading selection change, coalesces the rest, then re-plans on settle", () => {
     // Selection (T/C/Z, contrast/gamma/colormap/display) changes what's
     // shown, so the leading change rebuilds promptly. A continuous scrub
