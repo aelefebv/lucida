@@ -42,6 +42,16 @@ import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./scene
  *  skip the streak entirely. */
 const SCENE_APPLY_FAILURE_LIMIT = 3;
 
+/** Upper bound on how many distinct import-warning messages are retained in
+ *  the store and surfaced through [`RemoteDatasetActivity.warnings`]. A single
+ *  open can emit one distinct notice per malformed member (thousands for a
+ *  large collection), each unique so dedup never collapses them; retaining and
+ *  re-projecting all of them would grow the observable list without bound and
+ *  stall the tab. Past this many, further distinct warnings are counted (see
+ *  [`RemoteDatasetActivity.warningsOverflow`]) rather than stored — the list
+ *  stays bounded while the FACT that more warnings occurred is never lost. */
+export const MAX_OPEN_WARNINGS = 50;
+
 /**
  * The kinds of user-visible errors competing for the single
  * [`RemoteDatasetActivity`]`.error` slot. There is one banner, so
@@ -99,6 +109,22 @@ export interface RemoteDatasetActivity {
   loading: boolean;
   error: string | null;
   progress: string | null;
+  /** Non-fatal import warnings collected across the session, kept durably
+   *  after each open completes (unlike `progress`, which is transient). This
+   *  is the flattened, order-preserving, deduplicated projection of every
+   *  source's collected warnings, so datasets opened together in one pass
+   *  (multi-seed workspace creation, source-url view restores) each surface
+   *  their warnings — not just the last open's. Cleared wholesale by
+   *  [`dismissOpenWarnings`] and on connection loss; a single failed open
+   *  clears only its own. Capped at [`MAX_OPEN_WARNINGS`] distinct messages —
+   *  see `warningsOverflow` for what the cap elides. */
+  warnings: readonly string[];
+  /** How many further distinct warnings occurred beyond the ones retained in
+   *  `warnings` (the [`MAX_OPEN_WARNINGS`] cap). Zero unless a flood exceeded
+   *  the cap; lets a banner render a "+N more" affordance so a bounded display
+   *  never hides that more warnings happened. Retired by the same signals as
+   *  `warnings`. */
+  warningsOverflow: number;
 }
 
 /**
@@ -228,11 +254,42 @@ export class SessionController {
     loading: false,
     error: null,
     progress: null,
+    warnings: [],
+    warningsOverflow: 0,
   };
   /** Last `open_remote_dataset` send timestamp (performance.now() ms). Used
    *  to derive a round-trip on receipt. Approximate when concurrent opens
    *  are in flight — overwritten by each send. */
   private lastOpenSendTime: number | null = null;
+  /** Non-fatal import warnings grouped by the source url that produced them
+   *  (the `url` every `onDatasetOpenProgress` frame carries). Collection is
+   *  session-level and never reset per open, so datasets opened together in
+   *  one synchronous pass (multi-seed workspace creation, source-url view
+   *  restores) each contribute their warnings instead of the last open's reset
+   *  erasing the rest. Grouping by source lets a failed open retire only its
+   *  own warnings while sibling opens' warnings stand. The observable
+   *  [`RemoteDatasetActivity.warnings`] is the flattened, deduplicated
+   *  projection of this map (see [`publishWarnings`]). Bounded: no more than
+   *  [`MAX_OPEN_WARNINGS`] distinct messages are retained across all sources —
+   *  further distinct ones are counted into [`overflowByUrl`] instead. */
+  private readonly warningsByUrl = new Map<string, string[]>();
+  /** The distinct messages currently retained in [`warningsByUrl`] (its
+   *  cross-source dedup, materialized). Consulted on collect for O(1)
+   *  membership and size so the cap decision does not rescan the store, and so
+   *  a message already shown via one source is never miscounted as overflow
+   *  when a second source reports it. Kept in lock-step with the store. */
+  private readonly retainedMessages = new Set<string>();
+  /** Per-source count of distinct warnings dropped once the retention cap was
+   *  reached (the source produced them but they are not stored). Keyed by
+   *  source url so a failed open retires exactly its own overflow alongside its
+   *  retained warnings, leaving siblings' counts intact. Summed into
+   *  [`overflowWarnings`]. */
+  private readonly overflowByUrl = new Map<string, number>();
+  /** Running total of [`overflowByUrl`] — how many distinct warnings occurred
+   *  beyond the retained cap. Surfaced as
+   *  [`RemoteDatasetActivity.warningsOverflow`] so the cap bounds the DISPLAY
+   *  without ever dropping the fact that more warnings happened. */
+  private overflowWarnings = 0;
   /** True while a coalesced `onRemoteDocumentChanged` emission is scheduled
    *  for the current snapshot burst (see the event's doc). Commands applied
    *  while it is set — the bridge's synchronous pending-command replays and
@@ -329,6 +386,10 @@ export class SessionController {
     this.session.destroy();
     this.deps.datasets.clear();
     this.lastOpenSendTime = null;
+    this.warningsByUrl.clear();
+    this.retainedMessages.clear();
+    this.overflowByUrl.clear();
+    this.overflowWarnings = 0;
   }
 
   // ---------------------------------------------------------------------
@@ -362,11 +423,24 @@ export class SessionController {
     // kinds keep their own retirement signals (delivery recovery, apply
     // recovery, never for fatal) — an unrelated open must not mask them.
     this.clearSurfacedError(["open"]);
+    // Collected warnings are NOT reset here: several opens can be issued in one
+    // synchronous pass (multi-seed workspace creation, source-url view
+    // restores), and resetting per open would erase every earlier open's
+    // warnings before its progress frames arrived. Each source's warnings are
+    // retired by their own signal instead — that open failing, or a dismiss /
+    // connection loss.
     this.updateRemoteActivity({
       loading: true,
       progress: "dataset open request sent",
     });
     this.session.bridge.sendOpenRemoteDataset(url);
+  }
+
+  /** Clear the durable import warnings (the user dismissed the surface). Emits
+   *  through the same activity path so listeners re-render without the notice.
+   *  A no-op when nothing is collected. */
+  dismissOpenWarnings(): void {
+    this.clearAllOpenWarnings();
   }
 
   breakFollow(): void {
@@ -437,6 +511,119 @@ export class SessionController {
   private updateRemoteActivity(patch: Partial<RemoteDatasetActivity>): void {
     this.remoteActivity = { ...this.remoteActivity, ...patch };
     this.deps.events.onRemoteDatasetActivity(this.remoteActivity);
+  }
+
+  /** Record one import warning under the source url that produced it,
+   *  preserving every warning already collected (for this source and for
+   *  others). An empty/whitespace-only message is ignored (no blank bullet),
+   *  and a message already recorded for this source collapses to the existing
+   *  entry (identical notices — the same skipped-group notice repeated across
+   *  tiles, or replayed on resync — never stack).
+   *
+   *  Retention is capped at [`MAX_OPEN_WARNINGS`] distinct messages: once the
+   *  cap is reached, a further NEW distinct message is not stored but is
+   *  counted into [`overflowByUrl`], so a flood (one distinct notice per
+   *  malformed member of a large collection) leaves the store bounded and the
+   *  observable list capped while the overflow count preserves the fact that
+   *  more warnings occurred. A message already shown (via this or another
+   *  source) is never counted as overflow — it collapses as before. Both the
+   *  store growth and the cap decision are O(1) here, so collecting N warnings
+   *  is O(N), never O(N²). Republishes only when something observable changed. */
+  private collectOpenWarning(url: string, message: string): void {
+    if (message.trim() === "") return;
+    const existing = this.warningsByUrl.get(url);
+    if (existing?.includes(message)) return;
+    if (this.retainedMessages.has(message)) {
+      // Already displayed via another source. Keep a per-source copy so a
+      // failed open retires only its own hold on the shared notice, but do not
+      // grow the distinct set or the overflow count.
+      if (existing) existing.push(message);
+      else this.warningsByUrl.set(url, [message]);
+      return;
+    }
+    if (this.retainedMessages.size >= MAX_OPEN_WARNINGS) {
+      // The display is full of distinct notices; retain the FACT, not the text.
+      this.overflowByUrl.set(url, (this.overflowByUrl.get(url) ?? 0) + 1);
+      this.overflowWarnings += 1;
+      this.publishWarnings();
+      return;
+    }
+    if (existing) existing.push(message);
+    else this.warningsByUrl.set(url, [message]);
+    this.retainedMessages.add(message);
+    this.publishWarnings();
+  }
+
+  /** Drop every warning recorded for `url` — used when that specific open
+   *  fails, so its own notice does not sit beside its error, WITHOUT touching
+   *  warnings collected for other sources opened in the same batch. Retires the
+   *  source's overflow count too. Republishes only when something was removed. */
+  private clearOpenWarningsForUrl(url: string): void {
+    const removedWarnings = this.warningsByUrl.delete(url);
+    const removedOverflow = this.overflowByUrl.get(url);
+    if (removedOverflow !== undefined) {
+      this.overflowWarnings -= removedOverflow;
+      this.overflowByUrl.delete(url);
+    }
+    if (!removedWarnings && removedOverflow === undefined) return;
+    if (removedWarnings) this.rebuildRetainedMessages();
+    this.publishWarnings();
+  }
+
+  /** Drop every collected warning across all sources — used when the whole
+   *  session/connection is gone (disconnect, workspace archived) or the user
+   *  dismissed the surface. Republishes only when something was cleared. */
+  private clearAllOpenWarnings(): void {
+    if (this.warningsByUrl.size === 0 && this.overflowWarnings === 0) return;
+    this.warningsByUrl.clear();
+    this.retainedMessages.clear();
+    this.overflowByUrl.clear();
+    this.overflowWarnings = 0;
+    this.publishWarnings();
+  }
+
+  /** Recompute [`retainedMessages`] as the distinct messages currently in
+   *  [`warningsByUrl`]. Called after a per-source removal, whose dropped
+   *  messages may or may not still be held by another source. Bounded work:
+   *  the store never holds more than [`MAX_OPEN_WARNINGS`] distinct messages. */
+  private rebuildRetainedMessages(): void {
+    this.retainedMessages.clear();
+    for (const messages of this.warningsByUrl.values()) {
+      for (const message of messages) this.retainedMessages.add(message);
+    }
+  }
+
+  /** Rebuild [`RemoteDatasetActivity.warnings`] from [`warningsByUrl`]: every
+   *  source's messages in insertion order, deduplicated across sources so a
+   *  notice reported by two opens shows once. The store is bounded to
+   *  [`MAX_OPEN_WARNINGS`] distinct messages, so this projection is bounded
+   *  work per call rather than growing with the number of warnings seen. Emits
+   *  only when the flattened list OR the overflow count actually changed, so a
+   *  duplicate collect or a no-op clear stays silent. */
+  private publishWarnings(): void {
+    const flattened: string[] = [];
+    const seen = new Set<string>();
+    for (const messages of this.warningsByUrl.values()) {
+      for (const message of messages) {
+        if (seen.has(message)) continue;
+        seen.add(message);
+        flattened.push(message);
+      }
+    }
+    const current = this.remoteActivity.warnings;
+    const listUnchanged =
+      flattened.length === current.length &&
+      flattened.every((message, index) => message === current[index]);
+    if (listUnchanged && this.overflowWarnings === this.remoteActivity.warningsOverflow) {
+      return;
+    }
+    this.updateRemoteActivity({
+      // Reuse the existing array when only the overflow count moved (the common
+      // case past the cap): keeps the list's identity stable so nothing
+      // downstream re-derives from an unchanged list on every flood frame.
+      warnings: listUnchanged ? current : flattened,
+      warningsOverflow: this.overflowWarnings,
+    });
   }
 
   /**
@@ -609,6 +796,14 @@ export class SessionController {
     this.session.ensureAssetCatalog()?.removeDataset(datasetId);
     this.session.generatedAvailability.removeDataset(datasetId);
     this.session.ensureLayoutRegistry()?.removeDataset(datasetId);
+    // Warnings are collected by source url, not by workspace dataset id, and
+    // both removal paths here (the `remove_dataset` broadcast and the snapshot
+    // membership sweep) carry only the dataset id — there is no clean mapping
+    // back to the source that warned. Clearing wholesale on any removal would
+    // drop unrelated datasets' live warnings (and warnings swept in during a
+    // resync), so removal leaves the collected warnings alone; they retire on
+    // dismiss or connection loss. A warning about a just-removed dataset
+    // lingering until dismissed is the accepted, bounded cost.
   }
 
   private setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource): void {
@@ -1026,19 +1221,36 @@ export class SessionController {
       },
       onOpenDatasetFailed: (url, error) => {
         bridgeLog("open_remote_dataset.failed", { url, error });
-        // Spinner/progress always stop; the error surfaces through the
-        // ranked slot (a fatal engine banner outranks an open failure).
+        // Spinner/progress always stop; the error surfaces through the ranked
+        // slot (a fatal engine banner outranks an open failure). Only THIS
+        // source's warnings clear — a failed open must not leave its own
+        // "opened with a warning" notice beside its error, but a sibling open
+        // from the same batch keeps its warnings.
+        this.clearOpenWarningsForUrl(url);
         this.updateRemoteActivity({ loading: false, progress: null });
         this.surfaceError("open", error);
         this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
       },
-      onDatasetOpenProgress: (_requestId: string, url: string, diagnostic: DatasetOpenProgressDiagnostic) => {
+      onDatasetOpenProgress: (requestId: string, url: string, diagnostic: DatasetOpenProgressDiagnostic) => {
         bridgeLog("open_remote_dataset.progress_state", {
           url,
+          requestId,
           stage: diagnostic.stage,
           message: diagnostic.message,
+          warning: diagnostic.warning === true,
         });
+        if (diagnostic.warning === true) {
+          // A non-fatal import concern (e.g. the sampled-label-discovery
+          // notice) must outlive the transient progress line, so record it in
+          // the durable list keyed by its source url. EVERY warning frame is
+          // collected regardless of which open it belongs to — datasets opened
+          // together in one pass must each surface their warnings, and a frame
+          // arriving after a later open began must not be dropped.
+          this.collectOpenWarning(url, diagnostic.message);
+        }
         if (diagnostic.stage === "complete") {
+          // Clear the transient spinner/progress only; the durable warnings
+          // survive completion — that is the whole point of collecting them.
           this.updateRemoteActivity({ loading: false, progress: null });
           return;
         }
@@ -1083,6 +1295,9 @@ export class SessionController {
       onWorkspaceArchived: () => {
         this.deps.events.onConnectedChanged(false);
         this.deps.events.onSessionReadyChanged(false);
+        // The workspace is gone: drop every collected warning with the spinner
+        // so no notice about the archived workspace's opens lingers.
+        this.clearAllOpenWarnings();
         this.updateRemoteActivity({ loading: false, progress: null });
         this.contentSource.rejectAll();
         this.deps.events.onWorkspaceArchived();
@@ -1090,9 +1305,12 @@ export class SessionController {
       onDisconnect: () => {
         // The transport dropped: re-arm both readiness signals so a
         // reconnect's `onopen` + fresh snapshot must re-establish them before
-        // gated work (e.g. a still-pending seed open) fires.
+        // gated work (e.g. a still-pending seed open) fires. Every collected
+        // warning clears too — they described opens on the dead connection, and
+        // the reconnect's snapshot is the fresh truth.
         this.deps.events.onConnectedChanged(false);
         this.deps.events.onSessionReadyChanged(false);
+        this.clearAllOpenWarnings();
         this.updateRemoteActivity({ loading: false, progress: null });
         this.contentSource.rejectAll();
       },

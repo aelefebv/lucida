@@ -1,0 +1,11 @@
+{
+  "type": "dataset_open_progress",
+  "request_id": "web-7d2f45aa",
+  "url": "gs://lucida-fixtures/sampled-collection-01.zarr",
+  "diagnostic": {
+    "stage": "metadata_import",
+    "message": "labels were sampled during import; some tiles were not inspected and may carry additional labels",
+    "workspace_dataset_id": "wds-collection-77",
+    "warning": true
+  }
+}

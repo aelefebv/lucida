@@ -104,6 +104,11 @@ export interface DatasetOpenProgressDiagnostic {
   workspace_dataset_id?: string | null;
   dataset_source_id?: string | null;
   detail?: string | null;
+  /** A non-fatal import concern that must stay visible after the open
+   *  completes instead of clearing with the transient progress line. Omitted
+   *  on the wire when false; the bridge coerces it to a clean boolean so
+   *  every consumer can rely on `diagnostic.warning === true`/`=== false`. */
+  warning?: boolean;
 }
 
 interface PendingDatasetHealthRequest {
@@ -735,13 +740,22 @@ export class Bridge {
     };
     const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
     const url = typeof obj.url === "string" ? obj.url : "";
-    const diagnostic = obj.diagnostic as DatasetOpenProgressDiagnostic | undefined;
-    if (!requestId || !diagnostic || typeof diagnostic.message !== "string") return;
+    const raw = obj.diagnostic as
+      | (DatasetOpenProgressDiagnostic & { warning?: unknown })
+      | undefined;
+    if (!requestId || !raw || typeof raw.message !== "string") return;
+    // `warning` is absent on the wire when false; coerce it to a clean
+    // boolean here so downstream never has to distinguish missing from false.
+    const diagnostic: DatasetOpenProgressDiagnostic = {
+      ...raw,
+      warning: raw.warning === true,
+    };
     bridgeLog("open_remote_dataset.progress", {
       requestId,
       url,
       stage: diagnostic.stage,
       message: diagnostic.message,
+      warning: diagnostic.warning,
       datasetId: diagnostic.workspace_dataset_id ?? null,
     }, this.ws?.readyState);
     this.handlers.onDatasetOpenProgress?.(requestId, url, diagnostic);
@@ -1073,7 +1087,13 @@ export class Bridge {
     }
   }
 
-  sendOpenRemoteDataset(url: string) {
+  /** Send an open-remote-dataset request and return the `request_id` stamped
+   *  on it. The server echoes this id on every `dataset_open_progress` frame
+   *  for this open, so a caller can attribute progress/warnings to the exact
+   *  open they initiated (and ignore stragglers from a superseded one). The id
+   *  is returned even when the frame is dropped (socket not OPEN) — no progress
+   *  can arrive for a dropped send, so the returned id is simply never matched. */
+  sendOpenRemoteDataset(url: string): string {
     const requestId = makeOpenDatasetRequestId();
     bridgeLog("open_remote_dataset.send", { url, requestId }, this.ws?.readyState);
     this.send(JSON.stringify({
@@ -1081,6 +1101,7 @@ export class Bridge {
       request_id: requestId,
       url,
     }));
+    return requestId;
   }
 
   sendViewerInterest(interest: unknown) {
