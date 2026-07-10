@@ -56,12 +56,20 @@ interface MockContentSource extends ContentSource {
   fetchProxyCalls: FetchProxyRequest[];
   /** Default header used when auto-resolving proxies. */
   proxyHeader: ProxyHeaderJs;
-  /** Auto-resolve proxies with this many voxel bytes. */
+  /**
+   * Auto-resolve proxies with this many voxel bytes. Set to `null` to hold
+   * proxy fetches in-flight (like the chunk `pendingFetches` map) so the
+   * scheduler slot stays occupied until {@link resolveProxy} or an abort.
+   */
   autoResolveProxyBytes: number | null;
+  /** Held proxy fetches when `autoResolveProxyBytes` is null. */
+  pendingProxyFetches: Map<string, { resolve: (r: FetchProxyResult) => void; reject: (e: Error) => void }>;
+  resolveProxy(key: string, bytes?: number): void;
 }
 
 function createMockContentSource(): MockContentSource {
   const pendingFetches = new Map<string, { resolve: (r: FetchResult) => void; reject: (e: Error) => void }>();
+  const pendingProxyFetches = new Map<string, { resolve: (r: FetchProxyResult) => void; reject: (e: Error) => void }>();
   let fetchCount = 0;
   const autoResolveBytes: number | null = null;
 
@@ -73,6 +81,7 @@ function createMockContentSource(): MockContentSource {
 
     fetchProxyCount: 0,
     fetchProxyCalls: [],
+    pendingProxyFetches,
     proxyHeader: {
       algorithmVersion: 1,
       sourceContentHash: new Uint8Array(32),
@@ -106,13 +115,24 @@ function createMockContentSource(): MockContentSource {
       });
     },
 
-    fetchProxy(request: FetchProxyRequest, _signal: AbortSignal): Promise<FetchProxyResult> {
+    fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult> {
       source.fetchProxyCount++;
       source.fetchProxyCalls.push(request);
-      const bytes = source.autoResolveProxyBytes ?? 64;
-      return Promise.resolve({
-        header: source.proxyHeader,
-        data: new ArrayBuffer(bytes),
+
+      if (source.autoResolveProxyBytes !== null) {
+        return Promise.resolve({
+          header: source.proxyHeader,
+          data: new ArrayBuffer(source.autoResolveProxyBytes),
+        });
+      }
+
+      const key = `${request.datasetId}|${request.entityId}|${request.kind}|${request.t}|${request.c}`;
+      return new Promise<FetchProxyResult>((resolve, reject) => {
+        pendingProxyFetches.set(key, { resolve, reject });
+        signal.addEventListener("abort", () => {
+          pendingProxyFetches.delete(key);
+          reject(new DOMException("Aborted", "AbortError"));
+        });
       });
     },
 
@@ -135,6 +155,17 @@ function createMockContentSource(): MockContentSource {
       if (entry) {
         pendingFetches.delete(compositeKey);
         entry.reject(error);
+      }
+    },
+
+    resolveProxy(key: string, bytes = 64) {
+      const entry = pendingProxyFetches.get(key);
+      if (entry) {
+        pendingProxyFetches.delete(key);
+        entry.resolve({
+          header: source.proxyHeader,
+          data: new ArrayBuffer(bytes),
+        });
       }
     },
   };
@@ -3085,6 +3116,173 @@ describe("CpuCache", () => {
       const before = source.fetchProxyCount;
       consumeDeliverables(cache);
       expect(source.fetchProxyCount).toBe(before);
+    });
+
+    describe("departed-entity proxy cancel", () => {
+      const AWAY_KEY = "ds-1|entity-1|TileProxy3D|0|0";
+      const CURRENT_KEY = "ds-2|entity-2|TileProxy3D|0|0";
+
+      /** A plan whose active set names `entityId` and that requests its proxy. */
+      function proxyPlanFor(
+        datasetId: string,
+        entityId: string,
+        imageId: string,
+      ): RequestPlan {
+        return {
+          ...makePlan([], [makeActiveEntry(entityId, imageId)]),
+          proxyRequests: [makeProxyRequest({ datasetId, entityId, imageId })],
+        };
+      }
+
+      it("cancels a departed entity's in-flight proxy at the rebuild boundary", async () => {
+        const { cache, source } = createTestCache();
+        source.autoResolveProxyBytes = null; // hold the proxy in-flight
+
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+        expect(source.fetchProxyCount).toBe(1);
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
+
+        // entity-1 leaves the view; entity-2 is the current view now. The
+        // departure is only detected at the NEXT rebuild boundary.
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+
+        // entity-1 absent for a full rebuild → its proxy is aborted at the
+        // boundary, releasing the shared concurrency slot to the current view.
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+        await flush();
+
+        expect(cache.telemetry().inFlightProxyCount).toBe(0);
+        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(false);
+      });
+
+      it("frees the shared single slot for the current view's proxy", async () => {
+        // One shared concurrency slot: the chunk and proxy schedulers share
+        // the cap, so a departed entity's proxy holding it starves the view.
+        const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+        source.autoResolveProxyBytes = null;
+
+        // entity-1's proxy takes the single shared slot.
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+        expect(source.fetchProxyCount).toBe(1);
+
+        // entity-1 leaves; entity-2 (current view) wants its proxy but cannot
+        // start — the only slot is still held by the departed entity.
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-2", "entity-2", "image-2"));
+        expect(source.pendingProxyFetches.has(CURRENT_KEY)).toBe(false);
+
+        // Next rebuild: entity-1 absent for a full rebuild → its proxy is
+        // cancelled at the boundary, freeing the slot for the current view.
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-2", "entity-2", "image-2"));
+        await flush();
+
+        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(false);
+        expect(source.pendingProxyFetches.has(CURRENT_KEY)).toBe(true);
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+      });
+
+      it("re-fetches a returning entity's proxy after its departure cancel", async () => {
+        const { cache, source } = createTestCache();
+        source.autoResolveProxyBytes = null;
+
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+        expect(source.fetchProxyCount).toBe(1);
+
+        // entity-1 leaves for a full rebuild → its in-flight proxy is aborted.
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
+        await flush();
+        expect(cache.telemetry().inFlightProxyCount).toBe(0);
+
+        // entity-1 returns: proxies are NeverRetry, so the orchestrator's
+        // resubmit is the only path back — it must re-fetch, not stay dropped.
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+        expect(source.fetchProxyCount).toBe(2);
+        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
+      });
+
+      it("does not cancel a still-visible entity's in-flight proxy", () => {
+        const { cache, source } = createTestCache();
+        source.autoResolveProxyBytes = null;
+
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+
+        // entity-1 stays visible across rebuilds; its in-flight proxy persists
+        // (a re-submit finds it in-flight and does not re-enqueue or cancel it).
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+        cache.onPlanRebuildStart();
+        cache.submit(proxyPlanFor("ds-1", "entity-1", "image-1"));
+
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+        expect(source.fetchProxyCount).toBe(1);
+        expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
+      });
+
+      it("keeps a still-wanted group proxy when its group leaves the active set on a zoom-in", async () => {
+        // Group-to-tile zoom-in: the group first renders as a single
+        // GroupProxy3D (the group is the active entity), then resolves into
+        // individual tiles that share that SAME group proxy as their fallback.
+        // The group id leaves the active set, but the group proxy — keyed by
+        // the group id, not a per-tile entity — stays continuously requested.
+        // The per-entity departure cancel must NOT abort it (that would churn
+        // a large shared fallback with an abort + refetch every zoom-in).
+        const { cache, source } = createTestCache();
+        source.autoResolveProxyBytes = null; // hold the proxy in-flight
+
+        const GROUP_KEY = "ds-1|group-1|GroupProxy3D|0|0";
+        const groupProxy = makeProxyRequest({
+          datasetId: "ds-1",
+          entityId: "group-1",
+          imageId: "image-group-1",
+          kind: "GroupProxy3D",
+        });
+
+        // Group active; its group proxy takes a slot and stays in-flight.
+        cache.onPlanRebuildStart();
+        cache.submit({
+          ...makePlan([], [makeActiveEntry("group-1", "image-group-1")]),
+          proxyRequests: [groupProxy],
+        });
+        expect(source.fetchProxyCount).toBe(1);
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+        expect(source.pendingProxyFetches.has(GROUP_KEY)).toBe(true);
+
+        // Zoom-in: the tiles become the active entities; the group id drops
+        // out of the active set, but the group proxy is still requested.
+        cache.onPlanRebuildStart();
+        cache.submit({
+          ...makePlan([], [makeActiveEntry("tile-1", "image-tile-1")]),
+          proxyRequests: [groupProxy],
+        });
+
+        // Departure boundary for the group id. The group proxy's wantedness
+        // tracks plan membership (still requested), not one tile's departure,
+        // so it must survive the boundary — in-flight, never refetched.
+        cache.onPlanRebuildStart();
+        cache.submit({
+          ...makePlan([], [makeActiveEntry("tile-1", "image-tile-1")]),
+          proxyRequests: [groupProxy],
+        });
+        await flush();
+
+        expect(cache.telemetry().inFlightProxyCount).toBe(1);
+        expect(source.fetchProxyCount).toBe(1);
+        expect(source.pendingProxyFetches.has(GROUP_KEY)).toBe(true);
+      });
     });
   });
 

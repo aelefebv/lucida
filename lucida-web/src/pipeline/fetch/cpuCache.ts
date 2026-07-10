@@ -505,11 +505,13 @@ export class CpuCache {
   /**
    * Abort every in-flight (and drop every pending) chunk fetch for
    * `entityId` and clear its in-flight metadata. Used when an entity
-   * leaves the view entirely: its outstanding fetches would otherwise
-   * hold their concurrency slots until the transfer timeout, starving
-   * the current view. Proxy fetches are deliberately left alone — the
-   * starvation report is chunk-specific. A returning entity re-enqueues
-   * normally on its next submit.
+   * leaves the view entirely. The chunk and proxy schedulers share the
+   * concurrency/bytes caps (via `siblingInFlight`), so a departed
+   * entity's chunk and proxy fetches are both released — this handles
+   * the chunk side, {@link cancelProxyWorkForEntity} the proxy side —
+   * returning those shared slots to the current view immediately instead
+   * of holding them until the transfer timeout. A returning entity
+   * re-enqueues normally on its next submit.
    */
   private cancelChunkWorkForEntity(entityId: string): void {
     const cancelled = this.chunkScheduler.cancelWhere(
@@ -517,6 +519,34 @@ export class CpuCache {
     );
     for (const key of cancelled) {
       this.inFlightChunkMeta.delete(key);
+    }
+  }
+
+  /**
+   * Abort every in-flight (and drop every pending) PER-ENTITY proxy fetch
+   * for `entityId` and clear its in-flight metadata. The proxy counterpart
+   * to {@link cancelChunkWorkForEntity}, called at the same rebuild boundary
+   * when an entity leaves the view entirely: because both schedulers share
+   * the concurrency/bytes caps, a departed entity's outstanding per-tile
+   * proxy would otherwise hold a shared slot until the proxy timeout,
+   * starving the current view. Proxies are {@link NeverRetry}; a returning
+   * entity re-fetches its proxy on the orchestrator's next submit.
+   */
+  private cancelProxyWorkForEntity(entityId: string): void {
+    const cancelled = this.proxyScheduler.cancelWhere(
+      (entry) =>
+        entry.request.entityId === entityId &&
+        // Exclude group proxies: a `GroupProxy3D` is keyed by its group id
+        // rather than a per-tile active entity, so one tile leaving the
+        // active set does not make it unwanted — the same shared fallback
+        // can stay continuously requested by the tiles that remain visible.
+        // A group proxy's wantedness is governed by plan membership (it is
+        // kept while the plan still requests it), handled separately, not by
+        // any single entity's departure.
+        entry.request.kind !== "GroupProxy3D",
+    );
+    for (const key of cancelled) {
+      this.inFlightProxyMeta.delete(key);
     }
   }
 
@@ -593,11 +623,13 @@ export class CpuCache {
         this.chunkStore.demoteEntity(entityId);
         // The entity was active last rebuild but the just-completed one
         // never requested it: it has left the view entirely. Abort its
-        // in-flight chunk fetches so they release their concurrency slots
-        // to the current view immediately, rather than holding them until
-        // the transfer timeout. Its already-cached chunks are only demoted
-        // (kept, evictable); if it returns, its next submit re-enqueues.
+        // in-flight chunk and proxy fetches so they release their shared
+        // concurrency slots to the current view immediately, rather than
+        // holding them until the transfer timeout. Its already-cached
+        // chunks are only demoted (kept, evictable); if it returns, its
+        // next submit re-enqueues.
         this.cancelChunkWorkForEntity(entityId);
+        this.cancelProxyWorkForEntity(entityId);
       }
     }
     this.activeEntityIds = this.activeEntityIdsThisRebuild;
