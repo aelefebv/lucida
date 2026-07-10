@@ -761,11 +761,24 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // A camera-only change falls through: the cached overview texture already sits
   // on the minimap canvas, so we skip readMemberRenderMatrices + minimapRender
   // and recompute only the cheap 2D overlay below.
-  // The Z-invariant overlay layer (member bounding boxes / frustum) must be
-  // re-stroked when the geometry rebuilt or the camera moved, but NOT on a pure
-  // Z-scrub (only the Z-plane indicator moves). Computed before the key is
-  // advanced so it compares against the previous camera key.
-  const staticDirty = rebuilt || overlayCamKey !== state.overlayCamKey;
+  //
+  // The static overlay layer (member bounding boxes + axis arrows) is drawn in
+  // the minimap's OWN viewProj, which a 2D pan/zoom of the MAIN view never moves
+  // — the slice-mode minimap camera is fixed, so those strokes are pixel-
+  // identical across a main-view pan/zoom. So in slice mode the static layer is
+  // re-stroked only on a geometry rebuild (member set / placement / DPR / size,
+  // all folded into the geometry key → `rebuilt`); a pure pan/zoom reuses it.
+  //
+  // In volume mode the static layer additionally carries the main camera's view
+  // frustum, which tracks the main camera independently of the minimap camera:
+  // an orbit reorients the minimap camera (theta/phi → geometry key → rebuilt),
+  // and a dolly moves the frustum without a rebuild (→ overlayCamKey). So it
+  // must re-stroke whenever the main camera moves there. Computed before the key
+  // is advanced so it compares against the previous camera key.
+  const staticDirty =
+    mode === "volume"
+      ? rebuilt || overlayCamKey !== state.overlayCamKey
+      : rebuilt;
 
   state.overviewGeometryKey = geometryKey;
   state.overviewSettingsSnap = settingsSnap;

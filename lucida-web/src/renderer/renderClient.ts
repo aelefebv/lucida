@@ -8,6 +8,7 @@ import type {
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
+  ColdStateDeltaMessage,
   ViewHotStateMessage,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
@@ -286,6 +287,10 @@ export class RenderClient implements UploadClient {
   }
 
   coldStateSelection(msg: ColdStateSelectionMessage) {
+    this.worker.postMessage(msg);
+  }
+
+  coldStateDelta(msg: ColdStateDeltaMessage) {
     this.worker.postMessage(msg);
   }
 

@@ -135,8 +135,19 @@ export function buildRoster(args: {
   entities: EntitySnapshot[];
   ctx: TickContext;
   datasetId: string;
+  /**
+   * Optional entityId → tile matrices cache carried across rebuilds. A tile's
+   * model matrix comes from `scene.member_model_matrix` (a pure function of
+   * layout, no camera input), so it is byte-identical across a view move; when
+   * a cache is supplied, tile matrices already in it are reused and matrices for
+   * tiles new to the walk are computed and written back. `group-as-proxy`
+   * matrices are NEVER cached here — they are synthesized from the currently-
+   * visible child-tile set, which a view move changes. The caller invalidates
+   * the cache when layout/content/asset changes.
+   */
+  tileMatrixCache?: Map<string, { model: Float32Array; inv: Float32Array }>;
 }): BuildRosterResult {
-  const { activeSet, entities, ctx, datasetId } = args;
+  const { activeSet, entities, ctx, datasetId, tileMatrixCache } = args;
 
   // Use the planning module's canonical grouping (ADR 0025) so the
   // roster builder agrees with `assignModes` on which tiles make up
@@ -179,11 +190,20 @@ export function buildRoster(args: {
   const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
   for (const r of entries) {
     if (!r.entityId) continue;
-    const model = r.modelMatrix
-      ?? new Float32Array(ctx.scene.member_model_matrix(datasetId, r.imageId));
-    const inv = r.invModelMatrix
-      ?? new Float32Array(ctx.scene.inv_member_model_matrix(datasetId, r.imageId));
-    matricesByEntity.set(r.entityId, { model, inv });
+    // `group-as-proxy` entries carry a synthesized matrix (view-dependent —
+    // never cached). Everything else is a tile whose matrix is layout-derived
+    // and reusable across a view move.
+    if (r.modelMatrix && r.invModelMatrix) {
+      matricesByEntity.set(r.entityId, { model: r.modelMatrix, inv: r.invModelMatrix });
+      continue;
+    }
+    const cached = tileMatrixCache?.get(r.entityId);
+    const matrices = cached ?? {
+      model: new Float32Array(ctx.scene.member_model_matrix(datasetId, r.imageId)),
+      inv: new Float32Array(ctx.scene.inv_member_model_matrix(datasetId, r.imageId)),
+    };
+    if (!cached) tileMatrixCache?.set(r.entityId, matrices);
+    matricesByEntity.set(r.entityId, matrices);
   }
 
   return { entries, matricesByEntity };

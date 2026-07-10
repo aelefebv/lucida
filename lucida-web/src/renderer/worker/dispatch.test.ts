@@ -156,4 +156,36 @@ describe("worker dispatch upload feedback", () => {
     expect(ctx.state.currentColdState).toBeNull();
     expect(harness.wantedSetPosts).toBe(1);
   });
+
+  it("treats a view-move delta for an un-ingested dataset as a safe no-op", async () => {
+    // A delta can race ahead of the dataset's first full cold state. It must not
+    // touch GPU state or throw, but still posts the wanted set (matching the
+    // full path).
+    const harness = makeCtx();
+    const { ctx, posts } = harness;
+
+    await dispatchMessage(ctx, {
+      type: "coldStateDelta",
+      datasetId: "ds-not-yet-ingested",
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: {
+        xyBoundsVox: [0, 0, 1024, 1024],
+        zRangeVox: [0, 1],
+        effectiveZoom: 1,
+        sortCenterVox: null,
+        frustumPlanes: null,
+      },
+      desiredProxyKeys: [],
+      removedEntityIds: [],
+      upserts: [],
+      activeSetOrder: [],
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+    });
+
+    expect(posts).toEqual([]);
+    expect(ctx.state.coldStateByDataset.size).toBe(0);
+    expect(ctx.state.currentColdState).toBeNull();
+    expect(harness.wantedSetPosts).toBe(1);
+  });
 });

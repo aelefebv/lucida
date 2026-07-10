@@ -16,7 +16,14 @@ import type {
 import type { SceneEpochs } from "../../epochs.ts";
 import type { VisibleRegion } from "../../viewport.ts";
 import type { DatasetSettings } from "../../../tickCommon.ts";
-import { buildColdState, buildColdActiveEntry } from "./build.ts";
+import {
+  buildColdState,
+  buildColdActiveEntry,
+  buildColdStateDelta,
+  activeEntryReuseKey,
+  computeActiveSetIndexMap,
+  iterateActiveSetMembers,
+} from "./build.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -435,5 +442,234 @@ describe("buildColdState", () => {
     expect(msg1.activeSet[0].entityId).toBe(msg2.activeSet[0].entityId);
     // Touch Axis to silence unused-import lint.
     expect(Axis.X).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// View-move delta
+// ---------------------------------------------------------------------------
+
+function tileEntry(over: Partial<Extract<ActiveSetEntry, { kind: "tile" }>>): ActiveSetEntry {
+  return {
+    kind: "tile",
+    entityId: "ent",
+    imageId: "img",
+    mode: "tiles-with-detail",
+    targetLod: 0,
+    coarsestDetailLod: 0,
+    detailOwnedLodRange: [0, 0],
+    proxyAvailable: false,
+    groupProxyAvailable: false,
+    ...over,
+  } as ActiveSetEntry;
+}
+
+describe("activeEntryReuseKey", () => {
+  it("is equal for two tile entries that produce a byte-identical descriptor", () => {
+    const a = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 2, detailOwnedLodRange: [2, 4] });
+    const b = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 2, detailOwnedLodRange: [2, 4] });
+    expect(activeEntryReuseKey(a)).toBe(activeEntryReuseKey(b));
+  });
+
+  it("differs when a descriptor-affecting field (targetLod) changes", () => {
+    const a = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 2 });
+    const b = tileEntry({ entityId: "a", imageId: "img-a", targetLod: 3 });
+    expect(activeEntryReuseKey(a)).not.toBe(activeEntryReuseKey(b));
+  });
+
+  it("is null for group-as-proxy (its matrix is view-dependent → never reused)", () => {
+    const g: ActiveSetEntry = { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry;
+    expect(activeEntryReuseKey(g)).toBeNull();
+  });
+});
+
+describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
+  it("agrees with the cold-state member index map on the same active set", () => {
+    const entities = new Map([
+      ["a", makeTile("a", "img-a", "group-0")],
+      ["b", makeTile("b", "img-b", "group-0")],
+    ]);
+    const activeSet: ActiveSetEntry[] = [
+      tileEntry({ entityId: "a", imageId: "img-a" }),
+      tileEntry({ entityId: "b", imageId: "img-b" }),
+    ];
+    const cold = buildColdState({
+      datasetId: "ds1",
+      activeSet,
+      entities: [...entities.values()],
+      selection: makeSelection(),
+      multiChannel: false,
+      visibleRegion: makeVisibleRegion(),
+      epochs: makeEpochs(),
+      matricesByEntity: makeMatrices(),
+      dsSettings: makeDsSettings(),
+    });
+    const fromActiveSet = computeActiveSetIndexMap(activeSet, [0], false);
+    // Single-channel member id is the imageId.
+    expect(fromActiveSet.get("img-a")).toBe(0);
+    expect(fromActiveSet.get("img-b")).toBe(1);
+    // Same ids + order the cold-state message would iterate.
+    expect([...iterateActiveSetMembers(activeSet, [0], false)]).toEqual(["img-a", "img-b"]);
+    expect(cold.activeSet.map((e) => e.entityId)).toEqual(["a", "b"]);
+  });
+
+  it("suffixes member ids per visible channel in multi-channel mode", () => {
+    const activeSet: ActiveSetEntry[] = [tileEntry({ entityId: "a", imageId: "img-a" })];
+    expect([...iterateActiveSetMembers(activeSet, [0, 2], true)]).toEqual([
+      "img-a:ch0",
+      "img-a:ch2",
+    ]);
+  });
+});
+
+describe("buildColdStateDelta", () => {
+  const commonArgs = (activeSet: ActiveSetEntry[], previousActiveSet: ActiveSetEntry[]) => ({
+    datasetId: "ds1",
+    activeSet,
+    previousActiveSet,
+    entities: [makeTile("a", "img-a", "group-0"), makeTile("b", "img-b", "group-0"), makeTile("c", "img-c", "group-0")],
+    selection: makeSelection(),
+    visibleRegion: makeVisibleRegion(),
+    epochs: makeEpochs(),
+    matricesByEntity: makeMatrices(),
+    dsSettings: makeDsSettings(),
+  });
+
+  it("carries only changed/added descriptors, removed ids, and the full order", () => {
+    const prev: ActiveSetEntry[] = [
+      tileEntry({ entityId: "a", imageId: "img-a", targetLod: 1 }),
+      tileEntry({ entityId: "b", imageId: "img-b", targetLod: 1 }),
+    ];
+    const next: ActiveSetEntry[] = [
+      // a unchanged (reused), b LOD changed (upsert), c is new (upsert)
+      tileEntry({ entityId: "a", imageId: "img-a", targetLod: 1 }),
+      tileEntry({ entityId: "b", imageId: "img-b", targetLod: 2 }),
+      tileEntry({ entityId: "c", imageId: "img-c", targetLod: 0 }),
+    ];
+    const delta = buildColdStateDelta(commonArgs(next, prev));
+
+    expect(delta.type).toBe("coldStateDelta");
+    expect(delta.activeSetOrder).toEqual(["a", "b", "c"]);
+    // a is byte-identical → not shipped; b + c shipped.
+    expect(delta.upserts.map((u) => u.entityId).sort()).toEqual(["b", "c"]);
+    expect(delta.removedEntityIds).toEqual([]);
+  });
+
+  it("reports an entity that left the active set as removed", () => {
+    const prev: ActiveSetEntry[] = [
+      tileEntry({ entityId: "a", imageId: "img-a" }),
+      tileEntry({ entityId: "b", imageId: "img-b" }),
+    ];
+    const next: ActiveSetEntry[] = [tileEntry({ entityId: "a", imageId: "img-a" })];
+    const delta = buildColdStateDelta(commonArgs(next, prev));
+
+    expect(delta.removedEntityIds).toEqual(["b"]);
+    expect(delta.activeSetOrder).toEqual(["a"]);
+    // a is unchanged → no descriptor shipped at all.
+    expect(delta.upserts).toEqual([]);
+  });
+
+  it("always upserts a group-as-proxy entry even when its scalar fields match", () => {
+    const g: ActiveSetEntry = { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry;
+    const matrices = makeMatrices();
+    const synth = new Float32Array(16); synth[0] = 5; synth[15] = 1;
+    matrices.set("group-0", { model: synth, inv: synth });
+    const delta = buildColdStateDelta({
+      ...commonArgs([g], [g]),
+      matricesByEntity: matrices,
+    });
+    expect(delta.upserts.map((u) => u.entityId)).toEqual(["group-0"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reuse-key ⇔ descriptor contract
+//
+// The view-move delta reuses a retained descriptor whenever `activeEntryReuseKey`
+// is unchanged, so the key MUST distinguish every field the descriptor build
+// reads. These two properties bound that contract from both sides:
+//   (a) mutating any descriptor-affecting field the builder reads changes the key
+//       (so no such field can be silently dropped from the key), and
+//   (b) two entries with the same key build byte-identical descriptors (so a
+//       future descriptor field that isn't folded into the key can't slip a
+//       stale descriptor through a pan without failing this test).
+// ---------------------------------------------------------------------------
+
+describe("reuse-key ⇔ descriptor contract", () => {
+  // A fully-populated tile entry: every descriptor-affecting field set to a
+  // distinct, non-default value so a mutation to a different value is observable.
+  const baseTile = (): Extract<ActiveSetEntry, { kind: "tile" }> =>
+    ({
+      kind: "tile",
+      entityId: "ent-a",
+      imageId: "img-a",
+      mode: "tiles-with-detail",
+      targetLod: 2,
+      coarsestDetailLod: 5,
+      detailOwnedLodRange: [2, 4],
+      detailLevel: 2,
+      coarseLevel: 4,
+      wantedLodLevels: [2, 3],
+      proxyKind: "TileProxy3D",
+      proxyAvailable: true,
+      groupProxyAvailable: true,
+    }) as Extract<ActiveSetEntry, { kind: "tile" }>;
+
+  // Every field `buildColdActiveEntry` reads from a TILE entry, each paired with
+  // a mutation to a DIFFERENT value. Adding a new descriptor-affecting field
+  // without a case here (and without folding it into the key) is exactly the
+  // regression this guards.
+  const tileMutations: Array<[string, (t: Extract<ActiveSetEntry, { kind: "tile" }>) => void]> = [
+    ["imageId", (t) => { t.imageId = "img-z"; }],
+    ["targetLod", (t) => { t.targetLod = 3; }],
+    ["detailOwnedLodRange[0]", (t) => { t.detailOwnedLodRange = [1, 4]; }],
+    ["detailOwnedLodRange[1]", (t) => { t.detailOwnedLodRange = [2, 6]; }],
+    ["detailLevel", (t) => { t.detailLevel = 3; }],
+    ["coarseLevel", (t) => { t.coarseLevel = null; }],
+    ["wantedLodLevels", (t) => { t.wantedLodLevels = [2, 3, 4]; }],
+    ["mode", (t) => { t.mode = "tiles-with-proxy-fallback"; }],
+    ["proxyKind", (t) => { t.proxyKind = undefined; }],
+    ["proxyAvailable", (t) => { t.proxyAvailable = false; }],
+    ["groupProxyAvailable", (t) => { t.groupProxyAvailable = false; }],
+  ];
+
+  for (const [name, mutate] of tileMutations) {
+    it(`(a) mutating tile.${name} changes the reuse key`, () => {
+      const base = baseTile();
+      const baseKey = activeEntryReuseKey(base);
+      const mutated = baseTile();
+      mutate(mutated);
+      expect(activeEntryReuseKey(mutated)).not.toBe(baseKey);
+    });
+  }
+
+  it("(a) mutating invisible.imageId or coarsestLod changes the reuse key", () => {
+    const base: ActiveSetEntry = { kind: "invisible", entityId: "ent-x", imageId: "img-x", coarsestLod: 3 } as ActiveSetEntry;
+    const baseKey = activeEntryReuseKey(base);
+    const otherImage: ActiveSetEntry = { kind: "invisible", entityId: "ent-x", imageId: "img-y", coarsestLod: 3 } as ActiveSetEntry;
+    const otherLod: ActiveSetEntry = { kind: "invisible", entityId: "ent-x", imageId: "img-x", coarsestLod: 4 } as ActiveSetEntry;
+    expect(activeEntryReuseKey(otherImage)).not.toBe(baseKey);
+    expect(activeEntryReuseKey(otherLod)).not.toBe(baseKey);
+  });
+
+  it("(b) two tile entries with the same reuse key build byte-identical descriptors", () => {
+    // `a` and `b` are equal in every descriptor-affecting field but differ in a
+    // field the builder does NOT read (`coarsestDetailLod`) — so they share a key
+    // AND must produce identical descriptors. If a future descriptor field were
+    // read by the builder but omitted from the key, varying it here (or in a new
+    // mutation case above) would break one of these two properties.
+    const a = baseTile();
+    const b = baseTile();
+    b.coarsestDetailLod = 999; // not a descriptor input, not in the key
+    expect(activeEntryReuseKey(a)).toBe(activeEntryReuseKey(b));
+
+    const entityById = new Map([["ent-a", makeTile("ent-a", "img-a", "group-0")]]);
+    const matrices = makeMatrices();
+    matrices.set("ent-a", { model: new Float32Array(16).fill(2), inv: new Float32Array(16).fill(3) });
+    const display = { 0: { contrastMin: 1, contrastMax: 2, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 } };
+
+    const descA = buildColdActiveEntry(a, entityById, matrices, display);
+    const descB = buildColdActiveEntry(b, entityById, matrices, display);
+    expect(descA).toEqual(descB);
   });
 });

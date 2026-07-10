@@ -55,6 +55,10 @@ import {
 import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
+import {
+  computeActiveSetIndexMap,
+  iterateActiveSetMembers,
+} from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
 
 /** A visible member for render layer construction. */
@@ -118,6 +122,12 @@ interface PlannedDataset {
   visibleRegion: VisibleRegion;
   selection: SelectionState;
   result: RequestPlan;
+  /**
+   * The active set the worker currently holds for this dataset — captured from
+   * `PlanningState.previousActiveSet` BEFORE `plan()`'s `nextState` overwrote it.
+   * The view-move delta diffs `result.activeSet` against this.
+   */
+  previousActiveSet: ActiveSetEntry[];
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -415,6 +425,30 @@ export class TickCoordinator {
   /** Per-planned-dataset carry-forward for the display-only fast path. */
   private readonly lastRebuildByDataset = new Map<string, DatasetRebuildSignature>();
   /**
+   * Per-dataset cache of layout-derived per-entity tile model matrices, reused
+   * across rebuilds while placement is unchanged. Tile matrices come from
+   * `scene.member_model_matrix` (a pure function of layout, no camera input), so
+   * a view move — which advances only the view epoch — leaves them byte-
+   * identical; only tiles new to a rebuild's roster are recomputed. Keyed by an
+   * epoch fingerprint so a content/layout/asset change (a reflow or add/remove
+   * that moves placement) discards the stale matrices. `group-as-proxy` matrices
+   * are never cached (they are synthesized from the visible child-tile set, which
+   * a view move changes).
+   */
+  private readonly matrixCacheByDataset = new Map<string, {
+    epochKey: string;
+    matrices: Map<string, { model: Float32Array; inv: Float32Array }>;
+  }>();
+  /**
+   * Datasets whose worker-side cold state is known to hold exactly this
+   * coordinator's `previousActiveSet` — the precondition for a view-move delta.
+   * Set after a full cold state (or a delta) lands; a delta keeps it set because
+   * the worker's reconstructed active set equals the new `result.activeSet`. The
+   * scrub / display fast paths never change the active set, so they leave it set.
+   * Cleared on dataset removal so a re-added dataset re-syncs with a full send.
+   */
+  private readonly coldStateSyncedDatasets = new Set<string>();
+  /**
    * Debug member stats from the most recent non-cache-hit run. Replayed
    * onto `debugStats` on epoch cache hits so the panel doesn't flash
    * `Visible: 0 / 0` between idle ticks.
@@ -579,6 +613,13 @@ export class TickCoordinator {
       causes.includes("asset");
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
+    // A pure view move (pan / zoom / orbit): only the camera moved, so T/Z/C,
+    // the channel set, per-channel display state, and layout are all unchanged
+    // and the active set is a pure function of the new view. This is the sole
+    // gate for the view-move cold-state delta — anything bundled with the view
+    // change (a selection edit, a structural change) fails it and takes the full
+    // rebuild, so the delta's retained descriptors are always safe.
+    const viewOnly = !structural && causes.length === 1 && causes[0] === "view";
 
     // Display-only fast path — a per-channel intensity edit (contrast /
     // gamma / colormap / opacity) with nothing else changed. When it can
@@ -680,6 +721,9 @@ export class TickCoordinator {
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? { previousActiveSet: [] };
+      // Capture what the worker currently holds BEFORE `nextState` overwrites it
+      // — the view-move delta diffs the fresh active set against this.
+      const previousActiveSet = planningStateForDataset.previousActiveSet;
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
@@ -706,6 +750,7 @@ export class TickCoordinator {
         visibleRegion,
         selection,
         result,
+        previousActiveSet,
       });
     }
 
@@ -747,46 +792,104 @@ export class TickCoordinator {
       };
       this._lastPlanByDataset.set(dsId, budgetedResult);
 
-      // 3d. Build member roster + per-entity matrix map in one walk.
+      // 3d. Build member roster + per-entity matrix map in one walk. Reuse
+      // layout-derived tile matrices across a view move via a per-dataset cache
+      // invalidated whenever placement changes (content/layout/asset epoch).
+      const matrixEpochKey =
+        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
+      let matrixCacheEntry = this.matrixCacheByDataset.get(dsId);
+      if (!matrixCacheEntry || matrixCacheEntry.epochKey !== matrixEpochKey) {
+        matrixCacheEntry = { epochKey: matrixEpochKey, matrices: new Map() };
+        this.matrixCacheByDataset.set(dsId, matrixCacheEntry);
+      }
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
         activeSet: result.activeSet,
         entities,
         ctx,
         datasetId: dsId,
+        tileMatrixCache: matrixCacheEntry.matrices,
       });
       memberRoster.set(dsId, rosterEntries);
 
-      // Drives atlas creation/remap + wanted-set + descriptor buffer
-      // build; dsSettings bakes per-channel display state into descriptors.
-      const coldMsg = this.uploader.sendColdState({
-        ctx,
-        datasetId: dsId,
-        activeSet: result.activeSet,
-        entities,
-        selection,
-        multiChannel,
-        visibleRegion,
-        renderRadiusView: {
-          detail: planningConfig.detailRenderRadiusView,
-          coarse: planningConfig.coarseRenderRadiusView,
-        },
-        epochs: result.epochs,
-        desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
-        matricesByEntity,
-        dsSettings,
-      });
-      // Same memberId → entityIndex map the worker builds from cold
-      // state — both sides converge because they walk the same iteration order.
-      entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
+      // View-move fast path: the active set genuinely changed (tiles scroll
+      // in/out, LODs change) but only the camera moved, and the worker holds
+      // exactly this coordinator's `previousActiveSet`. Diff and ship only the
+      // delta instead of rebuilding + re-cloning the whole O(active-set)
+      // descriptor array. Any other case (first sync, a bundled selection/
+      // structural change) falls through to the full send below.
+      const canDelta =
+        viewOnly &&
+        this.coldStateSyncedDatasets.has(dsId) &&
+        planned.previousActiveSet.length > 0;
 
-      // Emit before render messages so `rayHitPerEntity` is current
-      // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
-      this.uploader.sendViewHotStateIfAdvanced({
-        ctx,
-        datasetId: dsId,
-        coldMsg,
-        epochs: result.epochs,
-      });
+      if (canDelta) {
+        this.uploader.sendColdStateDelta({
+          ctx,
+          datasetId: dsId,
+          activeSet: result.activeSet,
+          previousActiveSet: planned.previousActiveSet,
+          entities,
+          selection,
+          visibleRegion,
+          renderRadiusView: {
+            detail: planningConfig.detailRenderRadiusView,
+            coarse: planningConfig.coarseRenderRadiusView,
+          },
+          epochs: result.epochs,
+          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
+          matricesByEntity,
+          dsSettings,
+        });
+        // The worker rebuilds its descriptor buffer from the reordered active
+        // set in the SAME canonical order this walks, so the indices agree.
+        entityIndexByDataset.set(
+          dsId,
+          computeActiveSetIndexMap(result.activeSet, selection.visibleChannels, multiChannel),
+        );
+        this.uploader.sendViewHotStateFromMembersIfAdvanced({
+          ctx,
+          datasetId: dsId,
+          memberIds: iterateActiveSetMembers(
+            result.activeSet, selection.visibleChannels, multiChannel,
+          ),
+          epochs: result.epochs,
+        });
+      } else {
+        // Full send. Drives atlas creation/remap + wanted-set + descriptor
+        // buffer build; dsSettings bakes per-channel display state into
+        // descriptors. Marks the dataset synced so a later pure view move can
+        // take the delta path against this active set.
+        const coldMsg = this.uploader.sendColdState({
+          ctx,
+          datasetId: dsId,
+          activeSet: result.activeSet,
+          entities,
+          selection,
+          multiChannel,
+          visibleRegion,
+          renderRadiusView: {
+            detail: planningConfig.detailRenderRadiusView,
+            coarse: planningConfig.coarseRenderRadiusView,
+          },
+          epochs: result.epochs,
+          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
+          matricesByEntity,
+          dsSettings,
+        });
+        // Same memberId → entityIndex map the worker builds from cold
+        // state — both sides converge because they walk the same iteration order.
+        entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
+
+        // Emit before render messages so `rayHitPerEntity` is current
+        // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
+        this.uploader.sendViewHotStateIfAdvanced({
+          ctx,
+          datasetId: dsId,
+          coldMsg,
+          epochs: result.epochs,
+        });
+        this.coldStateSyncedDatasets.add(dsId);
+      }
 
       // Categorical label overlays are invisible to the WASM planner
       // (labels live outside `manifest.images`/`entities`), so their chunk
@@ -1596,6 +1699,11 @@ export class TickCoordinator {
     // next full rebuild.)
     this.lastRebuildByDataset.delete(workerMemberId);
     this.lastVisibleDatasetIds.delete(workerMemberId);
+    // Drop the cached tile matrices and the delta-sync flag so a re-added
+    // dataset re-derives placement and re-syncs with a full cold state before
+    // any view-move delta can reference it.
+    this.matrixCacheByDataset.delete(workerMemberId);
+    this.coldStateSyncedDatasets.delete(workerMemberId);
   }
 
   /** Per-dataset snapshot of the most recent `plan()` output. Live Map — do not mutate. */

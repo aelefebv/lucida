@@ -8,6 +8,7 @@ import type {
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
+  ColdStateDeltaMessage,
   ViewHotStateMessage,
   MissingChunk,
   MissingProxy,
@@ -51,6 +52,16 @@ export interface UploadClient {
    * descriptor array. See {@link ColdStateSelectionMessage}.
    */
   coldStateSelection(msg: ColdStateSelectionMessage): void;
+
+  /**
+   * Push a view-move update (pan / zoom / orbit) for a dataset whose active set
+   * genuinely changed but whose selection, display, and layout did not. Carries
+   * only the changed/added descriptors + removed ids + the new active-set order,
+   * so the worker patches its retained cold state and re-ingests it without the
+   * sender re-transmitting the O(active-set) descriptor array. See
+   * {@link ColdStateDeltaMessage}.
+   */
+  coldStateDelta(msg: ColdStateDeltaMessage): void;
 
   /**
    * Must be sent before subsequent render messages so the worker's

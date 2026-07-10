@@ -371,8 +371,10 @@ describe("tickMinimap overview/overlay split", () => {
     expect(overlay).toHaveBeenCalledTimes(2);
     const secondBounds = overlay.mock.calls[1][0].sliceViewports[0].bounds;
     expect(secondBounds).not.toEqual(firstBounds);
-    // The camera moved, so the static layer (bounding boxes) must re-stroke.
-    expect(overlay.mock.calls[1][0].staticDirty).toBe(true);
+    // The static layer (bounding boxes + axis arrows) is drawn in the minimap's
+    // OWN fixed viewProj, which a 2D pan of the main view never moves — so it is
+    // reused, not re-stroked. Only the dynamic viewport rect above changed.
+    expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
   });
 
   it("skips the O(N) overview redraw on a slice-mode zoom", () => {

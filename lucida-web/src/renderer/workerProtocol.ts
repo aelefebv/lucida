@@ -665,6 +665,55 @@ export interface ColdStateSelectionMessage {
   epochs: SceneEpochs;
 }
 
+/**
+ * View-move update for a dataset whose active set genuinely changed (a 2D pan,
+ * a 2D/3D zoom, or a 3D orbit): tiles scroll in/out and LODs change, but only
+ * the camera moved — the timepoint, Z-plane, channel set, per-channel display
+ * state, and layout are all unchanged.
+ *
+ * Rather than re-transmitting the whole O(active-set) descriptor array, this
+ * carries only the delta against the dataset's most recent {@link ColdStateMessage}:
+ *
+ *   - `upserts` — descriptors for entities that are new to the active set or
+ *     whose view-dependent fields (target LOD, LOD range, mode, proxy flags)
+ *     changed. Built by the exact same `buildColdActiveEntry` path a full cold
+ *     state uses, so they are byte-identical to what a full rebuild would emit.
+ *   - `removedEntityIds` — entities that left the active set.
+ *   - `activeSetOrder` — the full new active-set order, as entity ids. The
+ *     worker reorders its patched active set to match, so the descriptor-buffer
+ *     entity indices agree with the main thread's by construction.
+ *
+ * The worker patches its retained cold state (remove removed ids, upsert
+ * changed/added by entity id, reorder to `activeSetOrder`) and re-runs the same
+ * `applyColdState` a full cold state uses — so the visible result is identical
+ * to a full rebuild at the new view, including releasing resources for entities
+ * that left. An entity whose view-dependent fields are unchanged keeps its
+ * retained descriptor: its model matrix, LOD geometry, and display state are all
+ * view-independent (the caller only emits a delta when nothing but the camera
+ * moved), so the retained descriptor is exactly what a fresh build would produce.
+ */
+export interface ColdStateDeltaMessage {
+  type: "coldStateDelta";
+  datasetId: string;
+  epochs: SceneEpochs;
+  currentT: number;
+  currentZ: number;
+  visibleRegion: VisibleRegion;
+  /** Per-tier render radius as visible-region half-diagonal multipliers. */
+  renderRadiusView?: {
+    detail: number;
+    coarse: number;
+  };
+  /** Budget-admitted proxy residency keys for the new view. */
+  desiredProxyKeys?: string[];
+  /** Entity ids that left the active set since the retained cold state. */
+  removedEntityIds: string[];
+  /** Descriptors for entities new to the active set or whose descriptor changed. */
+  upserts: ColdStateActiveEntry[];
+  /** The full new active-set order, as entity ids, so worker/main agree on indices. */
+  activeSetOrder: string[];
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -686,6 +735,7 @@ export type MainToWorkerMessage =
   | ColdStateMessage
   | ColdStateDisplayMessage
   | ColdStateSelectionMessage
+  | ColdStateDeltaMessage
   | ViewHotStateMessage;
 
 // --- Worker -> Main ---
