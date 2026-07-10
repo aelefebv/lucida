@@ -329,6 +329,141 @@ fn skipped_group_warning(target: &str, reason: String) -> ImportWarning {
     }
 }
 
+/// Number of example tile prefixes named in the aggregated
+/// unreadable-tile-geometry warning message: enough to locate the pattern
+/// without flooding the message when a store-wide condition makes many
+/// candidate representatives unreadable at once.
+const UNREADABLE_GEOMETRY_WARNING_EXAMPLES: usize = 3;
+
+/// One aggregated [`ImportWarning`] covering every group representative tile
+/// that could not be read while selecting the collection's shared geometry.
+/// Aggregated by design — a store-wide condition (throttling, timeouts, or a
+/// permission configuration that answers a missing key with an error rather
+/// than NotFound) can make many representatives unreadable at once, and one
+/// warning per candidate would drown the open result. Only emitted once the
+/// collection has opened over a later readable representative; `examples` are
+/// the passed-over tile prefixes, of which only the first
+/// [`UNREADABLE_GEOMETRY_WARNING_EXAMPLES`] are named.
+fn unreadable_tile_geometry_warning(
+    dataset_id: &str,
+    unreadable: usize,
+    examples: &[&str],
+) -> ImportWarning {
+    let noun = if unreadable == 1 { "tile" } else { "tiles" };
+    let examples = examples
+        .iter()
+        .take(UNREADABLE_GEOMETRY_WARNING_EXAMPLES)
+        .map(|prefix| format!("{prefix:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ImportWarning {
+        kind: ImportWarningKind::UnreadableTileGeometry,
+        target: dataset_id.to_string(),
+        message: format!(
+            "{unreadable} representative {noun} could not be read for the \
+             collection's shared geometry (e.g. {examples}); the collection \
+             opened over the next readable tile's geometry. A store permission \
+             or throttling issue may be the cause."
+        ),
+    }
+}
+
+/// The shared multiscale geometry every tile of a collection inherits, learned
+/// by reading one representative tile. OME-Zarr collections require all tiles to
+/// share one multiscale, so a single readable tile's axes, levels, geometry, and
+/// channel metadata apply to every tile.
+struct SharedTileGeometry {
+    axes_names: Vec<String>,
+    level_entries: Vec<parse::LevelEntry>,
+    channel_infos: Vec<ChannelInfo>,
+    level_metas: Vec<parse::ArrayMeta>,
+}
+
+/// Read and parse one tile's shared multiscale geometry. Any read or parse
+/// failure — an unreadable/malformed `zarr.json` or unreadable level-array
+/// metadata — is returned as an error so the caller can fall forward to the next
+/// candidate tile instead of aborting the whole collection.
+async fn read_tile_geometry(
+    store: &Arc<dyn ObjectStore>,
+    tile_prefix: &str,
+) -> Result<SharedTileGeometry, StoreError> {
+    let tile_json = parse::read_zarr_json(store, &format!("{tile_prefix}/zarr.json")).await?;
+    let parsed = parse::parse_multiscales(&tile_json, &format!("{tile_prefix}: "))?;
+    // Channel display names from the tile's omero block (generic; optional).
+    let channel_infos = parse::parse_omero_channels(&tile_json);
+    let level_metas = parse::read_level_metas(store, tile_prefix, &parsed.level_entries).await?;
+    Ok(SharedTileGeometry {
+        axes_names: parsed.axes_names,
+        level_entries: parsed.level_entries,
+        channel_infos,
+        level_metas,
+    })
+}
+
+/// Select a collection's shared multiscale geometry from candidate
+/// representative tiles — one per group, in declared order.
+///
+/// Because every tile of an OME-Zarr collection shares one multiscale, a
+/// single readable representative anywhere defines the geometry for all, so the
+/// search never needs to look past one tile per group: the candidate set is
+/// O(groups), the same cost tier as parsing the groups themselves, never
+/// O(total tiles).
+///
+/// The first candidate is read alone, so a healthy collection reads exactly one
+/// tile before any fan-out. Only when the leading representative is unreadable
+/// are the remaining candidates fanned out with bounded concurrency
+/// ([`METADATA_FETCH_CONCURRENCY`]) and reduced in declared order, taking the
+/// first whose geometry reads. This keeps a corrupt leading representative — or
+/// a whole corrupt leading group — falling forward concurrently instead of one
+/// serial round-trip per candidate, even under a store-wide condition that
+/// makes every read fail.
+///
+/// Returns the chosen geometry (`None` when no candidate is readable) together
+/// with the prefixes of the unreadable candidates that were passed over, in
+/// declared order, so the caller can aggregate them into a single warning.
+///
+/// Candidates are taken by owned value so the concurrent futures — and the
+/// stream that drives them — borrow nothing from the caller, keeping the
+/// resulting future straightforwardly `Send`.
+async fn select_shared_tile_geometry(
+    store: &Arc<dyn ObjectStore>,
+    candidate_prefixes: Vec<String>,
+) -> (Option<SharedTileGeometry>, Vec<String>) {
+    let mut unreadable: Vec<String> = Vec::new();
+    let mut candidates = candidate_prefixes.into_iter();
+
+    // The leading candidate is read on its own so the common case — a healthy
+    // collection — costs exactly one representative read.
+    let Some(first) = candidates.next() else {
+        return (None, unreadable);
+    };
+    match read_tile_geometry(store, &first).await {
+        Ok(geometry) => return (Some(geometry), unreadable),
+        Err(_) => unreadable.push(first),
+    }
+
+    // Reached only when the leading representative is unreadable. Fan the rest
+    // out with bounded concurrency and consume the results in declared order,
+    // so the first readable candidate wins while reads overlap rather than
+    // serialize. Returning early drops the stream, cancelling the reads still
+    // in flight past the chosen tile.
+    let mut stream = futures_util::stream::iter(candidates.map(|prefix| {
+        let store = store.clone();
+        async move {
+            let outcome = read_tile_geometry(&store, &prefix).await;
+            (prefix, outcome)
+        }
+    }))
+    .buffered(METADATA_FETCH_CONCURRENCY);
+    while let Some((prefix, outcome)) = stream.next().await {
+        match outcome {
+            Ok(geometry) => return (Some(geometry), unreadable),
+            Err(_) => unreadable.push(prefix),
+        }
+    }
+    (None, unreadable)
+}
+
 /// Fetch and parse a single group's `zarr.json`, extracting its tiles.
 ///
 /// Tolerant by design: a missing collection `path`, an unreadable or malformed
@@ -389,6 +524,16 @@ async fn parse_one_group(
             "group metadata has no ome.well.images list".to_string(),
         ));
     };
+
+    // An empty list is as unusable as a missing one: it yields no tiles, which
+    // would otherwise become a silent orphan group with no images and no
+    // warning. Skip it loudly, exactly as the missing-list case is skipped.
+    if images.is_empty() {
+        return Err(skipped_group_warning(
+            &target,
+            "group metadata's ome.well.images list is empty".to_string(),
+        ));
+    }
 
     let mut tiles: Vec<TileParsed> = Vec::new();
     for image_entry in images {
@@ -554,34 +699,64 @@ async fn import_collection(
         ));
     }
 
-    let mut representative_tile_path: Option<String> = None;
-    let mut has_explicit_positions = false;
-    for group in &parsed_groups {
-        for tile in &group.tiles {
-            if tile.translation.is_some() {
-                has_explicit_positions = true;
-            }
-            if representative_tile_path.is_none() {
-                representative_tile_path = Some(tile.store_prefix.clone());
-            }
-        }
+    // Whether any tile is explicitly positioned is a pure function of the
+    // already-parsed group metadata (no tile I/O): a single tile carrying a
+    // translation makes the whole collection explicitly positioned.
+    let has_explicit_positions = parsed_groups
+        .iter()
+        .flat_map(|group| group.tiles.iter())
+        .any(|tile| tile.translation.is_some());
+
+    // Learn the shared multiscale geometry every tile inherits by reading a
+    // single representative tile. OME-Zarr collections require all tiles to
+    // share one multiscale, so any tile whose geometry reads and parses defines
+    // axes, levels, geometry, and channels for every tile — exactly one
+    // readable tile anywhere is enough.
+    //
+    // The candidate set is therefore one representative per group (its first
+    // tile), tried in declared order. A candidate whose `zarr.json` or
+    // level-array metadata is unreadable or malformed is passed over and the
+    // next group's representative is tried, so one corrupt tile — or a whole
+    // corrupt leading group — no longer aborts an otherwise-valid collection.
+    // Because a single readable representative suffices, the interior tiles of
+    // a group whose representative is unreadable are never probed: the search
+    // stays O(groups), never O(total tiles), even when a store-wide condition
+    // (throttling, timeouts, or permissions masking NotFound as an error)
+    // makes every read fail. The healthy common case reads exactly one tile;
+    // a corrupt leading representative falls forward with bounded concurrency.
+    //
+    // If no representative is readable the import fails loudly rather than open
+    // a geometry-less collection.
+    let representative_prefixes: Vec<String> = parsed_groups
+        .iter()
+        .filter_map(|group| group.tiles.first())
+        .map(|tile| tile.store_prefix.clone())
+        .collect();
+    let (shared_geometry, unreadable_representatives) =
+        select_shared_tile_geometry(store, representative_prefixes).await;
+    let SharedTileGeometry {
+        axes_names,
+        level_entries,
+        channel_infos,
+        level_metas,
+    } = shared_geometry.ok_or_else(|| {
+        StoreError::Metadata("collection has no tile with readable geometry".into())
+    })?;
+
+    // The collection opened. If selection had to fall forward past unreadable
+    // representatives, surface them as one aggregated warning; the common case
+    // — the leading representative read cleanly — records nothing.
+    if !unreadable_representatives.is_empty() {
+        let examples: Vec<&str> = unreadable_representatives
+            .iter()
+            .map(String::as_str)
+            .collect();
+        warnings.push(unreadable_tile_geometry_warning(
+            id,
+            unreadable_representatives.len(),
+            &examples,
+        ));
     }
-
-    // Read representative tile multiscales.
-    let rep_path = representative_tile_path
-        .ok_or_else(|| StoreError::Metadata("collection has no tiles".into()))?;
-
-    let rep_json = parse::read_zarr_json(store, &format!("{rep_path}/zarr.json")).await?;
-    let rep_parsed = parse::parse_multiscales(&rep_json, &format!("{rep_path}: "))?;
-    let axes_names = rep_parsed.axes_names;
-    let level_entries = rep_parsed.level_entries;
-
-    // Channel display names from the representative tile's omero block. OME-Zarr
-    // collections require all tiles to share one multiscale, so the representative
-    // tile's channels apply to every tile (generic; optional).
-    let channel_infos = parse::parse_omero_channels(&rep_json);
-
-    let level_metas = parse::read_level_metas(store, &rep_path, &level_entries).await?;
 
     let (full_shape_5d, _full_chunk_5d) = parse::extract_full_res(&level_metas, &axes_names);
 
@@ -1947,6 +2122,332 @@ mod tests {
         assert!(
             matches!(err, StoreError::Metadata(_)),
             "expected a metadata error, got {err:?}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable representative tile no longer aborts the whole collection:
+    /// selection falls forward to the next tile whose geometry parses, records a
+    /// warning naming the corrupt tile, and every tile (including the corrupt
+    /// one) still imports over the shared geometry.
+    #[tokio::test]
+    async fn unreadable_representative_tile_falls_forward() {
+        let dir = temp_dir("unreadable_rep_tile");
+        create_collection_fixture(
+            &dir,
+            "rep_collection",
+            &["A", "B"],
+            &["1"],
+            &[("A", "1", 0, 0, 2), ("B", "1", 1, 0, 1)],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 128, 128],
+            1,
+        );
+
+        // Corrupt the first tile's own multiscale metadata — the tile that
+        // would be picked as representative — while leaving its group's
+        // well/images list and every other tile intact.
+        fs::write(
+            dir.join("A").join("1").join("0").join("zarr.json"),
+            b"{ not json",
+        )
+        .unwrap();
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "rep-id", "Rep Collection")
+            .await
+            .unwrap();
+
+        // Exactly one aggregated geometry warning, keyed to the dataset and
+        // naming the unreadable candidate tile as an example.
+        let geo_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
+            .collect();
+        assert_eq!(
+            geo_warnings.len(),
+            1,
+            "expected one aggregated unreadable-tile-geometry warning, got {:?}",
+            result.warnings,
+        );
+        assert_eq!(geo_warnings[0].target, "rep-id");
+        assert!(
+            geo_warnings[0].message.contains("A/1/0"),
+            "message should name the tile, got {:?}",
+            geo_warnings[0].message,
+        );
+
+        // All three tiles remain — only the geometry source tile changed.
+        let tiles: Vec<_> = result
+            .manifest
+            .entities()
+            .iter()
+            .filter(|e| e.kind == EntityKind::Tile)
+            .collect();
+        assert_eq!(
+            tiles.len(),
+            3,
+            "every tile still imports over shared geometry"
+        );
+
+        // The shared geometry was learned from a readable tile.
+        for image in result.manifest.images() {
+            assert_eq!(image.multiscale.levels[0].shape, [1, 1, 1, 256, 256]);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// When the representative candidates are corrupt across more than one group,
+    /// selection keeps falling forward across group boundaries until a readable
+    /// tile is found; only the corrupt candidates read before it are warned.
+    #[tokio::test]
+    async fn representative_tile_falls_forward_across_groups() {
+        let dir = temp_dir("rep_tile_across_groups");
+        create_collection_fixture(
+            &dir,
+            "cross_group_collection",
+            &["A", "B"],
+            &["1"],
+            &[("A", "1", 0, 0, 1), ("B", "1", 1, 0, 1)],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 128, 128],
+            1,
+        );
+
+        // The entire first group's only tile is unreadable; the second group's
+        // tile is valid and must supply the shared geometry.
+        fs::write(dir.join("A").join("1").join("0").join("zarr.json"), b"nope").unwrap();
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "cross-id", "Cross Group Collection")
+            .await
+            .unwrap();
+
+        let geo_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
+            .collect();
+        assert_eq!(
+            geo_warnings.len(),
+            1,
+            "only the one corrupt candidate is warned"
+        );
+        assert_eq!(geo_warnings[0].target, "cross-id");
+        assert!(
+            geo_warnings[0].message.contains("A/1/0"),
+            "message should name the corrupt candidate, got {:?}",
+            geo_warnings[0].message,
+        );
+
+        // Both groups' tiles still import.
+        let tiles: Vec<_> = result
+            .manifest
+            .entities()
+            .iter()
+            .filter(|e| e.kind == EntityKind::Tile)
+            .collect();
+        assert_eq!(tiles.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A collection in which no tile has readable geometry cannot learn the
+    /// shared multiscale and still fails the import loudly rather than open a
+    /// geometry-less collection.
+    #[tokio::test]
+    async fn collection_with_no_readable_tile_geometry_fails() {
+        let dir = temp_dir("no_readable_tile_geometry");
+        create_collection_fixture(
+            &dir,
+            "broken_geometry",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 1), ("A", "2", 0, 1, 1)],
+            [1, 1, 1, 128, 128],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+
+        // Both groups parse (well/images intact) but every tile's own geometry
+        // metadata is corrupt.
+        fs::write(dir.join("A").join("1").join("0").join("zarr.json"), b"nope").unwrap();
+        fs::write(dir.join("A").join("2").join("0").join("zarr.json"), b"nope").unwrap();
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "broken-geo-id", "Broken Geometry")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Metadata(_)),
+            "expected a metadata error, got {err:?}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The geometry search never reads a corrupt leading group tile-by-tile.
+    /// With every tile of the leading group unreadable, the search tries that
+    /// group's single representative, then falls forward to the next group's
+    /// representative — so the corrupt group's interior tiles are never read
+    /// and total geometry reads track the group count, not the tile count.
+    #[tokio::test]
+    async fn corrupt_leading_group_geometry_search_skips_interior_tiles() {
+        let dir = temp_dir("corrupt_leading_group_geometry");
+        create_collection_fixture(
+            &dir,
+            "p",
+            &["A", "B"],
+            &["1"],
+            &[("A", "1", 0, 0, 20), ("B", "1", 1, 0, 20)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        // Corrupt EVERY tile of the leading group, so no tile in it is
+        // readable. The search must still not read the group tile-by-tile.
+        for tile in 0..20 {
+            fs::write(
+                dir.join("A")
+                    .join("1")
+                    .join(tile.to_string())
+                    .join("zarr.json"),
+                b"{ not json",
+            )
+            .unwrap();
+        }
+
+        let (store, reads) = recording_store(&dir);
+        let result =
+            import_dataset_with_label_discovery(&store, "clg", "Corrupt Leading Group", false)
+                .await
+                .expect("a corrupt leading group must fall forward, not fail the import");
+
+        // The collection opened over the healthy group's geometry: every tile
+        // of both groups still imports.
+        assert_eq!(result.manifest.images().len(), 40, "one image per tile");
+
+        // Decisive: the leading group cost exactly one geometry read (its
+        // representative), never its 20 tiles, and the search fell forward to
+        // the next group's representative.
+        let reads = reads.lock().unwrap();
+        assert!(
+            reads.iter().any(|p| p == "A/1/0/zarr.json"),
+            "the leading group's representative must be tried: {reads:?}",
+        );
+        assert!(
+            reads.iter().any(|p| p == "B/1/0/zarr.json"),
+            "selection must fall forward to the next group's representative: {reads:?}",
+        );
+        for interior in ["A/1/1/zarr.json", "A/1/10/zarr.json", "A/1/19/zarr.json"] {
+            assert!(
+                !reads.iter().any(|p| p == interior),
+                "interior tiles of the corrupt leading group must never be read for \
+                 geometry, but {interior} was: {reads:?}",
+            );
+        }
+        drop(reads);
+
+        // One aggregated geometry warning, naming the fell-forward
+        // representative as an example.
+        let geo: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
+            .collect();
+        assert_eq!(geo.len(), 1, "warnings: {:?}", result.warnings);
+        assert_eq!(geo[0].target, "clg");
+        assert!(geo[0].message.contains("A/1/0"), "{}", geo[0].message);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Store-wide tile-geometry read errors must not re-open the per-tile
+    /// fan-out: with every tile's own `zarr.json` GET failing (non-NotFound)
+    /// on a wide collection whose group metadata still reads, the geometry
+    /// search reads exactly one representative per group — never one per tile —
+    /// and then fails loudly rather than opening a geometry-less collection.
+    #[tokio::test]
+    async fn store_wide_tile_geometry_read_errors_are_bounded_by_groups() {
+        let dir = temp_dir("store_wide_geometry_errors");
+        // 4 rows x 3 columns = 12 groups, 20 tiles each = 240 tiles.
+        wide_label_free_fixture(&dir, &["A", "B", "C", "D"], &["1", "2", "3"], 20);
+
+        let (store, reads) = tile_geometry_read_erroring_store(&dir);
+        let err = import_dataset_with_label_discovery(&store, "swg", "Store Wide Geometry", false)
+            .await
+            .expect_err("no tile has readable geometry, so the import must fail loudly");
+        assert!(matches!(err, StoreError::Metadata(_)), "got {err:?}");
+
+        // Decisive: one geometry read per group (12), never one per tile (240).
+        let tile_geometry_reads = count_tile_geometry_reads(&reads);
+        assert_eq!(
+            tile_geometry_reads, 12,
+            "expected one geometry read per group (12 groups), got {tile_geometry_reads}",
+        );
+        assert!(
+            tile_geometry_reads <= 24,
+            "geometry reads must stay bounded by groups, not the 240 tiles: \
+             {tile_geometry_reads}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A group whose `ome.well.images` list is present but empty yields no tiles;
+    /// it must be skipped with a warning, exactly like a missing list, instead of
+    /// becoming a silent orphan group with no images.
+    #[tokio::test]
+    async fn empty_images_group_is_skipped_with_warning() {
+        let dir = temp_dir("empty_images_group");
+        create_collection_fixture(
+            &dir,
+            "empty_images_collection",
+            &["A", "B"],
+            &["1"],
+            &[("A", "1", 0, 0, 0), ("B", "1", 1, 0, 1)],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 128, 128],
+            1,
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "empty-id", "Empty Images Collection")
+            .await
+            .unwrap();
+
+        // The empty-images group is skipped with a warning naming it.
+        let skip_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == ImportWarningKind::SkippedGroup && w.target == "A/1")
+            .collect();
+        assert_eq!(
+            skip_warnings.len(),
+            1,
+            "empty-images group should be skipped with a warning, got {:?}",
+            result.warnings,
+        );
+        assert!(
+            skip_warnings[0].message.contains("empty"),
+            "message should explain the list is empty, got {:?}",
+            skip_warnings[0].message,
+        );
+
+        // Only the non-empty group becomes a group entity — no silent orphan.
+        let groups: Vec<_> = result
+            .manifest
+            .entities()
+            .iter()
+            .filter(|e| e.kind == EntityKind::Group)
+            .collect();
+        assert_eq!(
+            groups.len(),
+            1,
+            "empty group must not become an orphan entity"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -3855,6 +4356,38 @@ mod tests {
             fail_get_when: Some(|location| location.ends_with("labels/zarr.json")),
         });
         (store, reads)
+    }
+
+    /// Like [`recording_store`], but every GET of a tile's own multiscale
+    /// metadata (`group/column/tile/zarr.json`) fails with a non-NotFound
+    /// storage error, simulating a store on which tile-geometry reads error
+    /// store-wide. Group and root metadata sit shallower (fewer path
+    /// separators) and still read cleanly, so groups parse while no tile's
+    /// geometry can be read. The failed reads are still recorded.
+    fn tile_geometry_read_erroring_store(
+        dir: &std::path::Path,
+    ) -> (Arc<dyn ObjectStore>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let store: Arc<dyn ObjectStore> = Arc::new(RecordingStore {
+            inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+            reads: reads.clone(),
+            fail_get_when: Some(|location| {
+                location.ends_with("/zarr.json") && location.matches('/').count() == 3
+            }),
+        });
+        (store, reads)
+    }
+
+    /// Count the recorded tile-geometry metadata reads
+    /// (`group/column/tile/zarr.json`), which the geometry search must keep
+    /// bounded by the group count rather than the total tile count.
+    fn count_tile_geometry_reads(reads: &std::sync::Mutex<Vec<String>>) -> usize {
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with("/zarr.json") && path.matches('/').count() == 3)
+            .count()
     }
 
     /// Count the recorded label-index probe reads (`.../labels/zarr.json`).

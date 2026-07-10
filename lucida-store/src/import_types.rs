@@ -36,6 +36,17 @@ pub enum ImportWarningKind {
     /// A collection group was dropped from the import because its metadata was
     /// missing, unreadable, or malformed. The rest of the collection still opens.
     SkippedGroup,
+    /// One or more group representative tiles could not be read or parsed
+    /// while selecting the collection's shared multiscale geometry, so
+    /// representative-tile selection fell forward to a later readable group
+    /// representative. The collection still opens over the geometry of the
+    /// first readable tile. Always aggregated: one warning per import
+    /// summarizes every passed-over representative, because a store-wide
+    /// condition (throttling, or a permission configuration that answers a
+    /// missing key with an error instead of NotFound) can make many
+    /// representatives unreadable at once. The message names a few affected
+    /// tiles and the likely store-side causes.
+    UnreadableTileGeometry,
     /// Label discovery on a large collection probed only a sample of tiles, so
     /// labels present only on unsampled tiles were not discovered. The message
     /// names the environment variable that forces exhaustive discovery.
