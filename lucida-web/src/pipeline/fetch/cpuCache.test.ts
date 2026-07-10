@@ -1701,6 +1701,60 @@ describe("CpuCache", () => {
       }
     });
 
+    it("records a decode failure as a self-healing transient backoff", async () => {
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const source = createMockContentSource();
+        let failDecode = true;
+        const decode = {
+          decode: (bytes: ArrayBuffer) =>
+            failDecode
+              ? Promise.reject(new Error("length mismatch for wire format"))
+              : Promise.resolve(bytes),
+          activeCount: () => 0,
+          get size() { return 3; },
+          terminate: () => {},
+        } as unknown as DecodePool;
+        const cache = new CpuCache(source, decode, {
+          now: () => clock,
+          random: () => 0,
+        });
+
+        const req = makeRequest();
+        const composite = "entity-1/image-1/0/0/0/0/0/0";
+
+        // Fetch completes; the bytes cannot be decoded.
+        cache.submit(makePlan([req]));
+        source.resolve(composite);
+        await vi.advanceTimersByTimeAsync(0);
+
+        // A backoff entry is tracked and attributed to the transient bucket —
+        // not left unrecorded to re-fetch every rebuild.
+        expect(cache.failuresTracked()).toBe(1);
+        expect(cache.telemetry().failedChunks.transient).toBe(1);
+        expect(cache.telemetry().failedChunks.permanent).toBe(0);
+
+        // Re-planned immediately (clock unchanged): still inside backoff, so
+        // no retry storm.
+        const fetchesAfterFail = source.fetchCount;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetchesAfterFail);
+
+        // Past the backoff it self-heals: re-fetched, and this time it decodes
+        // and delivers, clearing the record.
+        failDecode = false;
+        clock += FAILURE_BACKOFF_MAX_MS + 1;
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(fetchesAfterFail + 1);
+        source.resolve(composite);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cache.failuresTracked()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("grows the transient backoff on each re-attempt (capped)", async () => {
       vi.useFakeTimers();
       try {
@@ -2331,6 +2385,53 @@ describe("CpuCache", () => {
       }
     });
 
+    it("a chunk whose client transient is retried into a server-reported failure feeds the streak once", async () => {
+      // The undercount case: a chunk's FIRST attempt is a client-side
+      // transient (streak-exempt, retried) and its RETRY comes back
+      // server-reported. The eligible failure lands on the retry, not the
+      // first attempt, so it must still feed the streak exactly once — a
+      // whole viewport of such chunks against a source that flaps then fails
+      // has to surface, not stay silent.
+      vi.useFakeTimers();
+      try {
+        const onChunkFailureStreak = vi.fn();
+        const { cache, source } = createTestCache({
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+        });
+
+        const reqs = Array.from(
+          { length: CHUNK_FAILURE_STREAK_THRESHOLD },
+          (_, i) => makeRequest({ x: i }),
+        );
+        cache.submit(makePlan(reqs));
+
+        // First attempt: a client-side transient (streak-exempt) that is retried.
+        for (let i = 0; i < reqs.length; i++) {
+          source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("Network error"));
+        }
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+
+        // Retry: the source now answers with a server-reported failure.
+        for (let i = 0; i < reqs.length; i++) {
+          source.reject(
+            `entity-1/image-1/0/0/0/0/0/${i}`,
+            new FetchError("backend unavailable", {
+              kind: "transient",
+              serverReported: true,
+            }),
+          );
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Each chunk fed exactly once → a full threshold → one notification.
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+        expect(onChunkFailureStreak.mock.calls[0][0]).toBe(CHUNK_FAILURE_STREAK_THRESHOLD);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("a delivered chunk retires a notified streak exactly once and re-arms the notifier", async () => {
       const onChunkFailureStreak = vi.fn();
       const onChunkFailureRecovered = vi.fn();
@@ -2369,6 +2470,186 @@ describe("CpuCache", () => {
       // immediately instead of waiting out the previous throttle window.
       await rejectBatch(3, CHUNK_FAILURE_STREAK_THRESHOLD);
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(2);
+    });
+
+    it("re-surfaces after a delivery reset when a re-planned source stays dead", async () => {
+      // The streak counts CONSECUTIVE failed deliveries: once a delivery
+      // resets it, a chunk that keeps failing across later re-plan cycles must
+      // re-contribute — otherwise a partially-dead source surfaces once, one
+      // unrelated chunk arrives, and the still-massively-failing chunks can
+      // never re-trip the alarm (a silent stall).
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const onChunkFailureStreak = vi.fn();
+        const onChunkFailureRecovered = vi.fn();
+        const source = createMockContentSource();
+        let decodeSucceeds = false;
+        const decode = {
+          decode: (bytes: ArrayBuffer) =>
+            decodeSucceeds
+              ? Promise.resolve(bytes)
+              : Promise.reject(new Error("length mismatch for wire format")),
+          activeCount: () => 0,
+          get size() { return 3; },
+          terminate: () => {},
+        } as unknown as DecodePool;
+        const cache = new CpuCache(source, decode, {
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+          onChunkFailureRecovered,
+          now: () => clock,
+          random: () => 0,
+        });
+
+        const dead = Array.from(
+          { length: CHUNK_FAILURE_STREAK_THRESHOLD },
+          (_, i) => makeRequest({ x: i }),
+        );
+        const deadComposites = dead.map(
+          (_, i) => `entity-1/image-1/0/0/0/0/0/${i}`,
+        );
+        const failAllDead = async () => {
+          cache.submit(makePlan(dead));
+          for (const composite of deadComposites) source.resolve(composite);
+          await vi.advanceTimersByTimeAsync(0);
+        };
+
+        // A full threshold of un-decodable deliveries surfaces the alarm.
+        await failAllDead();
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+
+        // One unrelated healthy chunk delivers: the streak resets and the
+        // alarm is retired.
+        decodeSucceeds = true;
+        cache.submit(makePlan([makeRequest({ y: 1 })]));
+        source.resolve("entity-1/image-1/0/0/0/0/1/0");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(onChunkFailureRecovered).toHaveBeenCalledTimes(1);
+
+        // The source is still dead. Past their backoff the same chunks re-plan,
+        // re-fetch, and fail again — and must re-surface rather than stay
+        // silently stalled behind a one-shot dedup.
+        decodeSucceeds = false;
+        clock += FAILURE_BACKOFF_MAX_MS + 1;
+        await failAllDead();
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-surfaces after resetChunkFailureStreak when the same source stays dead", async () => {
+      // resetChunkFailureStreak (reconnect) zeroes the count. A source that is
+      // still dead after the reconnect — the exact case the reset exists for —
+      // must be able to re-count its already-failed chunks; otherwise the
+      // count can never climb again and the alarm never re-fires.
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const onChunkFailureStreak = vi.fn();
+        const source = createMockContentSource();
+        const decode = {
+          decode: () => Promise.reject(new Error("length mismatch for wire format")),
+          activeCount: () => 0,
+          get size() { return 3; },
+          terminate: () => {},
+        } as unknown as DecodePool;
+        const cache = new CpuCache(source, decode, {
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+          now: () => clock,
+          random: () => 0,
+        });
+
+        const belowThreshold = CHUNK_FAILURE_STREAK_THRESHOLD - 4;
+        const dead = Array.from(
+          { length: belowThreshold },
+          (_, i) => makeRequest({ x: i }),
+        );
+        const deadComposites = dead.map(
+          (_, i) => `entity-1/image-1/0/0/0/0/0/${i}`,
+        );
+        const failAllDead = async () => {
+          cache.submit(makePlan(dead));
+          for (const composite of deadComposites) source.resolve(composite);
+          await vi.advanceTimersByTimeAsync(0);
+        };
+
+        // Below-threshold failures stay quiet.
+        await failAllDead();
+        expect(onChunkFailureStreak).not.toHaveBeenCalled();
+
+        // The transport reconnects: the count starts over.
+        cache.resetChunkFailureStreak();
+
+        // The source is still dead. Past their backoff the same chunks re-plan
+        // and fail again — they must re-contribute to the fresh count…
+        clock += FAILURE_BACKOFF_MAX_MS + 1;
+        await failAllDead();
+
+        // …so four more distinct dead chunks complete a full threshold and
+        // surface the alarm. If the reconnect-reset left the already-failed
+        // chunks barred from re-counting, the count would stall at four.
+        const rest = Array.from({ length: 4 }, (_, i) => makeRequest({ y: 1, x: i }));
+        cache.submit(makePlan(rest));
+        for (let i = 0; i < rest.length; i++) {
+          source.resolve(`entity-1/image-1/0/0/0/0/1/${i}`);
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+        expect(onChunkFailureStreak.mock.calls[0][0]).toBe(CHUNK_FAILURE_STREAK_THRESHOLD);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a dead source touching a small distinct-chunk set surfaces across re-plan cycles", async () => {
+      // The viewport touches fewer distinct chunks than the threshold. Each
+      // must be able to contribute on every re-plan failure, or the count can
+      // never reach the threshold no matter how long the source stays dead.
+      vi.useFakeTimers();
+      try {
+        let clock = 0;
+        const onChunkFailureStreak = vi.fn();
+        const source = createMockContentSource();
+        const decode = {
+          decode: () => Promise.reject(new Error("length mismatch for wire format")),
+          activeCount: () => 0,
+          get size() { return 3; },
+          terminate: () => {},
+        } as unknown as DecodePool;
+        const cache = new CpuCache(source, decode, {
+          maxConcurrentFetches: 32,
+          onChunkFailureStreak,
+          now: () => clock,
+          random: () => 0,
+        });
+
+        // Two distinct chunks — far below the threshold.
+        const reqs = [makeRequest({ x: 0 }), makeRequest({ x: 1 })];
+        const composites = [
+          "entity-1/image-1/0/0/0/0/0/0",
+          "entity-1/image-1/0/0/0/0/0/1",
+        ];
+
+        const cycles = CHUNK_FAILURE_STREAK_THRESHOLD / reqs.length;
+        for (let cycle = 0; cycle < cycles; cycle++) {
+          cache.submit(makePlan(reqs));
+          for (const composite of composites) source.resolve(composite);
+          await vi.advanceTimersByTimeAsync(0);
+          // Past any backoff so the next submit re-plans and re-fetches.
+          clock += FAILURE_BACKOFF_MAX_MS + 1;
+        }
+
+        // Two chunks across five re-plan cycles = a full threshold of
+        // consecutive failed deliveries → surfaced.
+        expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
+        expect(onChunkFailureStreak.mock.calls[0][0]).toBe(CHUNK_FAILURE_STREAK_THRESHOLD);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
