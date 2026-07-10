@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ProxiedContentSource } from "./contentSource.ts";
+import { ProxiedContentSource, DEFAULT_TIMEOUT_MS } from "./contentSource.ts";
 import { proxyResponseKey } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
 
@@ -48,6 +48,24 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+// ---------------------------------------------------------------------------
+// Timeout invariant
+// ---------------------------------------------------------------------------
+
+describe("DEFAULT_TIMEOUT_MS", () => {
+  it("keeps the client timeout above the store's worst-case read budget", () => {
+    // Mirror of lucida-store `backend::CLIENT_FETCH_TIMEOUT`; drift on either
+    // side must be caught. The documented server read budget is the retry-loop
+    // budget (retry_timeout 3s) plus a final per-attempt request timeout
+    // (SOURCE_REQUEST_TIMEOUT 5s) = 8s, and the client must keep >= 1s of
+    // headroom above it so the client, not the server, wins the timeout race.
+    const SERVER_READ_BUDGET_MS = 3_000 + 5_000;
+    expect(DEFAULT_TIMEOUT_MS).toBe(10_000);
+    expect(DEFAULT_TIMEOUT_MS).toBeGreaterThanOrEqual(SERVER_READ_BUDGET_MS + 1_000);
+    expect(DEFAULT_TIMEOUT_MS).toBeGreaterThanOrEqual(9_000);
+  });
 });
 
 // ---------------------------------------------------------------------------
