@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
-import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, readMinimapOverviewEpochs, resolveMinimapLayerContrast, resolveMinimapLayerColormap, tickMinimap } from "./minimapPath.ts";
+import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, readMinimapOverviewEpochs, resolveMinimapLayerContrast, resolveMinimapLayerColormap, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
 import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -626,5 +626,74 @@ describe("tickMinimap overview/overlay split", () => {
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(0);
     expect(overlay).not.toHaveBeenCalled();
+  });
+});
+
+describe("tickMinimapOverview throttle", () => {
+  it("throttles the O(members) seed-scan to the scan interval", () => {
+    // The seed-scan polls the CPU cache across every not-yet-seeded member's
+    // chunk grid — O(members × chunks) per frame, the dominant per-move CPU cost
+    // on large collections. It must run at most once per interval, not every rAF.
+    // scene.t() is read once at the top of each scan (after the throttle gate),
+    // so its call count tracks scans that actually ran; empty `datasets` isolates
+    // the gate from the per-member body.
+    const tSpy = vi.fn(() => 0);
+    const state = createMinimapState();
+    state.enabled = true;
+    const ctx = {
+      scene: { t: tSpy, c: () => 0 },
+      datasets: new Map(),
+    } as unknown as TickContext;
+
+    tickMinimapOverview(ctx, state, 1000); // first scan runs (never scanned before)
+    expect(tSpy).toHaveBeenCalledTimes(1);
+    expect(state.lastOverviewScanMs).toBe(1000);
+
+    tickMinimapOverview(ctx, state, 1050); // within the interval → skipped
+    expect(tSpy).toHaveBeenCalledTimes(1);
+    expect(state.lastOverviewScanMs).toBe(1000);
+
+    tickMinimapOverview(ctx, state, 1101); // past the interval → runs again
+    expect(tSpy).toHaveBeenCalledTimes(2);
+    expect(state.lastOverviewScanMs).toBe(1101);
+  });
+
+  it("returns the last continuation signal on a throttle-skipped frame", () => {
+    // A skipped frame must return the previous scan's budget-continuation signal
+    // so the render loop schedules exactly as it would scanning every frame.
+    const state = createMinimapState();
+    state.enabled = true;
+    const ctx = {
+      scene: { t: () => 0, c: () => 0 },
+      datasets: new Map(),
+    } as unknown as TickContext;
+
+    tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
+    state.overviewBudgetPending = true;
+    expect(tickMinimapOverview(ctx, state, 1010)).toBe(true); // skipped → pending
+    state.overviewBudgetPending = false;
+    expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → not pending
+  });
+
+  it("keeps scheduling on a throttle-skip while chunks await fetch (no tail-chunk strand)", () => {
+    // Regression: the render loop is purely dirty-driven, so a throttle-skipped
+    // frame must signal continuation while members still await fetched chunks —
+    // otherwise a tail chunk landing inside the interval strands un-uploaded
+    // (loop quiesces before the next scan) until an unrelated interaction.
+    const state = createMinimapState();
+    state.enabled = true;
+    const ctx = {
+      scene: { t: () => 0, c: () => 0 },
+      datasets: new Map(),
+    } as unknown as TickContext;
+
+    tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
+    expect(state.overviewBudgetPending).toBe(false); // empty scan → budget not exhausted
+
+    state.pendingFetch.set("m0", []); // a member is now awaiting fetched chunks
+    expect(tickMinimapOverview(ctx, state, 1010)).toBe(true); // skipped but continuation kept
+
+    state.pendingFetch.clear(); // seeding complete
+    expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → loop may quiesce
   });
 });

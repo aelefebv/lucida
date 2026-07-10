@@ -59,6 +59,17 @@ export const RESIDENCY_RENDER_INTERVAL_MS = 33;
 /** Separate budget for minimap overview uploads (independent from main view). */
 export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
 
+/**
+ * Minimum wall-clock gap between minimap overview seed-scans. The scan polls the
+ * CPU cache for every not-yet-seeded member's coarse-chunk grid, which is
+ * O(members × chunks) per frame — the dominant per-move CPU cost on large
+ * collections, because the members stay unseeded during interaction (the fetch
+ * scheduler prioritizes visible tiles over the minimap's bulk seed lane). Seeding
+ * is background/cosmetic-latency, so it is capped to this cadence rather than run
+ * every rAF; a fully-seeded member is skipped by the per-member gate regardless.
+ */
+export const MINIMAP_OVERVIEW_SCAN_INTERVAL_MS = 100;
+
 // `MAIN_VIEW_UPLOAD_BUDGET_BYTES` lives in `pipeline/upload/constants.ts`
 // because it's an upload-phase constant, not a render-loop one.
 
