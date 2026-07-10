@@ -74,7 +74,9 @@ export interface MinimapState {
    * Z-plane excluded. Distinguishes an overlay change that moves the Z-invariant
    * layer (member bounding boxes / frustum → the consumer must re-stroke the
    * cached static layer) from a pure Z-scrub (only the Z-plane indicator moves →
-   * the consumer reuses the cached static layer). Drives `staticDirty`.
+   * the consumer reuses the cached static layer). Drives `staticDirty`. In volume
+   * mode this carries the full main-camera pose (`inv_view_proj`), so a fly
+   * look-around (view direction rotates, eye fixed) re-strokes the frustum.
    */
   overlayCamKey: string | null;
   /** Camera-invariant overview outputs, cached keyed by `overviewGeometryKey`. */
@@ -798,9 +800,14 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   //    layer appears/disappears, detected via the visibility signature) forces a
   //    full geometry rebuild.
   //  - overlay key: the camera inputs that only move the viewport/frustum
-  //    rectangle on the 2D overlay — slice zoom/center, volume dolly
-  //    (eye_position). An orbit is handled by the camera key (it re-renders the
-  //    overview AND refreshes the overlay).
+  //    rectangle on the 2D overlay — slice zoom/center; in volume mode the whole
+  //    main-camera pose (`inv_view_proj`), which is the frustum's source. That
+  //    pose covers both a dolly (eye translates) and a fly look-around (the view
+  //    direction rotates with the eye fixed) — either moves the frustum without
+  //    changing member geometry or the minimap camera. An orbit is handled by the
+  //    camera key (it re-renders the overview AND refreshes the overlay); the
+  //    pose also moves under an orbit but only re-strokes the overlay, never a
+  //    second overview render.
   const cameraKey = mode === "volume" ? `${theta}|${phi}` : "";
   // devicePixelRatio and the minimap size set the backing pixel size the camera
   // and overview are rendered at (backingSize = round(size × devicePixelRatio)),
@@ -823,7 +830,20 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // is the camera/geometry portion WITHOUT Z: a change there moves the Z-invariant
   // overlay layer (bounding boxes / frustum); a Z-only change moves just the
   // slice-plane indicator, so the consumer reuses its cached static layer.
-  const overlayCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
+  // Volume mode keys the overlay on the full main-camera pose via
+  // `inv_view_proj()` — the exact source of the frustum the overlay strokes.
+  // `eye_position()` alone misses a fly look-around (the view direction rotates
+  // while the eye stays put): only `inv_view_proj` moves then, so without it the
+  // frustum would freeze mid-look-around. `inv_view_proj` is a superset of the
+  // eye (a dolly moves both), so it drives the dolly path unchanged too. It rides
+  // ONLY the overlay key, never the geometry/camera keys, so a look-around
+  // re-strokes the overlay without re-reading members or re-rendering the
+  // overview, and an orbit's pose change adds no second overview render. A stable
+  // pose stringifies to a stable key, so an idle tick still early-returns.
+  const overlayCamSnap =
+    mode === "volume"
+      ? `${scene.eye_position()}|${scene.inv_view_proj()}`
+      : `${scene.zoom()}|${scene.center()}`;
   const overlayCamKey = `${mode}|${overlayCamSnap}`;
   const zForOverlay = mode === "slice" ? sliceZ : 0;
   const overlayKey = `${overlayCamKey}|${zForOverlay}`;
@@ -891,9 +911,11 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // In volume mode the static layer additionally carries the minimap camera's
   // own boxes/arrows AND the main camera's view frustum. An orbit reorients the
   // minimap camera (cameraChanged → the boxes/arrows/frustum all move); a dolly
-  // moves the frustum without a rebuild (→ overlayCamKey). So it must re-stroke
-  // whenever either the minimap camera or the main camera moves there. Computed
-  // before the keys are advanced so it compares against the previous camera keys.
+  // or a fly look-around moves the frustum without a rebuild — both shift the main
+  // camera pose folded into overlayCamKey (inv_view_proj), so a look-around with
+  // the eye fixed still re-strokes. So it must re-stroke whenever either the
+  // minimap camera or the main camera moves there. Computed before the keys are
+  // advanced so it compares against the previous camera keys.
   const staticDirty =
     mode === "volume"
       ? rebuilt || cameraChanged || overlayCamKey !== state.overlayCamKey
