@@ -361,6 +361,8 @@ describe("tickMinimap overview/overlay split", () => {
     expect(renderCount.n).toBe(1);
     expect(overlay).toHaveBeenCalledTimes(1);
     const firstBounds = overlay.mock.calls[0][0].sliceViewports[0].bounds;
+    // First draw: the static (camera/geometry) overlay layer must be stroked.
+    expect(overlay.mock.calls[0][0].staticDirty).toBe(true);
 
     // Pan the main camera: overlay must recompute, overview must NOT redraw.
     scene.center = [1000, 1000];
@@ -369,6 +371,10 @@ describe("tickMinimap overview/overlay split", () => {
     expect(overlay).toHaveBeenCalledTimes(2);
     const secondBounds = overlay.mock.calls[1][0].sliceViewports[0].bounds;
     expect(secondBounds).not.toEqual(firstBounds);
+    // The static layer (bounding boxes + axis arrows) is drawn in the minimap's
+    // OWN fixed viewProj, which a 2D pan of the main view never moves — so it is
+    // reused, not re-stroked. Only the dynamic viewport rect above changed.
+    expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
   });
 
   it("skips the O(N) overview redraw on a slice-mode zoom", () => {
@@ -478,7 +484,13 @@ describe("tickMinimap overview/overlay split", () => {
     expect(renderCount.n).toBe(1);
   });
 
-  it("redraws the overview when the slice z changes", () => {
+  it("skips the O(N) overview redraw on a slice-mode z-scrub but updates the plane indicator", () => {
+    // The coarse overview is uploaded per (t, c) for the whole coarse volume
+    // and its GPU render takes no Z, so a Z-plane move changes neither the
+    // member geometry nor the rendered overview — only the overlay's
+    // current-plane indicator. A continuous Z-scrub must therefore reuse the
+    // cached overview (no O(members) re-read, no redundant redraw) and refresh
+    // just the cheap overlay.
     const scene = makeScene();
     const renderCount = { n: 0 };
     const overlay = vi.fn();
@@ -486,8 +498,23 @@ describe("tickMinimap overview/overlay split", () => {
     const ctx = makeCtx(scene, "slice", renderCount);
 
     tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(1);
+    expect(overlay.mock.calls[0][0].currentZ).toBe(0);
+
+    const readSpy = vi.spyOn(scene.wasm, "member_positions");
     tickMinimap(ctx, state, 3);
-    expect(renderCount.n).toBe(2);
+
+    // Overview NOT redrawn and no members re-read; overlay refreshed with the
+    // new plane.
+    expect(renderCount.n).toBe(1);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(overlay).toHaveBeenCalledTimes(2);
+    expect(overlay.mock.calls[1][0].currentZ).toBe(3);
+    // Camera/geometry unchanged: the static overlay layer (O(N) member borders)
+    // is NOT re-stroked — the consumer reuses its cached static layer and
+    // re-strokes only the cheap Z-plane indicator.
+    expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
   });
 
   it("redraws the overview when the layout epoch changes, even on a camera-only tick", () => {

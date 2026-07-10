@@ -56,7 +56,7 @@ export {
   emitPrefetchLane,
 } from "./emit.ts";
 
-export { plan } from "./plan.ts";
+export { plan, emitPlanRequests } from "./plan.ts";
 
 export {
   DEFAULT_PLANNING_CONFIG,

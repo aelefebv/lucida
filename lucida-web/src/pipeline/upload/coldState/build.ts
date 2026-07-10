@@ -6,6 +6,7 @@ import { Axis } from "../../../axes.ts";
 import type { LevelGeometry } from "../../../manifestTypes.ts";
 import type {
   ColdStateActiveEntry,
+  ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
 } from "../../../renderer/workerProtocol.ts";
@@ -168,5 +169,156 @@ export function buildColdState(args: {
     desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,
+  };
+}
+
+/**
+ * Worker-side member id for a planner {@link ActiveSetEntry}, matching
+ * `memberIdForColdEntry` (the cold-state-entry form) exactly: group-as-proxy
+ * routes by `entityId`, everything else by `imageId`, suffixed `:ch${channel}`
+ * in multi-channel mode. Both forms agree because a delta reconstructs the
+ * worker's active set from the same planner entries this walks.
+ */
+export function* iterateActiveSetMembers(
+  activeSet: ActiveSetEntry[],
+  visibleChannels: number[],
+  multiChannel: boolean,
+): Generator<string> {
+  for (const entry of activeSet) {
+    const base = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
+    for (const channel of visibleChannels) {
+      yield multiChannel ? `${base}:ch${channel}` : base;
+    }
+  }
+}
+
+/**
+ * Dense memberId → entityIndex map computed directly from a planner active set
+ * (not a built cold-state message). Walks `activeSet × visibleChannels` in the
+ * same canonical order as `computeMemberIndexMap`, so the delta path produces
+ * the identical index map a full cold state would — the worker rebuilds its
+ * descriptor buffer from the reordered active set in this same order.
+ */
+export function computeActiveSetIndexMap(
+  activeSet: ActiveSetEntry[],
+  visibleChannels: number[],
+  multiChannel: boolean,
+): Map<string, number> {
+  const indexByMember = new Map<string, number>();
+  let next = 0;
+  for (const memberId of iterateActiveSetMembers(activeSet, visibleChannels, multiChannel)) {
+    if (!indexByMember.has(memberId)) indexByMember.set(memberId, next++);
+  }
+  return indexByMember;
+}
+
+/**
+ * Stable key over EVERY field {@link buildColdActiveEntry} reads from a planner
+ * entry to build a descriptor — so two entries with equal keys produce a
+ * byte-identical descriptor and one can be reused across a view move.
+ *
+ * Returns `null` for `group-as-proxy`: its model matrix is synthesized from the
+ * currently-visible child-tile set (see `synthesizeGroupRosterEntry`), which a
+ * view move changes, so a group-as-proxy descriptor is never safe to reuse and
+ * is always rebuilt.
+ *
+ * Fields NOT included are those that are view-independent within a view move
+ * (levels geometry, layout position, model matrix for tiles, per-channel display
+ * state, parent group id) — the caller only emits a delta when nothing but the
+ * camera moved, so those are provably unchanged and need not be compared.
+ */
+export function activeEntryReuseKey(entry: ActiveSetEntry): string | null {
+  if (entry.kind === "group-as-proxy") return null;
+  if (entry.kind === "invisible") {
+    return `i|${entry.imageId}|${entry.coarsestLod}`;
+  }
+  return [
+    "t",
+    entry.imageId,
+    entry.targetLod,
+    entry.detailOwnedLodRange[0],
+    entry.detailOwnedLodRange[1],
+    entry.detailLevel ?? "",
+    entry.coarseLevel ?? "",
+    (entry.wantedLodLevels ?? []).join(","),
+    entry.mode,
+    entry.proxyKind ?? "",
+    entry.proxyAvailable ? 1 : 0,
+    entry.groupProxyAvailable ? 1 : 0,
+  ].join("|");
+}
+
+/**
+ * Pure delta builder for a view move. Diffs the new `activeSet` against
+ * `previousActiveSet` (what the worker currently holds) on {@link activeEntryReuseKey}
+ * — an O(1)-per-entity scalar compare — and emits only the changed/added
+ * descriptors, the removed entity ids, and the full new active-set order.
+ *
+ * Correctness rests on the caller's gate: the delta is only taken when the sole
+ * change is a pure view move (only the view epoch advanced), so an entry whose
+ * reuse key is unchanged has a byte-identical descriptor and can be retained.
+ * When in doubt an entry is treated as changed (over-send is slow-but-correct).
+ */
+export function buildColdStateDelta(args: {
+  datasetId: string;
+  activeSet: ActiveSetEntry[];
+  previousActiveSet: ActiveSetEntry[];
+  entities: EntitySnapshot[];
+  selection: SelectionState;
+  visibleRegion: VisibleRegion;
+  renderRadiusView?: { detail: number; coarse: number };
+  desiredProxyKeys?: Iterable<string>;
+  epochs: SceneEpochs;
+  matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
+  dsSettings: DatasetSettings | undefined;
+}): ColdStateDeltaMessage {
+  const entityById = new Map(args.entities.map(e => [e.entityId, e]));
+  const displayStateByChannel = buildDisplayStateByChannel(
+    args.selection.visibleChannels,
+    args.dsSettings,
+  );
+
+  const oldByEntity = new Map<string, ActiveSetEntry>();
+  const oldKeyByEntity = new Map<string, string | null>();
+  for (const e of args.previousActiveSet) {
+    oldByEntity.set(e.entityId, e);
+    oldKeyByEntity.set(e.entityId, activeEntryReuseKey(e));
+  }
+
+  const upserts: ColdStateActiveEntry[] = [];
+  const activeSetOrder: string[] = [];
+  const present = new Set<string>();
+  for (const entry of args.activeSet) {
+    activeSetOrder.push(entry.entityId);
+    present.add(entry.entityId);
+    const newKey = activeEntryReuseKey(entry);
+    const reusable =
+      newKey !== null &&
+      oldByEntity.has(entry.entityId) &&
+      oldKeyByEntity.get(entry.entityId) === newKey;
+    if (!reusable) {
+      upserts.push(
+        buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
+      );
+    }
+  }
+
+  const removedEntityIds: string[] = [];
+  for (const e of args.previousActiveSet) {
+    if (!present.has(e.entityId)) removedEntityIds.push(e.entityId);
+  }
+
+  return {
+    type: "coldStateDelta",
+    epochs: args.epochs,
+    datasetId: args.datasetId,
+    currentT: args.selection.t,
+    currentZ: args.selection.z,
+    visibleRegion: args.visibleRegion,
+    renderRadiusView: args.renderRadiusView,
+    desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
+    removedEntityIds,
+    upserts,
+    activeSetOrder,
   };
 }

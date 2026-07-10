@@ -20,18 +20,22 @@ import type { ColdStateDisplayState } from "../renderer/workerProtocol.ts";
 import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import {
   plan,
+  emitPlanRequests,
   emptyPlanStats,
   planProxyResidencyForInputs,
+  type PlanningConfig,
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
 import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
 import type {
+  ActiveSetEntry,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningState,
   ChunkRequest,
+  PlanStats,
   RequestPlan,
   PlanningSnapshot,
   SelectionState,
@@ -51,6 +55,10 @@ import {
 import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
+import {
+  computeActiveSetIndexMap,
+  iterateActiveSetMembers,
+} from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
 
 /** A visible member for render layer construction. */
@@ -114,6 +122,12 @@ interface PlannedDataset {
   visibleRegion: VisibleRegion;
   selection: SelectionState;
   result: RequestPlan;
+  /**
+   * The active set the worker currently holds for this dataset — captured from
+   * `PlanningState.previousActiveSet` BEFORE `plan()`'s `nextState` overwrote it.
+   * The view-move delta diffs `result.activeSet` against this.
+   */
+  previousActiveSet: ActiveSetEntry[];
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -275,6 +289,14 @@ function readZRangeVox(
  * `visibleChannels`), and `colormapMode` / `labelOpacity` are constant on
  * the intensity path — label-overlay state never reaches here because a
  * `label_settings` change fails the non-display fingerprint first.
+ *
+ * MAINTENANCE: this equality gates BOTH cheap paths — the display-only patch
+ * AND the selection-scrub fast path (which fires only when display is proven
+ * UNCHANGED). Any NEW field added to {@link ColdStateDisplayState} that a user
+ * edit can move must be compared here (or folded into the non-display
+ * fingerprint), or an edit to it could silently slip through a scrub as a stale
+ * display. The three omitted fields above are safe only because they cannot
+ * change on this path today.
  */
 function displayStatesEqual(
   a: Record<number, ColdStateDisplayState>,
@@ -402,6 +424,30 @@ export class TickCoordinator {
   private lastVisibleDatasetIds = new Set<string>();
   /** Per-planned-dataset carry-forward for the display-only fast path. */
   private readonly lastRebuildByDataset = new Map<string, DatasetRebuildSignature>();
+  /**
+   * Per-dataset cache of layout-derived per-entity tile model matrices, reused
+   * across rebuilds while placement is unchanged. Tile matrices come from
+   * `scene.member_model_matrix` (a pure function of layout, no camera input), so
+   * a view move — which advances only the view epoch — leaves them byte-
+   * identical; only tiles new to a rebuild's roster are recomputed. Keyed by an
+   * epoch fingerprint so a content/layout/asset change (a reflow or add/remove
+   * that moves placement) discards the stale matrices. `group-as-proxy` matrices
+   * are never cached (they are synthesized from the visible child-tile set, which
+   * a view move changes).
+   */
+  private readonly matrixCacheByDataset = new Map<string, {
+    epochKey: string;
+    matrices: Map<string, { model: Float32Array; inv: Float32Array }>;
+  }>();
+  /**
+   * Datasets whose worker-side cold state is known to hold exactly this
+   * coordinator's `previousActiveSet` — the precondition for a view-move delta.
+   * Set after a full cold state (or a delta) lands; a delta keeps it set because
+   * the worker's reconstructed active set equals the new `result.activeSet`. The
+   * scrub / display fast paths never change the active set, so they leave it set.
+   * Cleared on dataset removal so a re-added dataset re-syncs with a full send.
+   */
+  private readonly coldStateSyncedDatasets = new Set<string>();
   /**
    * Debug member stats from the most recent non-cache-hit run. Replayed
    * onto `debugStats` on epoch cache hits so the panel doesn't flash
@@ -567,6 +613,13 @@ export class TickCoordinator {
       causes.includes("asset");
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
+    // A pure view move (pan / zoom / orbit): only the camera moved, so T/Z/C,
+    // the channel set, per-channel display state, and layout are all unchanged
+    // and the active set is a pure function of the new view. This is the sole
+    // gate for the view-move cold-state delta — anything bundled with the view
+    // change (a selection edit, a structural change) fails it and takes the full
+    // rebuild, so the delta's retained descriptors are always safe.
+    const viewOnly = !structural && causes.length === 1 && causes[0] === "view";
 
     // Display-only fast path — a per-channel intensity edit (contrast /
     // gamma / colormap / opacity) with nothing else changed. When it can
@@ -580,6 +633,28 @@ export class TickCoordinator {
     if (
       selectionOnly &&
       this.tryDisplayOnlyUpdate({ ctx, currentEpochs, settings, multiChannel, tickStart })
+    ) {
+      this.serveCachedDebug(ctx, tickStart);
+      return this.cachedResult;
+    }
+
+    // Selection-scrub fast path — a pure T-scrub or Z-plane move in the 2D
+    // slice view, with the visible set, per-entity geometry/LOD, matrices, and
+    // display state all unchanged. Because only the selection epoch moved (the
+    // caller's `selectionOnly` gate), the view/content/layout inputs the active
+    // set derives from are byte-identical, so the roster and residency shape are
+    // unchanged; only the top-level currentT/currentZ (and, on a Z move, the
+    // visible region) differ. Re-plan + submit to fetch the new T/Z's chunks,
+    // but push a compact selection patch to the worker instead of rebuilding and
+    // re-transmitting the O(active-set) descriptor array — and reuse the cached
+    // roster. Any change beyond a pure scrub fails the proof inside and falls
+    // through to the full rebuild.
+    if (
+      selectionOnly &&
+      this.tryScrubOnlyUpdate({
+        ctx, currentEpochs, settings, multiChannel, tickStart,
+        minimapPendingFetch, planningConfig,
+      })
     ) {
       this.serveCachedDebug(ctx, tickStart);
       return this.cachedResult;
@@ -646,6 +721,9 @@ export class TickCoordinator {
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? { previousActiveSet: [] };
+      // Capture what the worker currently holds BEFORE `nextState` overwrites it
+      // — the view-move delta diffs the fresh active set against this.
+      const previousActiveSet = planningStateForDataset.previousActiveSet;
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
@@ -672,6 +750,7 @@ export class TickCoordinator {
         visibleRegion,
         selection,
         result,
+        previousActiveSet,
       });
     }
 
@@ -713,46 +792,104 @@ export class TickCoordinator {
       };
       this._lastPlanByDataset.set(dsId, budgetedResult);
 
-      // 3d. Build member roster + per-entity matrix map in one walk.
+      // 3d. Build member roster + per-entity matrix map in one walk. Reuse
+      // layout-derived tile matrices across a view move via a per-dataset cache
+      // invalidated whenever placement changes (content/layout/asset epoch).
+      const matrixEpochKey =
+        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
+      let matrixCacheEntry = this.matrixCacheByDataset.get(dsId);
+      if (!matrixCacheEntry || matrixCacheEntry.epochKey !== matrixEpochKey) {
+        matrixCacheEntry = { epochKey: matrixEpochKey, matrices: new Map() };
+        this.matrixCacheByDataset.set(dsId, matrixCacheEntry);
+      }
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
         activeSet: result.activeSet,
         entities,
         ctx,
         datasetId: dsId,
+        tileMatrixCache: matrixCacheEntry.matrices,
       });
       memberRoster.set(dsId, rosterEntries);
 
-      // Drives atlas creation/remap + wanted-set + descriptor buffer
-      // build; dsSettings bakes per-channel display state into descriptors.
-      const coldMsg = this.uploader.sendColdState({
-        ctx,
-        datasetId: dsId,
-        activeSet: result.activeSet,
-        entities,
-        selection,
-        multiChannel,
-        visibleRegion,
-        renderRadiusView: {
-          detail: planningConfig.detailRenderRadiusView,
-          coarse: planningConfig.coarseRenderRadiusView,
-        },
-        epochs: result.epochs,
-        desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
-        matricesByEntity,
-        dsSettings,
-      });
-      // Same memberId → entityIndex map the worker builds from cold
-      // state — both sides converge because they walk the same iteration order.
-      entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
+      // View-move fast path: the active set genuinely changed (tiles scroll
+      // in/out, LODs change) but only the camera moved, and the worker holds
+      // exactly this coordinator's `previousActiveSet`. Diff and ship only the
+      // delta instead of rebuilding + re-cloning the whole O(active-set)
+      // descriptor array. Any other case (first sync, a bundled selection/
+      // structural change) falls through to the full send below.
+      const canDelta =
+        viewOnly &&
+        this.coldStateSyncedDatasets.has(dsId) &&
+        planned.previousActiveSet.length > 0;
 
-      // Emit before render messages so `rayHitPerEntity` is current
-      // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
-      this.uploader.sendViewHotStateIfAdvanced({
-        ctx,
-        datasetId: dsId,
-        coldMsg,
-        epochs: result.epochs,
-      });
+      if (canDelta) {
+        this.uploader.sendColdStateDelta({
+          ctx,
+          datasetId: dsId,
+          activeSet: result.activeSet,
+          previousActiveSet: planned.previousActiveSet,
+          entities,
+          selection,
+          visibleRegion,
+          renderRadiusView: {
+            detail: planningConfig.detailRenderRadiusView,
+            coarse: planningConfig.coarseRenderRadiusView,
+          },
+          epochs: result.epochs,
+          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
+          matricesByEntity,
+          dsSettings,
+        });
+        // The worker rebuilds its descriptor buffer from the reordered active
+        // set in the SAME canonical order this walks, so the indices agree.
+        entityIndexByDataset.set(
+          dsId,
+          computeActiveSetIndexMap(result.activeSet, selection.visibleChannels, multiChannel),
+        );
+        this.uploader.sendViewHotStateFromMembersIfAdvanced({
+          ctx,
+          datasetId: dsId,
+          memberIds: iterateActiveSetMembers(
+            result.activeSet, selection.visibleChannels, multiChannel,
+          ),
+          epochs: result.epochs,
+        });
+      } else {
+        // Full send. Drives atlas creation/remap + wanted-set + descriptor
+        // buffer build; dsSettings bakes per-channel display state into
+        // descriptors. Marks the dataset synced so a later pure view move can
+        // take the delta path against this active set.
+        const coldMsg = this.uploader.sendColdState({
+          ctx,
+          datasetId: dsId,
+          activeSet: result.activeSet,
+          entities,
+          selection,
+          multiChannel,
+          visibleRegion,
+          renderRadiusView: {
+            detail: planningConfig.detailRenderRadiusView,
+            coarse: planningConfig.coarseRenderRadiusView,
+          },
+          epochs: result.epochs,
+          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
+          matricesByEntity,
+          dsSettings,
+        });
+        // Same memberId → entityIndex map the worker builds from cold
+        // state — both sides converge because they walk the same iteration order.
+        entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
+
+        // Emit before render messages so `rayHitPerEntity` is current
+        // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
+        this.uploader.sendViewHotStateIfAdvanced({
+          ctx,
+          datasetId: dsId,
+          coldMsg,
+          epochs: result.epochs,
+        });
+        this.coldStateSyncedDatasets.add(dsId);
+      }
 
       // Categorical label overlays are invisible to the WASM planner
       // (labels live outside `manifest.images`/`entities`), so their chunk
@@ -1249,6 +1386,299 @@ export class TickCoordinator {
   }
 
   /**
+   * The selection-scrub fast path. Fires only when it can PROVE the sole
+   * change since the last rebuild is a pure T-scrub and/or Z-plane move in the
+   * 2D slice view — the visible set, per-entity geometry/LOD, matrices, and
+   * per-channel display state are all unchanged. `currentT`/`currentZ` are
+   * top-level cold-state scalars (never part of a per-entity descriptor), so on
+   * a pure scrub the whole descriptor array is byte-identical; only the top
+   * scalars (and, on a Z move, the visible region) differ.
+   *
+   * Unlike {@link tryDisplayOnlyUpdate}, a scrub needs different chunks, so this
+   * still runs the planner and `cpuCache.submit` to fetch the new T/Z's keys —
+   * it only skips the O(active-set) descriptor rebuild + roster rebuild + full
+   * cold-state resend, pushing a compact selection patch to the worker (which
+   * re-ingests its retained cold state at the new selection) and reusing the
+   * cached roster.
+   *
+   * Correctness rests on the caller's `selectionOnly` gate: only the selection
+   * epoch moved, so the view/content/layout/asset inputs the active set is a
+   * pure function of are byte-identical — the roster and residency shape are
+   * provably unchanged, which is why the cached roster can be reused.
+   *
+   * Conservative by construction: it is scoped to slice mode, requires an
+   * actual T or Z move, and any other difference (a display edit, a bundled
+   * label/blend/visibility change, a channel change, a z-range WIDTH change such
+   * as a slab extension, a new/dropped dataset, a layer reorder, or a field
+   * added later) fails the proof and the caller falls through to a full rebuild.
+   *
+   * Returns `true` when it fully handled the tick (caller serves the cached
+   * result); `false` when the change is not a provable pure scrub or nothing
+   * scrubbed. On `false` no worker message is sent and no fetch is submitted.
+   */
+  private tryScrubOnlyUpdate(args: {
+    ctx: TickContext;
+    currentEpochs: SceneEpochs;
+    settings: SceneSettings;
+    multiChannel: boolean;
+    tickStart: number;
+    minimapPendingFetch: Map<string, MinimapChunkCoord[]>;
+    planningConfig: PlanningConfig;
+  }): boolean {
+    const { ctx, currentEpochs, settings, multiChannel, minimapPendingFetch, planningConfig } = args;
+    if (
+      this.cachedResult === null ||
+      this.lastRebuildScalars === null ||
+      this.lastRebuildByDataset.size === 0
+    ) {
+      return false;
+    }
+
+    // Scoped to the 2D slice view: a Z-plane move is a slice-view concept, and
+    // the volume path's proxy residency keys on T in ways this compact patch is
+    // deliberately not trying to cover. Volume T changes fall through to the
+    // full rebuild.
+    const scalars = this.lastRebuildScalars;
+    const mode = ctx.mode as "slice" | "volume";
+    if (mode !== "slice" || scalars.mode !== "slice") return false;
+
+    // C, multi-channel, layer order, and the visible-dataset set must be
+    // unchanged — each changes the member shape or roster and needs a real
+    // rebuild. (T is the scrub axis; Z is proven per-dataset via the z-range.)
+    if (ctx.scene.c() !== scalars.c) return false;
+    if (multiChannel !== scalars.multiChannel) return false;
+    if (JSON.stringify(settings.layerOrder) !== this.lastLayerOrderKey) return false;
+    const sceneC = scalars.c;
+
+    let visibleCount = 0;
+    for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
+      if (!dsSettings.visible) continue;
+      visibleCount++;
+      if (!this.lastVisibleDatasetIds.has(dsId)) return false;
+    }
+    if (visibleCount !== this.lastVisibleDatasetIds.size) return false;
+
+    const newT = ctx.scene.t();
+    const newZ = ctx.scene.z();
+    let anyScrub = newT !== scalars.t;
+
+    // Per-dataset precheck (no side effects). Prove for every planned dataset:
+    // still visible; non-display settings fingerprint unchanged (label state,
+    // blend mode, render mode, detail override, channel visibility, …);
+    // display state unchanged (a bundled display edit falls through so both
+    // edits settle via the full rebuild); visible-channel set unchanged; and
+    // the z-range WIDTH unchanged (a same-width shift is a plane move; a widen
+    // is a slab extension that changes which chunks/entities are wanted and
+    // must rebuild). A within-width z shift is the Z-scrub signal. The cached
+    // active set / entities / visible region needed to regenerate requests must
+    // all still be present, or the fast path bails to the full rebuild.
+    interface ScrubDataset {
+      dsId: string;
+      dsSettings: DatasetSettings | undefined;
+      visibleChannels: number[];
+      activeSet: ActiveSetEntry[];
+      entities: EntitySnapshot[];
+      cachedRegion: VisibleRegion;
+      newZRange: [number, number];
+    }
+    const perDataset: ScrubDataset[] = [];
+    for (const [dsId, sig] of this.lastRebuildByDataset) {
+      const dsSettings = settings.allSettings[dsId];
+      if (dsSettings && !dsSettings.visible) return false;
+      if (nonDisplayKeyForDataset(dsSettings) !== sig.nonDisplayKey) return false;
+      const visibleChannels = computeVisibleChannels(multiChannel, dsSettings, sceneC);
+      if (!numberArraysEqual(visibleChannels, sig.visibleChannels)) return false;
+      const displayState = buildDisplayStateByChannel(visibleChannels, dsSettings);
+      if (!displayStatesEqual(displayState, sig.displayState)) return false;
+      const zRange = readZRangeVox(ctx.scene, dsId);
+      const oldWidth = sig.zRangeVox[1] - sig.zRangeVox[0];
+      const newWidth = zRange[1] - zRange[0];
+      if (newWidth !== oldWidth) return false;
+      if (zRange[0] !== sig.zRangeVox[0] || zRange[1] !== sig.zRangeVox[1]) {
+        anyScrub = true;
+      }
+
+      const activeSet = this.planningState.get(dsId)?.previousActiveSet;
+      const entities = this._lastEntities.get(dsId);
+      const cachedRegion = this._lastVisibleRegion.get(dsId);
+      if (!activeSet || !entities || !cachedRegion) return false;
+
+      perDataset.push({
+        dsId, dsSettings, visibleChannels, activeSet, entities, cachedRegion,
+        newZRange: zRange,
+      });
+    }
+    // Nothing actually scrubbed — let the caller fall through (a genuine cache
+    // hit / display path already handled the no-op display case).
+    if (!anyScrub) return false;
+
+    // Regenerate ONLY the changed-T/Z chunk requests. The pure-scrub premise
+    // (only the selection epoch moved) makes the active set, entities, and
+    // camera-derived visible region byte-identical to the last rebuild, so the
+    // requests are re-emitted from the cached active set + a snapshot whose only
+    // difference is the new selection (and, on a Z move, the new z-range read
+    // via one cheap `visible_region` call). This skips the O(N)
+    // `view_query`/`member_positions` serde AND `assignModes` — the dominant
+    // remaining boundary cost — while producing exactly the requests a full
+    // `plan()` would for the new T/Z. `assetCatalog.snapshot()` is dataset-
+    // agnostic, so one shared snapshot serves every dataset's proxy budgeting.
+    const scrubRequestEpoch = currentEpochs.request + 1;
+    const scrubEpochs: SceneEpochs = { ...currentEpochs, request: scrubRequestEpoch };
+    const assetCatalog = ctx.assetCatalog.snapshot();
+    interface ScrubPlanned {
+      dsId: string;
+      dsSettings: DatasetSettings | undefined;
+      snapshot: PlanningSnapshot;
+      visibleRegion: VisibleRegion;
+      selection: SelectionState;
+      activeSet: ActiveSetEntry[];
+      requests: ChunkRequest[];
+      proxyRequests: ProxyRequest[];
+      stats: PlanStats;
+    }
+    const planned: ScrubPlanned[] = perDataset.map((pd) => {
+      const visibleRegion: VisibleRegion = {
+        ...pd.cachedRegion,
+        zRangeVox: pd.newZRange,
+      };
+      const selection: SelectionState = {
+        t: newT,
+        c: sceneC,
+        z: newZ,
+        visibleChannels: pd.visibleChannels,
+        renderMode: "slice",
+        interactionState: "idle",
+      };
+      const snapshot: PlanningSnapshot = {
+        datasetId: pd.dsId,
+        epochs: scrubEpochs,
+        entities: pd.entities,
+        visibleRegion,
+        selection,
+        assetCatalog,
+        minimapPending: minimapPendingFetch,
+      };
+      const stats = emptyPlanStats();
+      const { requests, proxyRequests } = emitPlanRequests(
+        pd.activeSet, snapshot, stats, planningConfig,
+      );
+      return {
+        dsId: pd.dsId,
+        dsSettings: pd.dsSettings,
+        snapshot,
+        visibleRegion,
+        selection,
+        activeSet: pd.activeSet,
+        requests,
+        proxyRequests,
+        stats,
+      };
+    });
+
+    // Budget proxy residency once (fresh keys for the new selection).
+    const proxyResidency = planProxyResidencyForInputs({
+      inputs: planned.map((p) => ({
+        snapshot: p.snapshot,
+        activeSet: p.activeSet,
+        proxyRequests: p.proxyRequests,
+      })),
+      config: planningConfig,
+    });
+    const proxyRequestsByDataset = new Map<string, ProxyRequest[]>();
+    for (const req of proxyResidency.admittedProxyRequests) {
+      const list = proxyRequestsByDataset.get(req.datasetId) ?? [];
+      list.push(req);
+      proxyRequestsByDataset.set(req.datasetId, list);
+    }
+    const desiredProxyKeysByDataset = new Map<string, Set<string>>();
+    for (const key of proxyResidency.desiredProxyKeys) {
+      const datasetId = key.split("|", 1)[0];
+      const set = desiredProxyKeysByDataset.get(datasetId) ?? new Set<string>();
+      set.add(key);
+      desiredProxyKeysByDataset.set(datasetId, set);
+    }
+
+    // Commit. Advance the fetch lifecycle exactly once (the delivery ledger is
+    // cleared because the worker repacks its atlas indirection for the new T/Z,
+    // so the new plane/timepoint's chunks must be re-delivered), then per
+    // dataset: submit the new fetch, push the compact selection patch, and
+    // refresh carry-forward state so a later full rebuild is coherent. The
+    // active set is unchanged, so `planningState` is deliberately left as-is.
+    ctx.cpuCache.onPlanRebuildStart();
+    for (const p of planned) {
+      this.requestEpoch = scrubRequestEpoch;
+      this._lastRequests = p.requests;
+      this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
+
+      emitViewerInterestHint(
+        ctx, p.dsId, p.selection, p.visibleRegion, p.requests, this.requestEpoch,
+      );
+
+      const budgetedProxyRequests = proxyRequestsByDataset.get(p.dsId) ?? [];
+      this._lastPlanByDataset.set(p.dsId, {
+        requests: p.requests,
+        activeSet: p.activeSet,
+        epochs: scrubEpochs,
+        proxyRequests: budgetedProxyRequests,
+        stats: p.stats,
+        nextState: { previousActiveSet: p.activeSet },
+      });
+
+      // Categorical label overlays follow the plane/timepoint too — merge their
+      // synthesized requests exactly as the full rebuild does.
+      const labelRequests = computeLabelChunkRequests({
+        datasetId: p.dsId,
+        manifest: ctx.datasets.get(p.dsId)!.manifest,
+        t: p.selection.t,
+        z: p.selection.z,
+        labelSettings: p.dsSettings?.label_settings,
+        mode,
+      });
+      const requestsWithLabels =
+        labelRequests.length > 0
+          ? [...p.requests, ...labelRequests]
+          : p.requests;
+
+      ctx.cpuCache.submit({
+        requests: requestsWithLabels,
+        activeSet: p.activeSet,
+        proxyRequests: budgetedProxyRequests,
+        epochs: scrubEpochs,
+        stats: p.stats,
+        nextState: { previousActiveSet: p.activeSet },
+      });
+
+      this.uploader.sendColdStateSelection({
+        ctx,
+        datasetId: p.dsId,
+        currentT: p.selection.t,
+        currentZ: p.selection.z,
+        visibleRegion: p.visibleRegion,
+        desiredProxyKeys: desiredProxyKeysByDataset.get(p.dsId) ?? new Set(),
+        epochs: scrubEpochs,
+      });
+
+      // Refresh the display-only fast-path signature's z-range so a subsequent
+      // display edit compares against the scrubbed value; the display state,
+      // channels, and non-display fingerprint were proven unchanged above.
+      const scrubSig = this.lastRebuildByDataset.get(p.dsId);
+      if (scrubSig) scrubSig.zRangeVox = p.visibleRegion.zRangeVox;
+    }
+
+    // Reuse the cached roster + entity index (identical on a pure scrub);
+    // refresh only the epochs it carries. Advance the scrubbed T scalar and the
+    // epoch/coalescing anchors so a later display edit / pan / zoom compares
+    // against the scrubbed state.
+    const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
+    this.lastEpochs = outputEpochs;
+    this.cachedResult = { ...this.cachedResult, settings, epochs: outputEpochs };
+    this.lastRebuildScalars = { ...scalars, t: newT };
+    this.lastRebuildAt = performance.now();
+    this.pendingDeferredRebuild = false;
+    return true;
+  }
+
+  /**
    * Clear planner-side per-dataset state on dataset removal. Upload-side
    * cleanup is the Uploader's responsibility.
    *
@@ -1269,6 +1699,11 @@ export class TickCoordinator {
     // next full rebuild.)
     this.lastRebuildByDataset.delete(workerMemberId);
     this.lastVisibleDatasetIds.delete(workerMemberId);
+    // Drop the cached tile matrices and the delta-sync flag so a re-added
+    // dataset re-derives placement and re-syncs with a full cold state before
+    // any view-move delta can reference it.
+    this.matrixCacheByDataset.delete(workerMemberId);
+    this.coldStateSyncedDatasets.delete(workerMemberId);
   }
 
   /** Per-dataset snapshot of the most recent `plan()` output. Live Map — do not mutate. */

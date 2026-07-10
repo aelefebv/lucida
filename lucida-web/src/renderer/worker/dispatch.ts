@@ -19,7 +19,12 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { MainToWorkerMessage } from "../workerProtocol.ts";
 import { destroyProxyAtlas } from "../proxyAtlas.ts";
 import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
-import { applyColdState, applyColdStateDisplay } from "../coldState/index.ts";
+import {
+  applyColdState,
+  applyColdStateDisplay,
+  applyColdStateSelection,
+  applyColdStateDelta,
+} from "../coldState/index.ts";
 import { handleProxyUpload } from "../proxy/index.ts";
 import {
   handleLabelSliceChunkData,
@@ -181,6 +186,25 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // resident descriptor buffer without re-ingesting cold state. No
       // residency changed, so no wanted-set is posted.
       applyColdStateDisplay(ctx, msg);
+      return;
+
+    case "coldStateSelection":
+      // Selection scrub (T/Z move): re-point the dataset's retained cold state
+      // at the new selection and re-ingest it, repacking the atlas indirection
+      // for the new plane/timepoint. The freshly-wanted chunks changed, so the
+      // wanted-set is posted (as with a full cold state).
+      applyColdStateSelection(ctx, msg);
+      ctx.postWantedSet();
+      return;
+
+    case "coldStateDelta":
+      // View move (pan/zoom/orbit): patch the dataset's retained cold state with
+      // the changed/added descriptors + removed ids, reorder to the new active
+      // set, and re-ingest it. The wanted-set is posted unconditionally for
+      // consistency with the full / selection paths — even when the delta was a
+      // no-op (dataset not yet ingested), matching how those paths always post.
+      applyColdStateDelta(ctx, msg);
+      ctx.postWantedSet();
       return;
 
     case "removeLayerResources": {

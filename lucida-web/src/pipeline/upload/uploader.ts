@@ -18,6 +18,7 @@ import type { TickContext } from "../../renderLoopTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import type {
   ChunkFeedbackReason,
+  ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
   MissingChunk,
@@ -28,8 +29,11 @@ import {
   emptyUploadTickStats,
   type UploadTickStats,
 } from "../../debug/debugStats.ts";
-import { buildColdState } from "./coldState/build.ts";
-import { buildViewHotState } from "./coldState/hotState.ts";
+import { buildColdState, buildColdStateDelta } from "./coldState/build.ts";
+import {
+  buildViewHotState,
+  buildViewHotStateFromMembers,
+} from "./coldState/hotState.ts";
 import { WorkerFeedback } from "./delivery/feedback.ts";
 import {
   buildManifestByImage,
@@ -123,6 +127,77 @@ export class Uploader {
   }
 
   /**
+   * Push a selection-scrub update to the worker for a dataset whose visible
+   * set, geometry, LOD, matrices, and display state are unchanged — only the
+   * current T and/or Z moved. The worker re-points the dataset's most recent
+   * cold state at the new selection and re-ingests it, repacking the atlas
+   * indirection for the new plane/timepoint without re-transmitting the
+   * O(active-set) descriptor array.
+   *
+   * Snapshots `epochs` (like {@link sendColdState}) so a later
+   * {@link deliverToWorker} stamps the freshly-fetched T/Z chunks with the
+   * selection's epochs — the worker's retained cold state now expects them.
+   */
+  sendColdStateSelection(args: {
+    ctx: TickContext;
+    datasetId: string;
+    currentT: number;
+    currentZ: number;
+    visibleRegion: VisibleRegion;
+    desiredProxyKeys: Iterable<string>;
+    epochs: SceneEpochs;
+  }): void {
+    args.ctx.client.coldStateSelection({
+      type: "coldStateSelection",
+      datasetId: args.datasetId,
+      currentT: args.currentT,
+      currentZ: args.currentZ,
+      visibleRegion: args.visibleRegion,
+      desiredProxyKeys: Array.from(args.desiredProxyKeys).sort(),
+      epochs: args.epochs,
+    });
+    this.lastEpochs = args.epochs;
+  }
+
+  /**
+   * Build and send a view-move cold-state delta. Snapshots `epochs` (like
+   * {@link sendColdState}) so a later {@link deliverToWorker} stamps the
+   * freshly-fetched chunks with the view's epochs — the worker's patched cold
+   * state now expects them.
+   */
+  sendColdStateDelta(args: {
+    ctx: TickContext;
+    datasetId: string;
+    activeSet: ActiveSetEntry[];
+    previousActiveSet: ActiveSetEntry[];
+    entities: EntitySnapshot[];
+    selection: SelectionState;
+    visibleRegion: VisibleRegion;
+    renderRadiusView?: { detail: number; coarse: number };
+    desiredProxyKeys?: Iterable<string>;
+    epochs: SceneEpochs;
+    matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
+    dsSettings: DatasetSettings | undefined;
+  }): ColdStateDeltaMessage {
+    const msg = buildColdStateDelta({
+      datasetId: args.datasetId,
+      activeSet: args.activeSet,
+      previousActiveSet: args.previousActiveSet,
+      entities: args.entities,
+      selection: args.selection,
+      visibleRegion: args.visibleRegion,
+      renderRadiusView: args.renderRadiusView,
+      desiredProxyKeys: args.desiredProxyKeys,
+      epochs: args.epochs,
+      matricesByEntity: args.matricesByEntity,
+      dsSettings: args.dsSettings,
+    });
+    args.ctx.client.coldStateDelta(msg);
+    this.lastEpochs = args.epochs;
+    return msg;
+  }
+
+  /**
    * Build and send a viewEpoch hot-state message. Must be posted before
    * subsequent render messages so the worker's `rayHitPerEntity` is
    * current when chunk-data eviction fires. Returns `false` (and emits
@@ -134,19 +209,51 @@ export class Uploader {
     coldMsg: ColdStateMessage;
     epochs: SceneEpochs;
   }): boolean {
-    const lastView = this.lastViewEpochByDataset.get(args.datasetId);
-    if (lastView === args.epochs.view) return false;
+    return this.emitViewHotState(args.ctx, args.datasetId, args.epochs, (rayHit) =>
+      buildViewHotState({
+        coldMsg: args.coldMsg,
+        rayHit,
+        epochs: args.epochs,
+        datasetId: args.datasetId,
+      }),
+    );
+  }
+
+  /**
+   * Like {@link sendViewHotStateIfAdvanced} but sourced from a member-id
+   * iterable (the view-move delta path, which has no built cold-state message).
+   * Same viewEpoch guard, same per-member ray-hit payload.
+   */
+  sendViewHotStateFromMembersIfAdvanced(args: {
+    ctx: TickContext;
+    datasetId: string;
+    memberIds: Iterable<string>;
+    epochs: SceneEpochs;
+  }): boolean {
+    return this.emitViewHotState(args.ctx, args.datasetId, args.epochs, (rayHit) =>
+      buildViewHotStateFromMembers({
+        memberIds: args.memberIds,
+        rayHit,
+        epochs: args.epochs,
+        datasetId: args.datasetId,
+      }),
+    );
+  }
+
+  /** Shared viewEpoch guard + ray-pick read for both hot-state senders. */
+  private emitViewHotState(
+    ctx: TickContext,
+    datasetId: string,
+    epochs: SceneEpochs,
+    build: (rayHit: [number, number, number]) => ReturnType<typeof buildViewHotState>,
+  ): boolean {
+    const lastView = this.lastViewEpochByDataset.get(datasetId);
+    if (lastView === epochs.view) return false;
     const hit = Array.from(
-      args.ctx.scene.ray_hit_local_image(args.datasetId),
+      ctx.scene.ray_hit_local_image(datasetId),
     ) as [number, number, number];
-    const msg = buildViewHotState({
-      coldMsg: args.coldMsg,
-      rayHit: hit,
-      epochs: args.epochs,
-      datasetId: args.datasetId,
-    });
-    args.ctx.client.viewHotState(msg);
-    this.lastViewEpochByDataset.set(args.datasetId, args.epochs.view);
+    ctx.client.viewHotState(build(hit));
+    this.lastViewEpochByDataset.set(datasetId, epochs.view);
     return true;
   }
 
