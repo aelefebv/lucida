@@ -595,7 +595,7 @@ export class RenderLoop {
       this.publishRenderedCaptureReady();
     }
 
-    if (tickMinimapOverview(ctx, this.minimapState)) this.setDirty("residency", "minimap_overview_continuation");
+    if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");
     if (shouldRender) tickMinimap(ctx, this.minimapState, this.sliceZ);
 
     // If work remains (budget exhausted or chunks pending), schedule another frame

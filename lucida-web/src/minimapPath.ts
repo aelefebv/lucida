@@ -4,7 +4,7 @@ import { Axis } from "./axes.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { MINIMAP_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 
 export interface MinimapState {
@@ -68,6 +68,19 @@ export interface MinimapState {
   overviewCache: MinimapOverviewCache | null;
   /** Set by tickMinimapOverview when new chunks are uploaded to GPU. */
   uploadGeneration: number;
+  /**
+   * Monotonic timestamp (`performance.now`) of the last overview seed-scan. The
+   * scan is throttled to {@link MINIMAP_OVERVIEW_SCAN_INTERVAL_MS}; frames inside
+   * the gap skip the O(members × chunks) poll entirely.
+   */
+  lastOverviewScanMs: number;
+  /**
+   * Whether the last scan exhausted its upload budget (more cached chunks still
+   * to upload). One of the two conditions — with a non-empty `pendingFetch` — under
+   * which a throttle-skipped frame keeps the loop scheduling, so deferred seed
+   * work is never stranded by the purely dirty-driven render loop.
+   */
+  overviewBudgetPending: boolean;
 }
 
 /**
@@ -133,6 +146,8 @@ export function createMinimapState(): MinimapState {
     overlayCamKey: null,
     overviewCache: null,
     uploadGeneration: 0,
+    lastOverviewScanMs: Number.NEGATIVE_INFINITY,
+    overviewBudgetPending: false,
   };
 }
 
@@ -317,11 +332,26 @@ export function markMinimapOverviewSeeded(
  * Upload explicit coarse-level overview chunks for the minimap.
  * Returns true if there are still missing chunks (caller should schedule another frame).
  */
-export function tickMinimapOverview(ctx: TickContext, state: MinimapState): boolean {
+export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: number): boolean {
   // Seed the coarse overview textures whenever the minimap OR the Explore-panel
   // thumbnails need them. The minimap's own render (`tickMinimap`) stays gated on
   // `enabled` alone — thumbnails render via the worker, not the loop.
   if (!state.enabled && !state.overviewActive) return false;
+
+  // Throttle the seed-scan (see MINIMAP_OVERVIEW_SCAN_INTERVAL_MS). The loop
+  // below polls the CPU cache across every not-yet-seeded member's coarse-chunk
+  // grid — O(members × chunks) per frame, the dominant per-move CPU cost on
+  // large collections. On a throttle-skipped frame, keep the loop scheduling
+  // (return true) while ANY seed work remains — budget still pending OR chunks
+  // still awaiting fetch — so the next past-interval tick runs the scan and
+  // uploads whatever has since arrived. The render loop is purely dirty-driven,
+  // so without this a tail chunk that lands inside the interval would strand
+  // un-uploaded (loop quiesces before the next scan) until an unrelated
+  // interaction. Only the (idempotent, cosmetic-latency) seed work is deferred.
+  if (now - state.lastOverviewScanMs < MINIMAP_OVERVIEW_SCAN_INTERVAL_MS) {
+    return state.overviewBudgetPending || state.pendingFetch.size > 0;
+  }
+  state.lastOverviewScanMs = now;
 
   const { scene, client, datasets } = ctx;
   const t = scene.t();
@@ -419,7 +449,8 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
     if (budgetRemaining <= 0) break;
   }
 
-  return budgetRemaining <= 0;
+  state.overviewBudgetPending = budgetRemaining <= 0;
+  return state.overviewBudgetPending;
 }
 
 /** Parsed per-dataset settings, keyed by dataset id (from `all_dataset_settings`). */
