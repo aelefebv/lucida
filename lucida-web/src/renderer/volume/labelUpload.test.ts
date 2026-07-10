@@ -9,7 +9,7 @@ import type { Chunk } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
 import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
 import { handleLabelVolumeChunkData } from "./upload.ts";
-import { computeLabelVolumeSizing } from "./atlas.ts";
+import { computeLabelVolumeSizing, labelPaddedVolumeBytes } from "./atlas.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "./index.ts";
 
 const SENTINEL = 0xffffffff;
@@ -258,9 +258,10 @@ describe("handleLabelVolumeChunkData", () => {
   it("skips the label (no throw, no pool) when the atlas can't be allocated", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
-    // Simulate an allocation failure (out-of-budget device).
+    // A single brick larger than the device limit makes createTexture throw
+    // synchronously — the label is skipped rather than throwing through upload.
     (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
-      throw new Error("out of memory");
+      throw new Error("texture dimension overflow");
     });
     expect(() => handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2))).not.toThrow();
     expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
@@ -350,5 +351,59 @@ describe("computeLabelVolumeSizing", () => {
     expect(s.capacity).toBe(1);
     expect(s.totalSlots).toBeGreaterThanOrEqual(1);
     expect(s.textureSize).toEqual([64, 48, 10]);
+  });
+});
+
+describe("labelPaddedVolumeBytes", () => {
+  // Canonical TCZYX shape/chunk arrays (only Z/Y/X are read).
+  const shape = (z: number, y: number, x: number): number[] => [1, 1, z, y, x];
+  const chunk = (z: number, y: number, x: number): number[] => [1, 1, z, y, x];
+
+  it("equals the true voxel bytes when chunks divide the extent evenly", () => {
+    // 128x128x64 in 64³ chunks divides evenly → no padding → padded == true.
+    const bytes = labelPaddedVolumeBytes(shape(64, 128, 128), chunk(64, 64, 64));
+    expect(bytes).toBe(64 * 128 * 128 * 4);
+  });
+
+  it("rounds every axis up to a whole brick (padding boundary bricks)", () => {
+    // 130x130x66 in 64³ chunks → grid 2x3x3, padded extent 128x192x192.
+    const bytes = labelPaddedVolumeBytes(shape(66, 130, 130), chunk(64, 64, 64));
+    expect(bytes).toBe(128 * 192 * 192 * 4);
+    // Padded strictly exceeds the true footprint here.
+    expect(bytes).toBeGreaterThan(66 * 130 * 130 * 4);
+  });
+
+  it("clamps a chunk larger than the extent (no oversized brick padding)", () => {
+    // A coarse declared chunk collapses to a single in-bounds brick, so the
+    // padded footprint is exactly the true extent (never the oversized chunk).
+    const bytes = labelPaddedVolumeBytes(shape(10, 48, 64), chunk(128, 128, 128));
+    expect(bytes).toBe(10 * 48 * 64 * 4);
+  });
+
+  it("equals the ACTUAL atlas texture allocation (textureSize product), the same packing the atlas uses", () => {
+    // The byte figure equals computeLabelVolumeSizing's textureSize voxel product
+    // — the footprint the atlas texture actually reserves — so eligibility can't
+    // drift from what gets allocated.
+    const z = 120, y = 1024, x = 1088, c = 128;
+    const bytes = labelPaddedVolumeBytes(shape(z, y, x), chunk(c, c, c));
+    const s = computeLabelVolumeSizing(x, y, z, c, c, c, 2048);
+    const [tx, ty, tz] = s.textureSize;
+    expect(bytes).toBe(tx * ty * tz * 4);
+  });
+
+  it("counts the rectangular slot-grid OVERSHOOT (totalSlots), not just gridCellCount", () => {
+    // 13 z-bricks of 512³: 13 is prime and every atlas axis holds at most
+    // floor(2048/512)=4 slots, so the grid can't pack as a 13-slot line — it
+    // rounds up to 16 slots, reserving 3 MORE than the 13 grid cells. The byte
+    // figure must reflect that actual textureSize allocation; a gridCellCount*brick
+    // count would UNDER-count and over-admit a mask the atlas can't hold.
+    const s = computeLabelVolumeSizing(512, 512, 6656, 512, 512, 512, 2048);
+    expect(s.gridCellCount).toBe(13);
+    expect(s.totalSlots).toBeGreaterThan(s.gridCellCount); // rectangular overshoot
+    const bytes = labelPaddedVolumeBytes(shape(6656, 512, 512), chunk(512, 512, 512));
+    const [tx, ty, tz] = s.textureSize;
+    expect(bytes).toBe(tx * ty * tz * 4);
+    // Strictly more than the naive grid-cell footprint it replaces.
+    expect(bytes).toBeGreaterThan(s.gridCellCount * s.chunkX * s.chunkY * s.chunkZ * 4);
   });
 });

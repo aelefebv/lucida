@@ -8,11 +8,25 @@
  * `volume/eviction.ts` (which owns the per-entity ray-pick state).
  */
 
+import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
+
+/** Bytes one label voxel occupies in the `r32uint` atlas. */
+const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
+
+/**
+ * The WebGPU guaranteed floor for `maxTextureDimension3D`. Byte accounting
+ * ({@link labelPaddedVolumeBytes}) packs at this floor rather than the live
+ * device limit: a real device with a higher limit packs the same bricks at
+ * least as tightly (relaxing the per-axis slot bound never increases the slot
+ * count), so the floor yields an UPPER BOUND on the actual allocation — the
+ * accounting can only over-estimate, never under-count what the atlas reserves.
+ */
+const GUARANTEED_MAX_TEXTURE_DIM_3D = 2048;
 
 /** Per-LOD indirection section metadata. */
 export interface LodIndirectionMeta {
@@ -132,6 +146,81 @@ function gridCells(extent: number, chunk: number): number {
 }
 
 /**
+ * The bricked geometry a label level packs into: the per-slot brick dims
+ * (clamped so a brick never exceeds the level extent) and the chunk grid the
+ * level covers. The single source of both the atlas allocation
+ * ({@link computeLabelVolumeSizing}) and its byte accounting
+ * ({@link labelPaddedVolumeBytes}), so the two can never disagree on the padded
+ * footprint a level occupies.
+ */
+interface LabelBrickGrid {
+  /** Brick dims clamped to the level extent (a brick never exceeds the level). */
+  chunkX: number; chunkY: number; chunkZ: number;
+  /** Level chunk-grid dims (cells per axis). */
+  gridX: number; gridY: number; gridZ: number;
+  /** Total chunk-grid cells (`gridX*gridY*gridZ`). */
+  gridCellCount: number;
+}
+
+function labelBrickGrid(
+  width: number, height: number, depth: number,
+  chunkX: number, chunkY: number, chunkZ: number,
+): LabelBrickGrid {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(1, Math.floor(height));
+  const d = Math.max(1, Math.floor(depth));
+  // A brick never needs to exceed the level extent: a `chunk_shape` larger than
+  // the level (a small level with a coarse declared chunk) collapses to a
+  // single cell, so the slot only ever holds the in-bounds region. Clamping
+  // keeps a slot within the level extent (and thus the device limit) instead of
+  // allocating an oversized brick that a monolithic texture never would.
+  const cx = Math.max(1, Math.min(Math.floor(chunkX), w));
+  const cy = Math.max(1, Math.min(Math.floor(chunkY), h));
+  const cz = Math.max(1, Math.min(Math.floor(chunkZ), d));
+  const gridX = gridCells(w, cx);
+  const gridY = gridCells(h, cy);
+  const gridZ = gridCells(d, cz);
+  return { chunkX: cx, chunkY: cy, chunkZ: cz, gridX, gridY, gridZ, gridCellCount: gridX * gridY * gridZ };
+}
+
+/**
+ * The bytes the bricked atlas ACTUALLY ALLOCATES to hold a label level: the
+ * `textureSize` voxel product the atlas texture reserves times 4 B/voxel
+ * (`r32uint`) — NOT the true voxel count `w*h*d*4`, and NOT merely the padded
+ * grid footprint. The slot grid is rectangular (`slotsX*slotsY*slotsZ` slots),
+ * so when the chunk-grid cell count does not factor cleanly the atlas OVERSHOOTS
+ * the grid by up to a full row/plane of slots — the texture reserves
+ * `totalSlots * brick`, which can exceed `gridCellCount * brick`. Eligibility
+ * ({@link chooseLabelLevel}) and the total-mask memory failsafe must be measured
+ * against this actual allocation so admitting a mask (or a stack of masks) can
+ * never under-count what the atlas then reserves, which would defeat the budget
+ * and OOM on constrained VRAM.
+ *
+ * Computed from the SAME {@link computeLabelVolumeSizing} packing the atlas uses,
+ * at the WebGPU {@link GUARANTEED_MAX_TEXTURE_DIM_3D} floor — so this figure is
+ * the single source of truth for the footprint, an upper bound on any real
+ * device's allocation, and can never drift from what the atlas reserves.
+ *
+ * `levelShape`/`chunkShape` are canonical TCZYX arrays (a level's
+ * `shape`/`chunk_shape`); only the spatial axes are read. Callers must have
+ * already passed the per-brick cap (see `chooseLabelLevel`): a brick larger than
+ * the floor cannot be packed and {@link computeLabelVolumeSizing} throws, so this
+ * is only ever called on a level whose brick fits.
+ */
+export function labelPaddedVolumeBytes(
+  levelShape: readonly number[],
+  chunkShape: readonly number[],
+): number {
+  const sizing = computeLabelVolumeSizing(
+    levelShape[Axis.X], levelShape[Axis.Y], levelShape[Axis.Z],
+    chunkShape[Axis.X], chunkShape[Axis.Y], chunkShape[Axis.Z],
+    GUARANTEED_MAX_TEXTURE_DIM_3D,
+  );
+  const [texW, texH, texD] = sizing.textureSize;
+  return texW * texH * texD * LABEL_VOLUME_BYTES_PER_VOXEL;
+}
+
+/**
  * The slot-grid sizing for a label volume atlas: the chunk grid the level
  * covers and the slot grid the atlas packs it into. Pure geometry — no GPU
  * allocation — so the residency invariant (the whole grid stays resident) is
@@ -193,22 +282,8 @@ export function computeLabelVolumeSizing(
   chunkZ: number,
   maxTextureDimension3D: number,
 ): LabelVolumeSizing {
-  const w = Math.max(1, Math.floor(width));
-  const h = Math.max(1, Math.floor(height));
-  const d = Math.max(1, Math.floor(depth));
-  // A brick never needs to exceed the level extent: a `chunk_shape` larger than
-  // the level (a small level with a coarse declared chunk) collapses to a
-  // single cell, so the slot only ever holds the in-bounds region. Clamping
-  // keeps a slot within the level extent (and thus the device limit) instead of
-  // allocating an oversized brick that a monolithic texture never would.
-  const cx = Math.max(1, Math.min(Math.floor(chunkX), w));
-  const cy = Math.max(1, Math.min(Math.floor(chunkY), h));
-  const cz = Math.max(1, Math.min(Math.floor(chunkZ), d));
-
-  const gridX = gridCells(w, cx);
-  const gridY = gridCells(h, cy);
-  const gridZ = gridCells(d, cz);
-  const gridCellCount = gridX * gridY * gridZ;
+  const { chunkX: cx, chunkY: cy, chunkZ: cz, gridX, gridY, gridZ, gridCellCount } =
+    labelBrickGrid(width, height, depth, chunkX, chunkY, chunkZ);
 
   // Request the whole grid; computeProxyAtlasLayout clamps only to the device
   // limit and packs the slots so no atlas axis exceeds it.
@@ -242,9 +317,15 @@ export function computeLabelVolumeSizing(
  * free it (the pool is keyed by the label image id).
  *
  * Returns `null` when the atlas can't be sized/allocated (e.g. a single chunk
- * larger than the device limit, or an out-of-budget device) — the caller
- * skips the label rather than throwing through the upload path. Level
- * selection already bounds the size, so this is defense in depth.
+ * larger than the device limit) — the caller skips the label rather than
+ * throwing through the upload path. Level selection already bounds the size, so
+ * this is defense in depth.
+ *
+ * A brick that exceeds the device dimension limit is caught synchronously:
+ * {@link computeLabelVolumeSizing} (via `computeProxyAtlasLayout`) throws, and
+ * `createEmptyVolumeTexture` throws on a descriptor overflow — both are wrapped
+ * in one `try/catch` that returns `null` and warns once, so a bad size skips the
+ * label instead of throwing through the upload path.
  */
 export function getOrCreateLabelVolumePool(
   ctx: WorkerCtx,
