@@ -28,6 +28,14 @@ import {
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
 import { buildPlanningSnapshot } from "./planning/snapshot.ts";
+import {
+  applyViewQueryDelta,
+  makeEntitySnapshot,
+  type SnapshotEntityDeps,
+  type ViewQueryDeltaJson,
+  type ViewQueryEntityJson,
+} from "./planning/snapshotDelta.ts";
+import type { WasmScene } from "lucida-core";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
 import type {
@@ -476,6 +484,62 @@ export class TickCoordinator {
     parentByEntityId: Map<string, string | null>;
   }>();
   /**
+   * Per-dataset cursor for the incremental view-query fold: the last
+   * reconstructed `image_id → EntitySnapshot` map, plus the basis it was
+   * built against. The next replan asks the scene for a `view_query_delta`
+   * and folds it onto `map` (deleting `left`, upserting `entered` ∪
+   * `changed`) instead of parsing the full visible set — the O(delta) win on
+   * a camera move.
+   *
+   * # Why a per-record projection map
+   *
+   * A delta reports only the *quantized* projection
+   * (`{ membership, visible, ideal_target_lod, kind }`) of each record. The
+   * fold is safe to feed the planner ONLY under coarseDetail, where the
+   * active-set mode/LOD derives from the view-independent
+   * `detailLevel`/`coarseLevel` + `visible` — the quantized set the delta
+   * tracks. On the legacy path the mode is chosen from the continuous
+   * `projected_diagonal_px`, which the delta does NOT track, so that path
+   * uses the full `view_query` (see the gate in `planAndFetch`).
+   *
+   * # Cursor lifecycle (silent-wrong-data guard)
+   *
+   * The scene holds the matching Rust cursor; the two MUST advance together.
+   *   - `scene`: a reconstructed `WasmScene` starts with an empty Rust cursor
+   *     (it is `#[serde(skip)]`), so its first `view_query_delta` is a Full.
+   *     Any cursor held here belongs to the prior scene, so a scene-identity
+   *     change drops every entry — folding a delta against a foreign cursor
+   *     would ship wrong tiles.
+   *   - `basis`: the record shape a delta does NOT re-report depends on the
+   *     manifest join and the detail-level override. Both can move WITHOUT a
+   *     structural epoch bump (a progressively-merged level swaps the manifest
+   *     object; a detail-override edit bumps only the selection epoch), and
+   *     neither is a trigger for the Rust delta — so a record absent from the
+   *     delta would keep a stale `levels`/`detailLevel`/`coarseLevel`.
+   *     Invalidating the cursor when the basis changes forces a reseed from
+   *     the full query with the new basis.
+   * A dropped entry means the next fold has no prior; the fold then reseeds
+   * from the full `view_query` at that same tick (matching the Rust cursor,
+   * which the delta call just advanced), so a Delta is never folded against a
+   * missing base.
+   */
+  private readonly viewDeltaCursor = new Map<string, {
+    /** Identity of the snapshot-inputs entry (manifest maps + placement). */
+    basisInputs: object;
+    /** Detail-level override the records were assembled with (`null` = none). */
+    basisDetailOverride: number | null;
+    map: Map<string, EntitySnapshot>;
+  }>();
+  /**
+   * The `WasmScene` the {@link viewDeltaCursor} entries were built against.
+   * Compared by object identity every fold; a mismatch (a reconstructed
+   * scene, or the first fold of a freshly-constructed coordinator) clears the
+   * whole cursor so a stale entry can never be folded against a new scene's
+   * Rust cursor.
+   */
+  private viewDeltaScene: WasmScene | null = null;
+
+  /**
    * Datasets whose worker-side cold state is known to hold exactly this
    * coordinator's `previousActiveSet` — the precondition for a view-move delta.
    * Set after a full cold state (or a delta) lands; a delta keeps it set because
@@ -772,11 +836,39 @@ export class TickCoordinator {
         this.snapshotInputCacheByDataset.set(dsId, snapshotInputs);
       }
 
+      // Reconstruct `entities` incrementally when it is safe. Under
+      // coarseDetail (the shipping default) the active-set mode/LOD derives
+      // from the view-independent `detailLevel`/`coarseLevel` + `visible` —
+      // exactly the quantized set `view_query_delta` tracks — so folding the
+      // delta yields the same render-affecting projection as a full parse at
+      // O(delta) instead of O(N-members) on a camera move. On the legacy path
+      // the mode is chosen from the continuous `projected_diagonal_px`, which
+      // the delta does NOT track, so the full `view_query` (below, via
+      // `buildPlanningSnapshot` with no override) is used — falling back to
+      // the full query is always correct. `visible_region` and `selection`
+      // are computed FRESH inside the builder regardless.
+      let entitiesOverride: EntitySnapshot[] | undefined;
+      if (planningConfig.coarseDetailEnabled) {
+        const deps: SnapshotEntityDeps = {
+          imageSpecById: snapshotInputs.imageSpecById,
+          parentByEntityId: snapshotInputs.parentByEntityId,
+          positions: snapshotInputs.positions,
+          dsSettings,
+        };
+        const folded = this.foldViewDeltaEntities(
+          ctx.scene, dsId, deps, snapshotInputs,
+        );
+        if (folded === "skip") continue;
+        entitiesOverride = folded;
+      }
+
       // Build the planning snapshot from live WASM state. Returns null
       // when `view_query` produces no visible entities (dataset not yet
-      // registered, etc.) — skip the dataset in that case.
-      // `minimapPendingFetch` flows through into the snapshot so the
-      // planner emits minimap-lane requests at the highest priority
+      // registered, etc.) — skip the dataset in that case. On the fold path
+      // the entity set is passed as `entitiesOverride`, so the builder skips
+      // the full `view_query` and only computes the fresh `visible_region` +
+      // `selection`. `minimapPendingFetch` flows through into the snapshot so
+      // the planner emits minimap-lane requests at the highest priority
       // (see ADR 0023).
       const built = buildPlanningSnapshot({
         scene: ctx.scene,
@@ -795,6 +887,7 @@ export class TickCoordinator {
           imageSpecById: snapshotInputs.imageSpecById,
           parentByEntityId: snapshotInputs.parentByEntityId,
         },
+        entitiesOverride,
       });
       if (!built) continue;
       const { snapshot, entities, visibleRegion, selection } = built;
@@ -1761,6 +1854,136 @@ export class TickCoordinator {
   }
 
   /**
+   * Reconstruct a dataset's `entities` incrementally by folding the scene's
+   * `view_query_delta` onto the per-dataset cursor, instead of parsing the
+   * full visible set. Returns the entity array on success, `"skip"` when the
+   * dataset is not registered (the scene reports `null`, exactly as the full
+   * `view_query` path skips it).
+   *
+   * Called only from the full-rebuild path and only when coarseDetail is
+   * enabled (the caller's gate). `deps` is the same manifest/placement join
+   * the full builder uses; `inputsRef` is the identity of the cached
+   * snapshot-inputs entry `deps` came from (the cursor's manifest/placement
+   * basis).
+   *
+   * Correctness: the returned array reconstructs the SAME snapshot a fresh
+   * full build produces, on the render-affecting projection
+   * ({@link EntitySnapshot} `visible` / `idealTargetLod` / `kind` /
+   * `detailLevel` / `coarseLevel` / `parentId`, keyed by `image_id`). Records
+   * in `entered` / `changed` are freshly assembled this tick; a carried-over
+   * record was assembled on a prior tick with a basis proven identical (scene
+   * identity + `basisInputs` + `basisDetailOverride`), so its quantized and
+   * manifest-derived fields match a fresh build. Continuous fields
+   * (`importance` / `projectedDiagonalPx` / `projectedAreaPx2` /
+   * `centroidWorld`) may be stale on a carried-over record — intended, and
+   * never a mode/LOD input under coarseDetail.
+   */
+  private foldViewDeltaEntities(
+    scene: TickContext["scene"],
+    datasetId: string,
+    deps: SnapshotEntityDeps,
+    inputsRef: object,
+  ): EntitySnapshot[] | "skip" {
+    // Scene-identity guard. A reconstructed scene starts with an empty Rust
+    // cursor, so any cursor held here belongs to a scene that no longer
+    // exists; drop all of them before folding against the new scene.
+    if (scene !== this.viewDeltaScene) {
+      this.viewDeltaCursor.clear();
+      this.viewDeltaScene = scene;
+    }
+
+    const deltaJson = scene.view_query_delta(datasetId);
+    // Advancing the Rust cursor and skipping are mutually exclusive: a `null`
+    // means the dataset is unknown and the Rust cursor was NOT advanced, so
+    // dropping our cursor keeps the two consistent for a later re-add.
+    if (!deltaJson || deltaJson === "null") {
+      this.viewDeltaCursor.delete(datasetId);
+      return "skip";
+    }
+    const delta = JSON.parse(deltaJson) as ViewQueryDeltaJson;
+
+    const detailOverride = deps.dsSettings?.detail_level_override ?? null;
+    const existing = this.viewDeltaCursor.get(datasetId);
+    // A cursor is a valid fold base only when its manifest/placement basis
+    // AND detail-level override still match — otherwise a carried-over record
+    // could hold a stale `levels`/`detailLevel`/`coarseLevel` (see the field
+    // doc). A mismatch forces a null prior, i.e. a reseed from the full query.
+    const prev =
+      existing &&
+      existing.basisInputs === inputsRef &&
+      existing.basisDetailOverride === detailOverride
+        ? existing.map
+        : null;
+
+    // Drop-on-throw invariant: `view_query_delta` above already advanced the
+    // Rust cursor to this tick's state, but the map build below is fallible —
+    // `makeEntitySnapshot` throws on a producer-invariant violation (a Tile
+    // with no parent edge). Advancing the Rust cursor and setting the TS cursor
+    // must not straddle that fallible build without a drop on throw: if a throw
+    // left the TS cursor holding the PRIOR tick's map, the next tick would fold
+    // a Delta onto that stale base and silently drop this tick's
+    // entered/left/changed forever (the offending record is now
+    // quantized-stable in the Rust cursor, so it never re-throws). On a throw,
+    // drop the entry so the next tick reseeds from the full query (matching the
+    // already-advanced Rust cursor), then rethrow so the failure stays loud —
+    // exactly as the non-folding full path throws every tick.
+    try {
+      let next: Map<string, EntitySnapshot>;
+      if (prev === null && "Delta" in delta) {
+        // The Rust cursor is ahead of this consumer (a new coordinator against
+        // a persisting scene, or a basis change), so the delta reports changes
+        // since a base we never held and cannot be folded. Reseed from the
+        // authoritative full query at this same tick: the delta call above just
+        // advanced the Rust cursor to this tick's quantized state, so a
+        // snapshot built from the full query now matches it and the next delta
+        // folds.
+        const seeded = this.buildEntityMapFromViewQuery(scene, datasetId, deps);
+        if (seeded === null) {
+          this.viewDeltaCursor.delete(datasetId);
+          return "skip";
+        }
+        next = seeded;
+      } else {
+        next = applyViewQueryDelta(prev, delta, deps);
+      }
+
+      this.viewDeltaCursor.set(datasetId, {
+        basisInputs: inputsRef,
+        basisDetailOverride: detailOverride,
+        map: next,
+      });
+      return [...next.values()];
+    } catch (e) {
+      this.viewDeltaCursor.delete(datasetId);
+      throw e;
+    }
+  }
+
+  /**
+   * Build a fresh `image_id → EntitySnapshot` map from the full `view_query`,
+   * via the same {@link makeEntitySnapshot} the fold uses. Returns `null`
+   * when the dataset is unknown (scene reports `null` / no visible set) — the
+   * caller treats that as skip. Used to seed the fold cursor when a delta
+   * cannot be folded (no matching prior).
+   */
+  private buildEntityMapFromViewQuery(
+    scene: TickContext["scene"],
+    datasetId: string,
+    deps: SnapshotEntityDeps,
+  ): Map<string, EntitySnapshot> | null {
+    const vqJson = scene.view_query(datasetId);
+    const vq = JSON.parse(vqJson) as
+      | { visible_entities?: ViewQueryEntityJson[] }
+      | null;
+    if (!vq || !vq.visible_entities) return null;
+    const map = new Map<string, EntitySnapshot>();
+    for (const row of vq.visible_entities) {
+      map.set(row.image_id, makeEntitySnapshot(row, deps));
+    }
+    return map;
+  }
+
+  /**
    * Clear planner-side per-dataset state on dataset removal. Upload-side
    * cleanup is the Uploader's responsibility.
    *
@@ -1787,6 +2010,9 @@ export class TickCoordinator {
     this.matrixCacheByDataset.delete(workerMemberId);
     this.snapshotInputCacheByDataset.delete(workerMemberId);
     this.coldStateSyncedDatasets.delete(workerMemberId);
+    // Drop the view-query fold cursor so a re-added dataset reseeds from a
+    // full query rather than folding a delta onto a removed dataset's records.
+    this.viewDeltaCursor.delete(workerMemberId);
   }
 
   /** Per-dataset snapshot of the most recent `plan()` output. Live Map — do not mutate. */

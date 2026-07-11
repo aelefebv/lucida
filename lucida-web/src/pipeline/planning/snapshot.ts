@@ -20,29 +20,21 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
+import {
+  makeEntitySnapshot,
+  type SnapshotEntityDeps,
+  type ViewQueryEntityJson,
+} from "./snapshotDelta.ts";
 
 // Re-export from canonical home in `./index.ts`.
 export type { MinimapChunkCoord } from "./index.ts";
-
-/**
- * Wire shape of one row in the `view_query` JSON output. Mirrors the
- * Rust `VisibleEntity` struct in `lucida-core/src/scene/view_query.rs`.
- */
-interface VisibleEntityRow {
-  entity_id: string;
-  image_id: string;
-  kind: "Image" | "Group" | "Tile";
-  visible: boolean;
-  projected_diagonal_px: number;
-  projected_area_px2: number;
-  centroid_world: [number, number, number];
-  ideal_target_lod: number;
-  importance: number;
-}
+// Re-export the coarse-level resolver — its canonical home is the shared
+// per-row translation module, but consumers historically import it here.
+export { resolveCoarseLevel } from "./snapshotDelta.ts";
 
 /** Wire shape of `view_query`'s top-level object. */
 interface ViewQueryJson {
-  visible_entities?: VisibleEntityRow[];
+  visible_entities?: ViewQueryEntityJson[];
 }
 
 /** Wire shape of `visible_region`'s JSON output (snake_case). */
@@ -67,52 +59,6 @@ const DEFAULT_VISIBLE_REGION: VisibleRegion = {
   sortCenterVox: null,
   frustumPlanes: null,
 };
-
-function generatedLevelIndices(imgSpec: ImageSpec | undefined): Set<number> {
-  return new Set(
-    (imgSpec?.multiscale.generated_levels ?? []).map((level) => level.level_index),
-  );
-}
-
-function selectableDetailLevels(imgSpec: ImageSpec | undefined): number[] {
-  if (!imgSpec) return [0];
-  const generated = generatedLevelIndices(imgSpec);
-  const sourceLevels = imgSpec.multiscale.levels
-    .map((level, idx) => level.level_index ?? idx)
-    .filter((level) => !generated.has(level))
-    .sort((a, b) => a - b);
-  return sourceLevels.length > 0 ? sourceLevels : [0];
-}
-
-function resolveDetailLevel(
-  imgSpec: ImageSpec | undefined,
-  override: number | null | undefined,
-): number {
-  const selectable = selectableDetailLevels(imgSpec);
-  if (typeof override === "number" && selectable.includes(override)) {
-    return override;
-  }
-  if (typeof override === "number") {
-    const lowerOrEqual = selectable.filter((level) => level <= override).at(-1);
-    if (lowerOrEqual !== undefined) return lowerOrEqual;
-    return selectable[0] ?? 0;
-  }
-  return selectable.includes(0) ? 0 : selectable[0] ?? 0;
-}
-
-export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | null {
-  if (!imgSpec || imgSpec.multiscale.levels.length === 0) return null;
-  const levels = imgSpec.multiscale.levels;
-  const explicit = imgSpec.multiscale.coarse_level_index;
-  if (
-    typeof explicit === "number" &&
-    explicit >= 0 &&
-    explicit < levels.length
-  ) {
-    return explicit;
-  }
-  return null;
-}
 
 /**
  * Minimal `DatasetEntry` shape consumed by the snapshot builder.
@@ -183,6 +129,22 @@ export interface BuildPlanningSnapshotArgs {
     /** Manifest map: entity id → parent id (or null for a root entity). */
     parentByEntityId?: Map<string, string | null>;
   };
+  /**
+   * Precomputed per-entity snapshots to use verbatim as `entities`, in place
+   * of parsing `view_query` and translating each row here. Supplied by a
+   * caller that reconstructs the entity set incrementally (folding
+   * `view_query_delta`) so the O(N) full parse + per-row translation is
+   * skipped on a camera move.
+   *
+   * When provided, the builder does NOT call `view_query`: `entities` is the
+   * passed array (empty is valid — the dataset is registered but nothing is
+   * visible). Every other output — `visibleRegion`, `selection`, the
+   * assembled snapshot — is still derived FRESH from the live scene, so a
+   * selection change (timepoint / channel / slice) is never served stale from
+   * this override. The records MUST be assembled via the shared
+   * {@link makeEntitySnapshot} so they are identical to the full path.
+   */
+  entitiesOverride?: EntitySnapshot[];
 }
 
 /**
@@ -235,23 +197,37 @@ export function buildPlanningSnapshot(
   void args.requestEpoch;
   void args.config;
 
+  // When the caller supplies `entitiesOverride`, the entity set is taken
+  // verbatim (it was reconstructed incrementally from `view_query_delta`) and
+  // steps 1–4 below — the full `view_query` parse, `member_positions`, the
+  // manifest maps, and the per-row translation — are all skipped. Only
+  // `visibleRegion` and `selection` (steps 5–6) run, so they stay fresh.
+  const entitiesOverride = args.entitiesOverride;
+
   // 1. view_query — may be null / empty when the dataset isn't yet
   //    registered in the scene. Caller treats this as "skip this
-  //    dataset" (matches the historical `continue`).
-  const vqJson = scene.view_query(datasetId);
-  const vq = JSON.parse(vqJson) as ViewQueryJson | null;
-  if (!vq || !vq.visible_entities) return null;
+  //    dataset" (matches the historical `continue`). Skipped entirely on
+  //    the override path.
+  let vq: ViewQueryJson | null = null;
+  if (!entitiesOverride) {
+    const vqJson = scene.view_query(datasetId);
+    vq = JSON.parse(vqJson) as ViewQueryJson | null;
+    if (!vq || !vq.visible_entities) return null;
+  }
 
   // 2. member_positions — keyed by entityId, 2D layout placement. Reuse a
   //    caller-cached parse when one is supplied (it is camera-independent,
-  //    keyed by the layout epoch); otherwise parse it here.
+  //    keyed by the layout epoch); otherwise parse it here. Not needed on
+  //    the override path (the caller already joined placement into the rows).
   const precomputed = args.precomputed;
-  let positions: Record<string, [number, number]>;
-  if (precomputed?.positions) {
-    positions = precomputed.positions;
-  } else {
-    const posJson = scene.member_positions(datasetId);
-    positions = JSON.parse(posJson);
+  let positions: Record<string, [number, number]> = {};
+  if (!entitiesOverride) {
+    if (precomputed?.positions) {
+      positions = precomputed.positions;
+    } else {
+      const posJson = scene.member_positions(datasetId);
+      positions = JSON.parse(posJson);
+    }
   }
 
   // 3. Build helper maps from the dataset manifest:
@@ -259,72 +235,47 @@ export function buildPlanningSnapshot(
   //   - parentByEntityId: stitches `Tile.parent === groupId` so promotion
   //     can group tiles by their parent group (ADR 0025).
   //   Both derive from the immutable manifest (camera-independent), so a
-  //   caller may supply them prebuilt; otherwise build them here.
-  let imageSpecById: Map<string, ImageSpec>;
-  if (precomputed?.imageSpecById) {
-    imageSpecById = precomputed.imageSpecById;
+  //   caller may supply them prebuilt; otherwise build them here. Not needed
+  //   on the override path (the rows were already joined with the manifest).
+  // 4. Snake-case → camelCase translation for every visible entity, via the
+  //    shared per-row builder so the full path and the delta fold produce
+  //    byte-identical records. Joins the WASM payload with the manifest for
+  //    `levels`, `detailLevel`, `coarseLevel`, and `parentId`, and with the
+  //    layout for `layoutPositionVox`. A `Tile` with no parent edge throws
+  //    inside {@link makeEntitySnapshot}, surfacing the producer-invariant
+  //    violation at assembly rather than later in `groupMembers`.
+  let entities: EntitySnapshot[];
+  if (entitiesOverride) {
+    entities = entitiesOverride;
   } else {
-    imageSpecById = new Map<string, ImageSpec>();
-    for (const img of dataset.manifest.images) {
-      imageSpecById.set(img.image_id, img);
-    }
-  }
-  let parentByEntityId: Map<string, string | null>;
-  if (precomputed?.parentByEntityId) {
-    parentByEntityId = precomputed.parentByEntityId;
-  } else {
-    parentByEntityId = new Map<string, string | null>();
-    for (const ent of dataset.manifest.entities) {
-      parentByEntityId.set(ent.id, ent.parent ?? null);
-    }
-  }
-
-  // 4. Snake-case → camelCase translation for every visible entity.
-  //    Joins the WASM payload with the manifest to pick up `levels` and
-  //    `parentId` (neither of which are part of `view_query`).
-  //
-  //    {@link EntitySnapshot} is a discriminated union. Branch on the
-  //    WASM-reported `kind` and construct the matching variant. Tile
-  //    entities require a non-null parent edge in the manifest — we
-  //    throw on the missing-edge case rather than silently coercing,
-  //    so producer bugs surface during snapshot assembly rather than
-  //    later in `groupMembers`.
-  const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
-    const imgSpec = imageSpecById.get(e.image_id);
-    const levels = imgSpec ? imgSpec.multiscale.levels : [];
-    const detailLevel = resolveDetailLevel(imgSpec, dsSettings?.detail_level_override);
-    const coarseLevel = resolveCoarseLevel(imgSpec);
-    const layoutPositionVox =
-      positions[e.entity_id] ?? ([0, 0] as [number, number]);
-    const base = {
-      entityId: e.entity_id,
-      imageId: e.image_id,
-      visible: e.visible,
-      projectedDiagonalPx: e.projected_diagonal_px,
-      projectedAreaPx2: e.projected_area_px2,
-      centroidWorld: e.centroid_world,
-      idealTargetLod: e.ideal_target_lod,
-      detailLevel,
-      coarseLevel,
-      importance: e.importance,
-      layoutPositionVox,
-      levels,
-    };
-    if (e.kind === "Tile") {
-      const parentId = parentByEntityId.get(e.entity_id);
-      if (parentId === undefined || parentId === null) {
-        throw new Error(
-          `[planning] Tile entity "${e.entity_id}" has no parent edge ` +
-            `in the manifest — TileSnapshot.parentId is required (non-null).`,
-        );
+    let imageSpecById: Map<string, ImageSpec>;
+    if (precomputed?.imageSpecById) {
+      imageSpecById = precomputed.imageSpecById;
+    } else {
+      imageSpecById = new Map<string, ImageSpec>();
+      for (const img of dataset.manifest.images) {
+        imageSpecById.set(img.image_id, img);
       }
-      return { kind: "Tile", parentId, ...base } satisfies EntitySnapshot;
     }
-    if (e.kind === "Group") {
-      return { kind: "Group", ...base } satisfies EntitySnapshot;
+    let parentByEntityId: Map<string, string | null>;
+    if (precomputed?.parentByEntityId) {
+      parentByEntityId = precomputed.parentByEntityId;
+    } else {
+      parentByEntityId = new Map<string, string | null>();
+      for (const ent of dataset.manifest.entities) {
+        parentByEntityId.set(ent.id, ent.parent ?? null);
+      }
     }
-    return { kind: "Image", ...base } satisfies EntitySnapshot;
-  });
+    const deps: SnapshotEntityDeps = {
+      imageSpecById,
+      parentByEntityId,
+      positions,
+      dsSettings,
+    };
+    // `vq` is non-null here — the override branch is the only path that
+    // leaves it null, and it's taken above.
+    entities = vq!.visible_entities!.map((e) => makeEntitySnapshot(e, deps));
+  }
 
   // 5. visible_region — null when WASM has nothing yet for this dataset.
   //    Snake_case → camelCase; fall back to the historical

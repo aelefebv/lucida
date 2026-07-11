@@ -99,6 +99,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
   return {
     epochs: () => JSON.stringify(config.epochs),
     view_query: () => JSON.stringify(config.viewQuery),
+    view_query_delta: () => JSON.stringify({ Full: config.viewQuery }),
     member_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
     t: () => config.t,

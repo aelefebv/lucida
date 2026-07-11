@@ -146,6 +146,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
   return {
     epochs: () => JSON.stringify(config.epochs),
     view_query: (_dsId: string) => JSON.stringify(config.viewQuery),
+    view_query_delta: (_dsId: string) => JSON.stringify({ Full: config.viewQuery }),
     member_positions: (_dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
     t: () => config.t,
@@ -1483,6 +1484,258 @@ describe("multi-dataset planning", () => {
     expect(tick2Ds2State.previousActiveSet).toEqual(tick1Ds2Result.activeSet);
     expect(tick2Ds1State).toBe(tick1Ds1Result.nextState);
     expect(tick2Ds2State).toBe(tick1Ds2Result.nextState);
+  });
+});
+
+// ===========================================================================
+// 2b. Incremental delta fold
+// ===========================================================================
+
+describe("incremental delta fold", () => {
+  // Under coarseDetail (the shipping default), a settled camera move
+  // reconstructs each dataset's `entities` by folding `view_query_delta` onto a
+  // per-dataset cursor instead of re-parsing the full visible set. These tests
+  // exercise the `Delta` branch directly — the shared `createMockScene` mock
+  // hardcodes `view_query_delta` to a `Full`, so that branch is otherwise
+  // uncovered at this layer.
+  //
+  // Both tests drive ONE scene object across ticks: a delta cursor is keyed on
+  // scene identity, so a fresh scene per tick would reset it before the fold
+  // could engage. The scene carries mutable epochs (bumped per tick) and a
+  // scripted `view_query_delta` (one payload per fold call, in order), with
+  // `view_query` a spy standing in for the authoritative full set.
+
+  let planSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    planSpy = vi.fn(plan);
+  });
+
+  function makeOrch(): TickCoordinator {
+    return new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan);
+  }
+
+  const emptyMinimap = new Map<string, never[]>();
+
+  function makeCtx(scene: unknown, datasets: Map<string, DatasetEntry>): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), coldStateDisplay: vi.fn(), coldStateSelection: vi.fn(), coldStateDelta: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  type FoldRow = MockSceneConfig["viewQuery"]["visible_entities"][number];
+
+  function foldRow(over: Partial<FoldRow> = {}): FoldRow {
+    return {
+      entity_id: "tile-0",
+      image_id: "img-0",
+      kind: "Tile",
+      visible: true,
+      projected_diagonal_px: 100,
+      projected_area_px2: 10000,
+      centroid_world: [0, 0, 0],
+      ideal_target_lod: 0,
+      importance: 1.0,
+      ...over,
+    };
+  }
+
+  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+
+  function fullPayload(rows: FoldRow[]): string {
+    return JSON.stringify({ Full: { epochs: deltaEpochs, visible_entities: rows } });
+  }
+
+  function deltaPayload(entered: FoldRow[], left: string[], changed: FoldRow[]): string {
+    return JSON.stringify({ Delta: { epochs: deltaEpochs, entered, left, changed } });
+  }
+
+  /**
+   * A single scene object (stable identity across ticks) whose epochs are
+   * mutable, whose `view_query` is a spy returning the current full set (the
+   * reseed oracle), and whose `view_query_delta` replays a script one payload
+   * per call. Bump the view epoch via `setView` between ticks to force a
+   * settled replan.
+   */
+  function makeFoldScene(opts: {
+    fullRows: FoldRow[];
+    deltaScript: string[];
+    memberPositions: Record<string, [number, number]>;
+  }) {
+    const epochs = { content: 1, layout: 1, view: 1, selection: 1 };
+    const fullRows = opts.fullRows;
+    const script = [...opts.deltaScript];
+    const viewQuery = vi.fn(() => JSON.stringify({ visible_entities: fullRows }));
+    const viewQueryDelta = vi.fn(() => {
+      const next = script.shift();
+      if (next === undefined) throw new Error("view_query_delta script exhausted");
+      return next;
+    });
+    const base = createMockScene({ epochs, memberPositions: opts.memberPositions }) as Record<string, unknown>;
+    const scene = {
+      ...base,
+      epochs: () => JSON.stringify(epochs),
+      view_query: viewQuery,
+      view_query_delta: viewQueryDelta,
+    };
+    return {
+      scene,
+      viewQuery,
+      viewQueryDelta,
+      setView: (v: number) => { epochs.view = v; },
+    };
+  }
+
+  const positions4: Record<string, [number, number]> = {
+    "tile-0": [0, 0],
+    "tile-1": [1024, 0],
+    "tile-2": [2048, 0],
+    "tile-3": [3072, 0],
+    "tile-orphan": [9999, 0],
+  };
+
+  it("folds a real Delta on the second replan instead of re-querying the full set", () => {
+    // Guards against a green-but-inert fold: if the incremental path silently
+    // always reseeded (or always went Full), this Delta's entered/left/changed
+    // would still be reflected via the full re-parse and the test would pass
+    // for the wrong reason — so it also asserts the full `view_query` was NOT
+    // consulted on the folding replan.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(4) }]]);
+      const orch = makeOrch();
+
+      const fold = makeFoldScene({
+        fullRows: [
+          foldRow({ entity_id: "tile-0", image_id: "img-0" }),
+          foldRow({ entity_id: "tile-1", image_id: "img-1" }),
+        ],
+        deltaScript: [
+          // Tick 1 — Full seeds the cursor with img-0, img-1.
+          fullPayload([
+            foldRow({ entity_id: "tile-0", image_id: "img-0" }),
+            foldRow({ entity_id: "tile-1", image_id: "img-1" }),
+          ]),
+          // Tick 2 — a real Delta: img-2 enters, img-0 leaves, img-1's LOD changes.
+          deltaPayload(
+            [foldRow({ entity_id: "tile-2", image_id: "img-2" })],
+            ["img-0"],
+            [foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 })],
+          ),
+        ],
+        memberPositions: positions4,
+      });
+
+      // Tick 1 — leading full rebuild seeds the fold cursor from the Full.
+      orch.planAndFetch(makeCtx(fold.scene, datasets), emptyMinimap);
+      planSpy.mockClear();
+      fold.viewQuery.mockClear();
+
+      // Tick 2 — a settled camera move (view epoch only) past the coalescing
+      // window folds the Delta onto the cursor.
+      vi.advanceTimersByTime(500);
+      fold.setView(2);
+      orch.planAndFetch(makeCtx(fold.scene, datasets), emptyMinimap);
+
+      // The fold engaged — the Delta was applied without a full re-parse.
+      expect(fold.viewQuery).not.toHaveBeenCalled();
+      expect(planSpy).toHaveBeenCalledTimes(1);
+
+      const snapshot = planSpy.mock.calls[0][0] as {
+        entities: Array<{ imageId: string; idealTargetLod: number }>;
+      };
+      const byImage = new Map(snapshot.entities.map((e) => [e.imageId, e]));
+      expect(byImage.get("img-1")?.idealTargetLod).toBe(2); // changed row applied
+      expect(byImage.has("img-2")).toBe(true); // entered row present
+      expect(byImage.has("img-0")).toBe(false); // left row absent
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reseeds from a fresh full build after a fold throws, never onto the stale pre-throw cursor", () => {
+    // A mid-fold throw (a Tile with no parent edge violates a producer
+    // invariant in makeEntitySnapshot) advances the Rust cursor but must not
+    // leave the TS cursor holding the prior tick's map: the next tick would
+    // then fold onto that stale base and silently drop the throwing tick's
+    // entered/left/changed forever. After the throwing tick the reconstructed
+    // set must equal a fresh full build — no ghost of a left record, no stale
+    // change, the correct entered record.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(4) }]]);
+      const orch = makeOrch();
+
+      const fold = makeFoldScene({
+        // The reseed oracle: the true current set at tick 3 (img-0 left,
+        // img-2 + the orphan entered-then-left, img-1 changed to LOD 2,
+        // img-3 entered).
+        fullRows: [
+          foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 }),
+          foldRow({ entity_id: "tile-3", image_id: "img-3" }),
+        ],
+        deltaScript: [
+          // Tick 1 — Full seeds the cursor {img-0, img-1}.
+          fullPayload([
+            foldRow({ entity_id: "tile-0", image_id: "img-0" }),
+            foldRow({ entity_id: "tile-1", image_id: "img-1" }),
+          ]),
+          // Tick 2 — a Delta upserting a Tile with NO parent edge → throws
+          // mid-fold. It also carries a legit left (img-0) and change
+          // (img-1 → LOD 2) that a stale-cursor fold would bury forever.
+          deltaPayload(
+            [
+              foldRow({ entity_id: "tile-orphan", image_id: "img-orphan" }),
+              foldRow({ entity_id: "tile-2", image_id: "img-2" }),
+            ],
+            ["img-0"],
+            [foldRow({ entity_id: "tile-1", image_id: "img-1", ideal_target_lod: 2 })],
+          ),
+          // Tick 3 — a Delta the fold must NOT apply onto the pre-throw map.
+          deltaPayload(
+            [foldRow({ entity_id: "tile-3", image_id: "img-3" })],
+            ["img-2", "img-orphan"],
+            [],
+          ),
+        ],
+        memberPositions: positions4,
+      });
+
+      // Tick 1 — seed.
+      orch.planAndFetch(makeCtx(fold.scene, datasets), emptyMinimap);
+      planSpy.mockClear();
+
+      // Tick 2 — the fold throws; the failure must stay loud (propagate).
+      vi.advanceTimersByTime(500);
+      fold.setView(2);
+      expect(() => orch.planAndFetch(makeCtx(fold.scene, datasets), emptyMinimap)).toThrow(/parent edge/);
+
+      // Tick 3 — the next settled replan must reconstruct the true current set
+      // from a fresh full build, not fold tick 3's Delta onto the stale cursor.
+      vi.advanceTimersByTime(500);
+      fold.setView(3);
+      orch.planAndFetch(makeCtx(fold.scene, datasets), emptyMinimap);
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      const snapshot = planSpy.mock.calls[0][0] as {
+        entities: Array<{ imageId: string; idealTargetLod: number }>;
+      };
+      const byImage = new Map(snapshot.entities.map((e) => [e.imageId, e]));
+      // Equals a fresh full build: no ghost left record (img-0), the change
+      // applied (img-1 at its new LOD), the correct entered record (img-3).
+      expect([...byImage.keys()].sort()).toEqual(["img-1", "img-3"]);
+      expect(byImage.get("img-1")?.idealTargetLod).toBe(2);
+      expect(byImage.has("img-0")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

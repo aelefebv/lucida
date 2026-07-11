@@ -284,6 +284,27 @@ impl WasmScene {
         }
     }
 
+    /// Incremental counterpart to [`Self::view_query`]: reports only what
+    /// changed since this scene last answered a delta query for the dataset.
+    ///
+    /// The scene holds a per-dataset cursor of the last-reported quantized set;
+    /// the first call after the scene is (re)constructed — the cursor is
+    /// `#[serde(skip)]`, so a fresh scene starts empty — yields a `Full`
+    /// snapshot, and subsequent calls yield a `Delta`. Serialized as an
+    /// externally-tagged enum: `{"Full": {...}}` or `{"Delta": {...}}` (see
+    /// [`crate::query::ViewQueryDelta`]). Returns the JSON string `"null"` for
+    /// an unknown dataset, matching [`Self::view_query`]'s missing-dataset
+    /// convention.
+    ///
+    /// Takes `&mut self` because answering advances the cursor.
+    pub fn view_query_delta(&mut self, dataset_id: &str) -> String {
+        let id = DatasetId(dataset_id.into());
+        match self.inner.view_query_delta(&id) {
+            Some(delta) => serde_json::to_string(&delta).unwrap_or_default(),
+            None => "null".to_string(),
+        }
+    }
+
     /// Debug helper: returns [effective_zoom, zoom_per_voxel] for a dataset.
     pub fn debug_lod_info(&self, dataset_id: &str) -> Vec<f64> {
         let ds_id = DatasetId(dataset_id.to_string());
