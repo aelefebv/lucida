@@ -729,6 +729,7 @@ impl Scene {
                         self.dataset_order.retain(|s| s != id);
                         self.dataset_settings.remove(id);
                         self.derived.remove(id);
+                        self.view_query_cursors.remove(id);
 
                         self.epochs.content += 1;
                         self.epochs.layout += 1;
