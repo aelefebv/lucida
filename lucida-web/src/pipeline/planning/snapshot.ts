@@ -160,6 +160,29 @@ export interface BuildPlanningSnapshotArgs {
   requestEpoch: number;
   /** Per-tick planning tunables — threaded through into downstream callers. */
   config: PlanningConfig;
+  /**
+   * Optional precomputed camera-independent inputs. These derive solely
+   * from the scene's fixed 2D layout placement and the immutable dataset
+   * manifest — they change only when the content / layout / asset epoch
+   * moves, never on a camera move. A caller that caches them per-dataset
+   * across view-only replans passes them here so the snapshot builder
+   * skips the `member_positions` serde and the two manifest-map rebuilds.
+   *
+   * All three are optional and independent. When a field is absent the
+   * builder computes it internally, identically to a caller that never
+   * caches — the internal path is the byte-for-byte default. When
+   * provided, the value MUST equal what the internal path would produce
+   * for the current scene state (same content / layout / asset epoch);
+   * a stale value yields wrong tile positions or parent edges.
+   */
+  precomputed?: {
+    /** Parsed `member_positions(datasetId)` — entityId → 2D layout position. */
+    positions?: Record<string, [number, number]>;
+    /** Manifest map: image_id → ImageSpec. */
+    imageSpecById?: Map<string, ImageSpec>;
+    /** Manifest map: entity id → parent id (or null for a root entity). */
+    parentByEntityId?: Map<string, string | null>;
+  };
 }
 
 /**
@@ -219,21 +242,41 @@ export function buildPlanningSnapshot(
   const vq = JSON.parse(vqJson) as ViewQueryJson | null;
   if (!vq || !vq.visible_entities) return null;
 
-  // 2. member_positions — keyed by entityId, 2D layout placement.
-  const posJson = scene.member_positions(datasetId);
-  const positions: Record<string, [number, number]> = JSON.parse(posJson);
+  // 2. member_positions — keyed by entityId, 2D layout placement. Reuse a
+  //    caller-cached parse when one is supplied (it is camera-independent,
+  //    keyed by the layout epoch); otherwise parse it here.
+  const precomputed = args.precomputed;
+  let positions: Record<string, [number, number]>;
+  if (precomputed?.positions) {
+    positions = precomputed.positions;
+  } else {
+    const posJson = scene.member_positions(datasetId);
+    positions = JSON.parse(posJson);
+  }
 
   // 3. Build helper maps from the dataset manifest:
   //   - imageSpecById: per-image multiscale levels
   //   - parentByEntityId: stitches `Tile.parent === groupId` so promotion
   //     can group tiles by their parent group (ADR 0025).
-  const imageSpecById = new Map<string, ImageSpec>();
-  for (const img of dataset.manifest.images) {
-    imageSpecById.set(img.image_id, img);
+  //   Both derive from the immutable manifest (camera-independent), so a
+  //   caller may supply them prebuilt; otherwise build them here.
+  let imageSpecById: Map<string, ImageSpec>;
+  if (precomputed?.imageSpecById) {
+    imageSpecById = precomputed.imageSpecById;
+  } else {
+    imageSpecById = new Map<string, ImageSpec>();
+    for (const img of dataset.manifest.images) {
+      imageSpecById.set(img.image_id, img);
+    }
   }
-  const parentByEntityId = new Map<string, string | null>();
-  for (const ent of dataset.manifest.entities) {
-    parentByEntityId.set(ent.id, ent.parent ?? null);
+  let parentByEntityId: Map<string, string | null>;
+  if (precomputed?.parentByEntityId) {
+    parentByEntityId = precomputed.parentByEntityId;
+  } else {
+    parentByEntityId = new Map<string, string | null>();
+    for (const ent of dataset.manifest.entities) {
+      parentByEntityId.set(ent.id, ent.parent ?? null);
+    }
   }
 
   // 4. Snake-case → camelCase translation for every visible entity.
