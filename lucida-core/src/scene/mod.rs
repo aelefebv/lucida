@@ -15,7 +15,7 @@ use lucida_content::*;
 use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
 use crate::epoch::SceneEpochs;
-use crate::query::{EntityQueryResult, ViewQueryResult};
+use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
@@ -158,6 +158,69 @@ pub struct Scene {
     /// Monotonic epoch counters for change detection.
     #[serde(default)]
     pub epochs: SceneEpochs,
+    /// Per-dataset snapshot of the last [`Scene::view_query_delta`], used to
+    /// diff successive queries. Client-local scratch, not part of shared or
+    /// serialized state.
+    #[serde(skip)]
+    pub(crate) view_query_cursors: HashMap<DatasetId, ViewQueryCursor>,
+}
+
+/// The camera's geometry family. A change between families routes the entity
+/// projection through a different path, so a delta across such a change is not
+/// meaningful and the query resyncs to a full snapshot instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraModeKind {
+    Slice,
+    Arcball,
+    Fly,
+}
+
+impl CameraModeKind {
+    fn of(camera: &Camera) -> Self {
+        match camera {
+            Camera::Slice(_) => Self::Slice,
+            Camera::Arcball(_) => Self::Arcball,
+            Camera::Fly(_) => Self::Fly,
+        }
+    }
+}
+
+/// The quantized state of one entity — the fields whose change is worth
+/// reporting in a delta. Continuous geometry (importance, projected size,
+/// centroid) is intentionally excluded so a camera nudge does not flag every
+/// entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuantizedEntity {
+    visible: bool,
+    ideal_target_lod: u32,
+    kind: EntityKind,
+}
+
+impl QuantizedEntity {
+    fn of(entry: &EntityQueryResult) -> Self {
+        Self {
+            visible: entry.visible,
+            ideal_target_lod: entry.ideal_target_lod,
+            kind: entry.kind.clone(),
+        }
+    }
+}
+
+/// Snapshot of the last query for one dataset. The delta compares against this
+/// to decide what changed, and whether a full resync is required.
+#[derive(Debug, Clone)]
+pub(crate) struct ViewQueryCursor {
+    /// Structural epochs at snapshot time. A move in any of these means the
+    /// membership base was rebuilt, so the query resyncs to a full snapshot.
+    content: u64,
+    layout: u64,
+    asset: u64,
+    /// Camera geometry family at snapshot time. A change resyncs.
+    mode: CameraModeKind,
+    /// Quantized state per present record, keyed by the unique per-record
+    /// `image_id` (an entity can own several images, so `entity_id` is not a
+    /// unique key).
+    entries: HashMap<ImageId, QuantizedEntity>,
 }
 
 impl Scene {
@@ -171,6 +234,7 @@ impl Scene {
             dataset_settings: HashMap::new(),
             derived: HashMap::new(),
             epochs: SceneEpochs::default(),
+            view_query_cursors: HashMap::new(),
         }
     }
 
@@ -261,6 +325,7 @@ impl Scene {
         self.dataset_order.retain(|s| s != id);
         self.dataset_settings.remove(id);
         self.derived.remove(id);
+        self.view_query_cursors.remove(id);
     }
 
     /// Returns the maximum `max_physical_extent` across all datasets.
@@ -1063,6 +1128,8 @@ impl Scene {
         self.dataset_order.retain(|id| dataset_ids.contains(id));
         self.dataset_settings
             .retain(|id, _| dataset_ids.contains(id));
+        self.view_query_cursors
+            .retain(|id, _| dataset_ids.contains(id));
 
         // Realign any KEPT per-label settings that carry the author's label
         // names onto the restored manifest's CURRENT label order (occurrence-
@@ -1339,6 +1406,144 @@ impl Scene {
             visible_entities: results,
         })
     }
+
+    /// Incremental counterpart to [`Scene::view_query`].
+    ///
+    /// The first query for a dataset, a query after the membership base was
+    /// rebuilt (a move in the content, layout, or asset epoch), and a query
+    /// after the camera changed geometry family all return
+    /// [`ViewQueryDelta::Full`] — a complete snapshot that also (re)seeds this
+    /// dataset's cursor. Any other query returns [`ViewQueryDelta::Delta`]
+    /// describing only the entities that entered, left, or whose quantized
+    /// state changed since the previous query.
+    ///
+    /// The per-entity records are produced by [`Scene::view_query`] itself, so
+    /// they are byte-for-byte what a full query would report. The delta only
+    /// decides *which* of those records to carry. Returns `None` exactly when
+    /// [`Scene::view_query`] would (an unknown dataset).
+    ///
+    /// Each dataset keeps an independent cursor, so datasets resync on their
+    /// own schedule. A resync fully drops the prior snapshot before reseeding,
+    /// so an entity that leaves and later returns arrives in `entered` with a
+    /// full record rather than being silently retained.
+    ///
+    /// A delta reports only quantized changes; see [`ViewQueryDelta`] for the
+    /// tracked set and the two obligations it places on consumers. In short: a
+    /// record's continuous fields may be stale while it is absent from deltas, so
+    /// a decision derived from a continuous field (a discrete choice keyed off a
+    /// projected size, say) must be recomputed by the consumer rather than
+    /// inferred from delta membership; and selection or structural changes surface
+    /// only through the returned `epochs`, not through entered/left/changed.
+    pub fn view_query_delta(&mut self, dataset_id: &DatasetId) -> Option<ViewQueryDelta> {
+        // Reuse the full projection verbatim: the records the delta hands back
+        // are exactly what a full query produces this frame.
+        let result = self.view_query(dataset_id)?;
+
+        let content = self.epochs.content;
+        let layout = self.epochs.layout;
+        let asset = self.epochs.asset;
+        let mode = CameraModeKind::of(&self.camera);
+
+        // A cursor whose structural epochs and camera family match the current
+        // scene describes the same projection space, so a difference against it
+        // is meaningful. Anything else — no cursor, a rebuilt membership base,
+        // or a camera-family change — forces a full resync. When in doubt, a
+        // full snapshot is slow-but-correct; a delta computed across a changed
+        // base could ship a wrong tile.
+        let can_delta = self.view_query_cursors.get(dataset_id).is_some_and(|c| {
+            c.content == content && c.layout == layout && c.asset == asset && c.mode == mode
+        });
+
+        let new_entries: HashMap<ImageId, QuantizedEntity> = result
+            .visible_entities
+            .iter()
+            .map(|e| (e.image_id.clone(), QuantizedEntity::of(e)))
+            .collect();
+
+        if !can_delta {
+            self.view_query_cursors.insert(
+                dataset_id.clone(),
+                ViewQueryCursor {
+                    content,
+                    layout,
+                    asset,
+                    mode,
+                    entries: new_entries,
+                },
+            );
+            return Some(ViewQueryDelta::Full(result));
+        }
+
+        let epochs = result.epochs.clone();
+
+        let (entered, left, changed) = {
+            // Present because `can_delta` is true.
+            let cursor = &self.view_query_cursors[dataset_id];
+            view_query_diff(&cursor.entries, &result.visible_entities, &new_entries)
+        };
+
+        self.view_query_cursors.insert(
+            dataset_id.clone(),
+            ViewQueryCursor {
+                content,
+                layout,
+                asset,
+                mode,
+                entries: new_entries,
+            },
+        );
+
+        Some(ViewQueryDelta::Delta {
+            epochs,
+            entered,
+            left,
+            changed,
+        })
+    }
+}
+
+/// Classify the current query against the prior snapshot into the delta
+/// vectors, each ordered by `image_id`.
+///
+/// Records are keyed by their unique `image_id`, never `entity_id` — an entity
+/// can own several images (each its own member/record with its own pyramid
+/// depth), so keying on `entity_id` would collapse distinct records and lose
+/// their individual `ideal_target_lod`.
+///
+/// - `entered`: a current record whose `image_id` is absent from `prev`.
+/// - `changed`: a current record whose `image_id` is in `prev` with a differing
+///   quantized state.
+/// - `left`: a `prev` `image_id` absent from the current set (`new_entries`).
+///
+/// `new_entries` is the current set already reduced to quantized state and
+/// keyed by `image_id`, passed in so the caller can reuse it to reseed the
+/// cursor without rebuilding it.
+fn view_query_diff(
+    prev: &HashMap<ImageId, QuantizedEntity>,
+    current: &[EntityQueryResult],
+    new_entries: &HashMap<ImageId, QuantizedEntity>,
+) -> (Vec<EntityQueryResult>, Vec<ImageId>, Vec<EntityQueryResult>) {
+    let mut entered = Vec::new();
+    let mut changed = Vec::new();
+    for entry in current {
+        match prev.get(&entry.image_id) {
+            None => entered.push(entry.clone()),
+            Some(before) if *before != QuantizedEntity::of(entry) => changed.push(entry.clone()),
+            Some(_) => {}
+        }
+    }
+
+    let mut left: Vec<ImageId> = prev
+        .keys()
+        .filter(|id| !new_entries.contains_key(*id))
+        .cloned()
+        .collect();
+
+    entered.sort_by(|a, b| a.image_id.0.cmp(&b.image_id.0));
+    changed.sort_by(|a, b| a.image_id.0.cmp(&b.image_id.0));
+    left.sort_by(|a, b| a.0.cmp(&b.0));
+
+    (entered, left, changed)
 }
 
 /// Resolve which layout to use for a dataset.
@@ -1966,6 +2171,134 @@ pub(crate) mod test_helpers {
         }
     }
 
+    /// A Single-kind dataset with ONE entity (`owner`, EntityKind::Image) at `position`,
+    /// owning multiple images with DIFFERING pyramid depths — for exercising the
+    /// duplicate-owner delta path. Each `(image_id, num_levels, base_px)` yields an
+    /// ImageSpec owned by `owner` whose multiscale has `num_levels` levels (level i is a
+    /// square `base_px >> i` on X/Y, single Z/T/C, chunk 256), Uint16, Proxied fetch.
+    pub fn make_multi_image_owner_opened(
+        id: &str,
+        owner: &str,
+        images: &[(&str, u32, u64)], // (image_id, num_levels, base_px_xy)
+        position: [f64; 2],
+    ) -> DatasetOpened {
+        use lucida_content::layout::EntityPlacement;
+
+        let owner_id = EntityId(owner.to_string());
+
+        let entities = vec![Entity {
+            id: owner_id.clone(),
+            kind: EntityKind::Image,
+            parent: None,
+            labels: EntityLabels {
+                name: Some(owner.to_string()),
+                ..Default::default()
+            },
+        }];
+
+        let placements = vec![EntityPlacement {
+            entity_id: owner_id.clone(),
+            position,
+        }];
+
+        let mut image_specs = Vec::new();
+        let mut fetch_images = Vec::new();
+
+        for (image_id, num_levels, base_px) in images {
+            let image_id = ImageId(image_id.to_string());
+            let chunk_shape = [1, 1, 1, 256, 256];
+            let levels = (0..*num_levels)
+                .map(|i| {
+                    let dim = (base_px >> i).max(1);
+                    let shape = [1, 1, 1, dim, dim];
+                    LevelGeometry {
+                        level_index: i,
+                        shape,
+                        chunk_shape,
+                        grid_shape: [
+                            shape[0].div_ceil(chunk_shape[0]),
+                            shape[1].div_ceil(chunk_shape[1]),
+                            shape[2].div_ceil(chunk_shape[2]),
+                            shape[3].div_ceil(chunk_shape[3]),
+                            shape[4].div_ceil(chunk_shape[4]),
+                        ],
+                        scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                    }
+                })
+                .collect();
+
+            image_specs.push(ImageSpec {
+                image_id: image_id.clone(),
+                owner: owner_id.clone(),
+                multiscale: MultiscaleInfo {
+                    axes: vec![
+                        Axis {
+                            name: "t".to_string(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".to_string(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                    ],
+                    levels,
+                    coarse_level_index: None,
+                    generated_levels: vec![],
+                    data_type: DataType::Uint16,
+                    pinned_axes: vec![],
+                    channel_infos: vec![],
+                },
+            });
+
+            fetch_images.push(ProxiedImageSpec {
+                image_id,
+                wire_format: WireFormat::Raw {
+                    data_type: DataType::Uint16,
+                },
+            });
+        }
+
+        let layout = LayoutSpec {
+            id: LayoutId("default".into()),
+            name: "Default".into(),
+            placements,
+        };
+
+        let manifest = DatasetManifest::new(
+            DatasetId(id.to_string()),
+            id.to_string(),
+            DatasetKind::Single,
+            entities,
+            vec![],
+            image_specs,
+            vec![layout],
+            Some(LayoutId("default".into())),
+        );
+
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
+            images: fetch_images,
+        });
+
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+            opener_client_id: None,
+        }
+    }
+
     /// Create a DatasetOpened for a collection of `groups` placed group
     /// entities, each parenting `tiles_per_group` tile entities whose
     /// positions compose from the group placement plus a tile→group
@@ -2242,6 +2575,36 @@ mod tests {
         assert!(!scene.dataset_settings.contains_key(&ds1_id));
         assert!(scene.dataset_settings.contains_key(&ds2_id));
         assert!(!scene.derived.contains_key(&ds1_id));
+    }
+
+    #[test]
+    fn remove_dataset_command_clears_view_query_cursor() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened("ds1", "first", 1))
+                .into(),
+        );
+
+        // A first delta query seeds the per-dataset cursor.
+        scene.view_query_delta(&DatasetId("ds1".into()));
+        assert!(
+            scene
+                .view_query_cursors
+                .contains_key(&DatasetId("ds1".into()))
+        );
+
+        // The reachable production removal path (command apply) must prune it.
+        scene.apply(
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("ds1".into()),
+            }
+            .into(),
+        );
+        assert!(
+            !scene
+                .view_query_cursors
+                .contains_key(&DatasetId("ds1".into()))
+        );
     }
 
     #[test]
@@ -4041,5 +4404,239 @@ mod tests {
             "4× members took {ratio:.1}× as long ({t1:?} → {t4:?}); \
              expected near-linear scaling"
         );
+    }
+
+    // ---- view_query_diff (pure classifier) ----
+
+    fn record(id: &str, visible: bool, lod: u32, kind: EntityKind) -> EntityQueryResult {
+        EntityQueryResult {
+            entity_id: EntityId(id.to_string()),
+            image_id: ImageId(format!("{id}-image")),
+            kind,
+            visible,
+            projected_diagonal_px: 1.0,
+            projected_area_px2: 1.0,
+            centroid_world: [0.0, 0.0, 0.0],
+            ideal_target_lod: lod,
+            importance: 1.0,
+        }
+    }
+
+    fn snapshot(current: &[EntityQueryResult]) -> HashMap<ImageId, QuantizedEntity> {
+        current
+            .iter()
+            .map(|e| (e.image_id.clone(), QuantizedEntity::of(e)))
+            .collect()
+    }
+
+    #[test]
+    fn diff_reports_entered_left_and_changed() {
+        // prev: a (visible, lod 0), b (visible, lod 1)
+        let prev_records = [
+            record("a", true, 0, EntityKind::Image),
+            record("b", true, 1, EntityKind::Image),
+        ];
+        let prev = snapshot(&prev_records);
+
+        // current: a unchanged, b changed (lod 1 → 2), c entered; b's continuous
+        // fields differ too but that is irrelevant.
+        let current = [
+            record("a", true, 0, EntityKind::Image),
+            record("b", true, 2, EntityKind::Image),
+            record("c", false, 3, EntityKind::Tile),
+        ];
+        let new_entries = snapshot(&current);
+        let (entered, left, changed) = view_query_diff(&prev, &current, &new_entries);
+
+        assert_eq!(
+            entered
+                .iter()
+                .map(|e| e.entity_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
+        assert_eq!(
+            changed
+                .iter()
+                .map(|e| e.entity_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert!(left.is_empty());
+        // `a` is unchanged, so it appears in none of the vectors.
+        assert!(!entered.iter().chain(&changed).any(|e| e.entity_id.0 == "a"));
+    }
+
+    #[test]
+    fn diff_reports_left_when_membership_shrinks() {
+        let prev_records = [
+            record("a", true, 0, EntityKind::Image),
+            record("b", true, 0, EntityKind::Image),
+        ];
+        let prev = snapshot(&prev_records);
+        let current = [record("a", true, 0, EntityKind::Image)];
+        let new_entries = snapshot(&current);
+
+        let (entered, left, changed) = view_query_diff(&prev, &current, &new_entries);
+        assert!(entered.is_empty());
+        assert!(changed.is_empty());
+        assert_eq!(left, vec![ImageId("b-image".into())]);
+    }
+
+    #[test]
+    fn diff_visibility_flip_is_a_change_not_a_departure() {
+        // An entity that stays in the set but flips visible is `changed`,
+        // never `left` — presence is membership, not on-screen visibility.
+        let prev_records = [record("a", true, 0, EntityKind::Image)];
+        let prev = snapshot(&prev_records);
+        let current = [record("a", false, 0, EntityKind::Image)];
+        let new_entries = snapshot(&current);
+
+        let (entered, left, changed) = view_query_diff(&prev, &current, &new_entries);
+        assert!(entered.is_empty());
+        assert!(left.is_empty());
+        assert_eq!(changed.len(), 1);
+        assert!(!changed[0].visible);
+    }
+
+    #[test]
+    fn diff_kind_change_is_a_change() {
+        let prev_records = [record("a", true, 0, EntityKind::Image)];
+        let prev = snapshot(&prev_records);
+        let current = [record("a", true, 0, EntityKind::Tile)];
+        let new_entries = snapshot(&current);
+
+        let (_, _, changed) = view_query_diff(&prev, &current, &new_entries);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].kind, EntityKind::Tile);
+    }
+
+    #[test]
+    fn diff_ignores_continuous_only_changes() {
+        let prev_records = [record("a", true, 0, EntityKind::Image)];
+        let prev = snapshot(&prev_records);
+        // Same quantized state, different continuous fields.
+        let mut moved = record("a", true, 0, EntityKind::Image);
+        moved.importance = 999.0;
+        moved.projected_area_px2 = 42.0;
+        moved.centroid_world = [7.0, 8.0, 9.0];
+        let current = [moved];
+        let new_entries = snapshot(&current);
+
+        let (entered, left, changed) = view_query_diff(&prev, &current, &new_entries);
+        assert!(entered.is_empty());
+        assert!(left.is_empty());
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn diff_vectors_are_sorted_by_image_id() {
+        // Records are keyed and ordered by `image_id`, not `entity_id`. Build a
+        // fixture where the two orders DIVERGE — entity_id lexical order is the
+        // reverse of image_id lexical order — so the assertions genuinely pin
+        // the `image_id` sort contract and would fail if the sort regressed to
+        // `entity_id`.
+        let rec = |entity_id: &str, image_id: &str, lod: u32| EntityQueryResult {
+            entity_id: EntityId(entity_id.to_string()),
+            image_id: ImageId(image_id.to_string()),
+            kind: EntityKind::Image,
+            visible: true,
+            projected_diagonal_px: 1.0,
+            projected_area_px2: 1.0,
+            centroid_world: [0.0, 0.0, 0.0],
+            ideal_target_lod: lod,
+            importance: 1.0,
+        };
+
+        // (entity_id, image_id): ("z", "img-a"), ("y", "img-b"), ("x", "img-c").
+        // image_id order is a→b→c; entity_id order is x→y→z (the reverse).
+
+        // entered: fresh membership, supplied in a shuffled input order.
+        let entered_fixture = [
+            rec("y", "img-b", 0),
+            rec("x", "img-c", 0),
+            rec("z", "img-a", 0),
+        ];
+        let entered_entries = snapshot(&entered_fixture);
+        let (entered, _, _) = view_query_diff(&HashMap::new(), &entered_fixture, &entered_entries);
+        assert_eq!(
+            entered
+                .iter()
+                .map(|e| e.image_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["img-a", "img-b", "img-c"]
+        );
+        // Sanity: those correspond to entity_ids in reverse order, proving the
+        // keys diverge (an entity_id sort would yield img-c, img-b, img-a).
+        assert_eq!(
+            entered
+                .iter()
+                .map(|e| e.entity_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z", "y", "x"]
+        );
+
+        // changed: same membership, quantized state (lod) differs; shuffled.
+        let prev_changed = [
+            rec("z", "img-a", 0),
+            rec("y", "img-b", 0),
+            rec("x", "img-c", 0),
+        ];
+        let current_changed = [
+            rec("y", "img-b", 5),
+            rec("x", "img-c", 5),
+            rec("z", "img-a", 5),
+        ];
+        let changed_entries = snapshot(&current_changed);
+        let (_, _, changed) =
+            view_query_diff(&snapshot(&prev_changed), &current_changed, &changed_entries);
+        assert_eq!(
+            changed
+                .iter()
+                .map(|e| e.image_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["img-a", "img-b", "img-c"]
+        );
+
+        // left: entities present in prev, dropped from current; shuffled prev.
+        let prev_left = [
+            rec("y", "img-b", 0),
+            rec("x", "img-c", 0),
+            rec("z", "img-a", 0),
+        ];
+        let current_left: [EntityQueryResult; 0] = [];
+        let left_entries = snapshot(&current_left);
+        let (_, left, _) = view_query_diff(&snapshot(&prev_left), &current_left, &left_entries);
+        assert_eq!(
+            left.iter().map(|id| id.0.as_str()).collect::<Vec<_>>(),
+            vec!["img-a", "img-b", "img-c"]
+        );
+    }
+
+    #[test]
+    fn diff_re_entry_after_departure_arrives_in_entered() {
+        // Step 1: a leaves.
+        let s0 = [
+            record("a", true, 0, EntityKind::Image),
+            record("b", true, 0, EntityKind::Image),
+        ];
+        let s1 = [record("b", true, 0, EntityKind::Image)];
+        let m1 = snapshot(&s1);
+        let (_, left, _) = view_query_diff(&snapshot(&s0), &s1, &m1);
+        assert_eq!(left, vec![ImageId("a-image".into())]);
+
+        // Step 2: a returns — because the prior snapshot fully dropped it, it
+        // reappears as `entered` with a full record, not silently retained.
+        let s2 = [
+            record("a", true, 5, EntityKind::Image),
+            record("b", true, 0, EntityKind::Image),
+        ];
+        let m2 = snapshot(&s2);
+        let (entered, left, changed) = view_query_diff(&m1, &s2, &m2);
+        assert_eq!(entered.len(), 1);
+        assert_eq!(entered[0].entity_id.0, "a");
+        assert_eq!(entered[0].ideal_target_lod, 5);
+        assert!(left.is_empty());
+        assert!(changed.is_empty());
     }
 }
