@@ -288,7 +288,10 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::DatasetPresenceUpdate { .. } => {
             &["session/server_dataset_presence_update.json"]
         }
-        ServerMessage::DatasetOpenProgress { .. } => &["session/server_dataset_open_progress.json"],
+        ServerMessage::DatasetOpenProgress { .. } => &[
+            "session/server_dataset_open_progress.json",
+            "session/server_dataset_open_progress_warning.json",
+        ],
         ServerMessage::OpenDatasetSucceeded { .. } => {
             &["session/server_open_dataset_succeeded.json"]
         }
@@ -1572,6 +1575,40 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     dataset_source_id: Some("source-9b31".into()),
                     detail: Some("1 derived level over 2 source levels".into()),
                     warning: false,
+                },
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/request_id",
+                    "/url",
+                    "/diagnostic",
+                    "/diagnostic/stage",
+                    "/diagnostic/message",
+                ],
+            ),
+        ),
+        (
+            // A non-fatal import concern: `warning: true` is the durable-notice
+            // signal a client keeps visible past open completion. This is the
+            // one progress golden that exercises the serialized `warning` field
+            // (the ordinary progress golden above leaves it false, so it is
+            // skipped on the wire) — the byte lock therefore covers both the
+            // present-and-true and absent-when-false encodings.
+            "session/server_dataset_open_progress_warning.json",
+            ServerMessage::DatasetOpenProgress {
+                request_id: "web-7d2f45aa".into(),
+                url: "gs://lucida-fixtures/sampled-collection-01.zarr".into(),
+                diagnostic: DatasetOpenProgressDiagnostic {
+                    stage: DatasetOpenStage::MetadataImport,
+                    message: "labels were sampled during import; some tiles were not inspected \
+                              and may carry additional labels"
+                        .into(),
+                    workspace_dataset_id: Some(DatasetId("wds-collection-77".into())),
+                    dataset_source_id: None,
+                    detail: None,
+                    warning: true,
                 },
             },
             req(

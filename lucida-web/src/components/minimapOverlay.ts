@@ -228,14 +228,14 @@ export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: M
 }
 
 /**
- * Draw the Z-DEPENDENT overlay layer — the per-member slice plane and viewport
- * rectangle (slice mode) — plus the orientation cube, on top of the (already
- * composited) static layer. Does NOT clear: it strokes over the static layer.
- * Re-run every overlay callback, including a pure Z-scrub, because the slice
- * plane / viewport indicators track the current plane.
+ * Draw the Z-plane sub-layer — the per-member slice planes (slice mode only),
+ * which depend on the current Z-plane but not on pan/zoom. Draws NOTHING in
+ * volume mode. Does NOT clear: it strokes over whatever surface it targets
+ * (a dedicated offscreen cache canvas), so the consumer clears first.
+ * Re-stroked only on a Z-scrub or geometry change, not on a pan/zoom.
  */
-export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, sliceViewports, mode, canvasW, canvasH, currentZ, datasetDims, theta, phi } = data;
+export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
+  const { viewProj, layers, mode, canvasW, canvasH, currentZ, datasetDims } = data;
 
   if (mode === "slice") {
     // Slice plane (per-member — shows Z within each tile)
@@ -244,7 +244,19 @@ export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: 
       if (!dims) continue;
       drawSlicePlane(ctx, viewProj, layer.modelMatrix, currentZ, dims.depth, canvasW, canvasH, "rgba(255,200,50,0.25)");
     }
+  }
+}
 
+/**
+ * Draw the viewport sub-layer — the per-member viewport rectangles (slice mode)
+ * plus the orientation cube (both modes, drawn last). These are cheap (bounded
+ * by the visible viewports, not the member count) and are re-stroked every
+ * overlay callback. Does NOT clear: it strokes over the composited layers.
+ */
+export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
+  const { viewProj, sliceViewports, mode, canvasW, canvasH, currentZ, theta, phi } = data;
+
+  if (mode === "slice") {
     // View rectangle intersections (per-member, in member-local voxel coordinates)
     for (const viewport of sliceViewports) {
       drawSliceViewportRect(
@@ -257,6 +269,27 @@ export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: 
 
   // Orientation cube (drawn last, on top of everything)
   drawOrientationCube(ctx, theta, phi, canvasW, canvasH);
+}
+
+/**
+ * Whether the Z-plane sub-layer cache must be redrawn: on a geometry change
+ * (`staticDirty`), the first draw (`prevZ === null`), or a Z-scrub
+ * (`currentZ !== prevZ`). A pan/zoom with unchanged Z reuses the cached layer.
+ */
+export function zPlaneLayerDirty(data: MinimapOverlayData, prevZ: number | null): boolean {
+  return data.staticDirty || prevZ === null || data.currentZ !== prevZ;
+}
+
+/**
+ * Draw the Z-DEPENDENT overlay layer — the per-member slice plane and viewport
+ * rectangle (slice mode) — plus the orientation cube, on top of the (already
+ * composited) static layer. Does NOT clear: it strokes over the static layer.
+ * Re-run every overlay callback, including a pure Z-scrub, because the slice
+ * plane / viewport indicators track the current plane.
+ */
+export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
+  drawZPlaneOverlays(ctx, data);
+  drawViewportOverlays(ctx, data);
 }
 
 /**

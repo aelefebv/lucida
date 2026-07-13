@@ -6,6 +6,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // holding live resources (WebSocket, decode workers, request timers) with
 // instance-recording doubles. The Session and its catalogs are real.
 vi.mock("./bridge.ts", () => {
+  // The real bridge stamps and returns a unique request id per open send;
+  // mirror that with a monotonic counter so the double matches its contract.
+  let openRequestCounter = 0;
   class MockBridge {
     static instances: MockBridge[] = [];
     handlers: unknown;
@@ -17,7 +20,7 @@ vi.mock("./bridge.ts", () => {
     sendDatasetPresence = vi.fn();
     sendCursor = vi.fn();
     sendFollow = vi.fn();
-    sendOpenRemoteDataset = vi.fn();
+    sendOpenRemoteDataset = vi.fn(() => `mock-open-req-${++openRequestCounter}`);
     subscribeBookmarkChanged = vi.fn(() => () => {});
     constructor(handlers: unknown, _url?: string, workspaceId?: string) {
       this.handlers = handlers;
@@ -68,6 +71,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
 
 import {
   SessionController,
+  MAX_OPEN_WARNINGS,
   type RemoteDatasetActivity,
   type SessionControllerDeps,
   type SessionControllerEvents,
@@ -84,6 +88,7 @@ const MockedBridge = Bridge as unknown as {
     destroy: ReturnType<typeof vi.fn>;
     sendPresence: ReturnType<typeof vi.fn>;
     sendFollow: ReturnType<typeof vi.fn>;
+    sendOpenRemoteDataset: ReturnType<typeof vi.fn>;
   }>;
 };
 const MockedContentSource = ProxiedContentSource as unknown as {
@@ -255,8 +260,9 @@ function makeHarness() {
   } satisfies SessionControllerDeps;
   const controller = new SessionController(deps);
   liveControllers.push(controller);
-  const handlers = MockedBridge.instances[MockedBridge.instances.length - 1].handlers;
-  return { controller, handlers, deps, events, scene, savedViewHooks, datasets };
+  const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
+  const handlers = bridge.handlers;
+  return { controller, handlers, bridge, deps, events, scene, savedViewHooks, datasets };
 }
 
 beforeEach(() => {
@@ -717,6 +723,430 @@ describe("SessionController error recovery and precedence", () => {
     const { handlers } = makeHarness();
     handlers.onConnected?.();
     expect(MockedCpuCache.instances[0].resetChunkFailureStreak).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SessionController durable import warnings", () => {
+  const sampledLabelNotice =
+    "labels were sampled during import; some tiles were not inspected";
+
+  it("collects a warning diagnostic durably and keeps it past open completion", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+
+    // Completion clears the transient spinner/progress but NOT the warning.
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "complete",
+      message: "dataset opened",
+    });
+    const activity = lastActivity(events);
+    expect(activity.loading).toBe(false);
+    expect(activity.progress).toBeNull();
+    expect(activity.warnings).toStrictEqual([sampledLabelNotice]);
+  });
+
+  it("appends multiple warnings from one open without dropping earlier ones", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: "first",
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "binding_build",
+      message: "second",
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual(["first", "second"]);
+  });
+
+  it("collects warnings from several datasets opened in one batch", () => {
+    // The multi-seed / source-url-restore flow opens many datasets in one
+    // synchronous pass, each through openRemoteDataset. Every open's warnings
+    // must survive — no per-open reset may silently drop all but the last.
+    const { controller, handlers, events } = makeHarness();
+
+    controller.openRemoteDataset("gs://a.zarr");
+    controller.openRemoteDataset("gs://b.zarr");
+
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: "warn-a",
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: "warn-b",
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual(["warn-a", "warn-b"]);
+  });
+
+  it("keeps an earlier open's warning when a later batch open reports none", () => {
+    // The worst-case regression: an earlier dataset warned, a later one in the
+    // same batch did not. A per-open reset would leave an EMPTY banner even
+    // though a real import warning was reported.
+    const { controller, handlers, events } = makeHarness();
+
+    controller.openRemoteDataset("gs://a.zarr");
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: "warn-a",
+      warning: true,
+    });
+
+    // A second open begins and completes with no warning of its own.
+    controller.openRemoteDataset("gs://b.zarr");
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "complete",
+      message: "dataset opened",
+    });
+
+    expect(lastActivity(events).warnings).toStrictEqual(["warn-a"]);
+  });
+
+  it("collects a warning frame that arrives after a later open began", () => {
+    // Frames are asynchronous: a warning for the first open can land after a
+    // second open has started. It must still be collected, not dropped as a
+    // superseded straggler.
+    const { controller, handlers, events } = makeHarness();
+
+    controller.openRemoteDataset("gs://a.zarr");
+    controller.openRemoteDataset("gs://b.zarr");
+
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: "warn-b",
+      warning: true,
+    });
+    // Late frame for the first open.
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: "warn-a",
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual(["warn-b", "warn-a"]);
+  });
+
+  it("ordinary (non-warning) progress is never collected as a warning", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: "reading metadata",
+    });
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: "reading metadata again",
+      warning: false,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("dismissOpenWarnings clears every collected warning", () => {
+    const { controller, handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: "warn-a",
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: "warn-b",
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual(["warn-a", "warn-b"]);
+
+    controller.dismissOpenWarnings();
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("a fresh open does not drop a previous open's collected warning", () => {
+    // Opening another dataset is not a signal to discard an existing warning;
+    // only dismiss / failure / connection loss retire warnings.
+    const { controller, handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+
+    controller.openRemoteDataset("gs://y.zarr");
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+
+  it("collapses identical warning messages from one source to a single entry", () => {
+    const { handlers, events } = makeHarness();
+
+    for (const stage of ["metadata_import", "binding_build", "generated_coarse_planning"] as const) {
+      handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+        stage,
+        message: sampledLabelNotice,
+        warning: true,
+      });
+    }
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+
+  it("shows an identical warning reported by two sources only once", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+
+  it("ignores an empty or whitespace-only warning message", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: "   ",
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "binding_build",
+      message: "",
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("a failed open clears only its own source's warnings", () => {
+    // Two datasets in one batch each warn; one open then fails. The failed
+    // open's warning goes (so it does not sit beside the error), but the
+    // sibling open's warning must remain.
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: "warn-a",
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: "warn-b",
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual(["warn-a", "warn-b"]);
+
+    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    expect(lastActivity(events).warnings).toStrictEqual(["warn-b"]);
+  });
+
+  it("a failed open keeps a shared warning another source still reports", () => {
+    // Both opens reported the same notice; failing one must not remove it
+    // while the other still stands behind it.
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-a", "gs://a.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+
+  it("a disconnect clears every collected warning", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    handlers.onDisconnect?.();
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("a workspace-archived clears every collected warning", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    handlers.onWorkspaceArchived?.("ws-1");
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("removing a dataset leaves collected warnings intact", () => {
+    // Warnings are keyed by source url, not workspace dataset id; a removal
+    // (user drop, or a resync membership sweep) carries only the id, so it must
+    // not clear warnings — doing so unconditionally would drop unrelated
+    // datasets' live warnings. They retire on dismiss / connection loss.
+    const { handlers, events } = makeHarness();
+
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+
+    handlers.onCommand(2, JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
+    expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+});
+
+describe("SessionController import-warning cap", () => {
+  /** Feed `count` distinct warning frames from one source, as the server does
+   *  for a collection with many malformed members (one unique notice each). */
+  function floodWarnings(
+    handlers: BridgeHandlers,
+    url: string,
+    count: number,
+    label = "warn",
+  ): void {
+    for (let i = 0; i < count; i++) {
+      handlers.onDatasetOpenProgress?.("req-flood", url, {
+        stage: "metadata_import",
+        message: `${label}-${i}`,
+        warning: true,
+      });
+    }
+  }
+
+  it("caps the retained list at MAX_OPEN_WARNINGS and counts the rest as overflow", () => {
+    const { handlers, events } = makeHarness();
+    const total = MAX_OPEN_WARNINGS + 25;
+
+    floodWarnings(handlers, "gs://collection.zarr", total);
+
+    const activity = lastActivity(events);
+    // The observable list never exceeds the cap, no matter how many arrive.
+    expect(activity.warnings).toHaveLength(MAX_OPEN_WARNINGS);
+    // It retains the FIRST cap-worth, in arrival order.
+    expect(activity.warnings).toStrictEqual(
+      Array.from({ length: MAX_OPEN_WARNINGS }, (_, i) => `warn-${i}`),
+    );
+    // Everything past the cap is preserved as a count, not silently dropped.
+    expect(activity.warningsOverflow).toBe(25);
+  });
+
+  it("never empties the warning signal under a flood far exceeding the cap", () => {
+    // z6o: a capped DISPLAY is fine; a dropped warning-SIGNAL is not. Even at
+    // thousands of distinct warnings the list must stay non-empty.
+    const { handlers, events } = makeHarness();
+    const total = MAX_OPEN_WARNINGS * 160; // 8000 at the default cap
+
+    floodWarnings(handlers, "gs://collection.zarr", total);
+
+    const activity = lastActivity(events);
+    expect(activity.warnings.length).toBeGreaterThan(0);
+    expect(activity.warnings).toHaveLength(MAX_OPEN_WARNINGS);
+    expect(activity.warningsOverflow).toBe(total - MAX_OPEN_WARNINGS);
+  });
+
+  it("warnings past the cap grow only the overflow count, not the retained list", () => {
+    // The mechanism that keeps collecting O(N) rather than O(N^2): once the cap
+    // is reached the store stops growing, so each further collect touches only
+    // the bounded store and the counter — the retained list is untouched.
+    const { handlers, events } = makeHarness();
+
+    floodWarnings(handlers, "gs://collection.zarr", MAX_OPEN_WARNINGS);
+    const atCap = [...lastActivity(events).warnings];
+    expect(atCap).toHaveLength(MAX_OPEN_WARNINGS);
+    expect(lastActivity(events).warningsOverflow).toBe(0);
+
+    // 4000 more distinct warnings: none change the retained list.
+    for (let i = 0; i < 4000; i++) {
+      handlers.onDatasetOpenProgress?.("req-flood", "gs://collection.zarr", {
+        stage: "metadata_import",
+        message: `overflow-${i}`,
+        warning: true,
+      });
+    }
+    expect(lastActivity(events).warnings).toStrictEqual(atCap);
+    expect(lastActivity(events).warningsOverflow).toBe(4000);
+  });
+
+  it("dismiss retires the overflow count along with the warnings", () => {
+    const { controller, handlers, events } = makeHarness();
+    floodWarnings(handlers, "gs://collection.zarr", MAX_OPEN_WARNINGS + 10);
+    expect(lastActivity(events).warningsOverflow).toBe(10);
+
+    controller.dismissOpenWarnings();
+    const activity = lastActivity(events);
+    expect(activity.warnings).toStrictEqual([]);
+    expect(activity.warningsOverflow).toBe(0);
+  });
+
+  it("a failed open retires its own overflow, leaving a sibling's intact", () => {
+    // Two floods from two sources each overflow; failing one clears only its
+    // own retained warnings AND its own overflow tally.
+    const { handlers, events } = makeHarness();
+    floodWarnings(handlers, "gs://a.zarr", MAX_OPEN_WARNINGS + 5, "a");
+    // The display is already full from source a; b's are all overflow.
+    floodWarnings(handlers, "gs://b.zarr", 7, "b");
+    expect(lastActivity(events).warningsOverflow).toBe(5 + 7);
+
+    handlers.onOpenDatasetFailed?.("gs://b.zarr", "object not found");
+    // b contributed no retained warnings (display was already full), so the
+    // list is unchanged; only b's 7 overflow are retired.
+    const activity = lastActivity(events);
+    expect(activity.warnings).toHaveLength(MAX_OPEN_WARNINGS);
+    expect(activity.warningsOverflow).toBe(5);
+  });
+
+  it("keeps a sibling's overflow signal when the sole retaining open fails", () => {
+    // A fills the display and then some; B's warnings all land as overflow
+    // (display already full). When A fails, its retained list AND its overflow
+    // go — but B's warnings really happened, so B's overflow must survive as a
+    // signal even though there is no detailed text left to show.
+    const { handlers, events } = makeHarness();
+    floodWarnings(handlers, "gs://a.zarr", MAX_OPEN_WARNINGS + 5, "a");
+    floodWarnings(handlers, "gs://b.zarr", 3, "b");
+    expect(lastActivity(events).warningsOverflow).toBe(5 + 3);
+
+    handlers.onOpenDatasetFailed?.("gs://a.zarr", "object not found");
+    const activity = lastActivity(events);
+    // The detailed list emptied with A, but the fact of B's warnings survives.
+    expect(activity.warnings).toStrictEqual([]);
+    expect(activity.warningsOverflow).toBe(3);
+  });
+
+  it("a shared over-cap message is not double-counted as overflow", () => {
+    // A message already displayed via one source, reported again by another,
+    // must collapse (dedup) — never inflate the overflow count.
+    const { handlers, events } = makeHarness();
+    floodWarnings(handlers, "gs://a.zarr", MAX_OPEN_WARNINGS);
+    expect(lastActivity(events).warningsOverflow).toBe(0);
+
+    // Re-report the very first (already displayed) notice from a second source.
+    handlers.onDatasetOpenProgress?.("req-b", "gs://b.zarr", {
+      stage: "metadata_import",
+      message: "warn-0",
+      warning: true,
+    });
+    expect(lastActivity(events).warningsOverflow).toBe(0);
+    expect(lastActivity(events).warnings).toHaveLength(MAX_OPEN_WARNINGS);
   });
 });
 

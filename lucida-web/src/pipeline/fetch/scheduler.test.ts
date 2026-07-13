@@ -273,6 +273,62 @@ describe("Scheduler.markInFlightDone", () => {
 });
 
 // ---------------------------------------------------------------------------
+// markInFlightDoneIfCurrent
+// ---------------------------------------------------------------------------
+
+describe("Scheduler.markInFlightDoneIfCurrent", () => {
+  it("releases and returns true when the caller's controller still holds the key", () => {
+    const { scheduler, startCalls } = makeScheduler();
+    const r = req({ chunkKey: "k" });
+    scheduler.enqueue([r]);
+    scheduler.drain(() => 100);
+    expect(scheduler.inFlightSize).toBe(1);
+    expect(scheduler.inFlightBytes).toBe(100);
+
+    const controller = startCalls[0].controller;
+    expect(scheduler.markInFlightDoneIfCurrent(keyOf(r), controller)).toBe(true);
+    expect(scheduler.inFlightSize).toBe(0);
+    expect(scheduler.inFlightBytes).toBe(0);
+  });
+
+  it("preserves the slot and returns false when a superseding controller holds the key", () => {
+    const { scheduler, startCalls } = makeScheduler();
+    const r = req({ chunkKey: "k" });
+
+    // First controller starts the key, then the key is cancelled and
+    // re-enqueued so a fresh controller supersedes it under the same key.
+    scheduler.enqueue([r]);
+    scheduler.drain(() => 100);
+    const superseded = startCalls[0].controller;
+
+    scheduler.cancelOne(keyOf(r));
+    scheduler.enqueue([r]);
+    scheduler.drain(() => 100);
+    const successor = startCalls[1].controller;
+    expect(successor).not.toBe(superseded);
+    expect(scheduler.inFlightSize).toBe(1);
+
+    // The superseded controller frees nothing: the successor's slot and its
+    // bytes stay intact.
+    expect(scheduler.markInFlightDoneIfCurrent(keyOf(r), superseded)).toBe(false);
+    expect(scheduler.inFlightSize).toBe(1);
+    expect(scheduler.inFlightBytes).toBe(100);
+
+    // The successor's own controller releases it.
+    expect(scheduler.markInFlightDoneIfCurrent(keyOf(r), successor)).toBe(true);
+    expect(scheduler.inFlightSize).toBe(0);
+    expect(scheduler.inFlightBytes).toBe(0);
+  });
+
+  it("returns false for a key that is not in flight", () => {
+    const { scheduler } = makeScheduler();
+    const controller = new AbortController();
+    expect(scheduler.markInFlightDoneIfCurrent("missing", controller)).toBe(false);
+    expect(scheduler.inFlightBytes).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cancelOne
 // ---------------------------------------------------------------------------
 

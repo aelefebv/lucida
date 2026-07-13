@@ -251,6 +251,11 @@ describe("tickMinimap overview/overlay split", () => {
     zoom: number;
     center: [number, number];
     eye: [number, number, number];
+    /**
+     * The MAIN camera's inverse view-projection — the frustum's source. In fly
+     * mode a pure look-around changes ONLY this (eye + theta/phi stay fixed).
+     */
+    invViewProj: number[];
     order: string;
     settings: string;
     /** Bumped by a dataset add/remove (see readMinimapOverviewEpochs). */
@@ -269,6 +274,7 @@ describe("tickMinimap overview/overlay split", () => {
       zoom: 1,
       center: [0, 0],
       eye: [0, 0, 10],
+      invViewProj: new Array<number>(16).fill(0),
       order: JSON.stringify(["ds"]),
       settings: JSON.stringify({
         ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
@@ -298,7 +304,7 @@ describe("tickMinimap overview/overlay split", () => {
       scene_model_matrix_for: () => new Float32Array(16),
       inv_scene_model_matrix_for: () => new Float32Array(16),
       dataset_volume_shape: () => new Float32Array([9, 500, 500]),
-      inv_view_proj: () => new Float32Array(16),
+      inv_view_proj: () => new Float32Array(s.invViewProj),
     } as unknown as WasmScene;
     return s;
   }
@@ -613,6 +619,132 @@ describe("tickMinimap overview/overlay split", () => {
     scene.theta = 1.0;
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(2);
+  });
+
+  it("in volume mode re-renders an orbit from cached geometry without re-reading members", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "volume", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(1);
+    const firstViewProj = overlay.mock.calls[0][0].viewProj;
+
+    // A pure orbit changes only theta/phi. Member geometry is camera-invariant,
+    // so the O(members) reads (positions + render matrices + per-dataset scene
+    // matrices + volume shape) must NOT rerun — yet the overview MUST redraw for
+    // the new angle and the overlay MUST refresh (frustum + boxes reorient).
+    const posSpy = vi.spyOn(scene.wasm, "member_positions");
+    const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
+    const idSpy = vi.spyOn(scene.wasm, "member_render_ids");
+    const dsMatSpy = vi.spyOn(scene.wasm, "scene_model_matrix_for");
+    const volShapeSpy = vi.spyOn(scene.wasm, "dataset_volume_shape");
+    // Return a distinct camera for the new angle so the overlay's viewProj moves.
+    const camSpy = vi.spyOn(scene.wasm, "minimap_camera").mockReturnValue(
+      new Float32Array(35).fill(7),
+    );
+
+    scene.theta = 1.0;
+    scene.phi = 0.3;
+    tickMinimap(ctx, state, 0);
+
+    expect(renderCount.n).toBe(2);
+    expect(posSpy).not.toHaveBeenCalled();
+    expect(matSpy).not.toHaveBeenCalled();
+    expect(idSpy).not.toHaveBeenCalled();
+    expect(dsMatSpy).not.toHaveBeenCalled();
+    expect(volShapeSpy).not.toHaveBeenCalled();
+    // The minimap camera was recomputed for the new orientation.
+    expect(camSpy).toHaveBeenCalled();
+
+    // Overlay refreshed: static layer re-stroked (boxes/frustum moved), the
+    // frustum tracks the new angle, and viewProj reflects the new camera.
+    expect(overlay).toHaveBeenCalledTimes(2);
+    const orbitCall = overlay.mock.calls[1][0];
+    expect(orbitCall.staticDirty).toBe(true);
+    expect(orbitCall.theta).toBe(1.0);
+    expect(orbitCall.phi).toBe(0.3);
+    expect(orbitCall.mainInvViewProj).not.toBeNull();
+    expect(Array.from(orbitCall.viewProj)).not.toEqual(Array.from(firstViewProj));
+  });
+
+  it("in volume mode re-strokes the frustum on a fly look-around without redrawing the overview", () => {
+    // Fly look-around: the view direction rotates while the eye stays put, so
+    // scene.eye_position() and the arcball theta/phi constants are UNCHANGED and
+    // only scene.inv_view_proj() (the main camera pose, the frustum's source)
+    // moves. The frustum must track the new orientation: the overlay callback
+    // must fire with the fresh mainInvViewProj and staticDirty = true, WITHOUT
+    // re-rendering the overview (minimap camera + member geometry unchanged) and
+    // WITHOUT re-reading any members.
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "volume", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(1);
+
+    const posSpy = vi.spyOn(scene.wasm, "member_positions");
+    const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
+    const idSpy = vi.spyOn(scene.wasm, "member_render_ids");
+    const camSpy = vi.spyOn(scene.wasm, "minimap_camera");
+
+    // Rotate the view direction only: eye + theta + phi fixed, pose moves.
+    scene.invViewProj = new Array<number>(16).fill(0).map((_, i) => i + 1);
+    tickMinimap(ctx, state, 0);
+
+    // No overview redraw, no minimap camera recompute, no member re-read.
+    expect(renderCount.n).toBe(1);
+    expect(camSpy).not.toHaveBeenCalled();
+    expect(posSpy).not.toHaveBeenCalled();
+    expect(matSpy).not.toHaveBeenCalled();
+    expect(idSpy).not.toHaveBeenCalled();
+
+    // Overlay re-stroked with the fresh pose; the frustum layer is static.
+    expect(overlay).toHaveBeenCalledTimes(2);
+    const lookCall = overlay.mock.calls[1][0];
+    expect(lookCall.staticDirty).toBe(true);
+    expect(lookCall.mainInvViewProj).not.toBeNull();
+    expect(Array.from(lookCall.mainInvViewProj as Float32Array)).toEqual(scene.invViewProj);
+    // Eye-only inputs did not move, so this is not an orbit: no viewProj change.
+    expect(lookCall.theta).toBe(scene.theta);
+    expect(lookCall.phi).toBe(scene.phi);
+
+    // A follow-up idle tick (stable pose) must early-return: no extra overlay
+    // call, no overview render — a stable inv_view_proj hashes to a stable key.
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(2);
+  });
+
+  it("in volume mode does not double-render the overview when a look-around accompanies an orbit", () => {
+    // An orbit moves theta/phi (→ camera key → one overview redraw) AND the main
+    // camera pose (inv_view_proj). The pose signal lives only in the overlay key,
+    // so it must NOT trigger a second/duplicate overview render.
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "volume", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+
+    scene.theta = 1.0;
+    scene.phi = 0.3;
+    scene.eye = [1, 2, 5];
+    scene.invViewProj = new Array<number>(16).fill(0).map((_, i) => i + 1);
+    tickMinimap(ctx, state, 0);
+
+    // Exactly one additional overview render (the camera-key path), not two.
+    expect(renderCount.n).toBe(2);
+    expect(overlay).toHaveBeenCalledTimes(2);
+    expect(overlay.mock.calls[1][0].staticDirty).toBe(true);
   });
 
   it("does nothing when the minimap is disabled", () => {

@@ -9,6 +9,7 @@
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
+import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { Axis } from "../axes.ts";
 import {
   getActiveChannels,
@@ -440,6 +441,41 @@ export class TickCoordinator {
     matrices: Map<string, { model: Float32Array; inv: Float32Array }>;
   }>();
   /**
+   * Per-dataset cache of the camera-independent inputs to
+   * {@link buildPlanningSnapshot}: the parsed `member_positions` record
+   * (the fixed 2D layout placement) and the two manifest-derived maps
+   * (`imageSpecById`, `parentByEntityId`). All three are pure functions of
+   * the scene's layout placement and the current dataset manifest, so a
+   * view move — which advances only the view epoch — leaves them
+   * byte-identical; recomputing them on every view-only replan is a wasted
+   * `member_positions` serde + JSON.parse plus two manifest walks on the
+   * interaction hot path.
+   *
+   * An entry is valid only when BOTH signals still match:
+   *   - `epochKey` — the content|layout|asset fingerprint (as
+   *     {@link matrixCacheByDataset}). `member_positions` is layout-derived,
+   *     so a reflow or an add/remove that moves placement bumps the epoch
+   *     and must recompute `positions`.
+   *   - `manifestRef` — the `ds.manifest` object reference. The manifest
+   *     maps derive from `ds.manifest`, which is swapped for a NEW object
+   *     when progressively-generated coarse/downsampled levels merge in —
+   *     a manifest change that carries no epoch bump. Reference identity is
+   *     the reliable change signal for that path, so a stale entry can
+   *     never serve outdated `imageSpecById` / `parentByEntityId` (and the
+   *     wrong level-of-detail set) after a new level arrives.
+   * On any mismatch all three inputs are recomputed and re-stored with the
+   * current epoch key and manifest reference. A manifest swap under an
+   * unchanged epoch also recomputes `positions`, which is harmless — it
+   * comes from the scene and is consistent within the tick.
+   */
+  private readonly snapshotInputCacheByDataset = new Map<string, {
+    epochKey: string;
+    manifestRef: DatasetManifest;
+    positions: Record<string, [number, number]>;
+    imageSpecById: Map<string, ImageSpec>;
+    parentByEntityId: Map<string, string | null>;
+  }>();
+  /**
    * Datasets whose worker-side cold state is known to hold exactly this
    * coordinator's `previousActiveSet` — the precondition for a view-move delta.
    * Set after a full cold state (or a delta) lands; a delta keeps it set because
@@ -695,6 +731,47 @@ export class TickCoordinator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
 
+      // Compute-or-reuse the camera-independent snapshot inputs (parsed
+      // `member_positions` + the two manifest maps). The entry is valid only
+      // when BOTH the placement epoch fingerprint AND the `ds.manifest`
+      // object reference are unchanged: `member_positions` is layout-derived
+      // (a reflow bumps the epoch), while the two manifest maps track
+      // `ds.manifest`, which is swapped for a new object — with no epoch bump
+      // — when progressively-generated levels merge in. A pure view move
+      // leaves both stable, so the whole entry is reused across the
+      // interaction hot path; any mismatch recomputes all three and re-stores
+      // the fresh key + manifest reference (recomputing `positions` on a
+      // manifest-only swap is harmless — the scene reports it consistently
+      // within the tick). Mirrors `matrixCacheByDataset` below.
+      const snapshotInputEpochKey =
+        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
+      let snapshotInputs = this.snapshotInputCacheByDataset.get(dsId);
+      if (
+        !snapshotInputs ||
+        snapshotInputs.epochKey !== snapshotInputEpochKey ||
+        snapshotInputs.manifestRef !== ds.manifest
+      ) {
+        const positions = JSON.parse(
+          ctx.scene.member_positions(dsId),
+        ) as Record<string, [number, number]>;
+        const imageSpecById = new Map<string, ImageSpec>();
+        for (const img of ds.manifest.images) {
+          imageSpecById.set(img.image_id, img);
+        }
+        const parentByEntityId = new Map<string, string | null>();
+        for (const ent of ds.manifest.entities) {
+          parentByEntityId.set(ent.id, ent.parent ?? null);
+        }
+        snapshotInputs = {
+          epochKey: snapshotInputEpochKey,
+          manifestRef: ds.manifest,
+          positions,
+          imageSpecById,
+          parentByEntityId,
+        };
+        this.snapshotInputCacheByDataset.set(dsId, snapshotInputs);
+      }
+
       // Build the planning snapshot from live WASM state. Returns null
       // when `view_query` produces no visible entities (dataset not yet
       // registered, etc.) — skip the dataset in that case.
@@ -713,6 +790,11 @@ export class TickCoordinator {
         currentEpochs,
         requestEpoch: this.requestEpoch,
         config: planningConfig,
+        precomputed: {
+          positions: snapshotInputs.positions,
+          imageSpecById: snapshotInputs.imageSpecById,
+          parentByEntityId: snapshotInputs.parentByEntityId,
+        },
       });
       if (!built) continue;
       const { snapshot, entities, visibleRegion, selection } = built;
@@ -1699,10 +1781,11 @@ export class TickCoordinator {
     // next full rebuild.)
     this.lastRebuildByDataset.delete(workerMemberId);
     this.lastVisibleDatasetIds.delete(workerMemberId);
-    // Drop the cached tile matrices and the delta-sync flag so a re-added
-    // dataset re-derives placement and re-syncs with a full cold state before
-    // any view-move delta can reference it.
+    // Drop the cached tile matrices, the cached snapshot inputs, and the
+    // delta-sync flag so a re-added dataset re-derives placement and re-syncs
+    // with a full cold state before any view-move delta can reference it.
     this.matrixCacheByDataset.delete(workerMemberId);
+    this.snapshotInputCacheByDataset.delete(workerMemberId);
     this.coldStateSyncedDatasets.delete(workerMemberId);
   }
 

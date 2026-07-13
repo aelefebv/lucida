@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
-import { drawStaticMinimapOverlays, drawDynamicMinimapOverlays } from "./minimapOverlay.ts";
+import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, zPlaneLayerDirty } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
 const MINIMAP_SIZE = 200;
@@ -21,6 +21,13 @@ export function Minimap({ client, activeLoop }: Props) {
   // rerun each Z step — only the cheap Z-dependent indicators are re-stroked.
   const staticLayerRef = useRef<HTMLCanvasElement | null>(null);
   const staticReadyRef = useRef(false);
+  // Offscreen cache of the Z-plane sub-layer (per-member slice planes). These
+  // depend on the current Z but not on pan/zoom, so a 2D pan/zoom blits this
+  // back verbatim; it is re-stroked only on a Z-scrub or geometry change. Only
+  // the cheap viewport rectangles + orientation cube are redrawn every frame.
+  const zLayerRef = useRef<HTMLCanvasElement | null>(null);
+  const zReadyRef = useRef(false);
+  const prevZRef = useRef<number | null>(null);
 
   // Effect 1: GPU init
   useEffect(() => {
@@ -56,6 +63,20 @@ export function Minimap({ client, activeLoop }: Props) {
         staticReadyRef.current = false;
       }
 
+      // Maintain the offscreen Z-plane cache at the current backing size.
+      let zLayer = zLayerRef.current;
+      if (!zLayer) {
+        zLayer = document.createElement("canvas");
+        zLayerRef.current = zLayer;
+        zReadyRef.current = false;
+      }
+      if (zLayer.width !== data.canvasW || zLayer.height !== data.canvasH) {
+        zLayer.width = data.canvasW;
+        zLayer.height = data.canvasH;
+        // A resize discards the backing store, so the cache must be rebuilt.
+        zReadyRef.current = false;
+      }
+
       // Rebuild the Z-invariant layer only when it changed (or the cache is
       // empty); a pure Z-scrub reuses it. `getContext` on a canvas that has
       // never had a 2D context is cheap and idempotent.
@@ -67,11 +88,26 @@ export function Minimap({ client, activeLoop }: Props) {
         }
       }
 
-      // Composite: cached static layer, then the fresh Z-dependent indicators
-      // on top — pixel-identical to a full redraw, in the same draw order.
+      // Rebuild the Z-plane sub-layer only on a Z-scrub or geometry change (or
+      // when the cache is empty / was just resized); a pan/zoom reuses it.
+      // `drawZPlaneOverlays` does not clear, so clear the offscreen first.
+      if (zPlaneLayerDirty(data, prevZRef.current) || !zReadyRef.current) {
+        const zCtx = zLayer.getContext("2d");
+        if (zCtx) {
+          zCtx.clearRect(0, 0, data.canvasW, data.canvasH);
+          drawZPlaneOverlays(zCtx, data);
+          zReadyRef.current = true;
+          prevZRef.current = data.currentZ;
+        }
+      }
+
+      // Composite: cached static layer, then the cached Z-plane layer, then the
+      // fresh viewport rectangles + orientation cube on top — pixel-identical to
+      // a full redraw, in the same draw order (source-over is associative).
       ctx.clearRect(0, 0, data.canvasW, data.canvasH);
       if (staticReadyRef.current) ctx.drawImage(staticLayer, 0, 0);
-      drawDynamicMinimapOverlays(ctx, data);
+      if (zReadyRef.current) ctx.drawImage(zLayer, 0, 0);
+      drawViewportOverlays(ctx, data);
     };
 
     activeLoop.setMinimap(true, MINIMAP_SIZE, overlayCallback);
