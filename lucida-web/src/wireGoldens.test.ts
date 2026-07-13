@@ -1067,11 +1067,45 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     const onDatasetOpenProgress = vi.fn();
     const { ws } = openBridge({ onDatasetOpenProgress });
     deliver(ws, raw);
+    // The wire omits `warning` when false; the bridge coerces it to a clean
+    // boolean before delivery, so the handler sees `warning: false`.
     expect(onDatasetOpenProgress).toHaveBeenCalledWith(
       "web-7d2f45aa",
       "gs://lucida-fixtures/kidney-multiplex.zarr",
-      expectedProgressDiagnostic,
+      { ...expectedProgressDiagnostic, warning: false },
     );
+  });
+
+  it("dataset_open_progress carries a durable import-warning flag", () => {
+    const raw = fixtureRaw("session/server_dataset_open_progress_warning.json");
+    COVERED_FIXTURES.add("session/server_dataset_open_progress_warning.json");
+    const expectedWarningDiagnostic: DatasetOpenProgressDiagnostic = {
+      stage: "metadata_import",
+      message:
+        "labels were sampled during import; some tiles were not inspected and may carry additional labels",
+      workspace_dataset_id: "wds-collection-77",
+      warning: true,
+    };
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "dataset_open_progress",
+      request_id: "web-7d2f45aa",
+      url: "gs://lucida-fixtures/sampled-collection-01.zarr",
+      diagnostic: expectedWarningDiagnostic,
+    });
+
+    const onDatasetOpenProgress = vi.fn();
+    const { ws } = openBridge({ onDatasetOpenProgress });
+    deliver(ws, raw);
+    expect(onDatasetOpenProgress).toHaveBeenCalledTimes(1);
+    const [requestId, url, diagnostic] = onDatasetOpenProgress.mock.calls[0] as [
+      string,
+      string,
+      DatasetOpenProgressDiagnostic,
+    ];
+    expect(requestId).toBe("web-7d2f45aa");
+    expect(url).toBe("gs://lucida-fixtures/sampled-collection-01.zarr");
+    expect(diagnostic.warning).toBe(true);
+    expect(diagnostic).toStrictEqual(expectedWarningDiagnostic);
   });
 
   it("open_dataset_succeeded: requester-only success envelope", () => {
