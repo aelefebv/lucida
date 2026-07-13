@@ -55,6 +55,20 @@ export interface TransientDescriptorParams {
   colormapMode?: number;
   /** Overlay opacity used in categorical mode (default `1`). */
   labelOpacity?: number;
+  /**
+   * Bricked LOD 0: when present, the single LOD is written with these
+   * chunk-grid dims and per-brick voxel dims (`[X, Y, Z]` order, matching
+   * `volumeDims`), so the shader walks a slot-grid atlas via its indirection
+   * buffer. `levelDims` is `volumeDims`, `indirectionOffset` 0, `lodCount` 1.
+   *
+   * When ABSENT, LOD 0 covers the whole volume in a single slot
+   * (`gridDims = [1,1,1]`, `chunkDims = volumeDims`) — the byte-identical
+   * single-tile layout the minimap/thumbnail path relies on.
+   */
+  lod?: {
+    gridDims: [number, number, number];
+    chunkDims: [number, number, number];
+  };
 }
 
 /**
@@ -106,23 +120,28 @@ export function serializeTransientDescriptor(
   u32[OFFSET_COLORMAP_MODE / 4] = (params.colormapMode ?? 0) >>> 0;
   f32[OFFSET_LABEL_OPACITY / 4] = params.labelOpacity ?? 1;
 
-  // Single LOD covering the full volume (single-slot atlas).
+  // Single LOD covering the volume. Either one slot for the whole volume
+  // (default) or the bricked grid supplied in `params.lod`.
   u32[OFFSET_LOD_COUNT / 4] = 1;
 
   const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
   const lodStrideU32 = DESCRIPTOR_LOD_INFO_SIZE / 4;
 
-  // LOD 0: level=0, offset=0, gridDims=(1,1,1), chunkDims=levelDims=volumeDims.
+  // LOD 0: level=0, offset=0. gridDims + chunkDims come from `params.lod` when
+  // present (bricked slot-grid atlas), else (1,1,1) + volumeDims (single slot).
+  // levelDims is always the volume extent.
+  const grid = params.lod?.gridDims ?? [1, 1, 1];
+  const chunk = params.lod?.chunkDims ?? params.volumeDims;
   u32[lodsBaseU32 + LOD_OFFSET_LEVEL / 4]              = 0;
   u32[lodsBaseU32 + LOD_OFFSET_INDIRECTION_OFFSET / 4] = 0;
   const gridBase = lodsBaseU32 + LOD_OFFSET_GRID_DIMS / 4;
-  u32[gridBase + 0] = 1;
-  u32[gridBase + 1] = 1;
-  u32[gridBase + 2] = 1;
+  u32[gridBase + 0] = grid[0];
+  u32[gridBase + 1] = grid[1];
+  u32[gridBase + 2] = grid[2];
   const chunkBase = lodsBaseU32 + LOD_OFFSET_CHUNK_DIMS / 4;
-  u32[chunkBase + 0] = params.volumeDims[0];
-  u32[chunkBase + 1] = params.volumeDims[1];
-  u32[chunkBase + 2] = params.volumeDims[2];
+  u32[chunkBase + 0] = chunk[0];
+  u32[chunkBase + 1] = chunk[1];
+  u32[chunkBase + 2] = chunk[2];
   const levelBase = lodsBaseU32 + LOD_OFFSET_LEVEL_DIMS / 4;
   u32[levelBase + 0] = params.volumeDims[0];
   u32[levelBase + 1] = params.volumeDims[1];

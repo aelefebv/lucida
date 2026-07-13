@@ -514,8 +514,9 @@ describe("resolveVisibleLabels — mode-aware, no stand-in", () => {
       },
     };
   }
-  // Slice-eligible (small X/Y) but volume-ineligible (Z busts the 3D per-axis
-  // cap) with no coarser level — eligible in 2D, not in 3D.
+  // Slice-eligible (small X/Y) but volume-ineligible: chunk-Z 1 over Z=4096 fans
+  // out to 4096 z-chunks, busting the volume chunk-count cap, with no coarser
+  // level — eligible in 2D, not in 3D.
   const deepZ = (name: string): LabelSpec => ({
     name,
     source_image_id: "img-0",
@@ -731,25 +732,89 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
   const vol = { datasetId: "ds-0", t: 0, z: 0, mode: "volume" as const, labelSettings: allOn(1) };
   const slice = { datasetId: "ds-0", t: 0, z: 0, mode: "slice" as const, labelSettings: allOn(1) };
 
-  it("skips a label whose Z exceeds the 3D limit — slice mode stays eligible", () => {
-    // 512×512×3000: fine in 2D (Z ignored), but Z>2048 in 3D with no coarser level.
+  it("renders a label whose Z busts the monolithic 3D limit when its bricks fit", () => {
+    // Z=2100 > the 2048 monolithic-texture limit, but bricking tiles it across
+    // slots: chunk-Z 64 → 33 z-bricks, X=Y=64 → one brick each → 33 chunks,
+    // ~33 MB padded. Under the old per-axis cap this was skipped; now the
+    // chunk-count + byte budgets admit it and it renders as bricks.
+    const m = manifestFor([{ shape: [1, 1, 2100, 64, 64], chunk: [1, 1, 64, 64, 64], scale: SCALE1 }]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.length).toBe(33); // gz=33, gy=gx=1
+    expect(reqs.every((r) => r.level === 0)).toBe(true);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(0);
+  });
+
+  it("renders a label whose X busts the monolithic 3D limit when its bricks fit", () => {
+    // The relax is per-axis, not Z-only: X=4096 > 2048 tiles into 8 x-bricks
+    // (chunk-X 512), ~4 MB padded → eligible at level 0.
+    const m = manifestFor([{ shape: [1, 1, 4, 4096, 64], chunk: [1, 1, 4, 512, 64], scale: SCALE1 }]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.length).toBe(8); // gy=8, gz=gx=1
+    expect(reqs.every((r) => r.level === 0)).toBe(true);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(0);
+  });
+
+  it("falls back to a coarser level when the finer level's single brick busts the 3D texture limit", () => {
+    // A "one chunk per plane" layout (common OME-Zarr): level 0 is a single
+    // 2100-wide brick, which exceeds the 2048 3D-texture floor. Its padded bytes
+    // (~40 MB) and chunk count (1) fit the budgets, so the byte/chunk checks alone
+    // would ADMIT it — but the atlas can't pack a 2100-wide brick, so it would
+    // render BLANK. The per-brick cap skips level 0 for the coarser level 1
+    // (1050-wide brick), which packs and renders.
+    const m = manifestFor([
+      { shape: [1, 1, 8, 600, 2100], chunk: [1, 1, 8, 600, 2100], scale: SCALE1 },
+      { shape: [1, 1, 8, 300, 1050], chunk: [1, 1, 8, 300, 1050], scale: [1, 1, 1, 2, 2] },
+    ]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.length).toBeGreaterThan(0);
+    expect(reqs.every((r) => r.level === 1)).toBe(true);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(1);
+  });
+
+  it("skips a label whose only level's brick busts the 3D limit — no blank; slice stays eligible", () => {
+    // The sole level is a single 2100-wide brick with no coarser fallback: volume
+    // mode is INELIGIBLE (renders nothing, a clean escape hatch) rather than
+    // admitting a level the atlas can't allocate. Slice mode draws from a single
+    // 2D tile bounded by the far larger 2D texture limit, so it stays eligible.
+    const m = manifestFor([{ shape: [1, 1, 8, 600, 2100], chunk: [1, 1, 8, 600, 2100], scale: SCALE1 }]);
+    expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })).toEqual([]);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "slice" })).toHaveLength(1);
+  });
+
+  it("DC1: a huge-Z level whose CHUNKED brick fits stays eligible under the per-brick cap", () => {
+    // Z=2100 busts the monolithic 3D limit, but the chunk-Z 64 brick (64 <= 2048)
+    // packs across slots. The per-brick cap gates the BRICK, not the extent, so
+    // this deep label remains eligible at level 0 (33 z-bricks) — the per-axis
+    // relax the feature depends on is preserved.
+    const m = manifestFor([{ shape: [1, 1, 2100, 64, 64], chunk: [1, 1, 64, 64, 64], scale: SCALE1 }]);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(0);
+    expect(computeLabelChunkRequests({ ...vol, manifest: m })).toHaveLength(33);
+  });
+
+  it("respects a caller-supplied per-brick cap (a tighter cap coarsens further)", () => {
+    const m = manifestFor([
+      { shape: [1, 1, 8, 600, 1024], chunk: [1, 1, 8, 600, 1024], scale: SCALE1 },
+      { shape: [1, 1, 8, 300, 512], chunk: [1, 1, 8, 300, 512], scale: [1, 1, 1, 2, 2] },
+    ]);
+    // Default floor (2048) accepts level 0 (1024-wide brick). A maxBrickDim3D of
+    // 600 rejects level 0's 1024-wide brick and takes level 1 (512-wide brick).
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(0);
+    expect(
+      resolveVisibleLabels(m, allOn(1), { mode: "volume", maxBrickDim3D: 600 })[0].levelIdx,
+    ).toBe(1);
+  });
+
+  it("skips a label whose padded bricks bust the byte budget — slice mode stays eligible", () => {
+    // 512×512×3000 in 256²×64 chunks: the per-axis dims no longer gate, and the
+    // chunk count fits (188), but the padded footprint (~3 GB) busts the 512 MB
+    // budget with no coarser level — volume-ineligible, slice unaffected.
     const m = manifestFor([{ shape: [1, 1, 3000, 512, 512], chunk: [1, 1, 64, 256, 256], scale: SCALE1 }]);
     expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
     expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })).toEqual([]);
     // Slice is unaffected by the 3D caps.
     expect(computeLabelChunkRequests({ ...slice, manifest: m }).length).toBeGreaterThan(0);
     expect(resolveVisibleLabels(m, allOn(1), { mode: "slice" })).toHaveLength(1);
-  });
-
-  it("coarsens past a level whose X/Y exceeds the 3D limit", () => {
-    const m = manifestFor([
-      { shape: [1, 1, 64, 4096, 4096], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }, // X/Y 4096 > 2048
-      { shape: [1, 1, 16, 1024, 1024], chunk: [1, 1, 16, 512, 512], scale: [1, 1, 4, 4, 4] }, // fits
-    ]);
-    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
-    expect(reqs.length).toBeGreaterThan(0);
-    expect(reqs.every((r) => r.level === 1)).toBe(true);
-    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(1);
   });
 
   it("coarsens past a level with too many chunks AND bounds the request count", () => {
@@ -765,10 +830,39 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
   });
 
   it("skips a level whose texture bytes exceed the volume budget — slice stays eligible", () => {
-    // 2048·2048·33·4 B = 553 MB > 512 MB; per-axis dims + chunk count are both fine.
+    // 2048·2048·33·4 B = 553 MB > 512 MB; the chunk count is fine. (Here chunks
+    // divide evenly, so the padded footprint equals the true 553 MB.)
     const m = manifestFor([{ shape: [1, 1, 33, 2048, 2048], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }]);
     expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
     expect(resolveVisibleLabels(m, allOn(1), { mode: "slice" })).toHaveLength(1);
+  });
+
+  it("measures the PADDED footprint: a level whose TRUE bytes fit but padded bricks bust is skipped", () => {
+    // 1030²×70 in 512²×64 chunks: awkward extents pad every boundary brick, so
+    // the padded footprint (128×1536×1536×4 ≈ 1.15 GB) busts the 512 MB budget
+    // while the TRUE volume (~283 MB) fits it. Accounting on TRUE bytes would
+    // admit a mask the atlas can't hold; accounting on padded bytes skips it.
+    const m = manifestFor([{ shape: [1, 1, 70, 1030, 1030], chunk: [1, 1, 64, 512, 512], scale: SCALE1 }]);
+    // The TRUE footprint is well under budget — the seam this pins.
+    expect(70 * 1030 * 1030 * 4).toBeLessThan(512 * 1024 * 1024);
+    expect(computeLabelChunkRequests({ ...vol, manifest: m })).toEqual([]);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })).toEqual([]);
+    // Slice mode is unaffected by the padded byte budget.
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "slice" })).toHaveLength(1);
+  });
+
+  it("coarsens past a level whose PADDED bricks bust the budget to a coarser one that fits", () => {
+    // Same awkward level 0 (padded ~1.15 GB, true ~283 MB) plus a coarser level
+    // 1 (padded ~146 MB). Padded accounting rejects level 0 and takes level 1 —
+    // the per-mask coarser-level fallback falls out of the finest→coarsest walk.
+    const m = manifestFor([
+      { shape: [1, 1, 70, 1030, 1030], chunk: [1, 1, 64, 512, 512], scale: SCALE1 },
+      { shape: [1, 1, 35, 515, 515], chunk: [1, 1, 64, 512, 512], scale: [1, 1, 2, 2, 2] },
+    ]);
+    const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
+    expect(reqs.length).toBeGreaterThan(0);
+    expect(reqs.every((r) => r.level === 1)).toBe(true);
+    expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(1);
   });
 
   it("coarsens past a level that busts the byte budget to one that fits", () => {
@@ -823,6 +917,30 @@ describe("resolveVisibleLabels — 3D total-volume memory budget", () => {
       labels,
     };
   }
+
+  // A single-level uint32 label with an explicit chunk shape, so a test can pad
+  // the boundary bricks (an awkward extent vs. chunk) to exercise the padded
+  // total-memory accounting.
+  const chunkedLabel = (name: string, shape: number[], chunk: number[]): LabelSpec => ({
+    name,
+    source_image_id: "img-0",
+    image: img(`img-0:label:${name}`, "Uint32", shape, chunk),
+  });
+
+  it("measures the PADDED footprint in the total budget: a stack can't slip past on true bytes", () => {
+    __resetLabelWarningsForTest();
+    // Two masks: TRUE ~139 MB each (both would fit the 512 MB total at ~278 MB),
+    // but PADDED ~384 MB each (66→2 z-bricks of 64, 1030→3 y-bricks of 512), so
+    // the padded total (~768 MB) only admits the first. Accounting on true bytes
+    // would admit both and OOM; padded accounting keeps only the prefix that fits.
+    const a = chunkedLabel("a", [1, 1, 66, 1030, 512], [1, 1, 64, 512, 512]);
+    const b = chunkedLabel("b", [1, 1, 66, 1030, 512], [1, 1, 64, 512, 512]);
+    const m = manifestOf([a, b]);
+    // The TRUE total is under budget — the seam this pins.
+    expect(2 * 66 * 1030 * 512 * 4).toBeLessThan(512 * 1024 * 1024);
+    const out = resolveVisibleLabels(m, allOn(2), { mode: "volume" });
+    expect(out.map((r) => r.name)).toEqual(["a"]);
+  });
 
   it("keeps a manifest-order prefix that fits and skips the rest in 3D", () => {
     __resetLabelWarningsForTest();

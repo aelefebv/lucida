@@ -34,8 +34,9 @@ const DEFAULT_LABEL_OPACITY = 0.5;
  * The transient categorical descriptor for a label volume pool. The buffer
  * is allocated once and rewritten in place each frame (the model matrix can
  * change on a layout epoch, so — unlike the 2D label descriptor cached by
- * opacity — it isn't cached). Single-LOD (grid 1×1×1) covering the whole
- * tile, `colormapMode == 1` to select the shader's first-hit branch.
+ * opacity — it isn't cached). Single-LOD carrying the level's chunk grid so
+ * the shader walks the bricked slot-grid atlas via its indirection buffer,
+ * `colormapMode == 1` to select the shader's first-hit branch.
  */
 function ensureLabelVolumeDescriptor(
   ctx: WorkerCtx,
@@ -49,6 +50,12 @@ function ensureLabelVolumeDescriptor(
     modelMatrix,
     invModelMatrix,
     volumeDims: [pool.width, pool.height, pool.depth],
+    // Bricked LOD 0: chunk grid + per-brick dims map each cell of the level
+    // to its atlas slot via the indirection buffer.
+    lod: {
+      gridDims: [pool.gridX, pool.gridY, pool.gridZ],
+      chunkDims: [pool.chunkX, pool.chunkY, pool.chunkZ],
+    },
     // Unused in categorical mode, but kept well-formed.
     contrastMin: 0,
     contrastMax: 1,
@@ -101,10 +108,11 @@ function ensureLabelVolumePalette(
  * Draw one categorical label overlay from its r32uint volume pool as a
  * first-hit colored surface over the intensity volume already composited.
  *
- * A label pool is a single-tile 3D texture covering the label's chosen level,
- * so a single-LOD transient descriptor (grid 1×1×1) reads it directly. It is
- * placed by the SOURCE member's model matrix (a label overlays its source's
- * physical extent), so a coarser label still covers the same region of the view.
+ * A label pool is a bricked slot-grid 3D atlas covering the label's chosen
+ * level, so a single-LOD transient descriptor carrying the level's chunk grid
+ * walks it via the indirection buffer. It is placed by the SOURCE member's
+ * model matrix (a label overlays its source's physical extent), so a coarser
+ * label still covers the same region of the view.
  * Declared OME colors are honored via the palette buffer; the rest use the
  * glasbey hash. Composited OVER the intensity (alpha blend, not first layer).
  * Returns true when a draw was issued, false when the pool has no resident
@@ -137,7 +145,7 @@ function renderLabelVolumeLayer(
   renderer.setAtlas(
     pool.texture,
     pool.indirectionBuf,
-    [1, 1, 1],
+    [pool.slotsX, pool.slotsY, pool.slotsZ],
     [pool.width, pool.height, pool.depth],
   );
   renderer.setRenderMode(0);

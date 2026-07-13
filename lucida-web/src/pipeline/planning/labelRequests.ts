@@ -15,6 +15,7 @@
 
 import { Axis } from "../../axes.ts";
 import { labelDepthZ, labelFootprint, labelTimeIndex } from "../../renderer/labelLayout.ts";
+import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
 import type {
   DatasetManifest,
@@ -35,17 +36,6 @@ const DEFAULT_MAX_CHUNKS_PER_PLANE = 64;
 const DEFAULT_MAX_LEVEL_DIM = 4096;
 
 /**
- * Cap on each dimension (X, Y AND Z) in VOLUME mode. The 3D overlay renders
- * from a monolithic r32uint texture, so every axis must fit the smallest
- * guaranteed WebGPU 3D texture limit (`maxTextureDimension3D` ≥ 2048) — much
- * lower than the 2D limit, and with a Z axis the 2D cap never considered. Used
- * as a device-agnostic default; the worker re-clamps to the real device limit
- * on pool creation. A level exceeding this is skipped (or a coarser one is
- * chosen) rather than silently truncated to the clamp while the model matrix
- * spans the full extent (which would misalign the mask).
- */
-const DEFAULT_MAX_LEVEL_DIM_3D = 2048;
-/**
  * Cap on a level's TOTAL 3D chunk count (`gz·gy·gx`) in VOLUME mode — the
  * volume analog of the per-plane 64. Volume mode fetches EVERY z-chunk, so an
  * anisotropic (chunk-Z 1) or deep label would otherwise fan out to tens of
@@ -53,10 +43,27 @@ const DEFAULT_MAX_LEVEL_DIM_3D = 2048;
  */
 const DEFAULT_MAX_CHUNKS_PER_VOLUME = 512;
 /**
- * Byte budget for the monolithic label volume texture in VOLUME mode
+ * Cap on a single BRICK's dimension (`min(chunkAxis, extentAxis)` per axis) in
+ * VOLUME mode. Bricking tiles a level across atlas slots so the LEVEL extent no
+ * longer has to fit a monolithic 3D texture — a deep-Z or wide-X level renders
+ * as bricks. But each brick is one contiguous region of the 3D atlas texture, so
+ * its clamped dimension must still fit the device 3D texture limit. 2048 is the
+ * WebGPU guaranteed floor for `maxTextureDimension3D`: a level whose clamped
+ * brick exceeds it can't be packed on the smallest conformant device (the atlas
+ * layout throws), so it is skipped in favor of a coarser renderable level. Using
+ * the floor never over-admits — a device with a higher limit packs the same
+ * brick at least as tightly. This bounds the BRICK, not the level extent.
+ */
+const DEFAULT_MAX_BRICK_DIM_3D = 2048;
+/**
+ * Byte budget for a single label's bricked volume atlas in VOLUME mode
  * (r32uint, 4 B/voxel), mirroring the intensity volume atlas budget (512 MB).
- * The per-axis clamp alone still allows a multi-GB texture (e.g. 1024²·512 =
- * 2.15 GB), which `createTexture` would reject — this bounds total memory.
+ * Measured against the PADDED brick footprint the atlas actually allocates (see
+ * {@link labelPaddedVolumeBytes}), NOT the true voxel count — a coarse/awkward
+ * chunk shape can pad the allocation well past `w·h·d·4`, so accounting on true
+ * bytes would admit a mask the atlas can't hold. Bricking lifts the per-axis
+ * texture-dimension limit, so this byte budget (plus the total-chunk cap) is
+ * what bounds a single mask's memory.
  *
  * Invariant: the total label-volume budget
  * ({@link DEFAULT_MAX_TOTAL_VOLUME_BYTES}) must be >= this value so the first
@@ -65,12 +72,13 @@ const DEFAULT_MAX_CHUNKS_PER_VOLUME = 512;
  */
 const DEFAULT_MAX_VOLUME_BYTES = 512 * 1024 * 1024;
 /**
- * Byte budget for the SUM of all label volume textures shown at once in VOLUME
- * mode. Showing every eligible mask in 3D means one monolithic r32uint texture
- * per visible mask, so the per-texture cap ({@link DEFAULT_MAX_VOLUME_BYTES})
- * alone does not bound total device memory — N masks near that cap would still
- * OOM. This caps the total: masks are shown in manifest order until the budget
- * is reached, and the rest are skipped (a fail-safe, never a crash). Mirrors the
+ * Byte budget for the SUM of all label volume atlases shown at once in VOLUME
+ * mode. Showing every eligible mask in 3D means one bricked r32uint atlas per
+ * visible mask, so the per-mask cap ({@link DEFAULT_MAX_VOLUME_BYTES}) alone
+ * does not bound total device memory — N masks near that cap would still OOM.
+ * This caps the total (measured on each mask's PADDED footprint, matching the
+ * per-mask accounting): masks are shown in manifest order until the budget is
+ * reached, and the rest are skipped (a fail-safe, never a crash). Mirrors the
  * intensity volume atlas budget (512 MB). SLICE mode is unaffected.
  *
  * Must be >= {@link DEFAULT_MAX_VOLUME_BYTES} (the per-texture cap) so the
@@ -78,8 +86,6 @@ const DEFAULT_MAX_VOLUME_BYTES = 512 * 1024 * 1024;
  * caller-supplied total up to the per-texture cap to enforce this.
  */
 const DEFAULT_MAX_TOTAL_VOLUME_BYTES = 512 * 1024 * 1024;
-/** Bytes per label voxel (r32uint). */
-const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
 
 /**
  * Overlay opacity a label falls back to when no per-label setting applies — on
@@ -106,13 +112,25 @@ function normalizeLabelOpacity(opacity: number | undefined): number {
  *
  * SLICE mode bounds the 2D footprint (`maxLevelDim`) and per-plane chunk grid
  * (`maxChunksPerPlane`) — Z is irrelevant (one plane is drawn). VOLUME mode
- * bounds every axis incl. Z (`maxLevelDim3D`, the 3D texture limit), the TOTAL
- * 3D chunk count (`maxChunksPerVolume`, since every z-chunk is fetched), AND
- * the total texture bytes (`maxVolumeBytes`) — the monolithic 3D texture is
- * cubic in memory. Returns `-1` when NO level fits (e.g. a whole-slide label,
- * or a 3D label whose Z is never downsampled below the limit) — the caller
- * skips it: a clean "nothing" (the panel still lists the label) beats a
- * silently truncated/stretched overlay. No unconditional coarsest fallback.
+ * bounds three things: the per-BRICK dimension (`maxBrickDim3D`), the TOTAL 3D
+ * chunk count (`maxChunksPerVolume`, since every z-chunk is fetched), AND the
+ * bricked atlas's actual allocation bytes (`maxVolumeBytes`, via
+ * {@link labelPaddedVolumeBytes}). It does NOT cap the LEVEL extent on any axis:
+ * the overlay renders from a bricked slot-grid atlas that tiles a level across
+ * slots, so a level busting the monolithic 3D texture limit on one axis (e.g. a
+ * deep Z) still renders as bricks. It DOES cap each brick, because a brick is a
+ * single contiguous texture region: a level whose clamped brick
+ * (`min(chunk, extent)`) exceeds `maxBrickDim3D` can't be packed at all, so it is
+ * skipped in favor of the coarser renderable level rather than admitted to a
+ * layout that would fail (rendering blank). The brick cap is checked BEFORE the
+ * byte math, so the packing that figure relies on never sees a too-big brick.
+ * Because this walks finest→coarsest and returns the first level that fits, the
+ * brick / chunk-count / byte checks automatically yield the coarser-level
+ * fallback for a level a finer one can't render. Returns `-1` when NO level fits
+ * (e.g. a whole-slide label, or a label whose coarsest level's brick or padded
+ * footprint still busts the limits) — the caller skips it: a clean "nothing"
+ * (the panel still lists the label) beats a silently truncated/stretched or
+ * blank overlay. No unconditional coarsest fallback.
  */
 function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): number {
   for (let i = 0; i < levels.length; i++) {
@@ -123,14 +141,29 @@ function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): num
     if (caps.mode === "volume") {
       const d = lvl.shape[Axis.Z];
       if (!(d > 0)) continue;
+      // Per-BRICK cap FIRST: a brick is one contiguous 3D texture region, so its
+      // clamped dimension must fit the texture limit even though bricking lifts
+      // the per-level extent limit. A level whose brick busts it can't be packed
+      // (the atlas layout throws), so skip it here — before the byte math, which
+      // packs the same brick — and let a coarser renderable level be chosen.
+      const brickX = Math.min(lvl.chunk_shape[Axis.X], w);
+      const brickY = Math.min(lvl.chunk_shape[Axis.Y], h);
+      const brickZ = Math.min(lvl.chunk_shape[Axis.Z], d);
+      if (
+        brickX > caps.maxBrickDim3D ||
+        brickY > caps.maxBrickDim3D ||
+        brickZ > caps.maxBrickDim3D
+      ) {
+        continue;
+      }
       const gz = grid1D(d, lvl.chunk_shape[Axis.Z]);
       const gy = grid1D(h, lvl.chunk_shape[Axis.Y]);
       const gx = grid1D(w, lvl.chunk_shape[Axis.X]);
-      const fitsDims =
-        w <= caps.maxLevelDim3D && h <= caps.maxLevelDim3D && d <= caps.maxLevelDim3D;
-      const fitsChunks = gz * gy * gx <= caps.maxChunksPerVolume;
-      const fitsBytes = w * h * d * LABEL_VOLUME_BYTES_PER_VOXEL <= caps.maxVolumeBytes;
-      if (fitsDims && fitsChunks && fitsBytes) return i;
+      if (gz * gy * gx > caps.maxChunksPerVolume) continue;
+      // Padded bytes are computed only after the per-brick cap passes, so the
+      // packing this figure depends on never throws on a too-big brick.
+      const fitsBytes = labelPaddedVolumeBytes(lvl.shape, lvl.chunk_shape) <= caps.maxVolumeBytes;
+      if (fitsBytes) return i;
     } else {
       const gx = grid1D(w, lvl.chunk_shape[Axis.X]);
       const gy = grid1D(h, lvl.chunk_shape[Axis.Y]);
@@ -171,11 +204,11 @@ export interface LabelSelectionCaps {
   maxLevelDim?: number;
   /** Slice-mode per-plane chunk cap (default {@link DEFAULT_MAX_CHUNKS_PER_PLANE}). */
   maxChunksPerPlane?: number;
-  /** Volume-mode per-axis dimension cap (default {@link DEFAULT_MAX_LEVEL_DIM_3D}). */
-  maxLevelDim3D?: number;
+  /** Volume-mode per-brick dimension cap (default {@link DEFAULT_MAX_BRICK_DIM_3D}). */
+  maxBrickDim3D?: number;
   /** Volume-mode total chunk-count cap (default {@link DEFAULT_MAX_CHUNKS_PER_VOLUME}). */
   maxChunksPerVolume?: number;
-  /** Volume-mode texture byte budget (default {@link DEFAULT_MAX_VOLUME_BYTES}). */
+  /** Volume-mode atlas-allocation byte budget (default {@link DEFAULT_MAX_VOLUME_BYTES}). */
   maxVolumeBytes?: number;
   /**
    * Volume-mode TOTAL byte budget across every mask shown at once (default
@@ -196,7 +229,7 @@ interface ResolvedLabelCaps {
   mode: "slice" | "volume";
   maxLevelDim: number;
   maxChunksPerPlane: number;
-  maxLevelDim3D: number;
+  maxBrickDim3D: number;
   maxChunksPerVolume: number;
   maxVolumeBytes: number;
   maxTotalVolumeBytes: number;
@@ -214,7 +247,7 @@ function resolveLabelCaps(caps?: LabelSelectionCaps): ResolvedLabelCaps {
     mode: caps?.mode ?? "slice",
     maxLevelDim: caps?.maxLevelDim ?? DEFAULT_MAX_LEVEL_DIM,
     maxChunksPerPlane: caps?.maxChunksPerPlane ?? DEFAULT_MAX_CHUNKS_PER_PLANE,
-    maxLevelDim3D: caps?.maxLevelDim3D ?? DEFAULT_MAX_LEVEL_DIM_3D,
+    maxBrickDim3D: caps?.maxBrickDim3D ?? DEFAULT_MAX_BRICK_DIM_3D,
     maxChunksPerVolume: caps?.maxChunksPerVolume ?? DEFAULT_MAX_CHUNKS_PER_VOLUME,
     maxVolumeBytes,
     maxTotalVolumeBytes,
@@ -291,17 +324,15 @@ function eligibleLabel(
 }
 
 /**
- * The chosen-level volume byte size of one label in VOLUME mode: `X·Y·Z` of the
- * `levelIdx` level times {@link LABEL_VOLUME_BYTES_PER_VOXEL} (r32uint). The
- * single accounting the total-memory budget is measured in.
+ * The device memory one label's chosen level occupies in VOLUME mode: the
+ * PADDED brick footprint the bricked atlas allocates (see
+ * {@link labelPaddedVolumeBytes}), NOT the true `X·Y·Z·4`. Measuring the padded
+ * footprint is what keeps the total-mask memory failsafe honest — a coarse-chunk
+ * mask whose padding inflates its allocation is counted at what it actually
+ * costs, so a stack of masks can't slip past the budget and OOM.
  */
 function labelVolumeBytes(level: LevelGeometry): number {
-  return (
-    level.shape[Axis.X] *
-    level.shape[Axis.Y] *
-    level.shape[Axis.Z] *
-    LABEL_VOLUME_BYTES_PER_VOXEL
-  );
+  return labelPaddedVolumeBytes(level.shape, level.chunk_shape);
 }
 
 /**
@@ -369,7 +400,7 @@ export function volumeBudgetPrefix(
  * label-volume memory budget ({@link volumeBudgetPrefix}): masks are kept in
  * manifest order until the budget is reached and the rest are skipped (warned
  * once), so showing every mask in 3D can never allocate an unbounded stack of
- * monolithic volume textures. SLICE mode shows the full visible + eligible set.
+ * volume atlases. SLICE mode shows the full visible + eligible set.
  */
 export function resolveVisibleLabels(
   manifest: DatasetManifest,
@@ -421,8 +452,8 @@ export function resolveVisibleLabels(
     return candidates.map((c) => c.resolved);
   }
 
-  // 3D fail-safe: cap total monolithic volume-texture memory. Keep masks in
-  // manifest order up to the budget; skip the rest (warn once). Never OOM.
+  // 3D fail-safe: cap total volume-atlas memory (padded footprints). Keep masks
+  // in manifest order up to the budget; skip the rest (warn once). Never OOM.
   const kept = volumeBudgetPrefix(
     manifest,
     candidates.map((c) => c.index),

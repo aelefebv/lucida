@@ -20,18 +20,18 @@ import {
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
-import { getOrCreateLabelVolumePool } from "./atlas.ts";
+import { acquireLabelSlot, getOrCreateLabelVolumePool } from "./atlas.ts";
 
 /**
- * Write WHOLE uint32 label chunks into the member's r32uint label VOLUME
- * pool. The delivery path (`dispatchLabelVolumeChunkDelivery`) forwards the
- * entire 3D chunk (no plane extraction), so each `chunk.data` is a full
- * `chunkZ*chunkY*chunkX` block of ids placed at the chunk's `(x, y, z)`
- * grid offset. The pool is a single tile reused in place, so a T scrub
- * overwrites resident voxels without blanking. Ids stay at full 32-bit
- * width — no intensity-range sampling (categorical, not scalar). Writes are
- * clamped to the (possibly device-limited) texture. Mirrors
- * `handleLabelSliceChunkData` in 3D and the intensity `handleVolumeChunkData`
+ * Write WHOLE uint32 label chunks into the member's bricked r32uint label
+ * VOLUME atlas. The delivery path (`dispatchLabelVolumeChunkDelivery`)
+ * forwards the entire 3D chunk (no plane extraction), so each `chunk.data` is
+ * a full `chunkZ*chunkY*chunkX` block of ids. Each chunk lands in exactly the
+ * atlas slot its indirection entry names, at that slot's origin, with ids
+ * preserved at full 32-bit width (no 16-bit truncation, no intensity-range
+ * sampling — categorical, not scalar). The atlas is reused in place across a
+ * T scrub (a re-delivered cell overwrites its own slot), so the overlay never
+ * blanks. Mirrors the intensity `handleVolumeChunkData` brick placement and
  * edge clamping.
  */
 export function handleLabelVolumeChunkData(
@@ -39,29 +39,44 @@ export function handleLabelVolumeChunkData(
   msg: LabelVolumeChunkDataMessage,
 ): void {
   // Drop an out-of-date delivery (e.g. a previous timepoint's chunk racing
-  // in after the view moved on) so it can't overwrite the pool with the
+  // in after the view moved on) so it can't overwrite the atlas with the
   // wrong T — same stale guard the intensity path uses.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
 
   const { memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
-  // Returns null if the texture can't be allocated — skip the label rather
+  // Returns null if the atlas can't be sized/allocated — skip the label rather
   // than throw through the upload path (defense in depth; level selection
   // already bounds the size).
-  const pool = getOrCreateLabelVolumePool(ctx, memberId, datasetId, levelWidth, levelHeight, levelDepth);
+  const pool = getOrCreateLabelVolumePool(
+    ctx, memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ,
+  );
   if (!pool) return;
 
+  let wrote = false;
   for (const chunk of msg.chunks) {
-    const xOff = chunk.x * chunkX;
-    const yOff = chunk.y * chunkY;
-    const zOff = chunk.z * chunkZ;
-    // Clamp to the resident texture (dims may be device-limited below the
-    // requested level); skip tiles that fall entirely outside it.
-    if (xOff >= pool.width || yOff >= pool.height || zOff >= pool.depth) continue;
-    const cw = Math.min(chunkX, pool.width - xOff);
-    const ch = Math.min(chunkY, pool.height - yOff);
-    const cd = Math.min(chunkZ, pool.depth - zOff);
+    // Skip a cell outside this level's chunk grid (defensive — a mismatched
+    // delivery can't index past the indirection buffer).
+    if (
+      chunk.x < 0 || chunk.x >= pool.gridX ||
+      chunk.y < 0 || chunk.y >= pool.gridY ||
+      chunk.z < 0 || chunk.z >= pool.gridZ
+    ) continue;
+    const gridIdx = chunk.z * pool.gridY * pool.gridX + chunk.y * pool.gridX + chunk.x;
+
+    // Edge chunks are partial: clamp the written region to the level extent so
+    // the last brick along each axis copies only its in-bounds voxels. Compute
+    // this BEFORE acquiring a slot so an out-of-bounds cell never consumes (or
+    // evicts for) a slot it would not write, nor writes a dangling indirection
+    // entry pointing at a slot that never received data.
+    const cw = Math.min(chunkX, pool.width - chunk.x * chunkX);
+    const ch = Math.min(chunkY, pool.height - chunk.y * chunkY);
+    const cd = Math.min(chunkZ, pool.depth - chunk.z * chunkZ);
     if (cw <= 0 || ch <= 0 || cd <= 0) continue;
+
+    const acquired = acquireLabelSlot(pool, gridIdx);
+    if (!acquired) continue; // nothing evictable (only a pathological over-limit grid)
+
     const data = asUint32(chunk.data);
     writeVolumeChunk(
       ctx.device,
@@ -72,11 +87,19 @@ export function handleLabelVolumeChunkData(
       cw,
       ch,
       cd,
-      xOff,
-      yOff,
-      zOff,
+      acquired.origin[0],
+      acquired.origin[1],
+      acquired.origin[2],
       "r32uint",
     );
+    pool.indirectionData[gridIdx] = acquired.slot;
+    wrote = true;
+  }
+
+  // Push the refreshed cell→slot map to the GPU so the shader walks the bricks
+  // this delivery just placed.
+  if (wrote) {
+    ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirectionData);
   }
 }
 
