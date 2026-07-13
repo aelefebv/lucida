@@ -26,6 +26,17 @@ use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
 use object_store::{BackoffConfig, ClientOptions, ObjectStore, RetryConfig};
 
+/// The client's fetch timeout for a single remote read.
+///
+/// This mirrors lucida-web `contentSource.ts` `DEFAULT_TIMEOUT_MS` and MUST be
+/// kept in sync with it. The store's worst-case per-read budget
+/// ([`max_source_read_budget`]) must stay under this value so the *client*, not
+/// the server, wins the timeout race. If the server were allowed to hang past
+/// the client's timeout, the client would give up and re-send the read while
+/// the original is still in flight, re-introducing the duplicate work this
+/// ordering exists to prevent.
+pub const CLIENT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Retry policy for remote source-path reads (GCS, S3, HTTP).
 ///
 /// object_store's default policy retries up to 10 times over 3 minutes. A
@@ -65,6 +76,21 @@ const SOURCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// per-attempt request timeout. HTTP layers its plain-`http` opt-in on top.
 fn source_client_options() -> ClientOptions {
     ClientOptions::new().with_timeout(SOURCE_REQUEST_TIMEOUT)
+}
+
+/// Worst-case wall-clock for ONE failing remote source read.
+///
+/// The retry loop is bounded by [`source_retry_config`]'s `retry_timeout`, but
+/// that budget only gates the time *between* attempts: a fresh attempt can be
+/// dispatched right before the loop budget elapses and then run for its full
+/// per-attempt [`SOURCE_REQUEST_TIMEOUT`] before giving up. The worst case is
+/// therefore the sum of the two, not either alone.
+///
+/// This must stay under [`CLIENT_FETCH_TIMEOUT`] so the client's fetch timeout
+/// never fires while the server is still working — see that constant's note on
+/// why the client, not the server, must win the race.
+pub fn max_source_read_budget() -> Duration {
+    source_retry_config().retry_timeout + SOURCE_REQUEST_TIMEOUT
 }
 
 /// Errors from storage backend operations.
@@ -428,8 +454,8 @@ mod tests {
             "expected 2-3 retries, got {}",
             cfg.max_retries
         );
-        // Total budget must stay comfortably under the client's 10s fetch
-        // timeout so a struggling object fails fast instead of hanging.
+        // Total budget must stay comfortably under CLIENT_FETCH_TIMEOUT so a
+        // struggling object fails fast instead of hanging.
         assert!(
             cfg.retry_timeout <= Duration::from_secs(4),
             "retry_timeout {:?} must be <= 4s",
@@ -442,15 +468,37 @@ mod tests {
     }
 
     #[test]
+    fn max_source_read_budget_stays_under_client_fetch_timeout() {
+        let budget = max_source_read_budget();
+
+        // The client, not the server, must win the timeout race.
+        assert!(
+            budget < CLIENT_FETCH_TIMEOUT,
+            "worst-case read budget {budget:?} must be under the client timeout {CLIENT_FETCH_TIMEOUT:?}",
+        );
+        // Keep at least 1s of headroom so drift on either side that erases the
+        // margin fails here rather than in production.
+        assert!(
+            budget + Duration::from_secs(1) <= CLIENT_FETCH_TIMEOUT,
+            "worst-case read budget {budget:?} must leave >= 1s headroom under {CLIENT_FETCH_TIMEOUT:?}",
+        );
+        // The retry-loop budget is one of the two components of the worst case.
+        assert!(
+            source_retry_config().retry_timeout < budget,
+            "retry_timeout must be a proper component of the worst-case budget",
+        );
+    }
+
+    #[test]
     fn source_request_timeout_bounds_a_stalling_connection() {
         // The retry budget only gates *between* attempts; a source that
         // connects but never sends a body is bounded by this per-attempt
-        // timeout instead. It must stay comfortably under the client's 10s
-        // fetch timeout so a stall fails fast rather than hanging.
+        // timeout instead. It must stay comfortably under CLIENT_FETCH_TIMEOUT
+        // so a stall fails fast rather than hanging.
         assert!(
             SOURCE_REQUEST_TIMEOUT >= Duration::from_secs(1)
                 && SOURCE_REQUEST_TIMEOUT <= Duration::from_secs(8),
-            "per-attempt timeout {SOURCE_REQUEST_TIMEOUT:?} must be a fail-fast value under 10s",
+            "per-attempt timeout {SOURCE_REQUEST_TIMEOUT:?} must be a fail-fast value under CLIENT_FETCH_TIMEOUT",
         );
     }
 }

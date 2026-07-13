@@ -52,7 +52,16 @@ export interface ContentSource {
   handleBinary(key: string, data: ArrayBuffer): void;
 }
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+/**
+ * Client-side fetch timeout for a single chunk read. Mirrors lucida-store
+ * `backend::CLIENT_FETCH_TIMEOUT` and must be kept in sync with it: the store's
+ * worst-case per-read budget (retry-loop budget plus a final per-attempt
+ * request timeout) must stay under this value so the client, not the server,
+ * wins the timeout race. If the server outlasts this timeout, the client gives
+ * up and re-sends the read while the original is still in flight, duplicating
+ * work.
+ */
+export const DEFAULT_TIMEOUT_MS = 10_000;
 /** Proxies can take longer to generate than chunks. */
 const DEFAULT_PROXY_TIMEOUT_MS = 60_000;
 

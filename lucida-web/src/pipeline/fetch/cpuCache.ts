@@ -34,7 +34,7 @@ import {
   type ProxyCacheEntry,
   type ProxyEvictable,
 } from "./proxyStore.ts";
-import { Scheduler } from "./scheduler.ts";
+import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
 import {
   classifyFetchError,
   NeverRetry,
@@ -131,15 +131,27 @@ export function backoffWithJitter(attempt: number, random: () => number): number
   return floor + random() * (base - floor);
 }
 
-interface TransientFailure {
-  /** `now()` at the moment the failure was recorded. */
+/**
+ * One per-key fetch-failure record. A key lives in exactly one of the two
+ * independently-bounded stores that hold these — {@link CpuCache.permanentFailures}
+ * (sticky) or {@link CpuCache.transientFailures} (self-healing) — so a flood of
+ * one kind can never evict the other's slot.
+ */
+interface FailureRecord {
+  /** `permanent` is sticky (never time-eligible); `transient` self-heals
+   *  after its backoff window. */
+  kind: "permanent" | "transient";
+  /** `now()` at the moment the failure was recorded (the transient backoff
+   *  anchor). */
   failedAt: number;
   /** How many times this key has failed transiently (>= 1); grows the
-   *  backoff across successive records. */
+   *  backoff across successive records. Zero for a permanent record. */
   attempt: number;
   /**
    * Wall-clock (in `now()`'s frame) at or after which the key may be
-   * re-planned. The plan-time gate skips the key until `now()` reaches it.
+   * re-planned. The plan-time gate skips the key until `now()` reaches it;
+   * a permanent record sets this to `Infinity` so it is never freed by the
+   * passage of time.
    */
   eligibleAt: number;
 }
@@ -189,31 +201,29 @@ export class CpuCache {
    * Keys with a PERMANENT fetch failure — one that
    * {@link classifyFetchError} tagged `permanent` (e.g. an HTTP 404 /
    * not-found, or a source that rejects the fetch outright, such as no
-   * wire format registered for the image). Permanent failures are sticky:
-   * never made re-eligible by the passage of time, and cleared only by a
-   * subsequent successful delivery, {@link CpuCache.reset}, or
-   * {@link CpuCache.cancelDataset}. A fetch that completes but cannot be
-   * decoded is NOT recorded here — decode failures feed the
-   * delivery-failure streak (see
-   * {@link CpuCache.recordChunkFailureForStreak}) instead.
+   * wire format registered for the image). Permanent records are sticky:
+   * their `eligibleAt` is `Infinity`, so the plan-time gate never frees
+   * them by the passage of time; they clear only on a subsequent
+   * successful delivery, {@link CpuCache.reset}, or
+   * {@link CpuCache.cancelDataset}.
    *
-   * A `Set` because membership plus insertion order is all the gate needs;
-   * insertion order is FIFO, so once the set reaches
+   * Map iteration is insertion-order FIFO, so once it reaches
    * {@link MAX_TRACKED_FAILURES} the oldest permanent key is dropped to hold
    * the memory bound. Kept independent from {@link transientFailures} so a
    * flood of permanents (e.g. a malformed collection emitting thousands of
    * 404s) can never crowd out a transient's backoff slot — and vice versa.
    */
-  private permanentFailures = new Set<string>();
+  private permanentFailures = new Map<string, FailureRecord>();
   /**
    * Keys with an outstanding TRANSIENT fetch failure (a timeout, disconnect,
-   * or other retryable rejection) awaiting their self-heal backoff. Each
-   * entry records when it failed, its attempt count (grows the backoff), and
-   * the instant it becomes re-eligible for planning. Bounded independently at
-   * {@link MAX_TRACKED_FAILURES} with FIFO eviction of the oldest entry, so
-   * backoff slots survive no matter how many permanent failures exist.
+   * failed decode, or other retryable rejection) awaiting their self-heal
+   * backoff. Each record carries when it failed, its attempt count (grows
+   * the backoff), and the instant it becomes re-eligible for planning.
+   * Bounded independently at {@link MAX_TRACKED_FAILURES} with FIFO eviction
+   * of the oldest entry, so backoff slots survive no matter how many
+   * permanent failures exist.
    */
-  private transientFailures = new Map<string, TransientFailure>();
+  private transientFailures = new Map<string, FailureRecord>();
 
   private lruCounter = 0;
 
@@ -423,14 +433,13 @@ export class CpuCache {
         continue;
       }
 
-      // Permanent failures stay excluded for the session (until reset /
-      // cancelDataset). Transient failures self-heal: once a re-planned
-      // key has waited out its (jittered, capped-exponential) backoff, it
-      // is re-enqueued. Re-eligibility is evaluated lazily here at plan
-      // time — there is no timer re-arming failed tiles on its own.
-      if (this.permanentFailures.has(key)) continue;
-      const transientFailure = this.transientFailures.get(key);
-      if (transientFailure && this.now() < transientFailure.eligibleAt) continue;
+      // Permanent failures stay excluded for the session (their `eligibleAt`
+      // is `Infinity`, until reset / cancelDataset). Transient failures
+      // self-heal: once a re-planned key has waited out its (jittered,
+      // capped-exponential) backoff, it is re-enqueued. Re-eligibility is
+      // evaluated lazily here at plan time — there is no timer re-arming
+      // failed tiles on its own.
+      if (this.isFailureExcluded(key)) continue;
 
       // The minimap and coarse lanes can demand the same chunk (shared
       // residency tier + key); one fetch serves both, and the most
@@ -496,11 +505,13 @@ export class CpuCache {
   /**
    * Abort every in-flight (and drop every pending) chunk fetch for
    * `entityId` and clear its in-flight metadata. Used when an entity
-   * leaves the view entirely: its outstanding fetches would otherwise
-   * hold their concurrency slots until the transfer timeout, starving
-   * the current view. Proxy fetches are deliberately left alone — the
-   * starvation report is chunk-specific. A returning entity re-enqueues
-   * normally on its next submit.
+   * leaves the view entirely. The chunk and proxy schedulers share the
+   * concurrency/bytes caps (via `siblingInFlight`), so a departed
+   * entity's chunk and proxy fetches are both released — this handles
+   * the chunk side, {@link cancelProxyWorkForEntity} the proxy side —
+   * returning those shared slots to the current view immediately instead
+   * of holding them until the transfer timeout. A returning entity
+   * re-enqueues normally on its next submit.
    */
   private cancelChunkWorkForEntity(entityId: string): void {
     const cancelled = this.chunkScheduler.cancelWhere(
@@ -508,6 +519,34 @@ export class CpuCache {
     );
     for (const key of cancelled) {
       this.inFlightChunkMeta.delete(key);
+    }
+  }
+
+  /**
+   * Abort every in-flight (and drop every pending) PER-ENTITY proxy fetch
+   * for `entityId` and clear its in-flight metadata. The proxy counterpart
+   * to {@link cancelChunkWorkForEntity}, called at the same rebuild boundary
+   * when an entity leaves the view entirely: because both schedulers share
+   * the concurrency/bytes caps, a departed entity's outstanding per-tile
+   * proxy would otherwise hold a shared slot until the proxy timeout,
+   * starving the current view. Proxies are {@link NeverRetry}; a returning
+   * entity re-fetches its proxy on the orchestrator's next submit.
+   */
+  private cancelProxyWorkForEntity(entityId: string): void {
+    const cancelled = this.proxyScheduler.cancelWhere(
+      (entry) =>
+        entry.request.entityId === entityId &&
+        // Exclude group proxies: a `GroupProxy3D` is keyed by its group id
+        // rather than a per-tile active entity, so one tile leaving the
+        // active set does not make it unwanted — the same shared fallback
+        // can stay continuously requested by the tiles that remain visible.
+        // A group proxy's wantedness is governed by plan membership (it is
+        // kept while the plan still requests it), handled separately, not by
+        // any single entity's departure.
+        entry.request.kind !== "GroupProxy3D",
+    );
+    for (const key of cancelled) {
+      this.inFlightProxyMeta.delete(key);
     }
   }
 
@@ -539,7 +578,7 @@ export class CpuCache {
     // stores' keys before mutating them.
     for (const entityId of entityIds) {
       const prefix = `${entityId}/`;
-      for (const key of [...this.permanentFailures, ...this.transientFailures.keys()]) {
+      for (const key of [...this.permanentFailures.keys(), ...this.transientFailures.keys()]) {
         if (key.startsWith(prefix)) this.clearFailure(key);
       }
       for (const key of this.inFlightChunkMeta.keys()) {
@@ -584,11 +623,13 @@ export class CpuCache {
         this.chunkStore.demoteEntity(entityId);
         // The entity was active last rebuild but the just-completed one
         // never requested it: it has left the view entirely. Abort its
-        // in-flight chunk fetches so they release their concurrency slots
-        // to the current view immediately, rather than holding them until
-        // the transfer timeout. Its already-cached chunks are only demoted
-        // (kept, evictable); if it returns, its next submit re-enqueues.
+        // in-flight chunk and proxy fetches so they release their shared
+        // concurrency slots to the current view immediately, rather than
+        // holding them until the transfer timeout. Its already-cached
+        // chunks are only demoted (kept, evictable); if it returns, its
+        // next submit re-enqueues.
         this.cancelChunkWorkForEntity(entityId);
+        this.cancelProxyWorkForEntity(entityId);
       }
     }
     this.activeEntityIds = this.activeEntityIdsThisRebuild;
@@ -936,6 +977,7 @@ export class CpuCache {
     key: string,
     retryCount = 0,
     startedEpochs: SceneEpochs = { ...this.currentEpochs },
+    fedStreak = false,
   ): Promise<void> {
     let result: FetchResult;
     try {
@@ -947,65 +989,68 @@ export class CpuCache {
       const fe = classifyFetchError(err);
 
       if (fe.kind === "abort" || fe.kind === "pending") {
-        // This settle can land a microtask after its key was cancelled and
-        // re-enqueued under a fresh controller — the same tile scrubbed out
-        // of the active set and straight back within one rebuild's detection
-        // lag. The cancel path already freed this fetch's slot and meta
-        // synchronously; releasing them again by key alone would clobber the
-        // live successor, under-counting concurrency (letting effective
-        // in-flight exceed the cap against a throttling backend) and dropping
-        // the dedup record so the next rebuild starts a duplicate fetch. Only
-        // free the slot + meta this settle still owns.
-        if (this.chunkScheduler.markInFlightDoneIfCurrent(key, controller)) {
-          this.inFlightChunkMeta.delete(key);
+        // A silent teardown: the caller cancelled, or generated bytes are not
+        // ready yet. No failure entry, no streak — just release the slot and
+        // metadata this settle still owns (see {@link settleFetch}).
+        if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
           if (fe.kind === "pending") this.drainSchedulers();
         }
         return;
       }
+
+      // Whether THIS fetch lifecycle has already fed the delivery-failure
+      // streak. Carried across the lifecycle's own in-fetch retries by the
+      // recursion argument, so a single failed delivery counts once no matter
+      // how many times it is retried before giving up. The dedup is scoped to
+      // the lifecycle only: a chunk that keeps failing across re-plan
+      // re-fetches (each a fresh lifecycle, once its backoff expires) must
+      // re-contribute every time, so the streak keeps measuring consecutive
+      // failed deliveries and a persistently dead source stays surfaced.
+      let fed = fedStreak;
 
       // A server-reported failure (a `source_chunk_status` frame: the source
       // answered the request with a failure) is a real delivery failure and
       // feeds the streak now, before the retry branch and regardless of its
       // retry classification. A persistently-failing source thus surfaces
       // even when each failure is individually transient (self-healing), and
-      // the count still resets the moment any chunk is delivered. It counts
-      // once per chunk, on the first attempt only (`retryCount === 0`): a
-      // server-reported transient that also fails its single retry must not
-      // feed the streak a second time for the same physical chunk — that would
-      // halve the effective threshold, tripping the aggregate signal on a mere
-      // self-healing throttle. The transient/permanent split below is left to
-      // drive retry unchanged.
-      if (fe.serverReported && retryCount === 0) {
+      // the count still resets the moment any chunk is delivered.
+      if (fe.serverReported && !fed) {
         this.recordChunkFailureForStreak(fe.message);
+        fed = true;
       }
 
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
-        return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs);
+        return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs, fed);
       }
 
       const isPermanent = fe.kind === "permanent";
-      this.recordFailure(key, isPermanent);
-      this.counters.recordFetchFailure(isPermanent, fe.message);
-      this.recordFailureForBurstDetection(isPermanent, fe.message);
-      // Client-side transient failures (network blips, timeouts, the
-      // transport's own disconnect rejections) belong to the reconnect
-      // machinery — counting them would let an ordinary connection drop or
-      // laptop sleep masquerade as a failing data source. A permanent fetch
-      // failure feeds the streak here (unless it was already counted above as
-      // server-reported, to avoid double-counting the same failure); decode
-      // failures are counted at the decode boundary below.
-      if (isPermanent && !fe.serverReported) this.recordChunkFailureForStreak(fe.message);
-      this.chunkScheduler.markInFlightDone(key);
-      this.inFlightChunkMeta.delete(key);
+      // A post-retry permanent failure is streak-eligible; a client-side
+      // transient (network blip, timeout, the transport's own disconnect
+      // rejection) belongs to the reconnect machinery and stays exempt, so an
+      // ordinary connection drop cannot masquerade as a failing data source.
+      // Feeding runs before the ownership gate so it reflects the failure the
+      // source reported; the per-key record it feeds through is written only
+      // when this settle still owns the key.
+      if (isPermanent && !fed) {
+        this.recordChunkFailureForStreak(fe.message);
+        fed = true;
+      }
+      if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+        this.recordFailure(key, isPermanent);
+        this.counters.recordFetchFailure(isPermanent, fe.message);
+        this.recordFailureForBurstDetection(isPermanent, fe.message);
+      }
       return;
     }
 
-    const responseBytes = result.bytes.byteLength;
-    this.chunkScheduler.correctInFlightBytes(key, responseBytes);
-
-    this.counters.recordCompletedFetch(responseBytes);
+    this.counters.recordCompletedFetch(result.bytes.byteLength);
+    // Correct the in-flight byte estimate only while this settle still owns
+    // the slot; a superseded successor keeps its own accounting.
+    if (this.chunkScheduler.isCurrent(key, controller)) {
+      this.chunkScheduler.correctInFlightBytes(key, result.bytes.byteLength);
+    }
 
     let decoded: ArrayBuffer;
     try {
@@ -1014,25 +1059,23 @@ export class CpuCache {
       this.counters.recordDecode(performance.now() - t0);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      this.counters.recordError(message);
       // A fetch that completes but cannot be decoded (wrong wire format,
-      // corrupted bytes, an intercepting proxy answering with garbage) is
-      // a delivery failure: a source failing every decode stalls the
-      // canvas exactly like one failing every fetch.
-      this.recordChunkFailureForStreak(`decode failed: ${message}`);
-      this.chunkScheduler.markInFlightDone(key);
-      this.inFlightChunkMeta.delete(key);
+      // corrupted bytes, an intercepting proxy answering with garbage) is a
+      // delivery failure: a source failing every decode stalls the canvas
+      // exactly like one failing every fetch. It records a self-healing
+      // transient backoff so the key is not re-fetched every rebuild, and
+      // feeds the streak once.
+      const streakMessage = `decode failed: ${message}`;
+      if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+        if (!fedStreak) {
+          this.recordChunkFailureForStreak(streakMessage);
+        }
+        this.recordFailure(key, false);
+        this.counters.recordFetchFailure(false, streakMessage);
+        this.recordFailureForBurstDetection(false, streakMessage);
+      }
       return;
     }
-
-    // Only a DELIVERED chunk — fetched AND decoded — proves the source is
-    // serving usable data; a completed fetch alone can still be garbage.
-    this.recordChunkDelivered();
-
-    // A previously-failed key that now delivers has recovered: drop its
-    // failure record so its attempt/backoff bookkeeping starts clean if
-    // it ever fails again.
-    this.clearFailure(key);
 
     const latestMeta = this.inFlightChunkMeta.get(key);
     const effectiveReq = latestMeta?.request ?? req;
@@ -1043,9 +1086,15 @@ export class CpuCache {
       isEpochStale(metaEpochs, this.currentEpochs);
     const lastSeenTick = stale ? -1 : latestMeta.lastSeenTick;
 
-    this.chunkScheduler.markInFlightDone(key);
-    if (this.inFlightChunkMeta.get(key) === latestMeta) {
-      this.inFlightChunkMeta.delete(key);
+    // Only a DELIVERED chunk — fetched AND decoded — proves the source is
+    // serving usable data; a completed fetch alone can still be garbage. When
+    // this settle still owns the key, the streak resets and the key's failure
+    // record clears so its attempt/backoff bookkeeping starts clean; a
+    // superseded settle leaves the successor's slot, metadata, and failure
+    // state untouched.
+    if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+      this.recordChunkDelivered();
+      this.clearFailure(key);
     }
 
     // Cache even if cancelled during decode — the work is done. The
@@ -1118,8 +1167,7 @@ export class CpuCache {
     } catch (err: unknown) {
       const fe = classifyFetchError(err);
       if (fe.kind === "abort") {
-        this.proxyScheduler.markInFlightDone(key);
-        this.inFlightProxyMeta.delete(key);
+        this.settleFetch(this.proxyScheduler, this.inFlightProxyMeta, key, controller);
         return;
       }
       // Consulted for symmetry; NeverRetry always returns false.
@@ -1128,14 +1176,20 @@ export class CpuCache {
         if (!this.proxyScheduler.hasInFlight(key)) return;
         return this.fetchProxy(req, controller, key);
       }
-      this.counters.recordError(fe.message);
-      this.proxyScheduler.markInFlightDone(key);
-      this.inFlightProxyMeta.delete(key);
+      // Proxies carry no per-key failure record or delivery streak; the
+      // orchestrator resubmits next tick if still wanted.
+      if (this.settleFetch(this.proxyScheduler, this.inFlightProxyMeta, key, controller)) {
+        this.counters.recordError(fe.message);
+      }
       return;
     }
 
     const responseBytes = result.data.byteLength;
-    this.proxyScheduler.correctInFlightBytes(key, responseBytes);
+    // Correct the in-flight byte estimate only while this settle still owns
+    // the slot; a superseded successor keeps its own accounting.
+    if (this.proxyScheduler.isCurrent(key, controller)) {
+      this.proxyScheduler.correctInFlightBytes(key, responseBytes);
+    }
 
     const latestMeta = this.inFlightProxyMeta.get(key);
     const effectiveReq = latestMeta?.request ?? req;
@@ -1157,12 +1211,12 @@ export class CpuCache {
       lastSeenTick,
     };
 
+    // Cache even if superseded during the fetch — the bytes are valid; the
+    // settle below releases the slot and metadata only when this controller
+    // still owns the key.
     this.proxyStore.insert(effectiveReq.datasetId, proxyInnerKey(effectiveReq), cacheEntry);
 
-    this.proxyScheduler.markInFlightDone(key);
-    if (this.inFlightProxyMeta.get(key) === latestMeta) {
-      this.inFlightProxyMeta.delete(key);
-    }
+    this.settleFetch(this.proxyScheduler, this.inFlightProxyMeta, key, controller);
 
     this.notifyListeners();
 
@@ -1253,15 +1307,52 @@ export class CpuCache {
   }
 
   /**
+   * Release the scheduler slot and drop the in-flight metadata for a
+   * completion, but only when the settling controller still owns the key.
+   * Every fetch-completion exit (chunk and proxy; failure, decode failure,
+   * success, abort/pending) routes through here so the identity guard holds
+   * by construction: a settle arriving after its key was cancelled and
+   * re-enqueued under a fresh controller (the same tile scrubbed away and
+   * straight back within a rebuild's detection lag) frees nothing, leaving
+   * the live successor's slot, metadata, and failure state intact — rather
+   * than under-counting concurrency and starting a duplicate fetch. Returns
+   * whether this settle owned the key, so callers gate their per-key
+   * bookkeeping (failure record, streak reset, recovery) on ownership.
+   */
+  private settleFetch<Req extends SchedulableRequest, M>(
+    scheduler: Scheduler<Req>,
+    meta: Map<string, M>,
+    key: string,
+    controller: AbortController,
+  ): boolean {
+    if (!scheduler.markInFlightDoneIfCurrent(key, controller)) return false;
+    meta.delete(key);
+    return true;
+  }
+
+  /** The failure record for `key`, from whichever store holds it (a key
+   *  lives in at most one). */
+  private getFailureRecord(key: string): FailureRecord | undefined {
+    return this.permanentFailures.get(key) ?? this.transientFailures.get(key);
+  }
+
+  /** Whether `key` is currently excluded from planning by a failure record:
+   *  a permanent record (never time-eligible) or a transient record still
+   *  inside its backoff window. */
+  private isFailureExcluded(key: string): boolean {
+    const record = this.getFailureRecord(key);
+    return record !== undefined && this.now() < record.eligibleAt;
+  }
+
+  /**
    * Record a fetch failure for `key`, routing it to the matching store.
    *
    * A key can flip kind between records (a timeout that later resolves to a
    * 404, or a 404 that later times out), so both stores are cleared of the
-   * key first — it must live in exactly one. A permanent failure is recorded
-   * in {@link permanentFailures} and stays sticky. A transient failure grows
-   * its attempt count from any prior transient record (so the backoff
-   * lengthens, capped) and records its re-eligibility instant in
-   * {@link transientFailures}.
+   * key first — it must live in exactly one. A permanent record is sticky
+   * (`eligibleAt` = `Infinity`). A transient record grows its attempt count
+   * from any prior transient record (so the backoff lengthens, capped) and
+   * records its re-eligibility instant.
    *
    * Each store is bounded independently at {@link MAX_TRACKED_FAILURES} with
    * FIFO eviction of its oldest entry. Because the stores are separate, a
@@ -1273,10 +1364,15 @@ export class CpuCache {
   private recordFailure(key: string, isPermanent: boolean): void {
     if (isPermanent) {
       this.transientFailures.delete(key);
-      // Delete-then-add refreshes FIFO recency, so a re-reported permanent
+      // Delete-then-set refreshes FIFO recency, so a re-reported permanent
       // is not the first to be dropped under cap pressure.
       this.permanentFailures.delete(key);
-      this.permanentFailures.add(key);
+      this.permanentFailures.set(key, {
+        kind: "permanent",
+        failedAt: this.now(),
+        attempt: 0,
+        eligibleAt: Infinity,
+      });
       this.evictOldestWhileOverCap(this.permanentFailures);
       return;
     }
@@ -1290,18 +1386,21 @@ export class CpuCache {
     // Delete-then-set keeps Map iteration order == insertion recency, so
     // FIFO eviction drops the genuinely oldest transient.
     this.transientFailures.delete(key);
-    this.transientFailures.set(key, { failedAt, attempt, eligibleAt });
+    this.transientFailures.set(key, {
+      kind: "transient",
+      failedAt,
+      attempt,
+      eligibleAt,
+    });
     this.evictOldestWhileOverCap(this.transientFailures);
   }
 
   /**
    * Drop the oldest (first-inserted) entries from a failure store until it
-   * is back within {@link MAX_TRACKED_FAILURES}. `Set` and `Map` both
-   * iterate in insertion order, so `keys().next()` yields the oldest key.
+   * is back within {@link MAX_TRACKED_FAILURES}. A `Map` iterates in
+   * insertion order, so `keys().next()` yields the oldest key.
    */
-  private evictOldestWhileOverCap(
-    store: Set<string> | Map<string, TransientFailure>,
-  ): void {
+  private evictOldestWhileOverCap(store: Map<string, FailureRecord>): void {
     while (store.size > MAX_TRACKED_FAILURES) {
       const oldest = store.keys().next().value;
       if (oldest === undefined) break;
@@ -1354,15 +1453,22 @@ export class CpuCache {
   }
 
   /**
-   * Count a delivery failure (a post-retry permanent fetch failure, or a
-   * decode failure) toward the consecutive-failure streak and notify the
-   * owner once it crosses the threshold — throttled while the streak
-   * persists. This is the user-visible complement to the per-chunk failure
-   * map: individual misses stay quiet, but a source that fails everything
-   * (e.g. credentials lost after a successful open, or a backend that stays
-   * unavailable — both reported per chunk as `source_chunk_status`, whether
-   * the content source rejects them as permanent or as self-healing
-   * transient) must not present as a silently stalling canvas.
+   * Count a streak-eligible delivery failure toward the consecutive-failure
+   * streak and notify the owner once it crosses the threshold — throttled
+   * while the streak persists. Eligible failures are a server-reported
+   * per-chunk failure (any retry classification), a post-retry permanent
+   * failure, or a decode failure; the caller feeds each failed delivery here
+   * exactly once per fetch lifecycle — a delivery's own attempt and its
+   * in-fetch retries count once, deduped by the recursion-carried flag in
+   * {@link CpuCache.fetchAndDecode}, while a chunk that keeps failing across
+   * re-plan re-fetches re-contributes each lifecycle so the count keeps
+   * tracking consecutive failed deliveries. This is the
+   * user-visible complement to the per-key failure records: individual misses
+   * stay quiet, but a source that fails everything (e.g. credentials lost
+   * after a successful open, or a backend that stays unavailable — both
+   * reported per chunk as `source_chunk_status`, whether the content source
+   * rejects them as permanent or as self-healing transient) must not present
+   * as a silently stalling canvas.
    */
   private recordChunkFailureForStreak(message: string): void {
     this.chunkFailureStreak += 1;
