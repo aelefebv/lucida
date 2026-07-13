@@ -92,6 +92,16 @@ export class Scheduler<Req extends SchedulableRequest> {
     return this.inFlight.has(key);
   }
 
+  /**
+   * Whether the live in-flight entry for `key` is the one `controller`
+   * started. False once the key was cancelled and re-enqueued under a fresh
+   * controller, so a superseded completion can leave the successor's slot
+   * (and its byte accounting) untouched.
+   */
+  isCurrent(key: string, controller: AbortController): boolean {
+    return this.inFlight.get(key)?.controller === controller;
+  }
+
   inFlightEntries(): IterableIterator<[string, InFlightEntry<Req>]> {
     return this.inFlight.entries();
   }
