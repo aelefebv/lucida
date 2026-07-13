@@ -91,6 +91,16 @@ export function useBridge(params: Params) {
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
   const [remoteDatasetProgress, setRemoteDatasetProgress] = useState<string | null>(null);
+  // Durable non-fatal import warnings collected across dataset opens. Unlike
+  // `remoteDatasetProgress`, these survive open completion; they are cleared by
+  // an explicit dismiss, a failed open (only that open's own), or connection
+  // loss.
+  const [remoteDatasetWarnings, setRemoteDatasetWarnings] = useState<readonly string[]>([]);
+  // How many further distinct warnings occurred beyond the ones retained in
+  // `remoteDatasetWarnings` (the display cap). Lets the banner render "+N more"
+  // so a bounded list never hides that a flood happened. Reset alongside the
+  // warnings themselves.
+  const [remoteDatasetWarningsOverflow, setRemoteDatasetWarningsOverflow] = useState(0);
 
   useEffect(() => {
     if (!wasmReady || controllerRef.current) return;
@@ -129,6 +139,8 @@ export function useBridge(params: Params) {
           setRemoteDatasetLoading(activity.loading);
           setRemoteDatasetError(activity.error);
           setRemoteDatasetProgress(activity.progress);
+          setRemoteDatasetWarnings(activity.warnings);
+          setRemoteDatasetWarningsOverflow(activity.warningsOverflow);
         },
         onSceneChanged: (scene) => portsRef.current.setWasmScene(scene),
         onDatasetsChanged: () => portsRef.current.bumpDatasetsVersion(),
@@ -166,6 +178,8 @@ export function useBridge(params: Params) {
       setRemoteDatasetLoading(false);
       setRemoteDatasetError(null);
       setRemoteDatasetProgress(null);
+      setRemoteDatasetWarnings([]);
+      setRemoteDatasetWarningsOverflow(0);
       portsRef.current.bumpDatasetsVersion();
     };
   }, [wasmReady, workspaceId]);
@@ -201,6 +215,10 @@ export function useBridge(params: Params) {
     controllerRef.current?.follow(targetId);
   }, []);
 
+  const dismissRemoteDatasetWarnings = useCallback(() => {
+    controllerRef.current?.dismissOpenWarnings();
+  }, []);
+
   const followablePeers = Array.from(peers.entries())
     .filter(([, p]) => p.following === null || p.following === undefined);
 
@@ -230,6 +248,17 @@ export function useBridge(params: Params) {
     remoteDatasetLoading,
     remoteDatasetError,
     remoteDatasetProgress,
+    /** Durable non-fatal import warnings collected across opens. Stays
+     *  populated after an open completes; cleared by
+     *  `dismissRemoteDatasetWarnings`, a failed open (its own only), or
+     *  connection loss. Capped for display; see `remoteDatasetWarningsOverflow`
+     *  for how many further distinct warnings the cap elided. */
+    remoteDatasetWarnings,
+    /** Count of further distinct warnings beyond the retained
+     *  `remoteDatasetWarnings` (the display cap). Zero unless a flood exceeded
+     *  the cap; drives the banner's "+N more" affordance. */
+    remoteDatasetWarningsOverflow,
+    dismissRemoteDatasetWarnings,
     breakFollow,
     handleFollow,
     followablePeers,

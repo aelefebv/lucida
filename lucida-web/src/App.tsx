@@ -21,6 +21,7 @@ import { FileBrowser } from "./components/FileBrowser.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
+import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
@@ -1425,6 +1426,15 @@ function App({
             )}
             <FpsCounter />
             <LoadingViewBanner applier={savedViewSync.applier} />
+            {/* Durable, dismissible surface for non-fatal import warnings from
+                a dataset open (e.g. the sampled-label-discovery notice). Stays
+                visible after the open completes and clears on dismiss or a
+                fresh open. */}
+            <ImportWarningBanner
+              warnings={bridge.remoteDatasetWarnings}
+              overflow={bridge.remoteDatasetWarningsOverflow}
+              onDismiss={bridge.dismissRemoteDatasetWarnings}
+            />
             {/* Non-blocking graceful-degrade notice from the LIGHT annotation
                 -view restore (slice 2): shown when an author's captured z/t/c had
                 to be clamped to fit the pin's own dataset. Auto-clears (effect
