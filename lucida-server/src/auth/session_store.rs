@@ -14,6 +14,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
+use crate::persistence::{
+    PersistenceOperation, PersistenceOperationId, PersistenceRecoveryDisposition,
+};
+
 /// One row in `login_sessions`.
 ///
 /// `id` is the opaque session ID written to the cookie; nothing about
@@ -42,6 +46,14 @@ pub struct LoginSession {
 pub enum SessionStoreError {
     #[error("storage backend error: {0}")]
     Backend(String),
+    #[error(
+        "persistence operation {operation_id} is recoverably indeterminate ({recovery:?}): {detail}"
+    )]
+    RecoverablyIndeterminate {
+        operation_id: PersistenceOperationId,
+        recovery: PersistenceRecoveryDisposition,
+        detail: String,
+    },
 }
 
 /// Trait implemented by every storage backend (SQLite in production,
@@ -74,6 +86,12 @@ pub trait LoginSessionStore: Send + Sync + 'static {
     /// deletion committed, rather than the result of a preceding racy lookup.
     /// Idempotent: a row that is already gone returns `Ok(None)`.
     async fn delete(&self, id: &str) -> Result<Option<LoginSession>, SessionStoreError>;
+
+    /// Begin a finite backend-owned single-session deletion.
+    fn begin_delete(
+        &self,
+        id: &str,
+    ) -> PersistenceOperation<Option<LoginSession>, SessionStoreError>;
 
     /// Bulk-delete every session whose `expires_at` is `<= now`.
     /// Returns the number of rows deleted. Called from the periodic

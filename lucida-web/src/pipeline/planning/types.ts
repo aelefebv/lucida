@@ -49,8 +49,10 @@ export interface SelectionState {
 }
 
 export interface CacheStateSnapshot {
-  cached: Map<string, Set<string>>;
-  inFlight: Map<string, Set<string>>;
+  /** datasetId → imageId → residency tier → canonical chunk keys. */
+  cached: Map<string, Map<string, Map<"detail" | "coarse", Set<string>>>>;
+  /** datasetId → imageId → residency tier → canonical chunk keys. */
+  inFlight: Map<string, Map<string, Map<"detail" | "coarse", Set<string>>>>;
 }
 
 export interface MinimapChunkCoord {

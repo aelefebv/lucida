@@ -106,7 +106,10 @@ describe("SavedViewApplier", () => {
     openCalls = [];
     docCmds = [];
     bridge = {
-      sendOpenRemoteDataset: (url: string) => { openCalls.push(url); },
+      sendOpenRemoteDataset: (url: string) => {
+        openCalls.push(url);
+        return `open-${openCalls.length}`;
+      },
       sendCommand: (json: string) => { docCmds.push(json); },
     };
   });
@@ -151,6 +154,27 @@ describe("SavedViewApplier", () => {
     expect(applier.getActiveEpoch()).toBeNull();
     expect(applier.ownsDatasetOpen(expectedId)).toBe(false);
     expect(applier.getState().okOpened).toBe(1);
+  });
+
+  it("settles an unadmitted dataset open immediately instead of waiting for timeout", async () => {
+    const scene = createMockScene();
+    bridge.sendOpenRemoteDataset = vi.fn(() => null);
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl, 30_000);
+    const v = emptyView();
+    v.datasets = ["gs://bucket/offline.zarr"];
+
+    await applier.apply(v);
+
+    expect(applier.getActiveEpoch()).toBeNull();
+    expect(applier.getState()).toMatchObject({
+      inProgress: false,
+      anyOpenFailed: true,
+      openStatuses: [{
+        url: "gs://bucket/offline.zarr",
+        state: "error",
+        error: "workspace connection is not ready",
+      }],
+    });
   });
 
   it("partial-failure: marks one URL as error but keeps applying", async () => {

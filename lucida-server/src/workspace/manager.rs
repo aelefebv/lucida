@@ -4,6 +4,7 @@
 //! the HTTP surface exposes), plus [`WorkspaceError`] and its HTTP mapping.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -27,6 +28,10 @@ use tokio::sync::{Mutex, OnceCell, OwnedRwLockReadGuard, RwLock, watch};
 use crate::auth::AuthEpochRegistry;
 use crate::generated_coarse::GeneratedStatusBudget;
 use crate::outbox::{DEFAULT_BROADCAST_BYTES, DEFAULT_BROADCAST_MESSAGES, broadcast_channel};
+use crate::persistence::{
+    PersistenceCompletion, PersistenceIndeterminate, PersistenceOperationId,
+    PersistenceRecoveryDisposition,
+};
 use crate::session::{InverseCommandError, Session};
 use crate::{BroadcastEvent, BroadcastSender, DatasetRuntimeConfig, UnicastRoutes};
 
@@ -42,6 +47,39 @@ const MAX_VIEWER_PROFILE_NAME_CHARS: usize = 64;
 pub(crate) const MAX_DATASET_NAME_CHARS: usize = 200;
 const MAX_WORKSPACE_CONNECTIONS: usize = 64;
 const MAX_PRINCIPAL_CONNECTIONS_PER_WORKSPACE: usize = 8;
+
+struct WorkspaceReconciliation {
+    operation_id: PersistenceOperationId,
+    error: StoreError,
+    deadline: tokio::time::Instant,
+}
+
+enum DocumentPersistenceResolution {
+    Committed,
+    Recovered {
+        operation_id: PersistenceOperationId,
+        deadline: tokio::time::Instant,
+    },
+}
+
+enum ReconciliationReadError<E> {
+    Backend(E),
+    Deadline,
+}
+
+async fn bounded_reconciliation_read<F, T, E>(
+    deadline: tokio::time::Instant,
+    read: F,
+) -> Result<T, ReconciliationReadError<E>>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout_at(deadline, read).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(ReconciliationReadError::Backend(error)),
+        Err(_) => Err(ReconciliationReadError::Deadline),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceAccessBasis {
@@ -480,6 +518,9 @@ pub struct WorkspaceManager {
     access_mutation_test_hook: Arc<StdMutex<Option<Arc<AccessMutationTestHook>>>>,
     #[cfg(test)]
     credential_mutation_test_hook: Arc<StdMutex<Option<Arc<CredentialMutationTestHook>>>>,
+    restart_required_workspaces: Arc<Mutex<HashSet<String>>>,
+    #[cfg(test)]
+    lose_persistence_completion_for_test: Arc<AtomicBool>,
 }
 
 impl WorkspaceManager {
@@ -509,6 +550,9 @@ impl WorkspaceManager {
             access_mutation_test_hook: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             credential_mutation_test_hook: Arc::new(StdMutex::new(None)),
+            restart_required_workspaces: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(test)]
+            lose_persistence_completion_for_test: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -585,6 +629,39 @@ impl WorkspaceManager {
         if let Some(hook) = hook {
             hook.entered.notify_one();
             hook.release.notified().await;
+        }
+    }
+
+    /// Deterministically simulate a transport/worker losing the success
+    /// acknowledgement after the durable backend has committed.  The next
+    /// completion-aware manager mutation must recover by read-back.
+    #[cfg(test)]
+    pub(crate) fn lose_next_persistence_completion(&self) {
+        self.lose_persistence_completion_for_test
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn inject_lost_persistence_completion<T>(
+        &self,
+        completion: PersistenceCompletion<T, StoreError>,
+    ) -> PersistenceCompletion<T, StoreError> {
+        if self
+            .lose_persistence_completion_for_test
+            .swap(false, Ordering::AcqRel)
+        {
+            match completion {
+                PersistenceCompletion::Committed(_) => {
+                    PersistenceCompletion::RecoverablyIndeterminate(
+                        PersistenceIndeterminate::resolved_backend(StoreError::Backend(
+                            "injected lost persistence completion".to_string(),
+                        )),
+                    )
+                }
+                other => other,
+            }
+        } else {
+            completion
         }
     }
 
@@ -800,6 +877,7 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
+        self.ensure_workspace_restore_allowed(workspace_id).await?;
         // NEVER-LEAK (workspace-open path). This path is reachable by *anyone*
         // who is handed a `/w/<id>` deep-link (annotation share-by-link), so a
         // caller with no access must not be able to tell "exists but denied"
@@ -892,12 +970,22 @@ impl WorkspaceManager {
             // and runtime teardown. The owned child survives HTTP caller
             // cancellation after SQLite commits.
             let _archive_operation = manager.archive_operations.lock().await;
-            let record = manager
+            let completion = manager
                 .store
-                .archive_workspace(&workspace_id)
-                .await
-                .map_err(WorkspaceError::Store)?
-                .ok_or(WorkspaceError::NotFound)?;
+                .begin_archive_workspace(&workspace_id)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_archive_completion(&workspace_id, completion)
+                .await;
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager
+                    .fail_closed_workspace_by_id(&workspace_id, "archive completion indeterminate")
+                    .await;
+            }
+            let record = resolved?.ok_or(WorkspaceError::NotFound)?;
             #[cfg(test)]
             manager.pause_access_mutation_after_commit().await;
             manager.notify_workspace_archived(&workspace_id).await;
@@ -936,12 +1024,22 @@ impl WorkspaceManager {
         let workspace_id = workspace_id.to_string();
         await_access_mutation(tokio::spawn(async move {
             let _archive_operation = manager.archive_operations.lock().await;
-            manager
+            let completion = manager
                 .store
-                .archive_workspace(&workspace_id)
-                .await
-                .map_err(WorkspaceError::Store)?
-                .ok_or(WorkspaceError::NotFound)?;
+                .begin_archive_workspace(&workspace_id)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_archive_completion(&workspace_id, completion)
+                .await;
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager
+                    .fail_closed_workspace_by_id(&workspace_id, "archive completion indeterminate")
+                    .await;
+            }
+            resolved?.ok_or(WorkspaceError::NotFound)?;
             #[cfg(test)]
             manager.pause_access_mutation_after_commit().await;
             manager.notify_workspace_archived(&workspace_id).await;
@@ -994,12 +1092,29 @@ impl WorkspaceManager {
         let workspace_id = workspace_id.to_string();
         let manager = self.clone();
         await_access_mutation(tokio::spawn(async move {
-            let member = manager
+            let completion = manager
                 .store
-                .upsert_member(&workspace_id, &email, &display_name, role)
+                .begin_upsert_member(&workspace_id, &email, &display_name, role)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_member_completion(
+                    &workspace_id,
+                    &email,
+                    Some(role),
+                    Some(expected_member_display_name(&email, &display_name)),
+                    completion,
+                )
                 .await
-                .map_err(map_membership_store_error)?
-                .ok_or(WorkspaceError::NotFound)?;
+                .map_err(map_membership_workspace_error);
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager
+                    .revoke_member_connections(&workspace_id, &email)
+                    .await;
+            }
+            let member = resolved?.ok_or(WorkspaceError::NotFound)?;
             #[cfg(test)]
             manager.pause_access_mutation_after_commit().await;
             manager
@@ -1021,12 +1136,28 @@ impl WorkspaceManager {
         let workspace_id = workspace_id.to_string();
         let manager = self.clone();
         await_access_mutation(tokio::spawn(async move {
-            let member = manager
+            let completion = manager
                 .store
-                .admin_upsert_owner(&workspace_id, &email, &display_name)
-                .await
-                .map_err(WorkspaceError::Store)?
-                .ok_or(WorkspaceError::NotFound)?;
+                .begin_admin_upsert_owner(&workspace_id, &email, &display_name)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_member_completion(
+                    &workspace_id,
+                    &email,
+                    Some(WorkspaceRole::Owner),
+                    Some(expected_member_display_name(&email, &display_name)),
+                    completion,
+                )
+                .await;
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager
+                    .revoke_member_connections(&workspace_id, &email)
+                    .await;
+            }
+            let member = resolved?.ok_or(WorkspaceError::NotFound)?;
             #[cfg(test)]
             manager.pause_access_mutation_after_commit().await;
             manager
@@ -1049,12 +1180,23 @@ impl WorkspaceManager {
         let workspace_id = workspace_id.to_string();
         let manager = self.clone();
         await_access_mutation(tokio::spawn(async move {
-            let member = manager
+            let completion = manager
                 .store
-                .update_member_role(&workspace_id, &email, role)
+                .begin_update_member_role(&workspace_id, &email, role)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_member_completion(&workspace_id, &email, Some(role), None, completion)
                 .await
-                .map_err(map_membership_store_error)?
-                .ok_or(WorkspaceError::NotFound)?;
+                .map_err(map_membership_workspace_error);
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager
+                    .revoke_member_connections(&workspace_id, &email)
+                    .await;
+            }
+            let member = resolved?.ok_or(WorkspaceError::NotFound)?;
             #[cfg(test)]
             manager.pause_access_mutation_after_commit().await;
             manager
@@ -1076,11 +1218,23 @@ impl WorkspaceManager {
         let workspace_id = workspace_id.to_string();
         let manager = self.clone();
         await_access_mutation(tokio::spawn(async move {
-            let removed = manager
+            let completion = manager
                 .store
-                .remove_member(&workspace_id, &email)
+                .begin_remove_member(&workspace_id, &email)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_member_removal_completion(&workspace_id, &email, completion)
                 .await
-                .map_err(map_membership_store_error)?;
+                .map_err(map_membership_workspace_error);
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager
+                    .revoke_member_connections(&workspace_id, &email)
+                    .await;
+            }
+            let removed = resolved?;
             if !removed {
                 return Err(WorkspaceError::NotFound);
             }
@@ -1110,12 +1264,20 @@ impl WorkspaceManager {
         let workspace_id = workspace_id.to_string();
         let manager = self.clone();
         await_access_mutation(tokio::spawn(async move {
-            let settings = manager
+            let completion = manager
                 .store
-                .update_link_access(&workspace_id, link_access, link_role)
-                .await
-                .map_err(WorkspaceError::Store)?
-                .ok_or(WorkspaceError::NotFound)?;
+                .begin_update_link_access(&workspace_id, link_access, link_role)
+                .resolve()
+                .await;
+            #[cfg(test)]
+            let completion = manager.inject_lost_persistence_completion(completion);
+            let resolved = manager
+                .resolve_link_completion(&workspace_id, link_access, link_role, completion)
+                .await;
+            if matches!(resolved, Err(WorkspaceError::PersistenceIndeterminate(_))) {
+                manager.revoke_link_connections(&workspace_id).await;
+            }
+            let settings = resolved?.ok_or(WorkspaceError::NotFound)?;
             #[cfg(test)]
             manager.pause_access_mutation_after_commit().await;
             manager.revoke_link_connections(&workspace_id).await;
@@ -1705,15 +1867,13 @@ impl WorkspaceManager {
                     "workspace.live_restore_started"
                 );
                 crate::binding_restore::restore_workspace_bindings(
-                    Arc::clone(&live.session),
-                    live.tx.clone(),
-                    workspace_id,
-                    Arc::clone(&self.store),
+                    Arc::clone(&live),
+                    self.clone(),
                     sources,
                     self.dataset_runtime.clone(),
                     Arc::clone(&self.generated_status_budget),
                 )
-                .await;
+                .await?;
                 let shutdown_reason = {
                     self.background_shutdown_reason
                         .lock()
@@ -1867,6 +2027,7 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceAccessBasis, WorkspaceError> {
+        self.ensure_workspace_restore_allowed(workspace_id).await?;
         if self
             .store
             .member_role_for_any_state(workspace_id, principal)
@@ -1986,11 +2147,81 @@ impl WorkspaceManager {
         closed
     }
 
+    pub(crate) async fn fail_closed_credential_persistence(
+        &self,
+        email: &str,
+        restart_required: bool,
+    ) -> usize {
+        if restart_required {
+            self.auth_epochs.block_until_restart(email).await;
+        }
+        self.revoke_principal_connections(email).await
+    }
+
+    async fn fail_closed_all_live_credentials(&self) -> usize {
+        let lives: Vec<_> = self
+            .live
+            .lock()
+            .await
+            .values()
+            .filter_map(|cell| cell.get().cloned())
+            .collect();
+        for live in &lives {
+            self.fail_closed_live_workspace(
+                live,
+                "credential persistence identity was unavailable",
+            )
+            .await;
+        }
+        lives.len()
+    }
+
+    pub(crate) async fn fail_closed_session_persistence(
+        &self,
+        session_id: &str,
+        email: Option<&str>,
+        restart_required: bool,
+    ) -> usize {
+        if restart_required {
+            self.auth_epochs
+                .block_session_until_restart(session_id)
+                .await;
+        }
+        match email {
+            Some(email) => {
+                self.fail_closed_credential_persistence(email, restart_required)
+                    .await
+            }
+            None => self.fail_closed_all_live_credentials().await,
+        }
+    }
+
+    pub(crate) async fn fail_closed_bearer_persistence(
+        &self,
+        token_hash: &str,
+        email: Option<&str>,
+        restart_required: bool,
+    ) -> usize {
+        if restart_required {
+            self.auth_epochs
+                .block_bearer_until_restart(token_hash)
+                .await;
+        }
+        match email {
+            Some(email) => {
+                self.fail_closed_credential_persistence(email, restart_required)
+                    .await
+            }
+            None => self.fail_closed_all_live_credentials().await,
+        }
+    }
+
     pub async fn require_viewer(
         &self,
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceRole, WorkspaceError> {
+        self.ensure_workspace_restore_allowed(workspace_id).await?;
         self.store
             .role_for(workspace_id, principal)
             .await
@@ -2003,6 +2234,7 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceRole, WorkspaceError> {
+        self.ensure_workspace_restore_allowed(workspace_id).await?;
         let role = self
             .store
             .role_for(workspace_id, principal)
@@ -2021,6 +2253,7 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceRole, WorkspaceError> {
+        self.ensure_workspace_restore_allowed(workspace_id).await?;
         let role = self
             .store
             .role_for(workspace_id, principal)
@@ -2039,6 +2272,7 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceRole, WorkspaceError> {
+        self.ensure_workspace_restore_allowed(workspace_id).await?;
         self.store
             .owner_role_for_any_state(workspace_id, principal)
             .await
@@ -2157,37 +2391,642 @@ impl WorkspaceManager {
         service_count
     }
 
+    async fn classify_workspace_indeterminate(
+        &self,
+        workspace_id: &str,
+        live: Option<&Arc<LiveWorkspace>>,
+        indeterminate: PersistenceIndeterminate<StoreError>,
+    ) -> Result<WorkspaceReconciliation, WorkspaceError> {
+        let (operation_id, cause, recovery, deadline) = indeterminate.into_parts();
+        if recovery == PersistenceRecoveryDisposition::RestartRequired {
+            self.restart_required_workspaces
+                .lock()
+                .await
+                .insert(workspace_id.to_string());
+        }
+        match cause {
+            crate::persistence::PersistenceIndeterminateCause::Backend(error)
+                if recovery == PersistenceRecoveryDisposition::Quiesced =>
+            {
+                Ok(WorkspaceReconciliation {
+                    operation_id,
+                    error,
+                    deadline: tokio::time::Instant::now() + deadline.duration(),
+                })
+            }
+            cause => {
+                if let Some(live) = live {
+                    self.fail_closed_live_workspace(
+                        live,
+                        "durable mutation completion indeterminate",
+                    )
+                    .await;
+                } else {
+                    self.fail_closed_workspace_by_id(
+                        workspace_id,
+                        "durable mutation completion indeterminate",
+                    )
+                    .await;
+                }
+                Err(WorkspaceError::PersistenceIndeterminate(format!(
+                    "operation {operation_id} ended indeterminately ({cause:?}); recovery={recovery:?}"
+                )))
+            }
+        }
+    }
+
+    async fn fail_workspace_reconciliation(
+        &self,
+        workspace_id: &str,
+        live: Option<&Arc<LiveWorkspace>>,
+        operation_id: PersistenceOperationId,
+        reason: &'static str,
+        detail: String,
+    ) -> WorkspaceError {
+        if let Some(live) = live {
+            self.fail_closed_live_workspace(live, reason).await;
+        } else {
+            self.fail_closed_workspace_by_id(workspace_id, reason).await;
+        }
+        WorkspaceError::PersistenceIndeterminate(format!(
+            "operation {operation_id} reconciliation failed: {detail}"
+        ))
+    }
+
+    async fn ensure_workspace_restore_allowed(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(), WorkspaceError> {
+        if self
+            .restart_required_workspaces
+            .lock()
+            .await
+            .contains(workspace_id)
+        {
+            Err(WorkspaceError::PersistenceIndeterminate(
+                "workspace remains fail-closed until restart after an unquiesced durable mutation"
+                    .to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn restart_required_workspace_count(&self) -> usize {
+        self.restart_required_workspaces.lock().await.len()
+    }
+
+    async fn fail_closed_workspace_by_id(&self, workspace_id: &str, reason: &'static str) {
+        let live = self
+            .live
+            .lock()
+            .await
+            .get(workspace_id)
+            .and_then(|cell| cell.get())
+            .cloned();
+        if let Some(live) = live {
+            self.fail_closed_live_workspace(&live, reason).await;
+        } else {
+            let mut workspace_epochs = self.workspace_access_epochs.lock().await;
+            let epoch = workspace_epochs
+                .entry(workspace_id.to_string())
+                .or_default();
+            *epoch = epoch.wrapping_add(1);
+        }
+    }
+
+    async fn resolve_archive_completion(
+        &self,
+        workspace_id: &str,
+        completion: PersistenceCompletion<Option<WorkspaceRecord>, StoreError>,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceError> {
+        match completion {
+            PersistenceCompletion::Committed(record) => Ok(record),
+            PersistenceCompletion::DefinitelyNotCommitted(error) => {
+                Err(WorkspaceError::Store(error))
+            }
+            PersistenceCompletion::RecoverablyIndeterminate(indeterminate) => {
+                let reconciliation = self
+                    .classify_workspace_indeterminate(workspace_id, None, indeterminate)
+                    .await?;
+                match bounded_reconciliation_read(
+                    reconciliation.deadline,
+                    self.store
+                        .workspace_archived_for_reconciliation(workspace_id),
+                )
+                .await
+                {
+                    Ok(Some(true)) => match bounded_reconciliation_read(
+                        reconciliation.deadline,
+                        self.store.get_workspace(workspace_id),
+                    )
+                    .await
+                    {
+                        Ok(Some(record)) => {
+                            tracing::warn!(workspace_id, "workspace.archive_commit_recovered");
+                            Ok(Some(record))
+                        }
+                        Ok(None) => Err(self
+                            .fail_workspace_reconciliation(
+                                workspace_id,
+                                None,
+                                reconciliation.operation_id,
+                                "archive reconciliation diverged",
+                                "archive marker existed but its record disappeared".into(),
+                            )
+                            .await),
+                        Err(ReconciliationReadError::Backend(readback)) => Err(self
+                            .fail_workspace_reconciliation(
+                                workspace_id,
+                                None,
+                                reconciliation.operation_id,
+                                "archive reconciliation read failed",
+                                format!("archive record could not be decoded ({readback})"),
+                            )
+                            .await),
+                        Err(ReconciliationReadError::Deadline) => Err(self
+                            .fail_workspace_reconciliation(
+                                workspace_id,
+                                None,
+                                reconciliation.operation_id,
+                                "archive reconciliation timed out",
+                                "archive record read exceeded its bounded deadline".into(),
+                            )
+                            .await),
+                    },
+                    Ok(_) => Err(WorkspaceError::Store(reconciliation.error)),
+                    Err(ReconciliationReadError::Backend(readback)) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "archive reconciliation read failed",
+                            format!(
+                                "archive completion was indeterminate ({}); durable read-back failed ({readback})",
+                                reconciliation.error
+                            ),
+                        )
+                        .await),
+                    Err(ReconciliationReadError::Deadline) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "archive reconciliation timed out",
+                            "archive marker read exceeded its bounded deadline".into(),
+                        )
+                        .await),
+                }
+            }
+        }
+    }
+
+    async fn resolve_member_completion(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        expected_role: Option<WorkspaceRole>,
+        expected_display_name: Option<String>,
+        completion: PersistenceCompletion<Option<WorkspaceMember>, StoreError>,
+    ) -> Result<Option<WorkspaceMember>, WorkspaceError> {
+        match completion {
+            PersistenceCompletion::Committed(member) => Ok(member),
+            PersistenceCompletion::DefinitelyNotCommitted(error) => {
+                Err(WorkspaceError::Store(error))
+            }
+            PersistenceCompletion::RecoverablyIndeterminate(indeterminate) => {
+                let reconciliation = self
+                    .classify_workspace_indeterminate(workspace_id, None, indeterminate)
+                    .await?;
+                match bounded_reconciliation_read(
+                    reconciliation.deadline,
+                    self.store.member_for_reconciliation(workspace_id, email),
+                )
+                .await
+                {
+                    Ok(Some(state))
+                        if expected_role.is_none_or(|role| state.role == role)
+                            && expected_display_name
+                                .as_ref()
+                                .is_none_or(|name| state.display_name == *name) =>
+                    {
+                        match bounded_reconciliation_read(
+                            reconciliation.deadline,
+                            self.store.admin_workspace_details(workspace_id),
+                        )
+                        .await
+                        {
+                            Ok(Some(details)) => {
+                                let member = details
+                                    .members
+                                    .into_iter()
+                                    .find(|member| member.email == email);
+                                tracing::warn!(
+                                    workspace_id,
+                                    principal = email,
+                                    "workspace.member_commit_recovered"
+                                );
+                                Ok(member)
+                            }
+                            Ok(None) => Err(self
+                                .fail_workspace_reconciliation(
+                                    workspace_id,
+                                    None,
+                                    reconciliation.operation_id,
+                                    "member reconciliation diverged",
+                                    "member state existed but workspace details disappeared".into(),
+                                )
+                                .await),
+                            Err(ReconciliationReadError::Backend(readback)) => Err(self
+                                .fail_workspace_reconciliation(
+                                    workspace_id,
+                                    None,
+                                    reconciliation.operation_id,
+                                    "member reconciliation read failed",
+                                    format!(
+                                        "member state committed but its response row could not be decoded ({readback})"
+                                    ),
+                                )
+                                .await),
+                            Err(ReconciliationReadError::Deadline) => Err(self
+                                .fail_workspace_reconciliation(
+                                    workspace_id,
+                                    None,
+                                    reconciliation.operation_id,
+                                    "member reconciliation timed out",
+                                    "member response read exceeded its bounded deadline".into(),
+                                )
+                                .await),
+                        }
+                    }
+                    Ok(_) => Err(WorkspaceError::Store(reconciliation.error)),
+                    Err(ReconciliationReadError::Backend(readback)) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "member reconciliation read failed",
+                            format!(
+                                "member completion was indeterminate ({}); durable read-back failed ({readback})",
+                                reconciliation.error
+                            ),
+                        )
+                        .await),
+                    Err(ReconciliationReadError::Deadline) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "member reconciliation timed out",
+                            "member state read exceeded its bounded deadline".into(),
+                        )
+                        .await),
+                }
+            }
+        }
+    }
+
+    async fn resolve_member_removal_completion(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        completion: PersistenceCompletion<bool, StoreError>,
+    ) -> Result<bool, WorkspaceError> {
+        match completion {
+            PersistenceCompletion::Committed(removed) => Ok(removed),
+            PersistenceCompletion::DefinitelyNotCommitted(error) => {
+                Err(WorkspaceError::Store(error))
+            }
+            PersistenceCompletion::RecoverablyIndeterminate(indeterminate) => {
+                let reconciliation = self
+                    .classify_workspace_indeterminate(workspace_id, None, indeterminate)
+                    .await?;
+                match bounded_reconciliation_read(
+                    reconciliation.deadline,
+                    self.store.member_for_reconciliation(workspace_id, email),
+                )
+                .await
+                {
+                    Ok(None) => {
+                        tracing::warn!(
+                            workspace_id,
+                            principal = email,
+                            "workspace.member_removal_commit_recovered"
+                        );
+                        Ok(true)
+                    }
+                    Ok(_) => Err(WorkspaceError::Store(reconciliation.error)),
+                    Err(ReconciliationReadError::Backend(readback)) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "member-removal reconciliation read failed",
+                            format!(
+                                "member removal completion was indeterminate ({}); durable read-back failed ({readback})",
+                                reconciliation.error
+                            ),
+                        )
+                        .await),
+                    Err(ReconciliationReadError::Deadline) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "member-removal reconciliation timed out",
+                            "member removal read exceeded its bounded deadline".into(),
+                        )
+                        .await),
+                }
+            }
+        }
+    }
+
+    async fn resolve_link_completion(
+        &self,
+        workspace_id: &str,
+        expected_access: WorkspaceLinkAccess,
+        expected_role: WorkspaceRole,
+        completion: PersistenceCompletion<Option<WorkspaceSharingSettings>, StoreError>,
+    ) -> Result<Option<WorkspaceSharingSettings>, WorkspaceError> {
+        match completion {
+            PersistenceCompletion::Committed(settings) => Ok(settings),
+            PersistenceCompletion::DefinitelyNotCommitted(error) => {
+                Err(WorkspaceError::Store(error))
+            }
+            PersistenceCompletion::RecoverablyIndeterminate(indeterminate) => {
+                let reconciliation = self
+                    .classify_workspace_indeterminate(workspace_id, None, indeterminate)
+                    .await?;
+                match bounded_reconciliation_read(
+                    reconciliation.deadline,
+                    self.store.link_policy_for_reconciliation(workspace_id),
+                )
+                .await
+                {
+                    Ok(Some((access, role)))
+                        if access == expected_access && role == expected_role =>
+                    {
+                        match bounded_reconciliation_read(
+                            reconciliation.deadline,
+                            self.store.sharing_settings(workspace_id),
+                        )
+                        .await
+                        {
+                            Ok(Some(settings)) => {
+                                tracing::warn!(
+                                    workspace_id,
+                                    "workspace.link_access_commit_recovered"
+                                );
+                                Ok(Some(settings))
+                            }
+                            Ok(None) => Err(self
+                                .fail_workspace_reconciliation(
+                                    workspace_id,
+                                    None,
+                                    reconciliation.operation_id,
+                                    "link reconciliation diverged",
+                                    "link policy existed but sharing settings disappeared".into(),
+                                )
+                                .await),
+                            Err(ReconciliationReadError::Backend(readback)) => Err(self
+                                .fail_workspace_reconciliation(
+                                    workspace_id,
+                                    None,
+                                    reconciliation.operation_id,
+                                    "link reconciliation read failed",
+                                    format!(
+                                        "link policy committed but sharing response could not be decoded ({readback})"
+                                    ),
+                                )
+                                .await),
+                            Err(ReconciliationReadError::Deadline) => Err(self
+                                .fail_workspace_reconciliation(
+                                    workspace_id,
+                                    None,
+                                    reconciliation.operation_id,
+                                    "link reconciliation timed out",
+                                    "sharing settings read exceeded its bounded deadline".into(),
+                                )
+                                .await),
+                        }
+                    }
+                    Ok(_) => Err(WorkspaceError::Store(reconciliation.error)),
+                    Err(ReconciliationReadError::Backend(readback)) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "link reconciliation read failed",
+                            format!(
+                                "link-access completion was indeterminate ({}); durable read-back failed ({readback})",
+                                reconciliation.error
+                            ),
+                        )
+                        .await),
+                    Err(ReconciliationReadError::Deadline) => Err(self
+                        .fail_workspace_reconciliation(
+                            workspace_id,
+                            None,
+                            reconciliation.operation_id,
+                            "link reconciliation timed out",
+                            "link policy read exceeded its bounded deadline".into(),
+                        )
+                        .await),
+                }
+            }
+        }
+    }
+
+    async fn resolve_document_completion(
+        &self,
+        live: &Arc<LiveWorkspace>,
+        seq: u64,
+        expected_document: &DocumentState,
+        completion: PersistenceCompletion<(), StoreError>,
+    ) -> Result<DocumentPersistenceResolution, WorkspaceError> {
+        match completion {
+            PersistenceCompletion::Committed(()) => Ok(DocumentPersistenceResolution::Committed),
+            PersistenceCompletion::DefinitelyNotCommitted(error) => {
+                Err(WorkspaceError::Store(error))
+            }
+            PersistenceCompletion::RecoverablyIndeterminate(indeterminate) => {
+                let reconciliation = self
+                    .classify_workspace_indeterminate(&live.workspace_id, Some(live), indeterminate)
+                    .await?;
+                match bounded_reconciliation_read(
+                    reconciliation.deadline,
+                    self.store.get_workspace(&live.workspace_id),
+                )
+                .await
+                {
+                    Ok(Some(record)) if record.seq == seq => {
+                        let durable = match serde_json::to_value(&record.document) {
+                            Ok(durable) => durable,
+                            Err(serialize) => {
+                                return Err(self
+                                    .fail_workspace_reconciliation(
+                                        &live.workspace_id,
+                                        Some(live),
+                                        reconciliation.operation_id,
+                                        "document reconciliation encoding failed",
+                                        format!(
+                                            "durable document comparison failed: {serialize}"
+                                        ),
+                                    )
+                                    .await);
+                            }
+                        };
+                        let expected = match serde_json::to_value(expected_document) {
+                            Ok(expected) => expected,
+                            Err(serialize) => {
+                                return Err(self
+                                    .fail_workspace_reconciliation(
+                                        &live.workspace_id,
+                                        Some(live),
+                                        reconciliation.operation_id,
+                                        "document reconciliation encoding failed",
+                                        format!(
+                                            "expected document comparison failed: {serialize}"
+                                        ),
+                                    )
+                                    .await);
+                            }
+                        };
+                        if durable == expected {
+                            tracing::warn!(workspace_id = %live.workspace_id, seq, "workspace.document_commit_recovered");
+                            Ok(DocumentPersistenceResolution::Recovered {
+                                operation_id: reconciliation.operation_id,
+                                deadline: reconciliation.deadline,
+                            })
+                        } else {
+                            self.fail_closed_live_workspace(
+                                live,
+                                "durable document diverged during commit recovery",
+                            )
+                            .await;
+                            Err(WorkspaceError::PersistenceIndeterminate(format!(
+                                "operation {} committed sequence {seq} with a different durable document",
+                                reconciliation.operation_id
+                            )))
+                        }
+                    }
+                    Ok(Some(record)) if record.seq < seq => {
+                        Err(WorkspaceError::Store(reconciliation.error))
+                    }
+                    Ok(None) => Err(WorkspaceError::Store(reconciliation.error)),
+                    Ok(Some(record)) => {
+                        self.fail_closed_live_workspace(
+                            live,
+                            "durable sequence diverged during commit recovery",
+                        )
+                        .await;
+                        Err(WorkspaceError::PersistenceIndeterminate(format!(
+                            "operation {} sequence {seq} completion is indeterminate; durable sequence is {}",
+                            reconciliation.operation_id,
+                            record.seq
+                        )))
+                    }
+                    Err(ReconciliationReadError::Backend(readback)) => Err(self
+                        .fail_workspace_reconciliation(
+                            &live.workspace_id,
+                            Some(live),
+                            reconciliation.operation_id,
+                            "durable commit read-back failed",
+                            format!(
+                                "document completion was indeterminate ({}); durable read-back failed ({readback})",
+                                reconciliation.error
+                            ),
+                        )
+                        .await),
+                    Err(ReconciliationReadError::Deadline) => Err(self
+                        .fail_workspace_reconciliation(
+                            &live.workspace_id,
+                            Some(live),
+                            reconciliation.operation_id,
+                            "durable commit read-back timed out",
+                            "document read-back exceeded its bounded deadline".into(),
+                        )
+                        .await),
+                }
+            }
+        }
+    }
+
+    /// Revoke admissions immediately, then detach quiescence and eviction so
+    /// the currently-admitted mutation permit can unwind without deadlocking
+    /// its own fail-closed path.  The next usable live runtime is restored
+    /// from durable state rather than this potentially divergent session.
+    async fn fail_closed_live_workspace(&self, live: &Arc<LiveWorkspace>, reason: &'static str) {
+        {
+            let mut workspace_epochs = self.workspace_access_epochs.lock().await;
+            let epoch = workspace_epochs
+                .entry(live.workspace_id.clone())
+                .or_default();
+            *epoch = epoch.wrapping_add(1);
+        }
+        let revoked = live.revoke_all_access().await;
+        {
+            let mut live_map = self.live.lock().await;
+            if live_map
+                .get(&live.workspace_id)
+                .and_then(|cell| cell.get())
+                .is_some_and(|current| Arc::ptr_eq(current, live))
+            {
+                live_map.remove(&live.workspace_id);
+            }
+        }
+        let manager = self.clone();
+        let live = Arc::clone(live);
+        tokio::spawn(async move {
+            revoked.quiesce().await;
+            remove_generated_interest_for_clients(&live, &revoked.client_ids).await;
+            close_revoked_connections(&live, &revoked.client_ids, reason).await;
+            manager
+                .shutdown_live_workspace_background(&live, reason)
+                .await;
+        });
+    }
+
     pub async fn persist_applied_command(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         command: &DocumentCommand,
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), WorkspaceError> {
-        match command {
+        let completion = match command {
             DocumentCommand::RemoveDataset { id } => {
                 self.store
-                    .persist_dataset_removed(&live.workspace_id, id, seq, document)
+                    .begin_persist_dataset_removed(&live.workspace_id, id, seq, document)
+                    .resolve()
                     .await
             }
             DocumentCommand::RenameDataset { id, name } => {
                 self.store
-                    .persist_dataset_renamed(&live.workspace_id, id, name, seq, document)
+                    .begin_persist_dataset_renamed(&live.workspace_id, id, name, seq, document)
+                    .resolve()
                     .await
             }
             _ => {
                 self.store
-                    .persist_document(&live.workspace_id, seq, document)
+                    .begin_persist_document(&live.workspace_id, seq, document)
+                    .resolve()
                     .await
             }
-        }
-        .map_err(WorkspaceError::Store)
+        };
+        #[cfg(test)]
+        let completion = self.inject_lost_persistence_completion(completion);
+        self.resolve_document_completion(live, seq, document, completion)
+            .await
+            .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_dataset_opened(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         workspace_dataset_id: &DatasetId,
         source: &SourceVersion,
         display_name: &str,
@@ -2195,8 +3034,9 @@ impl WorkspaceManager {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), WorkspaceError> {
-        self.store
-            .persist_dataset_opened(
+        let completion = self
+            .store
+            .begin_persist_dataset_opened(
                 &live.workspace_id,
                 workspace_dataset_id,
                 source,
@@ -2205,8 +3045,155 @@ impl WorkspaceManager {
                 seq,
                 document,
             )
-            .await
-            .map_err(WorkspaceError::Store)
+            .resolve()
+            .await;
+        #[cfg(test)]
+        let completion = self.inject_lost_persistence_completion(completion);
+        let resolution = self
+            .resolve_document_completion(live, seq, document, completion)
+            .await?;
+        let DocumentPersistenceResolution::Recovered {
+            operation_id,
+            deadline,
+        } = resolution
+        else {
+            return Ok(());
+        };
+        // The workspace row and membership share one transaction.  Verify the
+        // dataset-specific half as well before treating an indeterminate
+        // completion as committed.
+        let membership = match bounded_reconciliation_read(
+            deadline,
+            self.store
+                .dataset_by_workspace_dataset(&live.workspace_id, workspace_dataset_id),
+        )
+        .await
+        {
+            Ok(membership) => membership,
+            Err(ReconciliationReadError::Backend(readback)) => {
+                return Err(self
+                    .fail_workspace_reconciliation(
+                        &live.workspace_id,
+                        Some(live),
+                        operation_id,
+                        "dataset membership reconciliation read failed",
+                        format!("dataset membership read-back failed ({readback})"),
+                    )
+                    .await);
+            }
+            Err(ReconciliationReadError::Deadline) => {
+                return Err(self
+                    .fail_workspace_reconciliation(
+                        &live.workspace_id,
+                        Some(live),
+                        operation_id,
+                        "dataset membership reconciliation timed out",
+                        "dataset membership read exceeded its bounded deadline".into(),
+                    )
+                    .await);
+            }
+        };
+        let expected_revision = source.revision;
+        if membership.as_ref().is_some_and(|membership| {
+            membership.identity == source.identity
+                && membership.revision.as_ref() == Some(&expected_revision)
+                && membership.display_name == display_name
+        }) {
+            Ok(())
+        } else {
+            self.fail_closed_live_workspace(
+                live,
+                "dataset membership diverged during commit recovery",
+            )
+            .await;
+            Err(WorkspaceError::PersistenceIndeterminate(format!(
+                "operation {operation_id} committed the workspace document without the expected dataset membership"
+            )))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn persist_dataset_refreshed(
+        &self,
+        live: &Arc<LiveWorkspace>,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> Result<(), WorkspaceError> {
+        let completion = self
+            .store
+            .begin_persist_dataset_refreshed(
+                &live.workspace_id,
+                workspace_dataset_id,
+                source,
+                display_name,
+                seq,
+                document,
+            )
+            .resolve()
+            .await;
+        #[cfg(test)]
+        let completion = self.inject_lost_persistence_completion(completion);
+        let resolution = self
+            .resolve_document_completion(live, seq, document, completion)
+            .await?;
+        let DocumentPersistenceResolution::Recovered {
+            operation_id,
+            deadline,
+        } = resolution
+        else {
+            return Ok(());
+        };
+        let membership = match bounded_reconciliation_read(
+            deadline,
+            self.store
+                .dataset_by_workspace_dataset(&live.workspace_id, workspace_dataset_id),
+        )
+        .await
+        {
+            Ok(membership) => membership,
+            Err(ReconciliationReadError::Backend(readback)) => {
+                return Err(self
+                    .fail_workspace_reconciliation(
+                        &live.workspace_id,
+                        Some(live),
+                        operation_id,
+                        "dataset refresh reconciliation read failed",
+                        format!("refreshed membership read-back failed ({readback})"),
+                    )
+                    .await);
+            }
+            Err(ReconciliationReadError::Deadline) => {
+                return Err(self
+                    .fail_workspace_reconciliation(
+                        &live.workspace_id,
+                        Some(live),
+                        operation_id,
+                        "dataset refresh reconciliation timed out",
+                        "refreshed membership read exceeded its bounded deadline".into(),
+                    )
+                    .await);
+            }
+        };
+        let expected_revision = source.revision;
+        if membership.as_ref().is_some_and(|membership| {
+            membership.identity == source.identity
+                && membership.revision.as_ref() == Some(&expected_revision)
+                && membership.display_name == display_name
+        }) {
+            Ok(())
+        } else {
+            self.fail_closed_live_workspace(
+                live,
+                "dataset refresh membership diverged during commit recovery",
+            )
+            .await;
+            Err(WorkspaceError::PersistenceIndeterminate(format!(
+                "operation {operation_id} committed the workspace document without the refreshed dataset membership"
+            )))
+        }
     }
 
     pub async fn dataset_by_source(
@@ -2257,7 +3244,7 @@ impl WorkspaceManager {
     /// Returns the applied `(seq, command)` so the handler can broadcast.
     pub async fn rename_dataset_published(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         principal: &AuthPrincipal,
         requester: ClientId,
         request_id: String,
@@ -2274,58 +3261,59 @@ impl WorkspaceManager {
             id: workspace_dataset_id.clone(),
             name: name.clone(),
         };
-
-        // 3. Stage against a clone, persist it while the session lock keeps
-        //    sequence allocation ordered, then publish the durable candidate.
-        //    A missing id is NotFound (never-leak), not a silent no-op.
-        let seq = {
-            let mut sess = live.session.lock().await;
-            if !sess.document.manifests.contains_key(workspace_dataset_id) {
+        let task_command = command.clone();
+        let manager = self.clone();
+        let task_live = Arc::clone(live);
+        let author = principal.email.clone();
+        let task = tokio::spawn(async move {
+            // From staging through the prepared publication, one owned task
+            // holds the sequence fence.  Request cancellation only detaches
+            // this owner; it cannot cancel a possibly-committing store future.
+            let mut sess = task_live.session.lock().await;
+            if !sess.document.manifests.contains_key(match &task_command {
+                DocumentCommand::RenameDataset { id, .. } => id,
+                _ => unreachable!("rename task command"),
+            }) {
                 return Err(WorkspaceError::NotFound);
             }
             let staged = sess
-                .stage_durable_document_as(command.clone(), &principal.email, None)
+                .stage_durable_document_as(task_command.clone(), &author, None)
                 .map_err(|error| WorkspaceError::BadRequest(error.to_string()))?;
             let seq = staged.seq();
-            let publish = live
+            let publish = task_live
                 .tx
                 .prepare(BroadcastEvent::command(
                     Some(requester),
                     ServerMessage::CommandBroadcast {
                         seq,
-                        command: command.clone(),
+                        command: task_command.clone(),
                     },
                     Some(ServerMessage::Ack { request_id, seq }),
                 ))
                 .map_err(|_| WorkspaceError::OutboundUnavailable)?;
-
-            // 4. Persist: workspace_datasets.display_name + document_json
-            // together. Nothing live changes if this fails.
-            self.store
-                .persist_dataset_renamed(
-                    &live.workspace_id,
-                    workspace_dataset_id,
-                    &name,
-                    seq,
-                    staged.document(),
-                )
-                .await
-                .map_err(WorkspaceError::Store)?;
+            manager
+                .persist_applied_command(&task_live, staged.command(), seq, staged.document())
+                .await?;
             sess.commit_staged_document(staged);
-            // Publication is synchronous and allocation-free after prepare.
-            // Keep it inside the sequence lock so a later durable command
-            // cannot publish ahead of this one on a multithreaded runtime.
             publish.publish();
-            seq
-        };
-
-        Ok((seq, command))
+            Ok(seq)
+        });
+        match task.await {
+            Ok(result) => result.map(|seq| (seq, command)),
+            Err(error) => {
+                self.fail_closed_live_workspace(live, "dataset rename completion task failed")
+                    .await;
+                Err(WorkspaceError::PersistenceIndeterminate(format!(
+                    "dataset rename completion task failed: {error}"
+                )))
+            }
+        }
     }
 
     #[cfg(test)]
     pub async fn rename_dataset(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         principal: &AuthPrincipal,
         workspace_dataset_id: &DatasetId,
         name: &str,
@@ -2358,7 +3346,7 @@ impl WorkspaceManager {
     /// untouched.
     pub async fn apply_document_command_published(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         principal: &AuthPrincipal,
         requester: ClientId,
         request_id: String,
@@ -2369,21 +3357,24 @@ impl WorkspaceManager {
             Err(WorkspaceError::Store(e)) => return Err(CommandApplyError::GateUnavailable(e)),
             Err(_) => return Err(CommandApplyError::Forbidden),
         };
-        let (seq, removed_binding, applied_command) = {
-            let mut sess = live.session.lock().await;
+        let manager = self.clone();
+        let task_live = Arc::clone(live);
+        let author = principal.email.clone();
+        let task = tokio::spawn(async move {
+            let mut sess = task_live.session.lock().await;
             let command = crate::command_policy::authorize_and_stamp(
                 &sess.document,
                 command,
-                &principal.email,
+                &author,
                 role.can_own(),
             )
             .map_err(|_| CommandApplyError::Forbidden)?;
             let staged = sess
-                .stage_durable_document_as(command, &principal.email, None)
+                .stage_durable_document_as(command, &author, None)
                 .map_err(CommandApplyError::Rejected)?;
             let seq = staged.seq();
             let applied_command = staged.command().clone();
-            let publish = live
+            let publish = task_live
                 .tx
                 .prepare(BroadcastEvent::command(
                     Some(requester),
@@ -2394,12 +3385,23 @@ impl WorkspaceManager {
                     Some(ServerMessage::Ack { request_id, seq }),
                 ))
                 .map_err(|_| CommandApplyError::OutboundUnavailable)?;
-            self.persist_applied_command(live, staged.command(), seq, staged.document())
+            manager
+                .persist_applied_command(&task_live, staged.command(), seq, staged.document())
                 .await
-                .map_err(CommandApplyError::PersistFailed)?;
+                .map_err(map_command_persistence_error)?;
             let removed = sess.commit_staged_document(staged);
             publish.publish();
-            (seq, removed, applied_command)
+            Ok((seq, removed, applied_command))
+        });
+        let (seq, removed_binding, applied_command) = match task.await {
+            Ok(result) => result?,
+            Err(error) => {
+                self.fail_closed_live_workspace(live, "document completion task failed")
+                    .await;
+                return Err(CommandApplyError::PersistenceIndeterminate(format!(
+                    "document completion task failed: {error}"
+                )));
+            }
         };
         if let Some(binding) = removed_binding {
             binding.generated_service.shutdown("dataset_removed").await;
@@ -2410,7 +3412,7 @@ impl WorkspaceManager {
     #[cfg(test)]
     pub async fn apply_document_command(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         principal: &AuthPrincipal,
         command: DocumentCommand,
     ) -> Result<(u64, DocumentCommand), CommandApplyError> {
@@ -2431,7 +3433,7 @@ impl WorkspaceManager {
     /// leaves both live and durable state untouched.
     pub async fn apply_inverse_command(
         &self,
-        live: &LiveWorkspace,
+        live: &Arc<LiveWorkspace>,
         principal: &AuthPrincipal,
         target_operation_id: u64,
         expected_revision: u64,
@@ -2444,10 +3446,13 @@ impl WorkspaceManager {
             Err(_) => return Err(CommandApplyError::Forbidden),
         };
 
-        let (seq, removed_binding, command) = {
-            let mut session = live.session.lock().await;
+        let manager = self.clone();
+        let task_live = Arc::clone(live);
+        let author = principal.email.clone();
+        let task = tokio::spawn(async move {
+            let mut session = task_live.session.lock().await;
             let prepared = session
-                .prepare_inverse(target_operation_id, expected_revision, &principal.email)
+                .prepare_inverse(target_operation_id, expected_revision, &author)
                 .map_err(|error| match error {
                     InverseCommandError::NotAuthor => CommandApplyError::Forbidden,
                     InverseCommandError::UnknownOperation => {
@@ -2466,16 +3471,16 @@ impl WorkspaceManager {
             let command = crate::command_policy::authorize_and_stamp(
                 &session.document,
                 prepared.command,
-                &principal.email,
+                &author,
                 role.can_own(),
             )
             .map_err(|_| CommandApplyError::Forbidden)?;
             let staged = session
-                .stage_durable_document_as(command, &principal.email, Some(prepared.inverse_of))
+                .stage_durable_document_as(command, &author, Some(prepared.inverse_of))
                 .map_err(CommandApplyError::Rejected)?;
             let seq = staged.seq();
             let command = staged.command().clone();
-            let publish = live
+            let publish = task_live
                 .tx
                 .prepare(BroadcastEvent::command(
                     None,
@@ -2486,12 +3491,23 @@ impl WorkspaceManager {
                     None,
                 ))
                 .map_err(|_| CommandApplyError::OutboundUnavailable)?;
-            self.persist_applied_command(live, staged.command(), seq, staged.document())
+            manager
+                .persist_applied_command(&task_live, staged.command(), seq, staged.document())
                 .await
-                .map_err(CommandApplyError::PersistFailed)?;
+                .map_err(map_command_persistence_error)?;
             let removed = session.commit_staged_document(staged);
             publish.publish();
-            (seq, removed, command)
+            Ok((seq, removed, command))
+        });
+        let (seq, removed_binding, command) = match task.await {
+            Ok(result) => result?,
+            Err(error) => {
+                self.fail_closed_live_workspace(live, "inverse completion task failed")
+                    .await;
+                return Err(CommandApplyError::PersistenceIndeterminate(format!(
+                    "inverse completion task failed: {error}"
+                )));
+            }
         };
         if let Some(binding) = removed_binding {
             binding
@@ -2571,6 +3587,15 @@ fn normalize_request_email(email: &str) -> Result<String, WorkspaceError> {
         ));
     }
     Ok(normalized)
+}
+
+fn expected_member_display_name(email: &str, display_name: &str) -> String {
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() {
+        email.to_string()
+    } else {
+        trimmed.chars().take(200).collect()
+    }
 }
 
 /// Await a concrete, process-local access mutation task.
@@ -2728,6 +3753,22 @@ fn map_membership_store_error(error: StoreError) -> WorkspaceError {
     }
 }
 
+fn map_membership_workspace_error(error: WorkspaceError) -> WorkspaceError {
+    match error {
+        WorkspaceError::Store(error) => map_membership_store_error(error),
+        other => other,
+    }
+}
+
+fn map_command_persistence_error(error: WorkspaceError) -> CommandApplyError {
+    match error {
+        WorkspaceError::PersistenceIndeterminate(detail) => {
+            CommandApplyError::PersistenceIndeterminate(detail)
+        }
+        other => CommandApplyError::PersistFailed(other),
+    }
+}
+
 fn map_viewer_profile_store_error(error: StoreError) -> WorkspaceError {
     match error {
         StoreError::ViewerProfileConflict { expected, actual } => {
@@ -2754,6 +3795,8 @@ pub enum WorkspaceError {
     },
     #[error("outbound WebSocket capacity is unavailable")]
     OutboundUnavailable,
+    #[error("durable mutation completion is indeterminate: {0}")]
+    PersistenceIndeterminate(String),
     #[error("{0}")]
     Store(StoreError),
 }
@@ -2787,6 +3830,11 @@ pub enum CommandApplyError {
     /// state and sequence remain untouched.
     #[error("{0}")]
     PersistFailed(WorkspaceError),
+    /// Durable read-back could not resolve a lost completion.  The live
+    /// workspace has been revoked and will be restored from storage; callers
+    /// must close rather than send a retryable NACK.
+    #[error("durable command completion is indeterminate: {0}")]
+    PersistenceIndeterminate(String),
 }
 
 impl WorkspaceError {
@@ -2816,6 +3864,11 @@ impl WorkspaceError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "outbound_capacity_unavailable",
                 None,
+            ),
+            WorkspaceError::PersistenceIndeterminate(detail) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "persistence_indeterminate",
+                Some(detail),
             ),
             WorkspaceError::Store(e) => {
                 tracing::error!(error = %e, "workspaces.store_error");

@@ -673,6 +673,333 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
 }
 
 #[tokio::test]
+async fn lost_document_completion_is_read_back_and_published_exactly_once() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "before.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+    let mut broadcast_rx = live.tx.subscribe();
+
+    manager.lose_next_persistence_completion();
+    let (seq, command) = manager
+        .apply_document_command(
+            &live,
+            &owner,
+            DocumentCommand::RenameDataset {
+                id: dataset_id.clone(),
+                name: "after.zarr".into(),
+            },
+        )
+        .await
+        .expect("exact durable read-back must recover the committed command");
+    assert_eq!(seq, 2);
+    assert!(matches!(
+        command,
+        DocumentCommand::RenameDataset { name, .. } if name == "after.zarr"
+    ));
+
+    let event = tokio::time::timeout(Duration::from_secs(1), broadcast_rx.recv())
+        .await
+        .expect("recovered command omitted publication")
+        .expect("broadcast ring closed");
+    assert!(matches!(
+        event.kind(),
+        BroadcastKind::CommandBroadcast { sender: Some(0) }
+    ));
+    assert!(matches!(
+        broadcast_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    let session = live.session.lock().await;
+    assert_eq!(session.seq, 2);
+    assert_eq!(session.document.manifests[&dataset_id].name, "after.zarr");
+    drop(session);
+    let durable = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(durable.seq, 2);
+    assert_eq!(durable.document.manifests[&dataset_id].name, "after.zarr");
+    assert_eq!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "after.zarr"
+    );
+}
+
+#[tokio::test]
+async fn stalled_document_reconciliation_fails_closed_without_lying_about_the_committed_state() {
+    let (_, pool) = fresh_store_with_pool().await;
+    let store = SqliteWorkspaceStore::with_persistence_deadline(pool, Duration::from_millis(10));
+    let owner = principal("stalled-command@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "before-stall.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let old_live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+    let mut broadcast_rx = old_live.tx.subscribe();
+    let broadcast_budget_baseline = old_live.tx.queued_bytes();
+
+    store.lose_next_persistence_completion_in_backend();
+    store.stall_next_reconciliation_read();
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        manager.apply_document_command(
+            &old_live,
+            &owner,
+            DocumentCommand::RenameDataset {
+                id: dataset_id.clone(),
+                name: "committed-before-read-stall.zarr".into(),
+            },
+        ),
+    )
+    .await
+    .expect("the reconciliation read must share the backend-issued deadline")
+    .expect_err("a stalled read-back cannot manufacture a durable verdict");
+    let CommandApplyError::PersistenceIndeterminate(detail) = error else {
+        panic!("a stalled durable read-back must remain explicitly indeterminate");
+    };
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(detail.contains("persist-"));
+    assert!(matches!(
+        broadcast_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(old_live.tx.queued_bytes(), broadcast_budget_baseline);
+
+    let old_session = old_live
+        .session
+        .try_lock()
+        .expect("bounded reconciliation must release the accepted session guard");
+    assert_eq!(old_session.seq, 1);
+    assert_eq!(
+        old_session.document.manifests[&dataset_id].name,
+        "before-stall.zarr"
+    );
+    drop(old_session);
+
+    let durable = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(
+        durable.seq, 2,
+        "the injected backend worker really committed"
+    );
+    assert_eq!(
+        durable.document.manifests[&dataset_id].name,
+        "committed-before-read-stall.zarr"
+    );
+    assert_eq!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "committed-before-read-stall.zarr"
+    );
+
+    let operation_id = store.last_persistence_operation_id();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while crate::persistence::persistence_operation_resources(operation_id) != (false, false) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stalled reconciliation must release operation resources");
+    assert_eq!(
+        crate::persistence::persistence_operation_resources(operation_id),
+        (false, false),
+        "stalled reconciliation must retain neither worker nor controller"
+    );
+    let restored = manager
+        .live_workspace(&workspace_id, &owner)
+        .await
+        .expect("Quiesced recovery permits a fresh durable restore");
+    assert!(!Arc::ptr_eq(&old_live, &restored));
+    let restored_session = restored.session.lock().await;
+    assert_eq!(restored_session.seq, 2);
+    assert_eq!(
+        restored_session.document.manifests[&dataset_id].name,
+        "committed-before-read-stall.zarr"
+    );
+}
+
+#[tokio::test]
+async fn never_completing_accepted_command_returns_bounded_indeterminate_and_restores_durable_state()
+ {
+    let (_, pool) = fresh_store_with_pool().await;
+    let store = SqliteWorkspaceStore::with_persistence_deadline(pool, Duration::from_millis(10));
+    let owner = principal("never-command@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "before-timeout.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let old_live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+    let mut broadcast_rx = old_live.tx.subscribe();
+    let broadcast_budget_baseline = old_live.tx.queued_bytes();
+
+    store.never_complete_next_persistence();
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        manager.apply_document_command(
+            &old_live,
+            &owner,
+            DocumentCommand::RenameDataset {
+                id: dataset_id.clone(),
+                name: "must-not-publish.zarr".into(),
+            },
+        ),
+    )
+    .await
+    .expect("the backend-issued deadline must bound an accepted command")
+    .expect_err("a never-completing mutation cannot claim success or definite failure");
+    let CommandApplyError::PersistenceIndeterminate(detail) = error else {
+        panic!("deadline must remain explicitly indeterminate");
+    };
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(detail.contains("persist-"));
+    assert!(matches!(
+        broadcast_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        old_live.tx.queued_bytes(),
+        broadcast_budget_baseline,
+        "the unpublished prepared command must release its exact reservation"
+    );
+
+    let old_session = old_live
+        .session
+        .try_lock()
+        .expect("bounded return must release the accepted session guard");
+    assert_eq!(old_session.seq, 1);
+    assert_eq!(
+        old_session.document.manifests[&dataset_id].name,
+        "before-timeout.zarr"
+    );
+    drop(old_session);
+
+    let durable = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(durable.seq, 1);
+    assert_eq!(
+        durable.document.manifests[&dataset_id].name,
+        "before-timeout.zarr"
+    );
+    assert_eq!(
+        store
+            .dataset_by_workspace_dataset(&workspace_id, &dataset_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "before-timeout.zarr"
+    );
+
+    let operation_id = store.last_persistence_operation_id();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while crate::persistence::persistence_operation_resources(operation_id) != (false, false) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the accepted command must retain no backend worker or operation controller");
+
+    let restored = manager
+        .live_workspace(&workspace_id, &owner)
+        .await
+        .expect("a quiesced deadline permits deterministic durable restore");
+    assert!(!Arc::ptr_eq(&old_live, &restored));
+    let restored_session = restored.session.lock().await;
+    assert_eq!(restored_session.seq, 1);
+    assert_eq!(
+        restored_session.document.manifests[&dataset_id].name,
+        "before-timeout.zarr"
+    );
+}
+
+#[tokio::test]
+async fn unquiesced_accepted_command_retains_only_one_restart_tombstone_and_blocks_restore() {
+    let (_, pool) = fresh_store_with_pool().await;
+    let store = SqliteWorkspaceStore::with_persistence_deadline(pool, Duration::from_millis(10));
+    let owner = principal("restart-command@example.com", false);
+    let (workspace_id, dataset_id) =
+        seed_workspace_with_dataset(&store, &owner, "restart-before.zarr").await;
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), DatasetRuntimeConfig::defaults());
+    let old_live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
+    let mut broadcast_rx = old_live.tx.subscribe();
+    let broadcast_budget_baseline = old_live.tx.queued_bytes();
+
+    store.never_complete_and_never_quiesce_next_persistence();
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        manager.apply_document_command(
+            &old_live,
+            &owner,
+            DocumentCommand::RenameDataset {
+                id: dataset_id.clone(),
+                name: "restart-must-not-publish.zarr".into(),
+            },
+        ),
+    )
+    .await
+    .expect("both mutation and quiescence phases must be finitely bounded")
+    .expect_err("unquiesced persistence cannot claim a durable verdict");
+    let CommandApplyError::PersistenceIndeterminate(detail) = error else {
+        panic!("unquiesced persistence must remain explicitly indeterminate");
+    };
+    assert!(detail.contains("persist-"));
+    assert!(detail.contains("RestartRequired"));
+    assert!(matches!(
+        broadcast_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(old_live.tx.queued_bytes(), broadcast_budget_baseline);
+    let old_session = old_live
+        .session
+        .try_lock()
+        .expect("restart-required return must release the session guard");
+    assert_eq!(old_session.seq, 1);
+    assert_eq!(
+        old_session.document.manifests[&dataset_id].name,
+        "restart-before.zarr"
+    );
+    drop(old_session);
+
+    let operation_id = store.last_persistence_operation_id();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while crate::persistence::persistence_operation_resources(operation_id) != (false, false) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restart-required return must retain no worker, controller, or recovery future");
+    assert_eq!(manager.restart_required_workspace_count().await, 1);
+
+    for _ in 0..2 {
+        let error = match manager.live_workspace(&workspace_id, &owner).await {
+            Ok(_) => panic!("unquiesced workspace must remain fail-closed until process restart"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, WorkspaceError::PersistenceIndeterminate(_)));
+    }
+    assert_eq!(
+        manager.restart_required_workspace_count().await,
+        1,
+        "repeated restore attempts must not accumulate retained work or tombstones"
+    );
+
+    let durable = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+    assert_eq!(durable.seq, 1);
+    assert_eq!(
+        durable.document.manifests[&dataset_id].name,
+        "restart-before.zarr"
+    );
+}
+
+#[tokio::test]
 async fn inverse_command_rechecks_authorship_revision_persistence_and_replay() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);

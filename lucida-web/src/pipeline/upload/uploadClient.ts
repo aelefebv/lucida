@@ -21,7 +21,9 @@ import type { ResidencyTier } from "../fetch/types.ts";
  * id: single-channel `imageId` or multi-channel `imageId:chN`.
  */
 export type ChunksEvictedHandler = (
+  datasetId: string,
   memberId: string,
+  tier: ResidencyTier,
   evicted: string[],
   skipped: string[],
   reason?: ChunkFeedbackReason,
@@ -71,6 +73,7 @@ export interface UploadClient {
 
   sliceChunkData(
     memberId: string,
+    datasetId: string,
     chunks: Chunk[],
     level: number,
     z: number,
@@ -112,6 +115,7 @@ export interface UploadClient {
 
   volumeChunkData(
     memberId: string,
+    datasetId: string,
     chunks: Chunk[],
     level: number,
     t: number,

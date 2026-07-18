@@ -10,6 +10,7 @@
 import { Axis } from "./axes.ts";
 import {
   extractDataType,
+  manifestChunkImages,
   type DatasetManifest,
   type FetchSource,
   type ImageSpec,
@@ -300,14 +301,7 @@ export function validateDatasetChunkAdmission(
   fetch: FetchSource,
 ): void {
   const expected = new Map<string, { image: ImageSpec; role: ChunkRole }>();
-  for (const image of manifest.images) {
-    if (expected.has(image.image_id)) throw new Error(`Duplicate manifest image ${image.image_id}`);
-    expected.set(image.image_id, { image, role: "intensity" });
-  }
   for (const [labelIndex, label] of (manifest.labels ?? []).entries()) {
-    if (expected.has(label.image.image_id)) {
-      throw new Error(`Duplicate manifest image ${label.image.image_id}`);
-    }
     for (const [colorIndex, color] of (label.colors ?? []).entries()) {
       if (!Number.isSafeInteger(color.value) || color.value < 0 || color.value > LABEL_ID_MAX) {
         throw new Error(`labels[${labelIndex}].colors[${colorIndex}].value must fit uint32`);
@@ -318,7 +312,12 @@ export function validateDatasetChunkAdmission(
         );
       }
     }
-    expected.set(label.image.image_id, { image: label.image, role: "label" });
+  }
+  for (const { image, role } of manifestChunkImages(manifest)) {
+    if (expected.has(image.image_id)) {
+      throw new Error(`Duplicate manifest image ${image.image_id}`);
+    }
+    expected.set(image.image_id, { image, role });
   }
 
   const seen = new Set<string>();

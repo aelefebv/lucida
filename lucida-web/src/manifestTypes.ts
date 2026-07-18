@@ -145,6 +145,27 @@ export interface DatasetManifest {
   labels?: LabelSpec[];
 }
 
+/**
+ * Every manifest image that owns chunk data, in the canonical registration
+ * order: ordinary intensity images first, followed by label-overlay images in
+ * manifest order. Labels intentionally live outside `manifest.images` so they
+ * are not rendered as intensity layers, but fetch admission and snapshot
+ * reconstruction must still account for their independent chunk streams.
+ *
+ * Keep that boundary in one helper: callers which inspect only `images` will
+ * silently omit labels when restoring a workspace snapshot.
+ */
+export function* manifestChunkImages(
+  manifest: DatasetManifest,
+): Generator<{ image: ImageSpec; role: "intensity" | "label" }> {
+  for (const image of manifest.images) {
+    yield { image, role: "intensity" };
+  }
+  for (const label of manifest.labels ?? []) {
+    yield { image: label.image, role: "label" };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Wire forms and resolution
 //

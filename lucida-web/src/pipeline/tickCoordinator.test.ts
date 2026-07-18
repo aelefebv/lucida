@@ -1780,9 +1780,9 @@ describe("incremental delta fold", () => {
       expect(byImage.has("img-2")).toBe(true); // entered row present
       expect(byImage.has("img-0")).toBe(false); // left row absent
       const coldDelta = vi.mocked(deltaCtx.client.coldStateDelta).mock.calls[0][0];
-      expect(coldDelta.removedEntityIds).toEqual(["tile-0"]);
-      expect(coldDelta.appendedEntityIds).toBeUndefined();
-      expect(coldDelta.activeSetOrder).toEqual(["tile-1", "tile-2"]);
+      expect(coldDelta.removedImageIds).toEqual(["img-0"]);
+      expect(coldDelta.appendedImageIds).toBeUndefined();
+      expect(coldDelta.activeSetOrder).toEqual(["img-1", "img-2"]);
 
       // A subsequent changed-only delta has a provably stable order and takes
       // the incremental builder: no full activeSetOrder is emitted.
@@ -1793,7 +1793,7 @@ describe("incremental delta fold", () => {
       orch.planAndFetch(changedOnlyCtx, emptyMinimap);
       const changedOnly = vi.mocked(changedOnlyCtx.client.coldStateDelta).mock.calls[0][0];
       expect(changedOnly.activeSetOrder).toBeUndefined();
-      expect(changedOnly.appendedEntityIds).toEqual([]);
+      expect(changedOnly.appendedImageIds).toEqual([]);
       expect(changedOnly.upserts.map((entry) => entry.entityId)).toEqual(["tile-1"]);
     } finally {
       vi.useRealTimers();
@@ -1961,8 +1961,10 @@ describe("cache occupancy telemetry", () => {
     const cpuCache = createMockCpuCache();
     vi.mocked(cpuCache.snapshot).mockReturnValue({
       cached: new Map([
-        ["tile-0", new Set(["0/0.0.0.0.0", "0/0.0.0.1.0"])],
-        ["tile-2", new Set(["0/0.0.0.0.1"])],
+        ["ds1", new Map<string, Map<"detail" | "coarse", Set<string>>>([
+          ["img-0", new Map([["detail", new Set(["0/0.0.0.0.0", "0/0.0.0.1.0"]) ]])],
+          ["img-2", new Map([["coarse", new Set(["0/0.0.0.0.1"]) ]])],
+        ])],
       ]),
       inFlight: new Map(),
     });

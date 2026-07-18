@@ -72,6 +72,24 @@ describe("buildRoster", () => {
     expect(result.matricesByEntity.get("entity-b")?.model[0]).toBe(3);
   });
 
+  it("keeps two images with one owner as distinct roster entries", () => {
+    const owner = "shared-owner";
+    const result = buildRoster({
+      activeSet: [tile(owner, "image-a"), tile(owner, "image-b")],
+      entities: [
+        entity(owner, "image-a", [10, 20]),
+        entity(owner, "image-b", [30, 40]),
+      ],
+      ctx: context(),
+      datasetId: "ds-1",
+    });
+
+    expect(result.entries).toEqual([
+      { imageId: "image-a", position: [10, 20], entityId: owner },
+      { imageId: "image-b", position: [30, 40], entityId: owner },
+    ]);
+  });
+
   it("skips invisible and missing entities", () => {
     const activeSet: ActiveSetEntry[] = [
       { kind: "invisible", entityId: "hidden", imageId: "hidden-image", coarsestLod: 0 },

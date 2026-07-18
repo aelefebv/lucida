@@ -132,7 +132,7 @@ function shortId(id: string, max = 16): string {
   return "..." + id.slice(-(max - 3));
 }
 
-/** Dump CPU cache contents to the console, grouped by entity → cache → tier. */
+/** Dump CPU cache contents to the console, grouped by dataset/image identity. */
 function dumpCache(cache: import("../pipeline/fetch/index.ts").CpuCache | undefined | null): void {
   if (!cache) {
     console.warn("[DebugPanel] cpuCache not available");
@@ -140,17 +140,16 @@ function dumpCache(cache: import("../pipeline/fetch/index.ts").CpuCache | undefi
   }
   const entries = cache.getCacheDump();
   console.group(`[DebugPanel] cpuCache contents (${entries.length} chunks)`);
-  // Group chunks by entity, then dump as a single table per entity for
-  // easy scanning. console.table at the entity level keeps output dense.
-  const byEntity = new Map<string, typeof entries>();
+  const byImage = new Map<string, typeof entries>();
   for (const e of entries) {
-    let arr = byEntity.get(e.entityId);
-    if (!arr) { arr = []; byEntity.set(e.entityId, arr); }
+    const identity = `${e.datasetId}/${e.imageId}`;
+    let arr = byImage.get(identity);
+    if (!arr) { arr = []; byImage.set(identity, arr); }
     arr.push(e);
   }
-  for (const [entityId, arr] of byEntity) {
+  for (const [identity, arr] of byImage) {
     arr.sort((a, b) => a.level - b.level || a.chunkKey.localeCompare(b.chunkKey));
-    console.groupCollapsed(`${entityId}: ${arr.length} chunks`);
+    console.groupCollapsed(`${identity}: ${arr.length} chunks`);
     console.table(arr.map(e => ({
       chunkKey: e.chunkKey,
       cache: e.cache,
@@ -172,6 +171,8 @@ function dumpPending(cache: import("../pipeline/fetch/index.ts").CpuCache | unde
   const pending = cache.getPendingDump();
   console.group(`[DebugPanel] pending cpuCache queue (${pending.length} entries)`);
   console.table(pending.map(p => ({
+    datasetId: p.datasetId,
+    imageId: p.imageId,
     chunkKey: p.chunkKey,
     entityId: p.entityId,
     lane: p.lane,
@@ -1313,11 +1314,11 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           overlapStatus = overlaps ? "OK" : "NONE";
                         }
                         return (
-                          <div key={e.entityId} className="debug-member-row" style={{
+                          <div key={`${e.datasetId}:${e.imageId}`} className="debug-member-row" style={{
                             background: overlapStatus === "NONE" ? "var(--danger-surface)" : undefined,
                           }}>
-                            <span className="debug-member-id" title={e.entityId}>
-                              {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
+                            <span className="debug-member-id" title={`${e.datasetId}/${e.imageId} (owner ${e.entityId})`}>
+                              {e.imageId.length > 12 ? "..." + e.imageId.slice(-10) : e.imageId}
                             </span>
                             <span>pos:[{e.position[0]},{e.position[1]}]</span>
                             <span>full:[{e.fullShape ? e.fullShape.join(",") : "?"}]</span>
@@ -1345,8 +1346,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     </div>
                     <div className="debug-member-list">
                       {snap.orch.activeSet.slice(0, 10).map((e) => (
-                        <div key={e.entityId} className="debug-member-row">
-                          <span className="debug-member-id" title={e.entityId}>
+                        <div key={`${e.entityId}:${e.imageId}`} className="debug-member-row">
+                          <span className="debug-member-id" title={`${e.imageId} (owner ${e.entityId})`}>
                             {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
                           </span>
                           <span style={{ color: modeColor(e.mode) }}>{modeLabel(e.mode)}</span>
@@ -1416,7 +1417,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     <div className="debug-title">Top Requests</div>
                     <div className="debug-member-list">
                       {snap.orch.topRequests.map((r, i) => (
-                        <div key={`${r.chunkKey}-${i}`} className="debug-member-row">
+                        <div key={`${r.datasetId}/${r.imageId}/${r.chunkKey}-${i}`} className="debug-member-row">
                           <span style={{
                             color: r.lane === "detail" ? "var(--success-text)" : r.lane === "coarse" ? "var(--info-text)" : r.lane === "prefetch" ? "var(--warning-text)" : "var(--accent)",
                             width: 14,
@@ -1424,7 +1425,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                             {r.lane === "detail" ? "D" : r.lane === "coarse" ? "C" : r.lane === "prefetch" ? "P" : "O"}
                           </span>
                           <span>L{r.level}</span>
-                          <span className="debug-member-id" title={r.chunkKey}>
+                          <span className="debug-member-id" title={`${r.datasetId}/${r.imageId}/${r.chunkKey}`}>
                             {r.chunkKey}
                           </span>
                           <span>p{fmt(r.priority, 0)}</span>

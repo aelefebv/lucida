@@ -125,6 +125,7 @@ function makeSliceChunk(level: number, t: number, c: number, z: number, y: numbe
 function makeVolumeMsg(memberId: string, chunks: Chunk[], overrides?: Partial<VolumeChunkDataMessage>): VolumeChunkDataMessage {
   return {
     type: "volumeChunkData",
+    datasetId: "ds-0",
     epochs: epochs(),
     memberId,
     chunks,
@@ -144,6 +145,7 @@ function makeVolumeMsg(memberId: string, chunks: Chunk[], overrides?: Partial<Vo
 function makeSliceMsg(memberId: string, chunks: Chunk[], overrides?: Partial<SliceChunkDataMessage>): SliceChunkDataMessage {
   return {
     type: "sliceChunkData",
+    datasetId: "ds-0",
     epochs: epochs(),
     memberId,
     chunks,

@@ -10,8 +10,8 @@ use lucida_core::scene::{
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{
-    DatasetOpenFailureDiagnostic, GeneratedAvailabilityDelta, GeneratedAvailabilityIndex,
-    MAX_GENERATED_RUNTIME_CHUNKS, MAX_GENERATED_RUNTIME_LEVELS,
+    DatasetOpenFailureDiagnostic, FetchSource, GeneratedAvailabilityDelta,
+    GeneratedAvailabilityIndex, MAX_GENERATED_RUNTIME_CHUNKS, MAX_GENERATED_RUNTIME_LEVELS,
 };
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
@@ -59,7 +59,7 @@ impl Serialize for SessionSnapshot<'_> {
     where
         S: Serializer,
     {
-        let mut snapshot = serializer.serialize_struct("ServerMessage", 6)?;
+        let mut snapshot = serializer.serialize_struct("ServerMessage", 7)?;
         snapshot.serialize_field("type", "snapshot")?;
         snapshot.serialize_field("seq", &self.session.seq)?;
         snapshot.serialize_field("document", &self.session.document)?;
@@ -68,6 +68,13 @@ impl Serialize for SessionSnapshot<'_> {
         snapshot.serialize_field(
             "generated_availability",
             &GeneratedAvailabilityValues(&self.session.generated_availability),
+        )?;
+        snapshot.serialize_field(
+            "dataset_fetch",
+            &DatasetFetchValues {
+                bindings: &self.session.server_bindings,
+                document: &self.session.document,
+            },
         )?;
         snapshot.end()
     }
@@ -89,6 +96,30 @@ impl Serialize for PresenceValues<'_> {
 }
 
 struct GeneratedAvailabilityValues<'a>(&'a HashMap<DatasetId, GeneratedAvailabilityIndex>);
+
+/// Borrow the transport descriptor from the same live binding that serves the
+/// dataset's chunk requests. Filtering through document membership prevents a
+/// stale operational binding from leaking into the collaborative snapshot.
+struct DatasetFetchValues<'a> {
+    bindings: &'a HashMap<DatasetId, ServerBinding>,
+    document: &'a DocumentState,
+}
+
+impl Serialize for DatasetFetchValues<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut values = serializer.serialize_map(None)?;
+        for dataset_id in self.document.manifests.keys() {
+            let Some(binding) = self.bindings.get(dataset_id) else {
+                continue;
+            };
+            values.serialize_entry(dataset_id, &binding.dataset_opened.fetch)?;
+        }
+        values.end()
+    }
+}
 
 impl Serialize for GeneratedAvailabilityValues<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -313,12 +344,23 @@ impl Session {
                 }
             })
             .collect();
+        let dataset_fetch: HashMap<DatasetId, FetchSource> = self
+            .document
+            .manifests
+            .keys()
+            .filter_map(|dataset_id| {
+                self.server_bindings
+                    .get(dataset_id)
+                    .map(|binding| (dataset_id.clone(), binding.dataset_opened.fetch.clone()))
+            })
+            .collect();
         ServerMessage::Snapshot {
             seq: self.seq,
             document: self.document.clone(),
             peers: self.clients.values().cloned().collect(),
             your_id,
             generated_availability,
+            dataset_fetch,
         }
     }
 
@@ -960,8 +1002,16 @@ fn inverse_for(before: &DocumentState, command: &DocumentCommand) -> Option<Docu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use lucida_content::*;
     use lucida_protocol::*;
+    use lucida_store::cache::CachedStore;
+    use lucida_store::import_types::ServerBindingSeed;
+    use object_store::memory::InMemory;
+
+    use crate::binding::ChunkResolver;
+    use crate::generated_coarse::{DerivedChunkCache, GeneratedCoarseService};
 
     fn make_register(id: &str, name: &str) -> DatasetOpened {
         let entity_id = EntityId(format!("{id}-entity"));
@@ -1049,6 +1099,25 @@ mod tests {
         }
     }
 
+    fn inert_binding(dataset_opened: DatasetOpened) -> ServerBinding {
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::new(Arc::clone(&store), 1024));
+        let derived_chunks = Arc::new(DerivedChunkCache::default());
+        ServerBinding {
+            source: lucida_content::url::SourceVersion::new(
+                lucida_content::url::SourceIdentity::parse("file:///snapshot.zarr").unwrap(),
+                lucida_content::url::SourceRevision::from_bytes(b"snapshot-generation"),
+            ),
+            store,
+            resolver: Arc::new(ChunkResolver::new(&ServerBindingSeed { images: vec![] })),
+            cache,
+            dataset_opened,
+            derived_chunks: Arc::clone(&derived_chunks),
+            generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
+            import_warnings: vec![],
+        }
+    }
+
     #[test]
     fn new_session_starts_at_seq_zero() {
         let session = Session::new();
@@ -1096,6 +1165,35 @@ mod tests {
             }
             _ => panic!("expected Snapshot"),
         }
+    }
+
+    #[test]
+    fn snapshot_fetch_contract_comes_from_the_operational_binding() {
+        let mut session = Session::new();
+        let mut opened = make_register("compressed", "compressed");
+        let FetchSource::Proxied(fetch) = &mut opened.fetch;
+        fetch.images[0].wire_format = WireFormat::Zstd {
+            data_type: DataType::Uint16,
+        };
+        let dataset_id = opened.manifest.dataset_id.clone();
+        session.apply(DocumentCommand::DatasetOpened(opened.clone()));
+        session
+            .server_bindings
+            .insert(dataset_id.clone(), inert_binding(opened.clone()));
+
+        let ServerMessage::Snapshot { dataset_fetch, .. } = session.snapshot(42) else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(
+            serde_json::to_value(dataset_fetch.get(&dataset_id)).unwrap(),
+            serde_json::to_value(&opened.fetch).unwrap(),
+        );
+
+        let borrowed = serde_json::to_value(session.snapshot_view(42)).unwrap();
+        assert_eq!(
+            borrowed["dataset_fetch"][dataset_id.0.as_str()],
+            serde_json::to_value(&opened.fetch).unwrap(),
+        );
     }
 
     #[test]

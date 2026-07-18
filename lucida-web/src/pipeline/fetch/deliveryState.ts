@@ -9,8 +9,8 @@
 
 import type { ResidencyTier } from "./types.ts";
 
-function channelKeyFor(imageId: string, c: number): string {
-  return `${imageId}|${c}`;
+function channelKeyFor(datasetId: string, imageId: string, c: number): string {
+  return `${datasetId.length}:${datasetId}${imageId.length}:${imageId}${c}`;
 }
 
 function sentKeyFor(chunkKey: string, tier?: ResidencyTier): string {
@@ -21,12 +21,13 @@ export class DeliveryState {
   private chunkSent = new Map<string, Set<string>>();
 
   markChunkSent(
+    datasetId: string,
     imageId: string,
     c: number,
     chunkKey: string,
     tier?: ResidencyTier,
   ): void {
-    const key = channelKeyFor(imageId, c);
+    const key = channelKeyFor(datasetId, imageId, c);
     let set = this.chunkSent.get(key);
     if (!set) {
       set = new Set();
@@ -36,21 +37,23 @@ export class DeliveryState {
   }
 
   wasChunkSent(
+    datasetId: string,
     imageId: string,
     c: number,
     chunkKey: string,
     tier?: ResidencyTier,
   ): boolean {
-    return this.chunkSent.get(channelKeyFor(imageId, c))?.has(sentKeyFor(chunkKey, tier)) ?? false;
+    return this.chunkSent.get(channelKeyFor(datasetId, imageId, c))?.has(sentKeyFor(chunkKey, tier)) ?? false;
   }
 
   clearChunkSent(
+    datasetId: string,
     imageId: string,
     c: number,
     chunkKey: string,
     tier?: ResidencyTier,
   ): void {
-    const key = channelKeyFor(imageId, c);
+    const key = channelKeyFor(datasetId, imageId, c);
     const set = this.chunkSent.get(key);
     if (!set) return;
     if (tier === undefined) {
@@ -63,8 +66,15 @@ export class DeliveryState {
     if (set.size === 0) this.chunkSent.delete(key);
   }
 
-  clearChunksForImage(imageId: string): void {
-    const prefix = `${imageId}|`;
+  clearChunksForImage(datasetId: string, imageId: string): void {
+    const prefix = `${datasetId.length}:${datasetId}${imageId.length}:${imageId}`;
+    for (const key of this.chunkSent.keys()) {
+      if (key.startsWith(prefix)) this.chunkSent.delete(key);
+    }
+  }
+
+  clearDataset(datasetId: string): void {
+    const prefix = `${datasetId.length}:${datasetId}`;
     for (const key of this.chunkSent.keys()) {
       if (key.startsWith(prefix)) this.chunkSent.delete(key);
     }

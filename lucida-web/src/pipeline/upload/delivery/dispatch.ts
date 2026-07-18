@@ -67,6 +67,7 @@ export function dispatchChunk(
     const fullResDepth = meta.image.multiscale.levels[0].shape[Axis.Z];
     client.sliceChunkData(
       workerMemberId,
+      delivery.datasetId,
       [chunkData],
       delivery.level,
       sliceZ!,
@@ -86,6 +87,7 @@ export function dispatchChunk(
   } else {
     client.volumeChunkData(
       workerMemberId,
+      delivery.datasetId,
       [chunkData],
       delivery.level,
       delivery.t,

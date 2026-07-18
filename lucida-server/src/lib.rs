@@ -21,6 +21,7 @@ pub mod legacy_bookmark_recovery;
 pub mod open_diagnostics;
 pub mod origin;
 pub mod outbox;
+pub mod persistence;
 pub mod session;
 pub(crate) mod source_identity_migration;
 pub mod source_policy;

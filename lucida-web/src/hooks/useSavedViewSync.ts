@@ -30,7 +30,7 @@ interface Params {
   /** Returns the live `WasmScene`, or null if not yet loaded. */
   getScene: () => WasmScene | null;
   /** Bridge functions sourced from `useBridge`. */
-  sendOpenRemoteDataset: (url: string) => void;
+  sendOpenRemoteDataset: (url: string) => string | null;
   sendCommand: (json: string) => void;
   /** Tick that increments whenever the scene mutates locally — used to
    * drive URL re-encoding. We piggyback on the existing
@@ -216,7 +216,7 @@ export function useSavedViewSync({
           if (datasetReferenceMode === "source-url") {
             urlByDatasetId.set(dataset_id_for_url(url), url);
           }
-          sendOpenRemoteDataset(url);
+          return sendOpenRemoteDataset(url);
         },
       sendCommand,
       },

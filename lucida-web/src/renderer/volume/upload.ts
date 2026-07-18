@@ -54,6 +54,18 @@ export function handleLabelVolumeChunkData(
   );
   if (!pool) return;
 
+  const selectionChanged =
+    pool.residentContentEpoch !== msg.epochs.content ||
+    pool.residentSelectionEpoch !== msg.epochs.selection;
+  if (selectionChanged) {
+    // Keep the slot allocation, but make every old cell unreachable before
+    // accepting a partial delivery for the new timepoint. Reused slots are
+    // overwritten in place as their current chunks arrive.
+    pool.indirectionData.fill(0xFFFFFFFF);
+    pool.residentContentEpoch = undefined;
+    pool.residentSelectionEpoch = undefined;
+  }
+
   let wrote = false;
   for (const chunk of msg.chunks) {
     assertChunkBufferLength(chunk.data, chunk.contract, "worker");
@@ -106,8 +118,12 @@ export function handleLabelVolumeChunkData(
 
   // Push the refreshed cell→slot map to the GPU so the shader walks the bricks
   // this delivery just placed.
-  if (wrote) {
+  if (selectionChanged || wrote) {
     ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirectionData);
+  }
+  if (wrote) {
+    pool.residentContentEpoch = msg.epochs.content;
+    pool.residentSelectionEpoch = msg.epochs.selection;
   }
 }
 
@@ -119,16 +135,17 @@ export function handleVolumeChunkData(
   memberId: string,
 ): void {
   const { level, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+  const tier = msg.tier ?? "detail";
 
   // Drop entire batch if stale
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "stale");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "stale");
     return;
   }
 
   const atlas = ctx.state.volumeAtlases.get(poolKey);
   if (!atlas) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-pool");
     return; // pool not yet created by cold state handler
   }
 
@@ -140,13 +157,13 @@ export function handleVolumeChunkData(
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[volumeChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-entity-meta");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-entity-meta");
     return;
   }
   const lodMeta = entityLodMetas.find(m => m.level === level);
   if (!lodMeta) {
     console.warn(`[volumeChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-lod-meta");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-lod-meta");
     return;
   }
 
@@ -255,20 +272,24 @@ export function handleVolumeChunkData(
     }
     // Report evictions per member
     for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
+      ctx.post({ type: "chunksEvicted", datasetId: atlas.datasetId ?? msg.datasetId, memberId: evMember, tier, keys: evKeys, skipped: [], reason: "evicted" });
     }
     // Report skipped (this batch's member only)
     if (skippedKeys.length > 0) {
       postChunksRejected(
         ctx,
+        msg.datasetId,
         memberId,
+        tier,
         skippedKeys.map(key => ({ key })),
       );
     }
     if (radiusFilteredKeys.length > 0) {
       postChunksRequeued(
         ctx,
+        msg.datasetId,
         memberId,
+        tier,
         radiusFilteredKeys.map(key => ({ key })),
         "radius-filter",
       );

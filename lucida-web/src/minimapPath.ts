@@ -424,7 +424,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
             const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
             if (uploaded.has(chunkKey)) continue;
 
-            const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
+            const cached = ctx.cpuCache.getCachedChunk(datasetId, memberId, chunkKey, "coarse");
             if (cached && cached.data.byteLength > 0) {
               assertChunkBufferLength(cached.data, cached.contract, "decoded");
               if (cached.contract.role !== "intensity" || cached.contract.dtype !== "uint16") {

@@ -1535,7 +1535,7 @@ impl BroadcastSender {
     }
 
     #[cfg(test)]
-    fn queued_bytes(&self) -> usize {
+    pub(crate) fn queued_bytes(&self) -> usize {
         self.queued_bytes.load(Ordering::Acquire)
     }
 }
@@ -1764,6 +1764,31 @@ pub(crate) fn unicast_channel_with_process_budget(
         max_bytes,
         Arc::new(ProcessOutboxBudget::new(process_max_bytes)),
     )
+}
+
+/// Isolated allocator observer for cross-module lifecycle tests. Holding the
+/// probe does not hold a connection owner or any reservation alive.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ProcessOutboxBudgetProbe(Arc<ProcessOutboxBudget>);
+
+#[cfg(test)]
+impl ProcessOutboxBudgetProbe {
+    pub(crate) fn queued_bytes(&self) -> usize {
+        self.0.queued_bytes.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn unicast_channel_with_process_budget_probe(
+    max_messages: usize,
+    max_bytes: usize,
+    process_max_bytes: usize,
+) -> (UnicastSender, UnicastReceiver, ProcessOutboxBudgetProbe) {
+    let process_budget = Arc::new(ProcessOutboxBudget::new(process_max_bytes));
+    let (sender, receiver) =
+        unicast_channel_with_budget(max_messages, max_bytes, Arc::clone(&process_budget));
+    (sender, receiver, ProcessOutboxBudgetProbe(process_budget))
 }
 
 /// Build two isolated connections against the same allocator. Cross-module
@@ -2200,9 +2225,20 @@ impl UnicastReceiver {
 
     pub(crate) async fn recv_reserved(&mut self) -> Option<OutboxMessage> {
         loop {
+            // `signal_pressure` uses `notify_waiters`, which deliberately does
+            // not retain a permit for a future waiter. Register first, then
+            // re-check the durable atomic state so a close signalled just
+            // before this receive cannot be missed.
+            let notify = Arc::clone(&self.overload_notify);
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(close) = self.take_overload_close() {
+                return Some(close);
+            }
             tokio::select! {
                 biased;
-                () = self.overload_notify.notified() => {
+                () = &mut notified => {
                     if let Some(close) = self.take_overload_close() {
                         return Some(close);
                     }
@@ -2273,6 +2309,23 @@ mod tests {
             Err(OutboxSendError::Oversized)
         );
         assert_eq!(sender.metrics().rejected_oversized, 1);
+    }
+
+    #[tokio::test]
+    async fn overload_close_signalled_before_receive_is_not_lost() {
+        let (sender, mut receiver, budget) =
+            unicast_channel_with_process_budget_probe(1, 1024, 4096);
+        sender.force_overload_close();
+
+        let message = tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("durable overload state must wake a late receiver")
+            .expect("overload must produce a coded close");
+        assert!(matches!(message, Message::Close(_)));
+        drop(message);
+        drop(sender);
+        drop(receiver);
+        assert_eq!(budget.queued_bytes(), 0);
     }
 
     #[test]

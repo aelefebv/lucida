@@ -411,6 +411,7 @@ export function pushLabelLayers(
     const position = placement.position2d(label.source_image_id, source.owner);
     layers.push({
       datasetId: label.image.image_id,
+      ownerDatasetId: manifest.dataset_id,
       dataW,
       dataH,
       blendMode: "alpha",

@@ -62,7 +62,7 @@ export interface TelemetrySnapshot {
   transientFailures: number;
   /** Latest fetch error message, or null if none. */
   lastError: string | null;
-  /** Running average of decoded chunk sizes (bytes). */
+  /** Running average of source response payload sizes (bytes). */
   avgDecodedBytes: number;
   /** Number of completed fetches feeding `avgDecodedBytes`. */
   completedFetches: number;
@@ -143,16 +143,15 @@ export class TelemetryCounters {
   }
 
   /**
-   * Update the running average of decoded chunk sizes used for in-flight
-   * byte estimation, and bump the count of completed fetches that fed it.
+   * Update the diagnostic running average of source response payload sizes,
+   * and bump the count of completed fetches that fed it.
    */
   recordCompletedFetch(responseBytes: number): void {
     this.completedFetches++;
     this.avgDecodedBytes += (responseBytes - this.avgDecodedBytes) / this.completedFetches;
   }
 
-  /** Current running average of decoded chunk sizes — used by the cache
-   *  to seed in-flight byte estimates before the actual response arrives. */
+  /** Current diagnostic running average of source response payload sizes. */
   averageDecodedBytes(): number {
     return this.avgDecodedBytes;
   }

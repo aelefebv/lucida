@@ -7,7 +7,7 @@
 //! before that increment therefore cannot be admitted after it, even when its
 //! request was already queued in middleware.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -15,6 +15,9 @@ use tokio::sync::{Mutex, MutexGuard};
 #[derive(Debug, Default)]
 pub struct AuthEpochRegistry {
     epochs: Mutex<HashMap<String, u64>>,
+    restart_required: Mutex<HashSet<String>>,
+    restart_required_sessions: Mutex<HashSet<String>>,
+    restart_required_bearers: Mutex<HashSet<String>>,
 }
 
 impl AuthEpochRegistry {
@@ -31,6 +34,53 @@ impl AuthEpochRegistry {
         AuthEpochGuard {
             epochs: self.epochs.lock().await,
         }
+    }
+
+    pub(crate) async fn block_until_restart(&self, email: &str) {
+        self.restart_required
+            .lock()
+            .await
+            .insert(normalize_email(email));
+    }
+
+    pub async fn is_blocked(&self, email: &str) -> bool {
+        self.restart_required
+            .lock()
+            .await
+            .contains(&normalize_email(email))
+    }
+
+    pub(crate) async fn block_session_until_restart(&self, session_id: &str) {
+        self.restart_required_sessions
+            .lock()
+            .await
+            .insert(session_id.to_string());
+    }
+
+    pub async fn is_session_blocked(&self, session_id: &str) -> bool {
+        self.restart_required_sessions
+            .lock()
+            .await
+            .contains(session_id)
+    }
+
+    pub(crate) async fn block_bearer_until_restart(&self, token_hash: &str) {
+        self.restart_required_bearers
+            .lock()
+            .await
+            .insert(token_hash.to_string());
+    }
+
+    pub async fn is_bearer_blocked(&self, token_hash: &str) -> bool {
+        self.restart_required_bearers
+            .lock()
+            .await
+            .contains(token_hash)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn blocked_principal_count(&self) -> usize {
+        self.restart_required.lock().await.len()
     }
 }
 

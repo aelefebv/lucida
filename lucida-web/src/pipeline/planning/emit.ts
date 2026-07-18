@@ -141,7 +141,7 @@ export function emitMinimapLane(
 export function emitDetailLane(
   activeSet: ActiveSetEntry[],
   snapshot: PlanningSnapshot,
-  entityById: Map<string, EntitySnapshot>,
+  entityByImageId: Map<string, EntitySnapshot>,
   stats: PlanStats,
   allRequests: ChunkRequest[],
   config: PlanningConfig,
@@ -151,7 +151,7 @@ export function emitDetailLane(
     if (entry.kind === "invisible") continue;
 
     // Narrowed: entry is TileEntry below this point.
-    const entity = entityById.get(entry.entityId);
+    const entity = entityByImageId.get(entry.imageId);
     if (entity === undefined) continue;
 
     const chunks = iterateChunksAtLodRange(
@@ -190,7 +190,7 @@ export function emitDetailLane(
 export function emitPrefetchLane(
   activeSet: ActiveSetEntry[],
   snapshot: PlanningSnapshot,
-  entityById: Map<string, EntitySnapshot>,
+  entityByImageId: Map<string, EntitySnapshot>,
   stats: PlanStats,
   allRequests: ChunkRequest[],
   config: PlanningConfig,
@@ -198,7 +198,7 @@ export function emitPrefetchLane(
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
     if (entry.kind !== "tile") continue;
-    const entity = entityById.get(entry.entityId);
+    const entity = entityByImageId.get(entry.imageId);
     if (entity === undefined) continue;
     if (entity.levels.length === 0) continue;
 
@@ -246,7 +246,7 @@ export function emitPrefetchLane(
 export function emitCoarseLane(
   activeSet: ActiveSetEntry[],
   snapshot: PlanningSnapshot,
-  entityById: Map<string, EntitySnapshot>,
+  entityByImageId: Map<string, EntitySnapshot>,
   stats: PlanStats,
   allRequests: ChunkRequest[],
   config: PlanningConfig,
@@ -256,7 +256,7 @@ export function emitCoarseLane(
     if (entry.kind !== "tile") continue;
     if (entry.coarseLevel === undefined || entry.coarseLevel === null) continue;
 
-    const entity = entityById.get(entry.entityId);
+    const entity = entityByImageId.get(entry.imageId);
     if (entity === undefined) continue;
 
     const chunks = iterateChunksAtLodRange(

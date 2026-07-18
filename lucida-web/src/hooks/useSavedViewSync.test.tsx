@@ -155,7 +155,7 @@ function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
   }, [autoContrastMap]);
   const handle = useSavedViewSync({
     getScene: () => scene as unknown as Parameters<typeof useSavedViewSync>[0]["getScene"] extends () => infer R ? R : never,
-    sendOpenRemoteDataset: () => {},
+    sendOpenRemoteDataset: () => "open-test",
     sendCommand: () => {},
     changeTick: 0,
     debounceMs: 1,

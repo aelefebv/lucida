@@ -10,12 +10,15 @@ import {
 import type { DatasetState } from "./types.ts";
 import { Axis } from "./axes.ts";
 import {
+  manifestChunkImages,
   resolveDatasetManifest,
   resolveFetchSource,
   type DatasetManifest,
   type DatasetManifestWire,
   type FetchSource,
   type FetchSourceWire,
+  type ImageSpec,
+  type WireFormat,
 } from "./manifestTypes.ts";
 import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
@@ -67,6 +70,29 @@ export const MAX_OPEN_WARNING_MESSAGE_CHARS = 2048;
 export const MAX_TRACKED_OPEN_REQUESTS = 128;
 const LOCAL_OPEN_CAPACITY_REQUEST_PREFIX = "local-open-capacity:";
 const LOCAL_OPEN_TRANSPORT_REQUEST_PREFIX = "local-open-transport:";
+
+function wireFormatsEqual(left: WireFormat, right: WireFormat): boolean {
+  if ("Raw" in left && "Raw" in right) {
+    return left.Raw.data_type === right.Raw.data_type;
+  }
+  if ("Lz4" in left && "Lz4" in right) {
+    return left.Lz4.data_type === right.Lz4.data_type;
+  }
+  if ("Zstd" in left && "Zstd" in right) {
+    return left.Zstd.data_type === right.Zstd.data_type;
+  }
+  return false;
+}
+
+function imageChunkContractEqual(left: ImageSpec, right: ImageSpec): boolean {
+  const contractShape = (image: ImageSpec) => ({
+    dataType: image.multiscale.data_type,
+    axes: image.multiscale.axes,
+    levels: image.multiscale.levels,
+    pinnedAxes: image.multiscale.pinned_axes ?? [],
+  });
+  return JSON.stringify(contractShape(left)) === JSON.stringify(contractShape(right));
+}
 
 interface PendingOpenRequest {
   status: "pending";
@@ -436,7 +462,8 @@ export class SessionController {
       );
     };
     this.contentSource = new ProxiedContentSource(
-      (json) => this.session?.bridge.send(json),
+      (json) => this.session?.bridge.send(json) ?? false,
+      () => this.session?.bridge.resetTransport(),
     );
     this.cpuCache = new CpuCache(this.contentSource, decodePool, {
       // Chunk deliveries failing without interruption would otherwise
@@ -545,15 +572,15 @@ export class SessionController {
     this.session.bridge.sendDatasetPresence(scene.export_dataset_presence());
   }
 
-  openRemoteDataset(url: string): void {
+  openRemoteDataset(url: string): string | null {
     // A deliberate new attempt for the same source supersedes that source's
     // old failures, but never retires failures belonging to sibling URLs.
     this.removeFailedOpenRequestsForUrl(url);
     this.refreshVisibleOpenFailure();
-    this.beginOpenRequest(url);
+    return this.beginOpenRequest(url);
   }
 
-  private beginOpenRequest(url: string): void {
+  private beginOpenRequest(url: string): string | null {
     // The final slot is reserved for an actionable local admission failure.
     // Replace an older capacity notice with the user's latest attempt; it was
     // never sent, so this does not discard an in-flight server request.
@@ -585,7 +612,7 @@ export class SessionController {
       });
       this.surfaceError("open", error);
       this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
-      return;
+      return null;
     }
 
     const sentAt = performance.now();
@@ -610,7 +637,7 @@ export class SessionController {
       bridgeLog("open_remote_dataset.transport_not_ready", { url });
       this.surfaceError("open", error);
       this.deps.getSavedViewHooks()?.onOpenDatasetFailed(url, error);
-      return;
+      return null;
     }
     const progressOrder = ++this.openActivityOrder;
     this.openRequests.set(requestId, {
@@ -629,6 +656,7 @@ export class SessionController {
     // retired by their own signal instead — that open failing, or a dismiss /
     // connection loss.
     this.publishOpenRequestActivity();
+    return requestId;
   }
 
   /** Clear the durable import warnings (the user dismissed the surface). Emits
@@ -1163,10 +1191,15 @@ export class SessionController {
     const manifest = reg.manifest;
     const datasetId = manifest.dataset_id;
     validateDatasetChunkAdmission(manifest, reg.fetch);
-    if (!this.deps.datasets.has(datasetId)) {
+    const existing = this.deps.datasets.get(datasetId);
+    if (!existing) {
       this.setupFetchPipeline(manifest, reg.fetch);
     } else {
-      bridgeLog("setup_fetch_pipeline.skipped_existing", { datasetId });
+      this.reconcileFetchPipeline(
+        existing,
+        manifest,
+        reg.fetch,
+      );
     }
     const registry = this.session.ensureLayoutRegistry();
     if (!registry) return;
@@ -1182,6 +1215,91 @@ export class SessionController {
       const activeId = manifest.default_layout_id ?? manifest.source_layouts[0]?.id;
       if (activeId) registry.setActive(datasetId, activeId, sendCmd);
     }
+  }
+
+  /**
+   * Adopt a refreshed manifest and its authoritative, generation-bound fetch
+   * descriptors for an already-known workspace dataset without rebuilding its
+   * whole pipeline. Decoded chunks whose image and wire contracts are unchanged
+   * remain warm; changed/removed contracts are invalidated before replacement.
+   */
+  private reconcileFetchPipeline(
+    existing: DatasetState,
+    manifest: DatasetManifest,
+    incomingFetch: FetchSource,
+  ): void {
+    const datasetId = manifest.dataset_id;
+    const oldImages = new Map(
+      Array.from(manifestChunkImages(existing.manifest), (entry) => [entry.image.image_id, entry]),
+    );
+    const nextImages = new Map(
+      Array.from(manifestChunkImages(manifest), (entry) => [entry.image.image_id, entry]),
+    );
+    const oldFetch = new Map(
+      existing.fetch.Proxied.images.map((spec) => [spec.image_id, spec]),
+    );
+
+    const effectiveFetch: FetchSource = structuredClone(incomingFetch);
+    validateDatasetChunkAdmission(manifest, effectiveFetch);
+
+    const nextFetch = new Map(
+      effectiveFetch.Proxied.images.map((spec) => [spec.image_id, spec]),
+    );
+
+    const invalidatedImages = [...oldImages.values()].filter((oldEntry) => {
+      const nextEntry = nextImages.get(oldEntry.image.image_id);
+      const previousFetch = oldFetch.get(oldEntry.image.image_id);
+      const replacementFetch = nextFetch.get(oldEntry.image.image_id);
+      return !nextEntry ||
+        nextEntry.role !== oldEntry.role ||
+        !imageChunkContractEqual(oldEntry.image, nextEntry.image) ||
+        !previousFetch ||
+        !replacementFetch ||
+        !wireFormatsEqual(previousFetch.wire_format, replacementFetch.wire_format);
+    });
+    if (invalidatedImages.length > 0) {
+      const identities = invalidatedImages.map(({ image, role }) => ({
+        imageId: image.image_id,
+        // Label planning deliberately uses the label image id as its cache
+        // entity so categorical bytes cannot collide with the source image.
+        entityId: role === "label" ? image.image_id : image.owner,
+      }));
+      this.cpuCache.invalidateDatasetImages(datasetId, identities);
+      this.deps.getLoop()?.invalidateDatasetImages(
+        datasetId,
+        identities.map((identity) => identity.imageId),
+      );
+    }
+
+    let registeredImages = 0;
+    for (const spec of effectiveFetch.Proxied.images) {
+      const previous = oldFetch.get(spec.image_id);
+      if (!previous || !wireFormatsEqual(previous.wire_format, spec.wire_format)) {
+        this.contentSource.registerImage(datasetId, spec.image_id, spec.wire_format);
+        registeredImages++;
+      }
+    }
+    const removedImageIds = [...oldImages.keys()].filter((imageId) => !nextImages.has(imageId));
+    if (removedImageIds.length > 0) {
+      for (const imageId of removedImageIds) {
+        this.contentSource.unregisterImage(datasetId, imageId);
+      }
+    }
+
+    this.deps.datasets.set(datasetId, {
+      id: datasetId,
+      name: manifest.name,
+      manifest,
+      fetch: effectiveFetch,
+    });
+    this.deps.getLoop()?.updateDatasetManifest(datasetId, manifest);
+    this.deps.events.onDatasetsChanged();
+    bridgeLog("setup_fetch_pipeline.reconciled_existing", {
+      datasetId,
+      registeredImages,
+      removedImages: removedImageIds.length,
+      totalImages: effectiveFetch.Proxied.images.length,
+    });
   }
 
   private removeDataset(datasetId: string): void {
@@ -1236,7 +1354,7 @@ export class SessionController {
 
     let registeredImages = 0;
     for (const spec of fetchDesc.Proxied.images) {
-      this.contentSource.registerImage(spec.image_id, spec.wire_format);
+      this.contentSource.registerImage(datasetId, spec.image_id, spec.wire_format);
       registeredImages++;
     }
     const t1 = performance.now();
@@ -1352,8 +1470,50 @@ export class SessionController {
 
   private buildHandlers(): BridgeHandlers {
     return {
-      onSnapshot: (_seq, documentJson, snapshotPeers, yourId, generatedAvailability) => {
+      onSnapshot: (
+        _seq,
+        documentJson,
+        snapshotPeers,
+        yourId,
+        generatedAvailability,
+        datasetFetch,
+      ) => {
         try {
+          const doc = JSON.parse(documentJson);
+          const snapshotRegistrations: Array<{
+            datasetId: string;
+            manifest: DatasetManifest;
+            fetch: FetchSource;
+          }> = [];
+          if (doc.manifests) {
+            const manifests = doc.manifests as Record<string, DatasetManifestWire>;
+            const manifestIds = Object.keys(manifests);
+            const fetchIds = Object.keys(datasetFetch);
+            const missingFetch = manifestIds.find((datasetId) => !(datasetId in datasetFetch));
+            const orphanedFetch = fetchIds.find((datasetId) => !(datasetId in manifests));
+            if (missingFetch || orphanedFetch) {
+              throw new Error(
+                missingFetch
+                  ? `Snapshot dataset ${missingFetch} has no authoritative fetch descriptor`
+                  : `Snapshot fetch descriptor ${orphanedFetch} has no document manifest`,
+              );
+            }
+            for (const [datasetId, manifestWire] of Object.entries(manifests)) {
+              const manifest = resolveDatasetManifest(manifestWire);
+              if (manifest.dataset_id !== datasetId) {
+                throw new Error(
+                  `Snapshot manifest key ${datasetId} disagrees with dataset id ${manifest.dataset_id}`,
+                );
+              }
+              const fetch = resolveFetchSource(datasetFetch[datasetId]);
+              // Validate the whole snapshot before mutating the scene, content
+              // registrations, or dataset registry. One malformed sibling
+              // must never leave an otherwise-partially-installed snapshot.
+              validateDatasetChunkAdmission(manifest, fetch);
+              snapshotRegistrations.push({ datasetId, manifest, fetch });
+            }
+          }
+
           // The scene is obtained first so the guarded load carries it as
           // its subject; the guard makes a fatal load failure (trap,
           // borrow poisoning) surface even though the enclosing catch
@@ -1376,32 +1536,20 @@ export class SessionController {
 
           this.session.setScene(scene);
 
-          const doc = JSON.parse(documentJson);
           if (doc.manifests) {
-            for (const [dsId, manifestWire] of Object.entries(doc.manifests as Record<string, DatasetManifestWire>)) {
-              // Resolve the wire encoding (shared multiscale table etc.) up
-              // front so everything downstream sees effective per-image
-              // metadata.
-              const manifest = resolveDatasetManifest(manifestWire);
-              // A snapshot carries no fetch source; synthesize a proxied one
-              // from the manifest's images. Only consulted when the dataset
-              // isn't registered yet — an existing registration keeps the
-              // fetch source it was created with.
-              const fetchDesc: FetchSource = {
-                Proxied: {
-                  images: manifest.images.map(img => ({
-                    image_id: img.image_id,
-                    wire_format: { Raw: { data_type: img.multiscale.data_type } },
-                  })),
-                },
-              };
+            for (const { datasetId, manifest, fetch } of snapshotRegistrations) {
+              // Transport encoding belongs to the operational server binding,
+              // not the collaborative document. The snapshot carries the
+              // exact prevalidated generation-bound descriptor, preserving
+              // compressed intensity and label streams across join, reconnect,
+              // and persisted restore.
               this.ensureDatasetRegistered({
                 manifest,
-                fetch: fetchDesc,
+                fetch,
                 layoutActivation: {
                   kind: "local",
                   activeId:
-                    (doc.active_layout_ids as Record<string, string> | undefined)?.[dsId],
+                    (doc.active_layout_ids as Record<string, string> | undefined)?.[datasetId],
                 },
               });
             }
@@ -1740,6 +1888,7 @@ export class SessionController {
         );
       },
       onConnected: () => {
+        this.contentSource.handleTransportReady();
         // Chunk failures accumulated against a dropped transport (or its
         // reconnect window) say nothing about the restored connection.
         this.cpuCache.resetChunkFailureStreak();
@@ -1765,7 +1914,7 @@ export class SessionController {
         this.deps.events.onSessionReadyChanged(false);
         this.clearAllOpenWarnings();
         this.resetOpenRequests();
-        this.contentSource.rejectAll();
+        this.contentSource.handleTransportClosed();
       },
     };
   }

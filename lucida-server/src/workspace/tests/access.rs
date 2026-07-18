@@ -2360,6 +2360,148 @@ struct DeleteFailingCredentialStore {
     inner: Arc<MemorySessionStore>,
 }
 
+struct LostCompletionCredentialStore {
+    inner: Arc<MemorySessionStore>,
+}
+
+#[async_trait::async_trait]
+impl LoginSessionStore for LostCompletionCredentialStore {
+    async fn create(
+        &self,
+        session: crate::auth::LoginSession,
+    ) -> Result<(), crate::auth::SessionStoreError> {
+        self.inner.create(session).await
+    }
+
+    async fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::auth::LoginSession>, crate::auth::SessionStoreError> {
+        self.inner.get(id).await
+    }
+
+    async fn touch_last_used(
+        &self,
+        id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), crate::auth::SessionStoreError> {
+        self.inner.touch_last_used(id, now).await
+    }
+
+    async fn delete(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::auth::LoginSession>, crate::auth::SessionStoreError> {
+        self.inner.delete(id).await
+    }
+
+    fn begin_delete(
+        &self,
+        id: &str,
+    ) -> crate::persistence::PersistenceOperation<
+        Option<crate::auth::LoginSession>,
+        crate::auth::SessionStoreError,
+    > {
+        let inner = Arc::clone(&self.inner);
+        let id = id.to_owned();
+        crate::persistence::PersistenceOperation::spawn(
+            crate::persistence::PersistenceDeadline::default(),
+            async move {
+                inner.delete(&id).await.unwrap();
+                crate::persistence::PersistenceWorkerOutcome::RecoverablyIndeterminate(
+                    crate::auth::SessionStoreError::Backend(
+                        "injected lost delete completion".into(),
+                    ),
+                )
+            },
+            || async { true },
+        )
+    }
+
+    async fn delete_expired(
+        &self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<u64, crate::auth::SessionStoreError> {
+        self.inner.delete_expired(now).await
+    }
+}
+
+#[tokio::test]
+async fn lost_logout_completion_is_read_back_and_revokes_live_credentials() {
+    let store = fresh_store().await;
+    let owner = principal("logout-recovery@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Recovered logout completion"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    let attachment = manager
+        .attach_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+    let (route_tx, mut route_rx) = crate::outbox::unicast_channel(4, 1024);
+    attachment
+        .live()
+        .unicast_routes
+        .lock()
+        .await
+        .insert(152, route_tx);
+    let lease = manager
+        .register_attachment_connection(&attachment, 152, &owner)
+        .await
+        .unwrap();
+
+    let sessions = Arc::new(MemorySessionStore::new());
+    let now = Utc::now();
+    sessions
+        .create(crate::auth::LoginSession {
+            id: "lost-completion-logout".into(),
+            email: owner.email.clone(),
+            display_name: owner.display_name.clone(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let state = crate::auth::handlers::LogoutState {
+        config: Arc::new(AuthConfig::for_tests()),
+        store: Arc::new(LostCompletionCredentialStore {
+            inner: Arc::clone(&sessions),
+        }),
+        workspace_manager: Some(Arc::clone(&manager)),
+    };
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/auth/logout")
+        .header("cookie", "lucida_session=lost-completion-logout")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(owner.clone());
+    let response = crate::auth::handlers::logout(axum::extract::State(state), request).await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::FOUND);
+    assert!(
+        sessions
+            .get("lost-completion-logout")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(lease.is_revoked());
+    assert_eq!(manager.auth_epoch_registry().current(&owner.email).await, 1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), route_rx.recv())
+            .await
+            .expect("recovered logout must close the stale connection"),
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+}
+
 #[async_trait::async_trait]
 impl LoginSessionStore for DeleteFailingCredentialStore {
     async fn create(
@@ -2391,6 +2533,20 @@ impl LoginSessionStore for DeleteFailingCredentialStore {
         Err(crate::auth::SessionStoreError::Backend(
             "simulated delete failure".into(),
         ))
+    }
+
+    fn begin_delete(
+        &self,
+        _id: &str,
+    ) -> crate::persistence::PersistenceOperation<
+        Option<crate::auth::LoginSession>,
+        crate::auth::SessionStoreError,
+    > {
+        crate::persistence::PersistenceOperation::ready(
+            crate::persistence::PersistenceWorkerOutcome::DefinitelyNotCommitted(
+                crate::auth::SessionStoreError::Backend("simulated delete failure".into()),
+            ),
+        )
     }
 
     async fn delete_expired(
@@ -2515,6 +2671,295 @@ async fn finish_cancelled_access_mutation(
         Some(axum::extract::ws::Message::Close(_))
     ));
     assert!(lease.begin_operation().await.is_none());
+}
+
+#[tokio::test]
+async fn lost_membership_completion_is_read_back_before_revocation_returns() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Recovered membership completion"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let (route_tx, mut route_rx) = crate::outbox::unicast_channel(4, 1024);
+    attachment
+        .live()
+        .unicast_routes
+        .lock()
+        .await
+        .insert(151, route_tx);
+    let lease = manager
+        .register_attachment_connection(&attachment, 151, &member)
+        .await
+        .unwrap();
+
+    manager.lose_next_persistence_completion();
+    let updated = manager
+        .update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Viewer)
+        .await
+        .expect("durable read-back must recover the committed role change");
+    assert_eq!(updated.role, WorkspaceRole::Viewer);
+    assert!(lease.is_revoked());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), route_rx.recv())
+            .await
+            .expect("recovered access mutation must close stale capability"),
+        Some(axum::extract::ws::Message::Close(_))
+    ));
+    assert!(lease.begin_operation().await.is_none());
+}
+
+#[tokio::test]
+async fn stalled_role_reconciliation_fails_closed_without_reverting_a_committed_downgrade() {
+    let (_, pool) = fresh_store_with_pool().await;
+    let store =
+        SqliteWorkspaceStore::with_persistence_deadline(pool.clone(), Duration::from_millis(10));
+    let owner = principal("stalled-role-owner@example.com", false);
+    let member = principal("stalled-role-member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Stalled role reconciliation"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store.clone()),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let old_live = Arc::clone(attachment.live());
+    let (route_tx, mut route_rx, route_process_budget) =
+        crate::outbox::unicast_channel_with_process_budget_probe(4, 1024, 4096);
+    let route_payload_baseline = route_tx.queued_bytes();
+    old_live
+        .unicast_routes
+        .lock()
+        .await
+        .insert(171, route_tx.clone());
+    let lease = manager
+        .register_attachment_connection(&attachment, 171, &member)
+        .await
+        .unwrap();
+
+    store.lose_next_persistence_completion_in_backend();
+    store.stall_next_reconciliation_read();
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        manager.update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Viewer),
+    )
+    .await
+    .expect("membership reconciliation must be finitely bounded")
+    .expect_err("a stalled read-back cannot claim a role-change verdict");
+    let WorkspaceError::PersistenceIndeterminate(detail) = error else {
+        panic!("stalled membership reconciliation must remain indeterminate");
+    };
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(detail.contains("persist-"));
+    assert!(lease.is_revoked());
+    assert!(lease.begin_operation().await.is_none());
+
+    let close = tokio::time::timeout(Duration::from_millis(250), route_rx.recv())
+        .await
+        .expect("fail-close must release the access mutation guard")
+        .expect("the stale editor connection must receive one close");
+    assert!(matches!(close, axum::extract::ws::Message::Close(_)));
+    drop(close);
+    assert!(route_rx.try_recv().is_err());
+    assert_eq!(route_tx.queued_bytes(), route_payload_baseline);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "viewer",
+        "the injected worker committed before its completion was lost"
+    );
+    let _session_guard = old_live
+        .session
+        .try_lock()
+        .expect("bounded reconciliation must release every live-session guard");
+    let operation_id = store.last_persistence_operation_id();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while crate::persistence::persistence_operation_resources(operation_id) != (false, false) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stalled membership reconciliation must release operation resources");
+    assert_eq!(
+        crate::persistence::persistence_operation_resources(operation_id),
+        (false, false)
+    );
+
+    let restored = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .expect("Quiesced recovery permits restore from the committed viewer role");
+    assert!(!Arc::ptr_eq(&old_live, restored.live()));
+    drop(_session_guard);
+    old_live.unicast_routes.lock().await.clear();
+    drop(attachment);
+    drop(old_live);
+    drop(route_tx);
+    drop(route_rx);
+    assert_eq!(route_process_budget.queued_bytes(), 0);
+}
+
+#[tokio::test]
+async fn never_completing_role_revocation_returns_bounded_indeterminate_and_releases_live_capabilities()
+ {
+    let (_, pool) = fresh_store_with_pool().await;
+    let store =
+        SqliteWorkspaceStore::with_persistence_deadline(pool.clone(), Duration::from_millis(10));
+    let owner = principal("never-revoke-owner@example.com", false);
+    let member = principal("never-revoke-member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Never-completing revocation"))
+        .await
+        .unwrap();
+    let manager = Arc::new(WorkspaceManager::new(
+        Arc::new(store.clone()),
+        DatasetRuntimeConfig::defaults(),
+    ));
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let attachment = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let old_live = Arc::clone(attachment.live());
+    let (route_tx, mut route_rx, route_process_budget) =
+        crate::outbox::unicast_channel_with_process_budget_probe(4, 1024, 4096);
+    let route_payload_baseline = route_tx.queued_bytes();
+    attachment
+        .live()
+        .unicast_routes
+        .lock()
+        .await
+        .insert(181, route_tx.clone());
+    let lease = manager
+        .register_attachment_connection(&attachment, 181, &member)
+        .await
+        .unwrap();
+
+    store.never_complete_next_persistence();
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_millis(250),
+        manager.update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Viewer),
+    )
+    .await
+    .expect("the backend-issued deadline must bound access revocation")
+    .expect_err("a never-completing role mutation cannot claim a durable verdict");
+    let WorkspaceError::PersistenceIndeterminate(detail) = error else {
+        panic!("deadline must remain explicitly indeterminate");
+    };
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(detail.contains("persist-"));
+    assert!(lease.is_revoked());
+    assert!(lease.begin_operation().await.is_none());
+
+    let close = tokio::time::timeout(Duration::from_millis(250), route_rx.recv())
+        .await
+        .expect("fail-close must not retain the revocation guard")
+        .expect("the revoked connection must receive one close");
+    assert!(matches!(close, axum::extract::ws::Message::Close(_)));
+    drop(close);
+    assert!(
+        route_rx.try_recv().is_err(),
+        "revocation must close exactly once"
+    );
+    assert_eq!(
+        route_tx.queued_bytes(),
+        route_payload_baseline,
+        "revocation close must return its payload reservation to baseline"
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&member.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "editor",
+        "an aborted fake mutation must not be reported or observed as a downgrade"
+    );
+    let _session_guard = old_live
+        .session
+        .try_lock()
+        .expect("bounded return must release every live-session guard");
+
+    let operation_id = store.last_persistence_operation_id();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while crate::persistence::persistence_operation_resources(operation_id) != (false, false) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("access revocation must retain no backend worker or operation controller");
+
+    let restored = manager
+        .attach_workspace(&workspace.id, &member)
+        .await
+        .expect("quiesced access persistence permits a durable restore");
+    assert!(!Arc::ptr_eq(&old_live, restored.live()));
+    drop(_session_guard);
+    old_live.unicast_routes.lock().await.clear();
+    drop(attachment);
+    drop(old_live);
+    drop(route_tx);
+    drop(route_rx);
+    assert_eq!(
+        route_process_budget.queued_bytes(),
+        0,
+        "closed revocation route must return retained wire capacity to process baseline"
+    );
 }
 
 #[tokio::test]

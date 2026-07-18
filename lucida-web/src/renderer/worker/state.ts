@@ -76,13 +76,15 @@ export interface RendererState {
   /** poolKey → slice atlas pool state. */
   sliceAtlases: Map<string, SliceAtlasState>;
   /**
-   * memberId → r32uint label overlay slice pool. Separate from
+   * dataset-scoped label-pool key → r32uint label overlay slice pool.
+   * Separate from
    * {@link sliceAtlases} (r16uint intensity) because label ids need full
    * 32-bit storage and render through the categorical shader path.
    */
   labelSlicePools: Map<string, LabelSlicePool>;
   /**
-   * memberId → r32uint label overlay volume pool. The 3D counterpart to
+   * dataset-scoped label-pool key → r32uint label overlay volume pool. The
+   * 3D counterpart to
    * {@link labelSlicePools}: holds the full label mask volume for the
    * first-hit categorical surface drawn over the translucent intensity
    * volume. Separate from {@link volumeAtlases} (r16uint intensity) for the

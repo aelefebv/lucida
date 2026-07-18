@@ -175,6 +175,11 @@ impl PrincipalExtractor for SessionCookieExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
         let session_id =
             read_session_cookie(req, &self.config.cookie_name).ok_or(AuthError::Unauthenticated)?;
+        if self.auth_epochs.is_session_blocked(&session_id).await {
+            return Err(AuthError::Internal(
+                "session mutation recovery requires process restart".to_string(),
+            ));
+        }
 
         // Capture request-context fields once for any audit events
         // emitted below. Email is unknown until we look up the row;
@@ -236,6 +241,11 @@ impl PrincipalExtractor for SessionCookieExtractor {
         // the confirmation observes the deletion, or the returned principal
         // carries the old epoch and WebSocket admission rejects it after the
         // bump. This closes the middleware -> handler scheduling window.
+        if self.auth_epochs.is_blocked(&row.email).await {
+            return Err(AuthError::Internal(
+                "credential mutation recovery requires process restart".to_string(),
+            ));
+        }
         let auth_epoch = self.auth_epochs.current(&row.email).await;
         let confirmed = self.store.get(&session_id).await.map_err(|e| {
             error!(error = %e, "session_store.confirm.failed");
@@ -321,6 +331,11 @@ impl PrincipalExtractor for BearerTokenExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
         let raw = read_bearer_token(req).ok_or(AuthError::Unauthenticated)?;
         let token_hash = hash_bearer_token(raw);
+        if self.auth_epochs.is_bearer_blocked(&token_hash).await {
+            return Err(AuthError::Internal(
+                "bearer mutation recovery requires process restart".to_string(),
+            ));
+        }
 
         let user_agent = req
             .headers
@@ -369,6 +384,11 @@ impl PrincipalExtractor for BearerTokenExtractor {
         // As with cookie sessions, capture the epoch between two backing-store
         // validations so a token revoked concurrently cannot inherit the new
         // generation merely because its request was delayed in middleware.
+        if self.auth_epochs.is_blocked(&row.email).await {
+            return Err(AuthError::Internal(
+                "credential mutation recovery requires process restart".to_string(),
+            ));
+        }
         let auth_epoch = self.auth_epochs.current(&row.email).await;
         let confirmed = self.store.get_by_hash(&token_hash).await.map_err(|e| {
             error!(error = %e, "bearer_token_store.confirm.failed");

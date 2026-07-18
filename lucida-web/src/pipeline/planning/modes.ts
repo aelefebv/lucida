@@ -57,8 +57,8 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
       continue;
     }
 
-    groups.set(`__image__${entity.entityId}`, {
-      groupId: `__image__${entity.entityId}`,
+    groups.set(`__image__${entity.imageId}`, {
+      groupId: `__image__${entity.imageId}`,
       groupEntity: null,
       tiles: [entity],
       projectedDiagonalPx: entity.projectedDiagonalPx,

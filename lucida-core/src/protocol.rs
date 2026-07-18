@@ -10,7 +10,7 @@ pub use lucida_protocol::{
 };
 use lucida_protocol::{
     DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic, DatasetOpenSuccessDiagnostic,
-    DatasetSourceHealth, FailureDescriptor, GeneratedAvailabilityDelta,
+    DatasetSourceHealth, FailureDescriptor, FetchSource, GeneratedAvailabilityDelta,
     GeneratedAvailabilitySnapshot, GeneratedChunkStatus, SourceChunkStatus,
 };
 
@@ -135,6 +135,12 @@ pub enum ServerMessage {
         /// a document command.
         #[serde(default)]
         generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
+        /// Authoritative, generation-bound chunk transport descriptors for
+        /// every operational dataset binding in the document. Kept outside
+        /// `DocumentState`: compression is server runtime state, not a
+        /// collaborative edit or saved-view concern.
+        #[serde(default)]
+        dataset_fetch: HashMap<DatasetId, FetchSource>,
     },
     /// Command from another client, broadcast to all except sender.
     CommandBroadcast { seq: u64, command: DocumentCommand },
@@ -279,6 +285,7 @@ mod tests {
             peers: Vec::new(),
             your_id: 42,
             generated_availability: HashMap::new(),
+            dataset_fetch: HashMap::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -672,6 +679,7 @@ mod tests {
             peers: Vec::new(),
             your_id: 1,
             generated_availability: HashMap::new(),
+            dataset_fetch: HashMap::new(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
@@ -811,6 +819,7 @@ mod tests {
             peers: Vec::new(),
             your_id: 1,
             generated_availability: HashMap::new(),
+            dataset_fetch: HashMap::new(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();

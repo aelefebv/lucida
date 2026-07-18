@@ -57,9 +57,13 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     rejectAll = vi.fn();
     rejectDataset = vi.fn();
     registerImage = vi.fn();
+    unregisterImage = vi.fn();
+    unregisterDataset = vi.fn();
     handleBinary = vi.fn();
     handleChunkStatus = vi.fn();
     handleSourceChunkStatus = vi.fn();
+    handleTransportReady = vi.fn();
+    handleTransportClosed = vi.fn();
     constructor(_send: unknown) {
       MockProxiedContentSource.instances.push(this);
     }
@@ -68,6 +72,8 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
     resetChunkFailureStreak = vi.fn();
+    invalidateDatasetImages = vi.fn();
+    invalidateDatasetDelivery = vi.fn();
     config: unknown;
     constructor(_source: unknown, _pool: unknown, config?: unknown) {
       this.config = config;
@@ -96,6 +102,8 @@ import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
 import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import type { WasmScene } from "lucida-core";
+import type { DatasetState } from "./types.ts";
+import type { DatasetManifestWire, FetchSourceWire } from "./manifestTypes.ts";
 
 const MockedBridge = Bridge as unknown as {
   instances: Array<{
@@ -110,8 +118,12 @@ const MockedBridge = Bridge as unknown as {
 const MockedContentSource = ProxiedContentSource as unknown as {
   instances: Array<{
     registerImage: ReturnType<typeof vi.fn>;
+    unregisterImage: ReturnType<typeof vi.fn>;
+    unregisterDataset: ReturnType<typeof vi.fn>;
     rejectAll: ReturnType<typeof vi.fn>;
     handleSourceChunkStatus: ReturnType<typeof vi.fn>;
+    handleTransportReady: ReturnType<typeof vi.fn>;
+    handleTransportClosed: ReturnType<typeof vi.fn>;
   }>;
 };
 const MockedDecodePool = DecodePool as unknown as {
@@ -125,6 +137,8 @@ const MockedCpuCache = CpuCache as unknown as {
   instances: Array<{
     reset: ReturnType<typeof vi.fn>;
     resetChunkFailureStreak: ReturnType<typeof vi.fn>;
+    invalidateDatasetImages: ReturnType<typeof vi.fn>;
+    invalidateDatasetDelivery: ReturnType<typeof vi.fn>;
     config?: {
       onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void;
       onChunkFailureRecovered?: () => void;
@@ -188,10 +202,58 @@ function makeManifest(datasetId: string) {
   };
 }
 
+/** A collection where labels are sparse per member: A and C have independent
+ * label images, while B has none. This mirrors real collection imports and
+ * catches any snapshot path that assumes labels live in `manifest.images` or
+ * that every intensity member has exactly one label. */
+function makeSparseCollectionLabelManifest(datasetId: string) {
+  const base = makeManifest(datasetId);
+  const image = (member: string, dataType: string) => {
+    const next = structuredClone(base.images[0]);
+    next.image_id = `${datasetId}:image:${member}`;
+    next.owner = `${datasetId}:tile:${member}`;
+    next.multiscale.data_type = dataType;
+    return next;
+  };
+  const intensityA = image("A/0/0", "Uint16");
+  const intensityB = image("B/0/0", "Float32");
+  const intensityC = image("C/0/0", "Uint8");
+  const labelA = image("A/0/0:label:regions", "Uint32");
+  const labelC = image("C/0/0:label:mask", "Uint8");
+  return {
+    ...base,
+    kind: {
+      Collection: {
+        rows: ["0"],
+        columns: ["A", "B", "C"],
+        positioning_mode: "Grid",
+        has_explicit_positions: false,
+      },
+    },
+    images: [intensityA, intensityB, intensityC],
+    labels: [
+      {
+        name: "regions",
+        source_image_id: intensityA.image_id,
+        image: labelA,
+      },
+      {
+        name: "mask",
+        source_image_id: intensityC.image_id,
+        image: labelC,
+      },
+    ],
+  };
+}
+
 function snapshotJson(datasetIds: string[]): string {
   const manifests: Record<string, unknown> = {};
   for (const id of datasetIds) manifests[id] = makeManifest(id);
   return JSON.stringify({ manifests });
+}
+
+function manifestSnapshotJson(manifest: ReturnType<typeof makeManifest> | ReturnType<typeof makeSparseCollectionLabelManifest>): string {
+  return JSON.stringify({ manifests: { [manifest.dataset_id]: manifest } });
 }
 
 function datasetOpenedJson(datasetId: string, openerClientId: number | null): string {
@@ -244,11 +306,41 @@ function makeEvents(): SessionControllerEvents {
  *  into the next test. */
 const liveControllers: SessionController[] = [];
 
-function makeHarness() {
+function snapshotFetchForDocument(documentJson: string): Record<string, FetchSourceWire> {
+  const document = JSON.parse(documentJson) as {
+    manifests?: Record<string, DatasetManifestWire>;
+  };
+  return Object.fromEntries(
+    Object.entries(document.manifests ?? {}).map(([datasetId, manifest]) => {
+      const images = [
+        ...(manifest.images ?? []),
+        ...(manifest.labels ?? []).map((label) => label.image),
+      ];
+      return [datasetId, {
+        Proxied: {
+          images: images.map((image) => ({
+            image_id: image.image_id,
+            wire_format: {
+              Raw: {
+                data_type: image.multiscale?.data_type ?? "Uint16",
+              },
+            },
+          })),
+        },
+      }];
+    }),
+  );
+}
+
+function makeHarness(renderLoop: {
+  addDataset: ReturnType<typeof vi.fn>;
+  updateDatasetManifest: ReturnType<typeof vi.fn>;
+  invalidateDatasetImages: ReturnType<typeof vi.fn>;
+} | null = null) {
   const scene = makeFakeScene();
   const sceneRef: { current: WasmScene | null } = { current: null };
   const events = makeEvents();
-  const datasets = new Map<string, never>();
+  const datasets = new Map<string, DatasetState>();
   const savedViewHooks = {
     onDatasetOpened: vi.fn(),
     onOpenDatasetFailed: vi.fn(),
@@ -261,7 +353,7 @@ function makeHarness() {
       return sceneRef.current;
     }),
     getScene: () => sceneRef.current,
-    getLoop: () => null,
+    getLoop: () => renderLoop as never,
     datasets,
     removeDatasetLocal: vi.fn(),
     getSavedViewHooks: () => savedViewHooks,
@@ -280,7 +372,25 @@ function makeHarness() {
   const controller = new SessionController(deps);
   liveControllers.push(controller);
   const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
-  const handlers = bridge.handlers;
+  const rawHandlers = bridge.handlers;
+  const handlers = {
+    ...rawHandlers,
+    onSnapshot: (
+      seq: number,
+      documentJson: string,
+      peers: PresenceState[],
+      yourId: number,
+      generatedAvailability: Parameters<BridgeHandlers["onSnapshot"]>[4],
+      datasetFetch: Record<string, FetchSourceWire> = snapshotFetchForDocument(documentJson),
+    ) => rawHandlers.onSnapshot(
+      seq,
+      documentJson,
+      peers,
+      yourId,
+      generatedAvailability,
+      datasetFetch,
+    ),
+  };
   return { controller, handlers, bridge, deps, events, scene, savedViewHooks, datasets };
 }
 
@@ -302,6 +412,215 @@ afterEach(() => {
 });
 
 describe("SessionController dataset registration", () => {
+  it("restores authoritative compressed intensity and label descriptors from a fresh snapshot", () => {
+    const { handlers } = makeHarness();
+    const contentSource = MockedContentSource.instances[0];
+    const manifest = makeSparseCollectionLabelManifest("collection-compressed");
+    const snapshot = manifestSnapshotJson(manifest);
+    const datasetFetch: Record<string, FetchSourceWire> = {
+      "collection-compressed": {
+        Proxied: {
+          images: [
+            {
+              image_id: "collection-compressed:image:A/0/0",
+              wire_format: { Zstd: { data_type: "Uint16" } },
+            },
+            {
+              image_id: "collection-compressed:image:B/0/0",
+              wire_format: { Lz4: { data_type: "Float32" } },
+            },
+            {
+              image_id: "collection-compressed:image:C/0/0",
+              wire_format: { Zstd: { data_type: "Uint8" } },
+            },
+            {
+              image_id: "collection-compressed:image:A/0/0:label:regions",
+              wire_format: { Lz4: { data_type: "Uint32" } },
+            },
+            {
+              image_id: "collection-compressed:image:C/0/0:label:mask",
+              wire_format: { Zstd: { data_type: "Uint8" } },
+            },
+          ],
+        },
+      },
+    };
+
+    handlers.onSnapshot(1, snapshot, [], 4, {}, datasetFetch);
+    expect(contentSource.registerImage.mock.calls).toEqual([
+      ["collection-compressed", "collection-compressed:image:A/0/0", { Zstd: { data_type: "Uint16" } }],
+      ["collection-compressed", "collection-compressed:image:B/0/0", { Lz4: { data_type: "Float32" } }],
+      ["collection-compressed", "collection-compressed:image:C/0/0", { Zstd: { data_type: "Uint8" } }],
+      ["collection-compressed", "collection-compressed:image:A/0/0:label:regions", { Lz4: { data_type: "Uint32" } }],
+      ["collection-compressed", "collection-compressed:image:C/0/0:label:mask", { Zstd: { data_type: "Uint8" } }],
+    ]);
+
+    handlers.onDisconnect?.();
+    const refreshedFetch = structuredClone(datasetFetch);
+    refreshedFetch["collection-compressed"].Proxied.images[0].wire_format = {
+      Lz4: { data_type: "Uint16" },
+    };
+    handlers.onSnapshot(2, snapshot, [], 4, {}, refreshedFetch);
+    expect(contentSource.registerImage).toHaveBeenCalledTimes(6);
+    expect(contentSource.registerImage).toHaveBeenLastCalledWith(
+      "collection-compressed",
+      "collection-compressed:image:A/0/0",
+      { Lz4: { data_type: "Uint16" } },
+    );
+    expect(MockedCpuCache.instances[0].invalidateDatasetImages).toHaveBeenCalledWith(
+      "collection-compressed",
+      [{
+        imageId: "collection-compressed:image:A/0/0",
+        entityId: "collection-compressed:tile:A/0/0",
+      }],
+    );
+
+    handlers.onSnapshot(3, snapshot, [], 4, {}, refreshedFetch);
+    expect(contentSource.registerImage).toHaveBeenCalledTimes(6);
+  });
+
+  it("fails closed before registration when snapshot manifest/fetch parity is incomplete", () => {
+    const { handlers, deps, events } = makeHarness();
+    const contentSource = MockedContentSource.instances[0];
+    const manifest = makeSparseCollectionLabelManifest("collection-incomplete-fetch");
+    const snapshot = manifestSnapshotJson(manifest);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    handlers.onSnapshot(1, snapshot, [], 4, {}, {
+      "collection-incomplete-fetch": {
+        Proxied: {
+          // Omitting the remaining intensities and both label streams must not
+          // partially install a dataset with an invented transport contract.
+          images: [{
+            image_id: "collection-incomplete-fetch:image:A/0/0",
+            wire_format: { Zstd: { data_type: "Uint16" } },
+          }],
+        },
+      },
+    });
+
+    expect(contentSource.registerImage).not.toHaveBeenCalled();
+    expect(deps.datasets.has("collection-incomplete-fetch")).toBe(false);
+    expect(events.onSessionReadyChanged).not.toHaveBeenCalledWith(true);
+    expect(warn).toHaveBeenCalledWith(
+      "[Bridge] bad snapshot:",
+      expect.objectContaining({ message: expect.stringContaining("has no fetch descriptor") }),
+    );
+    warn.mockRestore();
+  });
+
+  it("registers every sparse collection intensity and label stream exactly once across snapshot reconnect", () => {
+    const { handlers, deps } = makeHarness();
+    const contentSource = MockedContentSource.instances[0];
+    const manifest = makeSparseCollectionLabelManifest("collection-labels");
+    const snapshot = manifestSnapshotJson(manifest);
+
+    // A fresh join/workspace restore carries only the document manifest. The
+    // controller must reconstruct one Raw descriptor per chunk-bearing image,
+    // including label images kept outside `manifest.images`.
+    handlers.onSnapshot(1, snapshot, [], 4, {});
+    expect(contentSource.registerImage.mock.calls).toEqual([
+      ["collection-labels", "collection-labels:image:A/0/0", { Raw: { data_type: "Uint16" } }],
+      ["collection-labels", "collection-labels:image:B/0/0", { Raw: { data_type: "Float32" } }],
+      ["collection-labels", "collection-labels:image:C/0/0", { Raw: { data_type: "Uint8" } }],
+      ["collection-labels", "collection-labels:image:A/0/0:label:regions", { Raw: { data_type: "Uint32" } }],
+      ["collection-labels", "collection-labels:image:C/0/0:label:mask", { Raw: { data_type: "Uint8" } }],
+    ]);
+    expect(deps.datasets.has("collection-labels")).toBe(true);
+
+    // A reconnect/resync snapshot for retained membership reuses that pipeline
+    // rather than registering any intensity or label stream a second time.
+    handlers.onDisconnect?.();
+    handlers.onSnapshot(2, snapshot, [], 4, {});
+    expect(contentSource.registerImage).toHaveBeenCalledTimes(5);
+  });
+
+  it("atomically reconciles sparse intensity and label membership from a changed reconnect snapshot", () => {
+    const renderLoop = {
+      addDataset: vi.fn(),
+      updateDatasetManifest: vi.fn(),
+      invalidateDatasetImages: vi.fn(),
+    };
+    const { handlers, deps } = makeHarness(renderLoop);
+    const contentSource = MockedContentSource.instances[0];
+    const initial = makeSparseCollectionLabelManifest("collection-refresh");
+    handlers.onSnapshot(1, manifestSnapshotJson(initial), [], 4, {});
+    expect(contentSource.registerImage).toHaveBeenCalledTimes(5);
+
+    // B and A's label disappeared, D and its label appeared, and C's label
+    // changed dtype. This is intentionally sparse rather than one-label-per-
+    // member so reconciliation follows image identity, not positional pairing.
+    const refreshed = makeSparseCollectionLabelManifest("collection-refresh");
+    refreshed.images = refreshed.images.filter((image) => !image.image_id.includes(":B/"));
+    const intensityD = structuredClone(refreshed.images[0]);
+    intensityD.image_id = "collection-refresh:image:D/0/0";
+    intensityD.owner = "collection-refresh:tile:D/0/0";
+    refreshed.images.push(intensityD);
+    refreshed.labels = refreshed.labels.filter((label) => label.name !== "regions");
+    refreshed.labels[0].image.multiscale.data_type = "Uint16";
+    const labelD = structuredClone(refreshed.labels[0]);
+    labelD.name = "objects";
+    labelD.source_image_id = intensityD.image_id;
+    labelD.image.image_id = "collection-refresh:image:D/0/0:label:objects";
+    labelD.image.owner = intensityD.owner;
+    labelD.image.multiscale.data_type = "Uint32";
+    refreshed.labels.push(labelD);
+
+    handlers.onDisconnect?.();
+    handlers.onSnapshot(2, manifestSnapshotJson(refreshed), [], 4, {});
+
+    expect(contentSource.registerImage.mock.calls.slice(5)).toEqual([
+      ["collection-refresh", "collection-refresh:image:D/0/0", { Raw: { data_type: "Uint16" } }],
+      ["collection-refresh", "collection-refresh:image:C/0/0:label:mask", { Raw: { data_type: "Uint16" } }],
+      ["collection-refresh", "collection-refresh:image:D/0/0:label:objects", { Raw: { data_type: "Uint32" } }],
+    ]);
+    expect(contentSource.unregisterImage.mock.calls).toEqual([
+      ["collection-refresh", "collection-refresh:image:B/0/0"],
+      ["collection-refresh", "collection-refresh:image:A/0/0:label:regions"],
+    ]);
+    expect(MockedCpuCache.instances[0].invalidateDatasetImages).toHaveBeenCalledExactlyOnceWith(
+      "collection-refresh",
+      [
+        {
+          imageId: "collection-refresh:image:B/0/0",
+          entityId: "collection-refresh:tile:B/0/0",
+        },
+        {
+          imageId: "collection-refresh:image:A/0/0:label:regions",
+          entityId: "collection-refresh:image:A/0/0:label:regions",
+        },
+        {
+          imageId: "collection-refresh:image:C/0/0:label:mask",
+          entityId: "collection-refresh:image:C/0/0:label:mask",
+        },
+      ],
+    );
+    expect(renderLoop.invalidateDatasetImages).toHaveBeenCalledExactlyOnceWith(
+      "collection-refresh",
+      [
+        "collection-refresh:image:B/0/0",
+        "collection-refresh:image:A/0/0:label:regions",
+        "collection-refresh:image:C/0/0:label:mask",
+      ],
+    );
+    const retained = deps.datasets.get("collection-refresh");
+    expect(retained?.manifest.images.map((image) => image.image_id)).toEqual(
+      refreshed.images.map((image) => image.image_id),
+    );
+    expect(retained?.manifest.labels?.map((label) => label.image.image_id)).toEqual(
+      refreshed.labels.map((label) => label.image.image_id),
+    );
+    expect(renderLoop.updateDatasetManifest).toHaveBeenCalledExactlyOnceWith(
+      "collection-refresh",
+      retained?.manifest,
+    );
+
+    // Replaying the same authoritative snapshot is registration-idempotent.
+    handlers.onSnapshot(3, manifestSnapshotJson(refreshed), [], 4, {});
+    expect(contentSource.registerImage).toHaveBeenCalledTimes(8);
+    expect(contentSource.unregisterImage).toHaveBeenCalledTimes(2);
+  });
+
   it("a live open for a dataset the snapshot already registered reuses its pipeline but still fires the open reactions", () => {
     const { controller, handlers, bridge, scene, savedViewHooks, events } = makeHarness();
     const contentSource = MockedContentSource.instances[0];
@@ -988,6 +1307,7 @@ describe("SessionController error recovery and precedence", () => {
   it("reconnect resets the cache chunk-failure streak", () => {
     const { handlers } = makeHarness();
     handlers.onConnected?.();
+    expect(MockedContentSource.instances[0].handleTransportReady).toHaveBeenCalledTimes(1);
     expect(MockedCpuCache.instances[0].resetChunkFailureStreak).toHaveBeenCalledTimes(1);
   });
 });

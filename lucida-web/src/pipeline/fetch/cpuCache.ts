@@ -39,6 +39,7 @@ import { debugLog } from "../../debug/logging.ts";
 import {
   chunkContractsEqual,
 } from "../../chunkContract.ts";
+import { chunkFrameByteLength } from "../../chunkFrame.ts";
 import type {
   CacheEntry,
   CacheTelemetry,
@@ -210,8 +211,8 @@ export class CpuCache {
 
   readonly deliveryState = new DeliveryState();
 
-  private activeEntityIds = new Set<string>();
-  private activeEntityIdsThisRebuild = new Set<string>();
+  private activeEntityIds = new Map<string, Set<string>>();
+  private activeEntityIdsThisRebuild = new Map<string, Set<string>>();
 
   private interactionDetector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
@@ -279,6 +280,10 @@ export class CpuCache {
    * and lane while the bytes are still in flight.
    */
   private inFlightChunkMeta = new Map<string, InFlightChunkMeta>();
+  /** Monotonic per-image invalidation generation. A decode already running
+   * when a refreshed manifest changes its contract must never cache its old
+   * bytes after cancellation. */
+  private imageInvalidationGeneration = new Map<string, number>();
 
   /**
    * Worker-rejected (atlas full + too far) chunks. `submit()` skips
@@ -488,7 +493,7 @@ export class CpuCache {
       activeEntityIds,
       epochs: plan.epochs,
     });
-    for (const entityId of activeEntityIds) this.activeEntityIdsThisRebuild.add(entityId);
+    this.activeEntityIdsThisRebuild.set(datasetId, new Set(activeEntityIds));
     for (const [key, req] of requests) this.wantedByKey.set(key, req);
     this.recordTierDemand(requests.values());
 
@@ -530,7 +535,12 @@ export class CpuCache {
     for (const req of requests) {
       const key = this.inFlightKey(req);
       this.counters.recordRequest();
-      if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
+      if (this.rejectionTracker.has(
+        req.datasetId,
+        req.imageId,
+        this.requestResidencyTier(req),
+        req.chunkKey,
+      )) {
         this.removeReady(key);
         continue;
       }
@@ -593,17 +603,22 @@ export class CpuCache {
   }
 
   private commitActiveEntityUnion(): void {
-    const next = new Set<string>();
-    for (const state of this.wantedByDataset.values()) {
-      for (const entityId of state.activeEntityIds) next.add(entityId);
+    const next = new Map<string, Set<string>>();
+    for (const [datasetId, state] of this.wantedByDataset) {
+      next.set(datasetId, new Set(state.activeEntityIds));
     }
-    for (const entityId of this.activeEntityIds) {
-      if (next.has(entityId)) continue;
-      this.chunkStore.demoteEntity(entityId);
-      this.cancelChunkWorkForEntity(entityId);
+    for (const [datasetId, entityIds] of this.activeEntityIds) {
+      const nextEntityIds = next.get(datasetId);
+      for (const entityId of entityIds) {
+        if (nextEntityIds?.has(entityId)) continue;
+        this.chunkStore.demoteEntity(datasetId, entityId);
+        this.cancelChunkWorkForEntity(datasetId, entityId);
+      }
     }
     this.activeEntityIds = next;
-    this.activeEntityIdsThisRebuild = new Set(next);
+    this.activeEntityIdsThisRebuild = new Map(
+      [...next].map(([datasetId, entityIds]) => [datasetId, new Set(entityIds)]),
+    );
   }
 
   /**
@@ -614,9 +629,9 @@ export class CpuCache {
    * of holding them until the transfer timeout. A returning entity
    * re-enqueues normally on its next submit.
    */
-  private cancelChunkWorkForEntity(entityId: string): void {
+  private cancelChunkWorkForEntity(datasetId: string, entityId: string): void {
     const cancelled = this.chunkScheduler.cancelWhere(
-      (entry) => entry.request.entityId === entityId,
+      (entry) => entry.request.datasetId === datasetId && entry.request.entityId === entityId,
     );
     for (const key of cancelled) {
       this.inFlightChunkMeta.delete(key);
@@ -628,37 +643,105 @@ export class CpuCache {
    * dataset → entityIds mapping; pass the full set. Not called for
    * view/layout/selection bumps — those must not abort fetches.
    */
-  cancelDataset(datasetId: string, entityIds: string[]): void {
+  cancelDataset(datasetId: string): void {
     this.dropWantedDataset(datasetId);
-    const entityIdSet = new Set(entityIds);
 
     this.chunkScheduler.cancelDataset(
-      (entry) => entityIdSet.has(entry.request.entityId),
+      (entry) => entry.request.datasetId === datasetId,
     );
 
-    this.chunkStore.cancelDataset(entityIds);
-    this.overviewStore.cancelDataset(entityIds);
+    this.chunkStore.cancelDataset(datasetId);
+    this.overviewStore.cancelDataset(datasetId);
 
+    const prefix = this.datasetKeyPrefix(datasetId);
+    for (const key of [...this.permanentFailures.keys(), ...this.transientFailures.keys()]) {
+      if (key.startsWith(prefix)) this.clearFailure(key);
+    }
+    for (const key of this.inFlightChunkMeta.keys()) {
+      if (key.startsWith(prefix)) this.inFlightChunkMeta.delete(key);
+    }
+    this.activeEntityIds.delete(datasetId);
+    this.activeEntityIdsThisRebuild.delete(datasetId);
+    this.rejectionTracker.clearDataset(datasetId);
+    this.deliveryState.clearDataset(datasetId);
+    this.removeReadyMatching((delivery) => delivery.datasetId === datasetId);
+  }
 
-    // Failure keys are `${entityId}/${chunkKey}`; entityIds may
-    // contain slashes (collection naming, e.g. "collectionId:A/1/0"), so
-    // prefix-match on `entityId + "/"` rather than splitting. Snapshot both
-    // stores' keys before mutating them.
-    for (const entityId of entityIds) {
-      const prefix = `${entityId}/`;
+  /**
+   * Cancel and forget only images whose refreshed manifest contract changed
+   * or disappeared. Unchanged sibling images stay decoded and deliverable.
+   * The generation bump also tombstones a decode that was already executing
+   * when its scheduler entry was cancelled.
+   */
+  invalidateDatasetImages(
+    datasetId: string,
+    images: readonly { imageId: string; entityId: string }[],
+  ): void {
+    if (images.length === 0) return;
+    const imageIds = new Set(images.map((image) => image.imageId));
+    const entityIds = new Set(images.map((image) => image.entityId));
+    for (const imageId of imageIds) {
+      const generationKey = this.imageGenerationKey(datasetId, imageId);
+      this.imageInvalidationGeneration.set(
+        generationKey,
+        (this.imageInvalidationGeneration.get(generationKey) ?? 0) + 1,
+      );
+      this.deliveryState.clearChunksForImage(datasetId, imageId);
+    }
+
+    const state = this.wantedByDataset.get(datasetId);
+    if (state) {
+      const removedKeys: string[] = [];
+      for (const [key, request] of state.requests) {
+        if (!imageIds.has(request.imageId)) continue;
+        removedKeys.push(key);
+      }
+      this.removeTierDemand(removedKeys.flatMap((key) => {
+        const request = state.requests.get(key);
+        return request ? [request] : [];
+      }));
+      for (const key of removedKeys) {
+        state.requests.delete(key);
+        this.wantedByKey.delete(key);
+        this.removeReady(key);
+      }
+    }
+
+    const cancelled = this.chunkScheduler.cancelWhere((entry) =>
+      entry.request.datasetId === datasetId && imageIds.has(entry.request.imageId)
+    );
+    for (const key of cancelled) this.inFlightChunkMeta.delete(key);
+    this.chunkStore.cancelImages(datasetId, imageIds);
+    this.overviewStore.cancelImages(datasetId, imageIds);
+    this.removeReadyMatching((delivery) =>
+      delivery.datasetId === datasetId && imageIds.has(delivery.imageId)
+    );
+    for (const imageId of imageIds) {
+      const prefix = this.imageKeyPrefix(datasetId, imageId);
       for (const key of [...this.permanentFailures.keys(), ...this.transientFailures.keys()]) {
         if (key.startsWith(prefix)) this.clearFailure(key);
       }
-      for (const key of this.inFlightChunkMeta.keys()) {
-        if (key.startsWith(prefix)) this.inFlightChunkMeta.delete(key);
-      }
-      this.activeEntityIds.delete(entityId);
-      this.activeEntityIdsThisRebuild.delete(entityId);
-      this.deliveryState.clearChunksForImage(entityId);
+      this.rejectionTracker.clearImage(datasetId, imageId);
     }
-    this.removeReadyMatching((delivery) =>
-      delivery.datasetId === datasetId || entityIdSet.has(delivery.entityId),
-    );
+    for (const entityId of entityIds) {
+      this.activeEntityIds.get(datasetId)?.delete(entityId);
+      this.activeEntityIdsThisRebuild.get(datasetId)?.delete(entityId);
+    }
+    this.notifyListeners();
+    this.drainSchedulers();
+  }
+
+  /** Worker resources for this dataset were rebuilt. Keep decoded bytes warm,
+   * but clear optimistic sent facts and make still-wanted cached chunks
+   * deliverable to the fresh worker pools again. */
+  invalidateDatasetDelivery(datasetId: string): void {
+    this.deliveryState.clearDataset(datasetId);
+    for (const entry of this.chunkStore.allEntries()) {
+      if (entry.datasetId === datasetId) this.queueReadyEntry(entry);
+    }
+    for (const entry of this.overviewStore.allEntries()) {
+      if (entry.datasetId === datasetId) this.queueReadyEntry(entry);
+    }
   }
 
   /**
@@ -667,19 +750,30 @@ export class CpuCache {
    * enqueuing and don't refresh `lastSeenTick`. Cleared on every
    * cold-state rebuild via {@link clearRejected}.
    */
-  markRejected(entityId: string, chunkKey: string): void {
-    const wasNew = this.rejectionTracker.mark(entityId, chunkKey);
+  markRejected(
+    datasetId: string,
+    imageId: string,
+    tier: ResidencyTier,
+    chunkKey: string,
+  ): void {
+    const wasNew = this.rejectionTracker.mark(datasetId, imageId, tier, chunkKey);
     if (!wasNew) return;
 
     const cancelled = this.chunkScheduler.cancelWhere((entry) => (
-      entry.request.entityId === entityId &&
+      entry.request.imageId === imageId &&
+      entry.request.datasetId === datasetId &&
+      this.requestResidencyTier(entry.request) === tier &&
       entry.request.chunkKey === chunkKey
     ));
     for (const key of cancelled) {
       this.inFlightChunkMeta.delete(key);
     }
     this.removeReadyMatching(
-      (delivery) => delivery.entityId === entityId && delivery.chunkKey === chunkKey,
+      (delivery) => delivery.datasetId === datasetId &&
+        delivery.imageId === imageId &&
+        delivery.chunkKey === chunkKey &&
+        (delivery.residencyTier ??
+          (delivery.lane === "coarse" || delivery.lane === "minimap" ? "coarse" : "detail")) === tier,
     );
   }
 
@@ -688,9 +782,11 @@ export class CpuCache {
   }
 
   onPlanRebuildStart(): void {
-    for (const entityId of this.activeEntityIds) {
-      if (!this.activeEntityIdsThisRebuild.has(entityId)) {
-        this.chunkStore.demoteEntity(entityId);
+    for (const [datasetId, entityIds] of this.activeEntityIds) {
+      const nextEntityIds = this.activeEntityIdsThisRebuild.get(datasetId);
+      for (const entityId of entityIds) {
+        if (nextEntityIds?.has(entityId)) continue;
+        this.chunkStore.demoteEntity(datasetId, entityId);
         // The entity was active last rebuild but the just-completed one
         // never requested it: it has left the view entirely. Abort its
         // in-flight chunk fetches so they release their concurrency slots
@@ -698,11 +794,11 @@ export class CpuCache {
         // holding them until the transfer timeout. Its already-cached
         // chunks are only demoted (kept, evictable); if it returns, its
         // next submit re-enqueues.
-        this.cancelChunkWorkForEntity(entityId);
+        this.cancelChunkWorkForEntity(datasetId, entityId);
       }
     }
     this.activeEntityIds = this.activeEntityIdsThisRebuild;
-    this.activeEntityIdsThisRebuild = new Set();
+    this.activeEntityIdsThisRebuild = new Map();
     this.currentSubmitTick++;
     this.desiredDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
@@ -732,6 +828,7 @@ export class CpuCache {
         const key = this.deliveryKey(delivery);
         if (!this.readyTierByKey.has(key)) continue;
         if (this.deliveryState.wasChunkSent(
+          delivery.datasetId,
           delivery.imageId,
           delivery.c,
           delivery.chunkKey,
@@ -755,7 +852,7 @@ export class CpuCache {
 
   markSent(delivery: ReadyDelivery): void {
     this.deliveryState.markChunkSent(
-      delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
+      delivery.datasetId, delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
     );
     this.removeReady(this.deliveryKey(delivery));
   }
@@ -767,62 +864,87 @@ export class CpuCache {
    */
   isChunkSent(req: ChunkRequest): boolean {
     return this.deliveryState.wasChunkSent(
-      req.imageId, req.c, req.chunkKey, this.requestResidencyTier(req),
+      req.datasetId, req.imageId, req.c, req.chunkKey, this.requestResidencyTier(req),
     );
   }
 
   markChunkEvicted(
+    datasetId: string,
     imageId: string,
     c: number,
+    tier: ResidencyTier,
     evicted: string[],
     skipped: string[],
   ): void {
     for (const key of evicted) {
-      this.deliveryState.clearChunkSent(imageId, c, key);
-      const entry =
-        this.chunkStore.findByImageChunk(imageId, c, key) ??
-        this.overviewStore.findByImageChunk(imageId, c, key);
+      this.deliveryState.clearChunkSent(datasetId, imageId, c, key, tier);
+      const store = tier === "detail" ? this.chunkStore : this.overviewStore;
+      const entry = store.findByImageChunk(datasetId, imageId, c, key);
       if (entry) this.queueReadyEntry(entry);
     }
     for (const key of skipped) {
-      this.deliveryState.clearChunkSent(imageId, c, key);
-      const entry =
-        this.chunkStore.findByImageChunk(imageId, c, key) ??
-        this.overviewStore.findByImageChunk(imageId, c, key);
-      this.markRejected(entry?.entityId ?? imageId, key);
+      this.deliveryState.clearChunkSent(datasetId, imageId, c, key, tier);
+      this.markRejected(datasetId, imageId, tier, key);
     }
   }
 
   markChunkMissing(
+    datasetId: string,
     imageId: string,
     c: number,
     chunkKey: string,
-    tier?: ResidencyTier,
+    tier: ResidencyTier,
   ): void {
-    this.deliveryState.clearChunkSent(imageId, c, chunkKey, tier);
-    const entry =
-      this.chunkStore.findByImageChunk(imageId, c, chunkKey) ??
-      this.overviewStore.findByImageChunk(imageId, c, chunkKey);
+    this.deliveryState.clearChunkSent(datasetId, imageId, c, chunkKey, tier);
+    const store = tier === "detail" ? this.chunkStore : this.overviewStore;
+    const entry = store.findByImageChunk(datasetId, imageId, c, chunkKey);
     if (entry) this.queueReadyEntry(entry);
   }
 
   snapshot(): CacheStateSnapshot {
-    const cached = new Map<string, Set<string>>();
-    for (const [entityId, chunkKeys] of this.chunkStore.entityChunkKeys()) {
-      cached.set(entityId, new Set(chunkKeys));
+    type TierSets = Map<ResidencyTier, Set<string>>;
+    type ImageTierSets = Map<string, TierSets>;
+    const cached = new Map<string, ImageTierSets>();
+    const add = (
+      target: Map<string, ImageTierSets>,
+      datasetId: string,
+      imageId: string,
+      tier: ResidencyTier,
+      chunkKey: string,
+    ): void => {
+      let byImage = target.get(datasetId);
+      if (!byImage) {
+        byImage = new Map();
+        target.set(datasetId, byImage);
+      }
+      let byTier = byImage.get(imageId);
+      if (!byTier) {
+        byTier = new Map();
+        byImage.set(imageId, byTier);
+      }
+      let keys = byTier.get(tier);
+      if (!keys) {
+        keys = new Set();
+        byTier.set(tier, keys);
+      }
+      keys.add(chunkKey);
+    };
+    for (const entry of this.chunkStore.allEntries()) {
+      add(cached, entry.datasetId, entry.imageId, "detail", entry.chunkKey);
     }
-    for (const [entityId, chunkKeys] of this.overviewStore.entityChunkKeys()) {
-      const existing = cached.get(entityId) ?? new Set();
-      for (const key of chunkKeys) existing.add(key);
-      cached.set(entityId, existing);
+    for (const entry of this.overviewStore.allEntries()) {
+      add(cached, entry.datasetId, entry.imageId, "coarse", entry.chunkKey);
     }
 
-    const inFlight = new Map<string, Set<string>>();
+    const inFlight = new Map<string, ImageTierSets>();
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
-      const entityId = entry.request.entityId;
-      const set = inFlight.get(entityId) ?? new Set();
-      set.add(entry.request.chunkKey);
-      inFlight.set(entityId, set);
+      add(
+        inFlight,
+        entry.request.datasetId,
+        entry.request.imageId,
+        this.requestResidencyTier(entry.request),
+        entry.request.chunkKey,
+      );
     }
 
     return { cached, inFlight };
@@ -892,18 +1014,34 @@ export class CpuCache {
   }
 
   /** Searches the detail then coarse chunk stores. */
-  getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
-    const entry =
-      this.chunkStore.get(entityId, chunkKey) ??
-      this.overviewStore.get(entityId, chunkKey);
+  getCachedChunk(
+    datasetId: string,
+    imageId: string,
+    chunkKey: string,
+    tier?: ResidencyTier,
+  ): ReadyChunkDelivery | null {
+    const entry = tier === "detail"
+      ? this.chunkStore.get(datasetId, imageId, chunkKey)
+      : tier === "coarse"
+        ? this.overviewStore.get(datasetId, imageId, chunkKey)
+        : this.chunkStore.get(datasetId, imageId, chunkKey) ??
+          this.overviewStore.get(datasetId, imageId, chunkKey);
     return entry ? this.chunkEntryToDelivery(entry) : null;
   }
 
   /** Searches detail then overview; null when neither has the chunk. */
-  getCachedChunkTier(entityId: string, chunkKey: string): EvictionTier | null {
-    const entry =
-      this.chunkStore.get(entityId, chunkKey) ??
-      this.overviewStore.get(entityId, chunkKey);
+  getCachedChunkTier(
+    datasetId: string,
+    imageId: string,
+    chunkKey: string,
+    residencyTier?: ResidencyTier,
+  ): EvictionTier | null {
+    const entry = residencyTier === "detail"
+      ? this.chunkStore.get(datasetId, imageId, chunkKey)
+      : residencyTier === "coarse"
+        ? this.overviewStore.get(datasetId, imageId, chunkKey)
+        : this.chunkStore.get(datasetId, imageId, chunkKey) ??
+          this.overviewStore.get(datasetId, imageId, chunkKey);
     return entry?.tier ?? null;
   }
 
@@ -922,7 +1060,9 @@ export class CpuCache {
   }
 
   getCacheDump(): Array<{
+    datasetId: string;
     entityId: string;
+    imageId: string;
     cache: "main" | "overview";
     level: number;
     tier: EvictionTier;
@@ -938,8 +1078,10 @@ export class CpuCache {
 
   /** Per-entry age (ms since enqueue) for the starvation panel. */
   getPendingDump(): Array<{
+    datasetId: string;
     chunkKey: string;
     entityId: string;
+    imageId: string;
     lane: Lane;
     priority: number;
     ageMs: number;
@@ -948,8 +1090,10 @@ export class CpuCache {
     return this.chunkScheduler.pendingSnapshot().map(r => {
       const enq = this.chunkScheduler.enqueueTimeFor(this.inFlightKey(r));
       return {
+        datasetId: r.datasetId,
         chunkKey: r.chunkKey,
         entityId: r.entityId,
+        imageId: r.imageId,
         lane: r.lane,
         priority: r.priority,
         ageMs: enq !== undefined ? now - enq : 0,
@@ -988,6 +1132,7 @@ export class CpuCache {
     this.rejectionTracker.clear();
     this.deliveryState.reset();
     this.inFlightChunkMeta.clear();
+    this.imageInvalidationGeneration.clear();
     this.lruCounter = 0;
     this.currentSubmitTick = 0;
     this.chunkStore.setBudgetBytes(this.config.mainBudgetBytes);
@@ -1008,11 +1153,17 @@ export class CpuCache {
     retryCount = 0,
     startedEpochs: SceneEpochs = { ...this.currentEpochs },
     fedStreak = false,
+    startedImageGeneration = this.imageGeneration(req.datasetId, req.imageId),
   ): Promise<void> {
     let result: FetchResult;
     try {
       result = await this.source.fetch(
-        { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
+        {
+          datasetId: req.datasetId,
+          imageId: req.imageId,
+          chunkKey: req.chunkKey,
+          expectedResponseBytes: this.estimateResponseBytes(req),
+        },
         controller.signal,
       );
     } catch (err: unknown) {
@@ -1052,7 +1203,15 @@ export class CpuCache {
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
-        return this.fetchAndDecode(req, controller, key, retryCount + 1, startedEpochs, fed);
+        return this.fetchAndDecode(
+          req,
+          controller,
+          key,
+          retryCount + 1,
+          startedEpochs,
+          fed,
+          startedImageGeneration,
+        );
       }
 
       const isPermanent = fe.kind === "permanent";
@@ -1104,6 +1263,12 @@ export class CpuCache {
         this.counters.recordFetchFailure(false, streakMessage);
         this.recordFailureForBurstDetection(false, streakMessage);
       }
+      return;
+    }
+
+    if (this.imageGeneration(req.datasetId, req.imageId) !== startedImageGeneration) {
+      this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller);
+      this.drainSchedulers();
       return;
     }
 
@@ -1182,8 +1347,20 @@ export class CpuCache {
   }
 
   private drainSchedulers(): void {
-    const estimateBytes = () => this.counters.averageDecodedBytes();
+    // The server replies with the exact decompressed source slice described by
+    // the immutable chunk contract. Charge the complete binary frame before
+    // dispatch; a cold cache must not treat the first burst as zero bytes.
+    const estimateBytes = (req: ChunkRequest) => this.estimateResponseBytes(req);
     this.chunkScheduler.drain(estimateBytes);
+  }
+
+  private estimateResponseBytes(req: ChunkRequest): number {
+    return chunkFrameByteLength(
+      req.datasetId,
+      req.imageId,
+      req.chunkKey,
+      req.contract.sourceExpectedBytes,
+    );
   }
 
   private applyElasticTierBudgets(): void {
@@ -1473,7 +1650,9 @@ export class CpuCache {
   private deliveryKey(delivery: ReadyDelivery): string {
     const tier = delivery.residencyTier ??
       (delivery.lane === "coarse" || delivery.lane === "minimap" ? "coarse" : "detail");
-    return `${delivery.datasetId}/${delivery.entityId}/${tier}/${delivery.chunkKey}`;
+    return this.imageKeyPrefix(delivery.datasetId, delivery.imageId) +
+      this.identityPart(tier) +
+      this.identityPart(delivery.chunkKey);
   }
 
   private deliveriesEquivalent(a: ReadyChunkDelivery, b: ReadyChunkDelivery): boolean {
@@ -1496,12 +1675,18 @@ export class CpuCache {
       !this.wantedByKey.has(key) ||
       (entry.lane !== "detail" && entry.lane !== "coarse") ||
       this.deliveryState.wasChunkSent(
+        entry.datasetId,
         entry.imageId,
         entry.c,
         entry.chunkKey,
         entry.residencyTier,
       ) ||
-      this.rejectionTracker.has(entry.entityId, entry.chunkKey)
+      this.rejectionTracker.has(
+        entry.datasetId,
+        entry.imageId,
+        entry.residencyTier ?? (entry.lane === "coarse" ? "coarse" : "detail"),
+        entry.chunkKey,
+      )
     ) {
       this.removeReady(key);
       return;
@@ -1586,7 +1771,7 @@ export class CpuCache {
     const usesOverviewCache =
       req.lane === "minimap" || req.lane === "coarse";
     const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
-    return store.get(req.entityId, req.chunkKey);
+    return store.get(req.datasetId, req.imageId, req.chunkKey);
   }
 
   /**
@@ -1739,7 +1924,29 @@ export class CpuCache {
   }
 
   private inFlightKey(req: ChunkRequest): string {
-    return `${req.datasetId}/${req.entityId}/${this.requestResidencyTier(req)}/${req.chunkKey}`;
+    return this.imageKeyPrefix(req.datasetId, req.imageId) +
+      this.identityPart(this.requestResidencyTier(req)) +
+      this.identityPart(req.chunkKey);
+  }
+
+  private identityPart(value: string): string {
+    return `${value.length}:${value}`;
+  }
+
+  private datasetKeyPrefix(datasetId: string): string {
+    return this.identityPart(datasetId);
+  }
+
+  private imageKeyPrefix(datasetId: string, imageId: string): string {
+    return this.datasetKeyPrefix(datasetId) + this.identityPart(imageId);
+  }
+
+  private imageGenerationKey(datasetId: string, imageId: string): string {
+    return `${datasetId.length}:${datasetId}${imageId.length}:${imageId}`;
+  }
+
+  private imageGeneration(datasetId: string, imageId: string): number {
+    return this.imageInvalidationGeneration.get(this.imageGenerationKey(datasetId, imageId)) ?? 0;
   }
 }
 

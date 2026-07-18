@@ -98,6 +98,7 @@ describe("pushLabelVolumeLayers", () => {
     expect(layer.entityIndex).toBe(0);
     expect(layer.scissorRect).toBeDefined();
     expect(layers.every((l) => l.isLabel)).toBe(true);
+    expect(layers.every((l) => l.ownerDatasetId === "ds-0")).toBe(true);
     // Both labels share one source, so the shared placement accessor crosses
     // the scene boundary once rather than once per overlay.
     expect(scene.member_model_matrix).toHaveBeenCalledTimes(1);

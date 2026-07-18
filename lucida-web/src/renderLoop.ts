@@ -10,7 +10,7 @@ import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset,
 import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
-import type { CpuCache } from "./pipeline/fetch/index.ts";
+import type { CpuCache, ResidencyTier } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
@@ -135,8 +135,16 @@ export class RenderLoop {
     // When the worker evicts or skips chunks, update the uploader's
     // delivery tracking so they can be re-sent. Evictions trigger a new
     // tick.
-    this.client.onChunksEvicted = (memberId: string, evicted: string[], skipped: string[], reason) => {
-      this.uploader.handleChunksEvicted(memberId, evicted, skipped, this.session.cpuCache, reason);
+    this.client.onChunksEvicted = (datasetId, memberId, tier, evicted, skipped, reason) => {
+      this.uploader.handleChunksEvicted(
+        datasetId,
+        memberId,
+        tier,
+        evicted,
+        skipped,
+        this.session.cpuCache,
+        reason,
+      );
       if (evicted.length > 0) {
         this.setDirty("residency", "chunks_evicted");
       }
@@ -232,8 +240,9 @@ export class RenderLoop {
     imageId: string,
     c: number,
     chunkKey: string,
+    tier: ResidencyTier,
   ): "resident" | "missing" | "unknown" {
-    return this.uploader.workerChunkResidency(datasetId, imageId, c, chunkKey);
+    return this.uploader.workerChunkResidency(datasetId, imageId, c, chunkKey, tier);
   }
 
   addDataset(id: string, manifest: DatasetManifest): void {
@@ -248,18 +257,28 @@ export class RenderLoop {
     this.setDirty("interactive", "dataset_manifest_updated");
   }
 
+  /**
+   * A refreshed manifest changed or removed one or more image contracts.
+   * Worker descriptors/atlases are dataset-coupled, so rebuild that GPU-side
+   * dataset atomically while retaining unchanged decoded CPU chunks for
+   * immediate redelivery.
+   */
+  invalidateDatasetImages(id: string, imageIds: readonly string[]): void {
+    if (imageIds.length === 0 || !this.datasets.has(id)) return;
+    this.session.cpuCache.invalidateDatasetDelivery(id);
+    this.tickCoordinator.clearMemberResources(id);
+    this.uploader.clearDataset(id);
+    this.client.removeLayerResources(id);
+    this.publishCaptureReady(false, "dataset_manifest_invalidated");
+    this.setDirty("interactive", "dataset_manifest_invalidated");
+  }
+
   removeDataset(id: string): void {
     const unsub = this.unsubs.get(id);
     if (unsub) {
       unsub();
       this.unsubs.delete(id);
     }
-    // Capture image IDs from the manifest BEFORE deleting the dataset
-    // entry so we can pair the cache cleanup with a wire-format
-    // unregistration on the content source (closes the
-    // imageWireFormats leak; see contentSource.unregisterDataset).
-    const manifest = this.datasets.get(id)?.manifest;
-    const imageIds = manifest ? manifest.images.map(img => img.image_id) : [];
     this.datasets.delete(id);
     this.viewportLoading.removeDataset(id);
 
@@ -268,8 +287,8 @@ export class RenderLoop {
     // member IDs may differ (e.g. "collectionId:A/1/0").
     const memberIds = this.collectMemberIds(id);
 
-    this.session.cpuCache.cancelDataset(id, memberIds);
-    this.session.contentSource.unregisterDataset(imageIds);
+    this.session.cpuCache.cancelDataset(id);
+    this.session.contentSource.unregisterDataset(id);
 
     clearVolumeForDataset(this.volumeState, id);
     clearSliceForDataset(this.sliceState, id);

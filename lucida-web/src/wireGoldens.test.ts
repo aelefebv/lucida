@@ -316,6 +316,18 @@ const expectedFetchSingle: FetchSource = {
   },
 };
 
+const expectedSnapshotFetchSingle: FetchSource = {
+  Proxied: {
+    images: [
+      { image_id: "multiscale-0", wire_format: { Zstd: { data_type: "Uint16" } } },
+      {
+        image_id: "multiscale-0:label:region-a",
+        wire_format: { Lz4: { data_type: "Uint32" } },
+      },
+    ],
+  },
+};
+
 /** Wire shape of `lucida_protocol::DatasetOpened`. */
 interface WireDatasetOpened {
   manifest: DatasetManifest;
@@ -837,7 +849,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     vi.unstubAllGlobals();
   });
 
-  it("snapshot: document, peers, your_id, and generated availability all arrive", () => {
+  it("snapshot: document, peers, generated availability, and compressed fetch contracts all arrive", () => {
     const raw = fixtureRaw("session/server_snapshot.json");
     COVERED_FIXTURES.add("session/server_snapshot.json");
     expect(JSON.parse(raw)).toStrictEqual({
@@ -847,6 +859,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       peers: [expectedPeerPresence],
       your_id: 7,
       generated_availability: { "wds-0f3a": expectedGeneratedSnapshot },
+      dataset_fetch: { "wds-0f3a": expectedSnapshotFetchSingle },
     });
 
     const onSnapshot = vi.fn();
@@ -854,7 +867,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     deliver(ws, raw);
 
     expect(onSnapshot).toHaveBeenCalledTimes(1);
-    const [seq, documentJson, peers, yourId, generatedAvailability] =
+    const [seq, documentJson, peers, yourId, generatedAvailability, datasetFetch] =
       onSnapshot.mock.calls[0];
     expect(seq).toBe(42);
     const document: WireDocumentState = JSON.parse(documentJson);
@@ -863,6 +876,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(yourId).toBe(7);
     expect(generatedAvailability).toStrictEqual({
       "wds-0f3a": expectedGeneratedSnapshot,
+    });
+    expect(datasetFetch).toStrictEqual({
+      "wds-0f3a": expectedSnapshotFetchSingle,
     });
 
     // The pin's embedded author view drives the restore path's mode choice
@@ -1278,10 +1294,15 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     // Consumption path: the same frame's fields drive the content source,
     // which must fail the pending fetch permanently (never a transient
     // timeout) so the delivery-failure streak can count a dead source.
-    const source = new ProxiedContentSource(() => {});
-    source.registerImage("multiscale-0", { Raw: { data_type: "Uint16" } });
+    const source = new ProxiedContentSource(() => true, () => {});
+    source.registerImage("wds-0f3a", "multiscale-0", { Raw: { data_type: "Uint16" } });
     const pending = source.fetch(
-      { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "0/1/0/1/0/0" },
+      {
+        datasetId: "wds-0f3a",
+        imageId: "multiscale-0",
+        chunkKey: "0/1/0/1/0/0",
+        expectedResponseBytes: 64,
+      },
       new AbortController().signal,
     );
     const [datasetId, imageId, key, status, failure, message] =
@@ -1584,12 +1605,20 @@ describe("wire goldens: client messages through Bridge senders", () => {
 describe("wire goldens: content-source request envelopes", () => {
   it("fetch() sends the chunk_request envelope", async () => {
     const sent: string[] = [];
-    const source = new ProxiedContentSource((json) => sent.push(json));
-    source.registerImage("multiscale-0", { Zstd: { data_type: "Uint16" } });
+    const source = new ProxiedContentSource(
+      (json) => { sent.push(json); return true; },
+      () => {},
+    );
+    source.registerImage("wds-0f3a", "multiscale-0", { Zstd: { data_type: "Uint16" } });
 
     const controller = new AbortController();
     const pending = source.fetch(
-      { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "1/2/1/12/3/4" },
+      {
+        datasetId: "wds-0f3a",
+        imageId: "multiscale-0",
+        chunkKey: "1/2/1/12/3/4",
+        expectedResponseBytes: 64,
+      },
       controller.signal,
     );
 

@@ -51,6 +51,7 @@ import {
   type RenderRadiusPreviewTier,
 } from "./logging.ts";
 import { radiusSpecsForOverlay } from "./radiusPreview.ts";
+import { plannedRankKey } from "./plannedRank.ts";
 
 interface Props {
   wasmSceneRef: RefObject<WasmScene | null>;
@@ -86,6 +87,13 @@ interface GroupBadge {
 
 type OverlayTier = "detail" | "coarse";
 type DisplayTier = OverlayTier | "missing";
+
+function requestOverlayTier(request: ChunkRequest): OverlayTier {
+  if (request.tier) return request.tier;
+  return request.lane === "coarse" || request.lane === "minimap"
+    ? "coarse"
+    : "detail";
+}
 
 export interface TierCoverageCounts {
   /** Chunks requested by the current plan for this tier. */
@@ -241,14 +249,14 @@ export function buildGroupTierCoverage(
 
     const counts = coverage[tier];
     counts.wanted++;
-    const ready = cacheSnap?.cached.get(req.entityId)?.has(req.chunkKey) ?? false;
+    const ready = cacheSnap?.cached.get(req.datasetId)?.get(req.imageId)?.get(tier)?.has(req.chunkKey) ?? false;
     if (ready) {
       counts.ready++;
     }
-    if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
+    if (cacheSnap?.inFlight.get(req.datasetId)?.get(req.imageId)?.get(tier)?.has(req.chunkKey)) {
       counts.inFlight++;
     }
-    if (ready || cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey, tier)) {
+    if (ready || cpuCache?.deliveryState.wasChunkSent(req.datasetId, req.imageId, req.c, req.chunkKey, tier)) {
       counts.shown++;
     }
   }
@@ -847,12 +855,16 @@ export function DebugOverlays({
         const snap = cpuCache.snapshot();
         // Rank lookup for "planned" color gradient. Built once per
         // tick: pending queue is in priority order, so array index ==
-        // rank. Key matches CpuCache's inFlightKey: `${entityId}/${chunkKey}`.
+        // rank. Dataset identity is explicit because entity ids are local to a
+        // dataset and may overlap across simultaneously open sources.
         const pending = cpuCache.getPendingSnapshot();
         const rankByKey = new Map<string, number>();
         for (let i = 0; i < pending.length; i++) {
           const r = pending[i];
-          rankByKey.set(`${r.entityId}/${r.chunkKey}`, i);
+          rankByKey.set(
+            plannedRankKey(r.datasetId, r.imageId, requestOverlayTier(r), r.chunkKey),
+            i,
+          );
         }
         outer: for (const [dsId, plan] of plans) {
           if (out.length >= MAX_CHUNK_RECTS) break;
@@ -883,8 +895,8 @@ export function DebugOverlays({
             const fullX = lvl0.shape[Axis.X];
             const fullY = lvl0.shape[Axis.Y];
 
-            const cachedSet = snap.cached.get(entry.entityId);
-            const inFlightSet = snap.inFlight.get(entry.entityId);
+            const cachedByTier = snap.cached.get(dsId)?.get(entry.imageId);
+            const inFlightByTier = snap.inFlight.get(dsId)?.get(entry.imageId);
 
             const residency = (
               key: string,
@@ -904,23 +916,36 @@ export function DebugOverlays({
               })) {
                 return false;
               }
-              const worker = renderLoopRef.current?.workerChunkResidency(dsId, entry.imageId, c, key) ?? "unknown";
+              const worker = renderLoopRef.current?.workerChunkResidency(
+                dsId,
+                entry.imageId,
+                c,
+                key,
+                tier,
+              ) ?? "unknown";
               if (worker === "resident") return true;
               if (worker === "missing") return false;
-              return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key, tier);
+              return cpuCache.deliveryState.wasChunkSent(dsId, entry.imageId, c, key, tier);
             };
 
-            const statusFor = (key: string): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
-              if (cachedSet?.has(key)) {
+            const statusFor = (
+              key: string,
+              sourceTier: OverlayTier,
+            ): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
+              if (cachedByTier?.get(sourceTier)?.has(key)) {
                 return {
                   status: "cached",
-                  tier: enabled.cachedTier ? cpuCache.getCachedChunkTier(entry.entityId, key) : undefined,
+                  tier: enabled.cachedTier
+                    ? cpuCache.getCachedChunkTier(dsId, entry.imageId, key, sourceTier)
+                    : undefined,
                 };
               }
-              if (inFlightSet?.has(key)) return { status: "in-flight" };
+              if (inFlightByTier?.get(sourceTier)?.has(key)) return { status: "in-flight" };
               return {
                 status: "planned",
-                priorityRank: enabled.plannedRank ? rankByKey.get(`${entry.entityId}/${key}`) : undefined,
+                priorityRank: enabled.plannedRank
+                  ? rankByKey.get(plannedRankKey(dsId, entry.imageId, sourceTier, key))
+                  : undefined,
               };
             };
 
@@ -1019,13 +1044,13 @@ export function DebugOverlays({
                     }
 
                     out.push({
-                      key: `${dsId}/${entry.entityId}/${sourceTier}/${key}`,
+                      key: `${dsId}/${entry.imageId}/${sourceTier}/${key}`,
                       x: rect.x,
                       y: rect.y,
                       w: rect.w,
                       h: rect.h,
                       sourceTier: displayTier,
-                      ...statusFor(statusKey),
+                      ...statusFor(statusKey, displayTier === "coarse" ? "coarse" : sourceTier),
                     });
                   }
                 }

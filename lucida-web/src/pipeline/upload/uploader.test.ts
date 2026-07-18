@@ -329,7 +329,7 @@ describe("Uploader unified delivery", () => {
     const ret = new Uploader().deliverToWorker(ctx, 512, 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
-    expect(sliceChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
+    expect(sliceChunkData.mock.calls[0][2][0].key).toBe(large.chunkKey);
     expect(scopedDebugStats.upload!.tick!.budgetExhausted).toBe(true);
     expect(scopedDebugStats.upload!.tick!.bytesUploaded).toBe(1024);
     expect(ret).toBe(true);
@@ -383,7 +383,7 @@ describe("Uploader unified delivery", () => {
     new Uploader().deliverToWorker(ctx, 2048, 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(2);
-    expect(sliceChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
+    expect(sliceChunkData.mock.calls.map((call) => call[2][0].key)).toEqual([
       largeDetail.chunkKey,
       coarse.chunkKey,
     ]);
@@ -468,15 +468,19 @@ describe("Uploader worker feedback", () => {
   it("forwards chunk eviction feedback to CpuCache by image/channel", () => {
     const cpuCache = makeCpuCache();
     new Uploader().handleChunksEvicted(
+      "ds-0",
       "img-0:ch1",
+      "detail",
       ["0/0/1/0/0/0"],
       ["0/0/1/0/0/1"],
       cpuCache,
     );
 
     expect(cpuCache.markChunkEvicted).toHaveBeenCalledWith(
+      "ds-0",
       "img-0",
       1,
+      "detail",
       ["0/0/1/0/0/0"],
       ["0/0/1/0/0/1"],
     );
@@ -490,15 +494,18 @@ describe("Uploader worker feedback", () => {
       entityId: "tile-0",
       memberId: "img-0:ch2",
       c: 2,
+      tier: "detail",
       chunkKey: "0/0/2/0/0/0",
     };
 
     new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
 
     expect(cpuCache.markChunkMissing).toHaveBeenCalledWith(
+      "ds1",
       "img-0",
       2,
       "0/0/2/0/0/0",
+      "detail",
     );
   });
 });

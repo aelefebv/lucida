@@ -88,21 +88,21 @@ describe("ChunkStore basics", () => {
     const { store } = makeMainStore();
     const entry = makeEntry({ sizeBytes: 100, chunkKey: "k-1" });
     store.insert(entry);
-    expect(store.get("e-1", "k-1")).toBe(entry);
+    expect(store.get("ds-1", "img-1", "k-1")).toBe(entry);
     expect(store.bytes).toBe(100);
   });
 
   it("get returns undefined for missing entries", () => {
     const { store } = makeMainStore();
-    expect(store.get("e-x", "k-x")).toBeUndefined();
+    expect(store.get("ds-1", "e-x", "k-x")).toBeUndefined();
   });
 
   it("remove drops the entry and decrements bytes", () => {
     const { store, evictionLog } = makeMainStore();
     const entry = makeEntry({ sizeBytes: 100, chunkKey: "k-1", tier: "prefetch" });
     store.insert(entry);
-    expect(store.remove("e-1", "k-1")).toBe(true);
-    expect(store.get("e-1", "k-1")).toBeUndefined();
+    expect(store.remove("ds-1", "img-1", "k-1")).toBe(true);
+    expect(store.get("ds-1", "img-1", "k-1")).toBeUndefined();
     expect(store.bytes).toBe(0);
     // remove() emits an eviction record using the configured label fn.
     expect(evictionLog).toEqual(["prefetch"]);
@@ -110,7 +110,7 @@ describe("ChunkStore basics", () => {
 
   it("remove returns false for missing entries", () => {
     const { store } = makeMainStore();
-    expect(store.remove("e-x", "k-x")).toBe(false);
+    expect(store.remove("ds-1", "e-x", "k-x")).toBe(false);
   });
 
   it("removeEntry drops the entry by reference and decrements bytes", () => {
@@ -124,11 +124,11 @@ describe("ChunkStore basics", () => {
 
   it("hasEntity reflects insert / remove", () => {
     const { store } = makeMainStore();
-    expect(store.hasEntity("e-1")).toBe(false);
+    expect(store.hasEntity("ds-1", "e-1")).toBe(false);
     store.insert(makeEntry({ sizeBytes: 10, entityId: "e-1", chunkKey: "k-1" }));
-    expect(store.hasEntity("e-1")).toBe(true);
-    store.remove("e-1", "k-1");
-    expect(store.hasEntity("e-1")).toBe(false);
+    expect(store.hasEntity("ds-1", "e-1")).toBe(true);
+    store.remove("ds-1", "img-1", "k-1");
+    expect(store.hasEntity("ds-1", "e-1")).toBe(false);
   });
 
   it("multiple entries per entity are kept and iterable", () => {
@@ -138,10 +138,34 @@ describe("ChunkStore basics", () => {
     store.insert(a);
     store.insert(b);
     expect(store.bytes).toBe(30);
-    const keys = Array.from(store.chunkKeysForEntity("e-1"));
+    const keys = Array.from(store.chunkKeysForEntity("ds-1", "e-1"));
     expect(new Set(keys)).toEqual(new Set(["a", "b"]));
-    const entries = Array.from(store.entriesForEntity("e-1"));
+    const entries = Array.from(store.entriesForEntity("ds-1", "e-1"));
     expect(entries).toHaveLength(2);
+  });
+
+  it("stores identical chunk coordinates independently for two images owned by one entity", () => {
+    const { store } = makeMainStore();
+    const imageA = makeEntry({
+      sizeBytes: 10,
+      entityId: "shared-owner",
+      imageId: "image-a",
+      chunkKey: "0/0/0/0/0/0",
+    });
+    const imageB = makeEntry({
+      sizeBytes: 20,
+      entityId: "shared-owner",
+      imageId: "image-b",
+      chunkKey: "0/0/0/0/0/0",
+    });
+
+    store.insert(imageA);
+    store.insert(imageB);
+
+    expect(store.bytes).toBe(30);
+    expect(store.get("ds-1", "image-a", imageA.chunkKey)).toBe(imageA);
+    expect(store.get("ds-1", "image-b", imageB.chunkKey)).toBe(imageB);
+    expect(Array.from(store.entriesForEntity("ds-1", "shared-owner"))).toHaveLength(2);
   });
 
   it("allEntries iterates every cached entry across entities", () => {
@@ -158,38 +182,31 @@ describe("ChunkStore basics", () => {
 // ---------------------------------------------------------------------------
 
 describe("ChunkStore.cancelDataset", () => {
-  it("removes every entry for the given entityIds and zeros their bytes", () => {
+  it("removes every entry for one dataset and preserves identical sibling ids", () => {
     const { store, evictionLog } = makeMainStore();
     store.insert(makeEntry({ sizeBytes: 100, entityId: "e-1", chunkKey: "a" }));
     store.insert(makeEntry({ sizeBytes: 100, entityId: "e-1", chunkKey: "b" }));
-    store.insert(makeEntry({ sizeBytes: 50, entityId: "e-2", chunkKey: "c" }));
+    store.insert(makeEntry({
+      datasetId: "ds-2", sizeBytes: 50, entityId: "e-1", chunkKey: "a",
+    }));
     expect(store.bytes).toBe(250);
 
-    store.cancelDataset(["e-1"]);
+    store.cancelDataset("ds-1");
 
     expect(store.bytes).toBe(50);
-    expect(store.hasEntity("e-1")).toBe(false);
-    expect(store.hasEntity("e-2")).toBe(true);
+    expect(store.hasEntity("ds-1", "e-1")).toBe(false);
+    expect(store.hasEntity("ds-2", "e-1")).toBe(true);
+    expect(store.get("ds-2", "img-1", "a")?.sizeBytes).toBe(50);
     // Dataset removal does not emit eviction records.
     expect(evictionLog).toEqual([]);
   });
 
-  it("is a no-op for unknown entityIds", () => {
+  it("is a no-op for an unknown dataset", () => {
     const { store } = makeMainStore();
     store.insert(makeEntry({ sizeBytes: 10, entityId: "e-1", chunkKey: "a" }));
-    store.cancelDataset(["unknown"]);
+    store.cancelDataset("unknown");
     expect(store.bytes).toBe(10);
-    expect(store.hasEntity("e-1")).toBe(true);
-  });
-
-  it("handles multiple entityIds in one call", () => {
-    const { store } = makeMainStore();
-    store.insert(makeEntry({ sizeBytes: 10, entityId: "e-1", chunkKey: "a" }));
-    store.insert(makeEntry({ sizeBytes: 20, entityId: "e-2", chunkKey: "b" }));
-    store.insert(makeEntry({ sizeBytes: 30, entityId: "e-3", chunkKey: "c" }));
-    store.cancelDataset(["e-1", "e-3"]);
-    expect(store.bytes).toBe(20);
-    expect(store.hasEntity("e-2")).toBe(true);
+    expect(store.hasEntity("ds-1", "e-1")).toBe(true);
   });
 });
 
@@ -207,8 +224,8 @@ describe("ChunkStore.reset", () => {
     store.reset();
 
     expect(store.bytes).toBe(0);
-    expect(store.hasEntity("e-1")).toBe(false);
-    expect(store.hasEntity("e-2")).toBe(false);
+    expect(store.hasEntity("ds-1", "e-1")).toBe(false);
+    expect(store.hasEntity("ds-1", "e-2")).toBe(false);
     expect(Array.from(store.allEntries())).toEqual([]);
   });
 });
@@ -229,9 +246,9 @@ describe("ChunkStore eviction via policy", () => {
     store.insert(makeEntry({ sizeBytes: 50, chunkKey: "c", insertedAt: 2 }));
 
     expect(store.bytes).toBeLessThanOrEqual(200);
-    expect(store.get("e-1", "a")).toBeUndefined();
-    expect(store.get("e-1", "b")).toBeDefined();
-    expect(store.get("e-1", "c")).toBeDefined();
+    expect(store.get("ds-1", "img-1", "a")).toBeUndefined();
+    expect(store.get("ds-1", "img-1", "b")).toBeDefined();
+    expect(store.get("ds-1", "img-1", "c")).toBeDefined();
     // Eviction label was the configured one.
     expect(evictionLog).toEqual(["overview"]);
   });
@@ -255,7 +272,7 @@ describe("ChunkStore eviction via policy", () => {
     store.insert(makeEntry({
       sizeBytes: 50, chunkKey: "active", tier: "active-detail", insertedAt: 1,
     }));
-    expect(store.get("e-1", "prefetch")).toBeUndefined();
+    expect(store.get("ds-1", "img-1", "prefetch")).toBeUndefined();
     expect(evictionLog).toEqual(["prefetch"]);
   });
 
@@ -356,7 +373,9 @@ describe("ChunkStore residency reporting", () => {
     const dump = store.dump();
     expect(dump).toHaveLength(1);
     expect(dump[0]).toEqual({
+      datasetId: "ds-1",
       entityId: "e-1",
+      imageId: "img-1",
       level: 2,
       tier: "active-detail",
       bytes: 64,
@@ -386,18 +405,18 @@ describe("ChunkStore.demoteEntity", () => {
     store.insert(b);
     store.insert(c);
 
-    store.demoteEntity("e-1");
+    store.demoteEntity("ds-1", "e-1");
 
-    expect(store.get("e-1", "a")?.tier).toBe("demoted-detail");
-    expect(store.get("e-1", "b")?.tier).toBe("demoted-detail");
+    expect(store.get("ds-1", "img-1", "a")?.tier).toBe("demoted-detail");
+    expect(store.get("ds-1", "img-1", "b")?.tier).toBe("demoted-detail");
     // Prefetch entries don't change tier on demotion.
-    expect(store.get("e-1", "c")?.tier).toBe("prefetch");
+    expect(store.get("ds-1", "img-1", "c")?.tier).toBe("prefetch");
   });
 
   it("is a no-op for unknown entities", () => {
     const { store } = makeMainStore();
     // Should not throw.
-    expect(() => store.demoteEntity("unknown")).not.toThrow();
+    expect(() => store.demoteEntity("ds-1", "unknown")).not.toThrow();
   });
 });
 
@@ -405,18 +424,20 @@ describe("ChunkStore.demoteEntity", () => {
 // Snapshot integration helper
 // ---------------------------------------------------------------------------
 
-describe("ChunkStore.entityChunkKeys", () => {
-  it("yields [entityId, chunkKeys] pairs for snapshot composition", () => {
+describe("ChunkStore.imageChunkKeys", () => {
+  it("yields dataset-scoped image/chunk pairs for snapshot composition", () => {
     const { store } = makeMainStore();
     store.insert(makeEntry({ sizeBytes: 10, entityId: "e-1", chunkKey: "a" }));
     store.insert(makeEntry({ sizeBytes: 10, entityId: "e-1", chunkKey: "b" }));
-    store.insert(makeEntry({ sizeBytes: 10, entityId: "e-2", chunkKey: "c" }));
+    store.insert(makeEntry({ sizeBytes: 10, entityId: "e-2", imageId: "img-2", chunkKey: "c" }));
+    store.insert(makeEntry({ datasetId: "ds-2", sizeBytes: 10, entityId: "e-1", chunkKey: "d" }));
 
     const collected = new Map<string, Set<string>>();
-    for (const [entityId, keys] of store.entityChunkKeys()) {
-      collected.set(entityId, new Set(keys));
+    for (const [datasetId, imageId, keys] of store.imageChunkKeys()) {
+      collected.set(`${datasetId}:${imageId}`, new Set(keys));
     }
-    expect(collected.get("e-1")).toEqual(new Set(["a", "b"]));
-    expect(collected.get("e-2")).toEqual(new Set(["c"]));
+    expect(collected.get("ds-1:img-1")).toEqual(new Set(["a", "b"]));
+    expect(collected.get("ds-1:img-2")).toEqual(new Set(["c"]));
+    expect(collected.get("ds-2:img-1")).toEqual(new Set(["d"]));
   });
 });

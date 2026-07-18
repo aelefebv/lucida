@@ -46,7 +46,7 @@ import { validateSavedView } from "./encoder.ts";
 
 export interface ApplierBridge {
   /** Send `OpenRemoteDataset { url }` over the WebSocket. */
-  sendOpenRemoteDataset: (url: string) => void;
+  sendOpenRemoteDataset: (url: string) => string | null;
   /** Send a document command (broadcast to peers). */
   sendCommand: (json: string) => void;
 }
@@ -701,7 +701,13 @@ export class SavedViewApplier {
         context.pendingByUrl.set(r.url, r.id);
       });
       try {
-        this.bridge.sendOpenRemoteDataset(r.url);
+        const requestId = this.bridge.sendOpenRemoteDataset(r.url);
+        if (requestId === null) {
+          context.pendingByDatasetId.get(r.id)?.finish(
+            "error",
+            "workspace connection is not ready",
+          );
+        }
       } catch (error) {
         context.pendingByDatasetId.get(r.id)?.finish("error", String(error));
       }

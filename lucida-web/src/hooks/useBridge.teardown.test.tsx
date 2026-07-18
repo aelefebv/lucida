@@ -44,6 +44,7 @@ vi.mock("../pipeline/fetch/index.ts", () => {
     registerImage = vi.fn();
     handleBinary = vi.fn();
     handleChunkStatus = vi.fn();
+    handleTransportReady = vi.fn();
     constructor(_send: unknown) {
       MockProxiedContentSource.instances.push(this);
     }

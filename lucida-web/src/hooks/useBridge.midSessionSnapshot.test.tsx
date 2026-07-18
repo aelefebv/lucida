@@ -47,6 +47,7 @@ vi.mock("../pipeline/fetch/index.ts", () => {
     registerImage = vi.fn();
     handleBinary = vi.fn();
     handleChunkStatus = vi.fn();
+    handleTransportReady = vi.fn();
     constructor(_send: unknown) {
       MockProxiedContentSource.instances.push(this);
     }
@@ -126,6 +127,21 @@ function snapshotJson(datasetIds: string[]): string {
   return JSON.stringify({ manifests });
 }
 
+function snapshotFetch(document: string) {
+  const parsed = JSON.parse(document) as { manifests?: Record<string, ReturnType<typeof makeManifest>> };
+  return Object.fromEntries(Object.entries(parsed.manifests ?? {}).map(([datasetId, manifest]) => [
+    datasetId,
+    {
+      Proxied: {
+        images: manifest.images.map((image) => ({
+          image_id: image.image_id,
+          wire_format: { Raw: { data_type: image.multiscale.data_type } },
+        })),
+      },
+    },
+  ]));
+}
+
 function makeParams(scene: ReturnType<typeof makeFakeScene>) {
   const wasmSceneRef: { current: WasmScene | null } = { current: null };
   return {
@@ -170,7 +186,8 @@ describe("useBridge mid-session snapshot", () => {
     const contentSource = MockedContentSource.instances[0];
 
     act(() => {
-      handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 7, {});
+      const document = snapshotJson(["wds-1"]);
+      handlers.onSnapshot(1, document, [], 7, {}, snapshotFetch(document));
     });
     expect(params.datasetsRef.current.has("wds-1")).toBe(true);
     expect(contentSource.registerImage).toHaveBeenCalledTimes(1);
@@ -178,7 +195,8 @@ describe("useBridge mid-session snapshot", () => {
 
     // Mid-session snapshot with the same membership: pure refresh.
     act(() => {
-      handlers.onSnapshot(9, snapshotJson(["wds-1"]), [], 7, {});
+      const document = snapshotJson(["wds-1"]);
+      handlers.onSnapshot(9, document, [], 7, {}, snapshotFetch(document));
     });
     expect(scene.load_document).toHaveBeenCalledTimes(2);
     expect(contentSource.registerImage).toHaveBeenCalledTimes(1);
@@ -194,7 +212,8 @@ describe("useBridge mid-session snapshot", () => {
     const contentSource = MockedContentSource.instances[0];
 
     act(() => {
-      handlers.onSnapshot(1, snapshotJson(["wds-1", "wds-2"]), [], 7, {});
+      const document = snapshotJson(["wds-1", "wds-2"]);
+      handlers.onSnapshot(1, document, [], 7, {}, snapshotFetch(document));
     });
     expect(params.datasetsRef.current.has("wds-1")).toBe(true);
     expect(params.datasetsRef.current.has("wds-2")).toBe(true);
@@ -203,7 +222,8 @@ describe("useBridge mid-session snapshot", () => {
     // The resync snapshot no longer contains wds-2 (its remove_dataset was
     // among the lost broadcasts) but adds wds-3 (opened while lagged).
     act(() => {
-      handlers.onSnapshot(20, snapshotJson(["wds-1", "wds-3"]), [], 7, {});
+      const document = snapshotJson(["wds-1", "wds-3"]);
+      handlers.onSnapshot(20, document, [], 7, {}, snapshotFetch(document));
     });
     expect(params.datasetCallbacksRef.current.removeDataset).toHaveBeenCalledTimes(1);
     expect(params.datasetCallbacksRef.current.removeDataset).toHaveBeenCalledWith("wds-2");

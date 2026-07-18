@@ -1,10 +1,13 @@
 /**
  * Transient single-entity descriptor serializer.
  *
- * Used by callers that don't have a cold-state-backed descriptor buffer
- * (currently just the minimap path — see `volumeRenderer.setTransientDescriptor`).
+ * Used by single-atlas callers that don't have a cold-state-backed descriptor
+ * buffer: categorical slice/volume label pools and the minimap/thumbnail path.
  * Writes `modelMatrix` + `invModelMatrix`, display state, and a single LOD slot covering the full
  * volume (single-slot atlas).
+ * The same source is also written to `detailSource`, which is the descriptor
+ * field sampled by the current slice and volume shaders for single-atlas
+ * callers. `coarseSource` is explicitly invalidated.
  *
  * Reads byte offsets from `./layout.ts` — the same source of truth used
  * by the canonical `descriptorBuffer.serializeEntityDescriptor`. The
@@ -24,6 +27,8 @@ import {
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
   OFFSET_COLORMAP_MODE,
+  OFFSET_COARSE_SOURCE,
+  OFFSET_DETAIL_SOURCE,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_LABEL_OPACITY,
@@ -31,6 +36,7 @@ import {
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
 } from "./layout.ts";
+import { writeChunkTierSource } from "./tierSource.ts";
 
 export interface TransientDescriptorParams {
   modelMatrix: Float32Array;
@@ -75,6 +81,9 @@ export interface TransientDescriptorParams {
  *     and `gridDims = [1, 1, 1]`, matching the single-slot atlas layout
  *     used by `volumeRenderer.setVolume`
  *   - zeroes the remaining LOD slots
+ *   - exposes that single atlas through `detailSource` (the binding used by
+ *     slice labels, volume labels, and minimap/thumbnail rendering)
+ *   - keeps `coarseSource` invalid so fallback cannot sample an unbound tier
  */
 export function serializeTransientDescriptor(
   target: ArrayBuffer,
@@ -119,6 +128,19 @@ export function serializeTransientDescriptor(
   u32[levelBase + 0] = params.volumeDims[0];
   u32[levelBase + 1] = params.volumeDims[1];
   u32[levelBase + 2] = params.volumeDims[2];
+
+  // `setAtlas`/`setVolume` bind every transient single atlas at the detail
+  // bindings. Mirror the legacy LOD metadata into the explicit source record
+  // that current shaders actually sample. The shared writer owns XYZ/ZYX
+  // conversion and the complete 64-byte source layout.
+  writeChunkTierSource(u32, OFFSET_DETAIL_SOURCE, {
+    level: 0,
+    offset: 0,
+    gridDims: [grid[2], grid[1], grid[0]],
+    chunkDims: [chunk[2], chunk[1], chunk[0]],
+    levelDims: [params.volumeDims[2], params.volumeDims[1], params.volumeDims[0]],
+  });
+  writeChunkTierSource(u32, OFFSET_COARSE_SOURCE, undefined);
 
   // Zero out the remaining LOD slots.
   for (let i = 1; i < DESCRIPTOR_MAX_LODS; i++) {

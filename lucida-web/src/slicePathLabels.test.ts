@@ -74,6 +74,7 @@ describe("pushLabelLayers", () => {
       "img-0:label:region-a",
     ]);
     expect(layers.every((l) => l.isLabel)).toBe(true);
+    expect(layers.every((l) => l.ownerDatasetId === "ds-0")).toBe(true);
     for (const l of layers) expect(l.opacity).toBeCloseTo(0.5);
   });
 

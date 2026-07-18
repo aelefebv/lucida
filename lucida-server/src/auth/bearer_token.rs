@@ -12,6 +12,9 @@ use lucida_core::auth_principal::AuthPrincipal;
 use thiserror::Error;
 
 use super::config::AuthConfig;
+use crate::persistence::{
+    PersistenceOperation, PersistenceOperationId, PersistenceRecoveryDisposition,
+};
 
 /// One row in `bearer_tokens`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +62,14 @@ pub fn hash_bearer_token(raw: &str) -> String {
 pub enum BearerTokenStoreError {
     #[error("storage backend error: {0}")]
     Backend(String),
+    #[error(
+        "persistence operation {operation_id} is recoverably indeterminate ({recovery:?}): {detail}"
+    )]
+    RecoverablyIndeterminate {
+        operation_id: PersistenceOperationId,
+        recovery: PersistenceRecoveryDisposition,
+        detail: String,
+    },
 }
 
 #[async_trait]
@@ -85,6 +96,13 @@ pub trait BearerTokenStore: Send + Sync + 'static {
         token_hash: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<BearerToken>, BearerTokenStoreError>;
+
+    /// Begin a finite backend-owned credential revocation.
+    fn begin_revoke_by_hash(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> PersistenceOperation<Option<BearerToken>, BearerTokenStoreError>;
 }
 
 #[cfg(test)]

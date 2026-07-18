@@ -141,8 +141,8 @@ interface PlannedDataset {
 
 interface FoldedEntityDelta {
   upsertEntities: EntitySnapshot[];
-  removedEntityIds: string[];
-  appendedEntityIds: string[];
+  removedImageIds: string[];
+  appendedImageIds: string[];
 }
 
 interface FoldedEntities {
@@ -904,9 +904,9 @@ export class TickCoordinator {
       // cannot advance planner state or publish partial cold/fetch work.
       // `debugStats` is per-frame scratch, not coordinator carry-forward.
       if (cacheSnapshot !== null) {
-        const entityById = new Map(entities.map(e => [e.entityId, e]));
+        const entityByImageId = new Map(entities.map(e => [e.imageId, e]));
         debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
-          dsId, result, entities, entityById, visibleRegion, cacheSnapshot,
+          dsId, result, entities, entityByImageId, visibleRegion, cacheSnapshot,
         );
       }
 
@@ -1029,8 +1029,8 @@ export class TickCoordinator {
           ? {
               upsertEntities: planned.entityDelta.upsertEntities,
               upsertEntries: assignChunkModes(planned.entityDelta.upsertEntities),
-              removedEntityIds: planned.entityDelta.removedEntityIds,
-              appendedEntityIds: planned.entityDelta.appendedEntityIds,
+              removedImageIds: planned.entityDelta.removedImageIds,
+              appendedImageIds: planned.entityDelta.appendedImageIds,
             }
           : undefined;
         this.uploader.sendColdStateDelta({
@@ -1107,20 +1107,20 @@ export class TickCoordinator {
       // bounded (DEBUG_MEMBER_ROW_CAP) — the scalar counters keep the
       // full population visible.
       if (debugStats.enabled) {
-        const activeByEntity = new Map(
-          result.activeSet.map((a) => [a.entityId, a]),
+        const activeByImage = new Map(
+          result.activeSet.map((a) => [a.imageId, a]),
         );
-        const requestsByEntity = new Map<string, ChunkRequest[]>();
+        const requestsByImage = new Map<string, ChunkRequest[]>();
         for (const r of result.requests) {
           if (r.lane === "prefetch") continue;
-          const list = requestsByEntity.get(r.entityId);
+          const list = requestsByImage.get(r.imageId);
           if (list) list.push(r);
-          else requestsByEntity.set(r.entityId, [r]);
+          else requestsByImage.set(r.imageId, [r]);
         }
         for (const entity of entities) {
           debugStats.totalMembers++;
           debugStats.visibleMembers++;
-          const activeEntry = activeByEntity.get(entity.entityId);
+          const activeEntry = activeByImage.get(entity.imageId);
           // Only tile entries carry `targetLod`; invisibles report coarsest.
           const tl =
             activeEntry?.kind === "tile"
@@ -1130,7 +1130,7 @@ export class TickCoordinator {
                 : -1;
           // Rows only for members with pending chunk requests — the
           // panel filters to `chunksNeeded > 0` anyway — and row-capped.
-          const entityRequests = requestsByEntity.get(entity.entityId);
+          const entityRequests = requestsByImage.get(entity.imageId);
           const chunksNeeded = entityRequests?.length ?? 0;
           if (chunksNeeded > 0 && entityRequests) {
             debugStats.memberStatsActiveTotal++;
@@ -1234,6 +1234,7 @@ export class TickCoordinator {
           if (entry.kind === "tile") {
             orchDebug.activeSet.push({
               entityId: entry.entityId,
+              imageId: entry.imageId,
               mode: entry.mode,
               targetLod: entry.targetLod,
               coarsestDetailLod: entry.coarsestDetailLod,
@@ -1243,6 +1244,7 @@ export class TickCoordinator {
             // invisible
             orchDebug.activeSet.push({
               entityId: entry.entityId,
+              imageId: entry.imageId,
               mode: "invisible",
               targetLod: entry.coarsestLod,
               coarsestDetailLod: entry.coarsestLod,
@@ -1262,7 +1264,9 @@ export class TickCoordinator {
           orchDebug.chunksByLevel[r.level] = (orchDebug.chunksByLevel[r.level] ?? 0) + 1;
         }
         orchDebug.topRequests = this._lastRequests.slice(0, 20).map(r => ({
+          datasetId: r.datasetId,
           entityId: r.entityId,
+          imageId: r.imageId,
           level: r.level,
           t: r.t, c: r.c, z: r.z, y: r.y, x: r.x,
           lane: r.lane,
@@ -1286,18 +1290,21 @@ export class TickCoordinator {
       // truncated to the last-processed dataset's first 5 (the prior
       // last-dataset-wins behavior).
       const entityDiagEntries: OrchDebug["entityDiag"] = [];
-      for (const [, entities] of this._lastEntities) {
+      for (const [datasetId, entities] of this._lastEntities) {
         for (const e of entities) {
           if (entityDiagEntries.length >= 5) break;
           entityDiagEntries.push({
+            datasetId,
             entityId: e.entityId,
+            imageId: e.imageId,
             position: e.layoutPositionVox,
             fullShape: e.levels.length > 0
               ? [e.levels[0].shape[Axis.X], e.levels[0].shape[Axis.Y]] as [number, number]
               : null,
             // Occupancy is counted lazily for just the entries shown
             // here, against the shared per-rebuild cache snapshot.
-            cachedKeys: cacheSnapshot?.cached.get(e.entityId)?.size ?? 0,
+            cachedKeys: [...(cacheSnapshot?.cached.get(datasetId)?.get(e.imageId)?.values() ?? [])]
+              .reduce((count, keys) => count + keys.size, 0),
           });
         }
         if (entityDiagEntries.length >= 5) break;
@@ -2001,12 +2008,8 @@ export class TickCoordinator {
             upsertEntities: delta.Delta.changed
               .map((row) => next.get(row.image_id))
               .filter((entity): entity is EntitySnapshot => entity !== undefined),
-            removedEntityIds: unique(
-              delta.Delta.left
-                .map((imageId) => prev.get(imageId)?.entityId)
-                .filter((id): id is string => id !== undefined),
-            ),
-            appendedEntityIds: [],
+            removedImageIds: unique(delta.Delta.left),
+            appendedImageIds: [],
           };
         }
       }

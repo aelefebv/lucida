@@ -56,14 +56,8 @@ import {
   OFFSET_DETAIL_SOURCE,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  SOURCE_OFFSET_CHUNK_DIMS,
-  SOURCE_OFFSET_GRID_DIMS,
-  SOURCE_OFFSET_INDIRECTION_OFFSET,
-  SOURCE_OFFSET_LEVEL,
-  SOURCE_OFFSET_LEVEL_DIMS,
-  SOURCE_OFFSET_PAD0,
-  SOURCE_OFFSET_VALID,
 } from "./descriptor/layout.ts";
+import { writeChunkTierSource } from "./descriptor/tierSource.ts";
 
 // Re-export size/sentinel constants so existing consumers don't break.
 // New code should import these from `./descriptor/layout.ts` directly.
@@ -410,43 +404,4 @@ function findLodMeta(
     if (lodMetas[i].level === level) return lodMetas[i];
   }
   return undefined;
-}
-
-function writeChunkTierSource(
-  u32: Uint32Array,
-  offsetBytes: number,
-  meta: LodIndirectionMeta | undefined,
-): void {
-  const base = offsetBytes / 4;
-  if (!meta) {
-    for (let i = 0; i < 16; i++) u32[base + i] = 0;
-    return;
-  }
-
-  const [gZ, gY, gX] = meta.gridDims;
-  const [cZ, cY, cX] = meta.chunkDims;
-  const [lZ, lY, lX] = meta.levelDims;
-
-  u32[base + SOURCE_OFFSET_VALID / 4] = 1;
-  u32[base + SOURCE_OFFSET_LEVEL / 4] = meta.level;
-  u32[base + SOURCE_OFFSET_INDIRECTION_OFFSET / 4] = meta.offset;
-  u32[base + SOURCE_OFFSET_PAD0 / 4] = 0;
-
-  const gridBase = base + SOURCE_OFFSET_GRID_DIMS / 4;
-  u32[gridBase + 0] = gX;
-  u32[gridBase + 1] = gY;
-  u32[gridBase + 2] = gZ;
-  u32[gridBase + 3] = 0;
-
-  const chunkBase = base + SOURCE_OFFSET_CHUNK_DIMS / 4;
-  u32[chunkBase + 0] = cX;
-  u32[chunkBase + 1] = cY;
-  u32[chunkBase + 2] = cZ;
-  u32[chunkBase + 3] = 0;
-
-  const levelBase = base + SOURCE_OFFSET_LEVEL_DIMS / 4;
-  u32[levelBase + 0] = lX;
-  u32[levelBase + 1] = lY;
-  u32[levelBase + 2] = lZ;
-  u32[levelBase + 3] = 0;
 }

@@ -16,7 +16,11 @@ import type { CompositeLayer } from "../layerCompositor.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import type { AggregateBatch } from "../sliceRenderer.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
-import { type SliceAtlasState, type LabelSlicePool } from "./atlas.ts";
+import {
+  type SliceAtlasState,
+  type LabelSlicePool,
+  labelSlicePoolMatchesEpochs,
+} from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 import {
   aggregateTopologyGeneration,
@@ -29,6 +33,7 @@ import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { DEFAULT_LABEL_OPACITY } from "../../labelSettings.ts";
 import { admitWorkerRenderSurface } from "../worker/surface.ts";
+import { labelPoolKey } from "../labelPoolKey.ts";
 
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -153,7 +158,7 @@ function ensureLabelDescriptor(
     pool.descAllocation = ctx.gpuResources.createBuffer(
       ctx.device,
       {
-        key: `label-slice:${pool.memberId ?? pool.datasetId}:descriptor`,
+        key: `label-slice:${labelPoolKey(pool.datasetId, pool.memberId)}:descriptor`,
         kind: "descriptor",
         datasetId: pool.datasetId,
       },
@@ -193,7 +198,7 @@ function ensureLabelPalette(
     pool.labelColorAllocation = ctx.gpuResources.createBuffer(
       ctx.device,
       {
-        key: `label-slice:${pool.memberId ?? pool.datasetId}:palette:${count}`,
+        key: `label-slice:${labelPoolKey(pool.datasetId, pool.memberId)}:palette:${count}`,
         kind: "buffer",
         datasetId: pool.datasetId,
       },
@@ -228,8 +233,11 @@ function renderLabelLayer(
   target: GPUTexture,
 ): CompositeLayer | null {
   const memberId = layer.datasetId;
-  const pool = ctx.state.labelSlicePools.get(memberId);
-  if (!pool) return null;
+  if (!layer.ownerDatasetId) return null;
+  const pool = ctx.state.labelSlicePools.get(
+    labelPoolKey(layer.ownerDatasetId, memberId),
+  );
+  if (!pool || !labelSlicePoolMatchesEpochs(pool, msg.epochs)) return null;
 
   const descBuffer = ensureLabelDescriptor(ctx, pool, layer.opacity ?? DEFAULT_LABEL_OPACITY);
   const palette = ensureLabelPalette(ctx, pool, layer.labelColors);

@@ -137,34 +137,35 @@ describe("dispatchChunk", () => {
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     const call = sliceChunkData.mock.calls[0];
     // Positional layout:
-    // (workerMemberId, [chunkData], level, z, t, c,
+    // (workerMemberId, datasetId, [chunkData], level, z, t, c,
     //  levelWidth, levelHeight, chunkX, chunkY, chunkZ,
     //  fullResDepth, levelDepth, fullResZ, epochs)
     expect(call[0]).toBe("img-0");
-    expect(call[1]).toHaveLength(1);
-    expect(call[1][0]).toEqual({
+    expect(call[1]).toBe("ds1");
+    expect(call[2]).toHaveLength(1);
+    expect(call[2][0]).toEqual({
       data: delivery.data,
       contract: delivery.contract,
       x: 3, y: 2, z: 1,
       key: "1/0/0/1/2/3",
     });
-    expect(call[2]).toBe(1); // level
-    expect(call[3]).toBe(7); // sliceZ argument
-    expect(call[4]).toBe(0); // t
-    expect(call[5]).toBe(0); // c
+    expect(call[3]).toBe(1); // level
+    expect(call[4]).toBe(7); // sliceZ argument
+    expect(call[5]).toBe(0); // t
+    expect(call[6]).toBe(0); // c
     // Level 1 shape = [1,1,2,512,512]; width=512, height=512
-    expect(call[6]).toBe(512);
     expect(call[7]).toBe(512);
+    expect(call[8]).toBe(512);
     // Level 1 chunk_shape = [1,1,1,256,256]; chunkX=256, chunkY=256, chunkZ=1
-    expect(call[8]).toBe(256);
     expect(call[9]).toBe(256);
-    expect(call[10]).toBe(1);
+    expect(call[10]).toBe(256);
+    expect(call[11]).toBe(1);
     // fullResDepth = level 0 shape[Z] = 4
-    expect(call[11]).toBe(4);
+    expect(call[12]).toBe(4);
     // levelDepth = level 1 shape[Z] = 2
-    expect(call[12]).toBe(2);
-    expect(call[13]).toBe(7); // fullResZ === sliceZ
-    expect(call[14]).toBe(EPOCHS);
+    expect(call[13]).toBe(2);
+    expect(call[14]).toBe(7); // fullResZ === sliceZ
+    expect(call[15]).toBe(EPOCHS);
   });
 
   it("volume mode calls volumeChunkData with the right positional args", () => {
@@ -177,22 +178,23 @@ describe("dispatchChunk", () => {
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(volumeChunkData).toHaveBeenCalledTimes(1);
     const call = volumeChunkData.mock.calls[0];
-    // (workerMemberId, [chunkData], level, t, c,
+    // (workerMemberId, datasetId, [chunkData], level, t, c,
     //  levelWidth, levelHeight, levelDepth,
     //  chunkX, chunkY, chunkZ, epochs)
     expect(call[0]).toBe("img-0");
-    expect(call[2]).toBe(0); // level
-    expect(call[3]).toBe(0); // t
-    expect(call[4]).toBe(0); // c
+    expect(call[1]).toBe("ds1");
+    expect(call[3]).toBe(0); // level
+    expect(call[4]).toBe(0); // t
+    expect(call[5]).toBe(0); // c
     // Level 0 shape = [1,1,4,1024,1024]
-    expect(call[5]).toBe(1024); // levelWidth
-    expect(call[6]).toBe(1024); // levelHeight
-    expect(call[7]).toBe(4);    // levelDepth
+    expect(call[6]).toBe(1024); // levelWidth
+    expect(call[7]).toBe(1024); // levelHeight
+    expect(call[8]).toBe(4);    // levelDepth
     // Level 0 chunk_shape = [1,1,2,256,256]
-    expect(call[8]).toBe(256);  // chunkX
-    expect(call[9]).toBe(256);  // chunkY
-    expect(call[10]).toBe(2);   // chunkZ
-    expect(call[11]).toBe(EPOCHS);
+    expect(call[9]).toBe(256);  // chunkX
+    expect(call[10]).toBe(256); // chunkY
+    expect(call[11]).toBe(2);   // chunkZ
+    expect(call[12]).toBe(EPOCHS);
   });
 
   it("missing level meta is a no-op (defensive — caller should pre-filter)", () => {
@@ -214,6 +216,6 @@ describe("dispatchChunk", () => {
     dispatchChunk(client, delivery, meta, "volume", "img-0:ch2", null, EPOCHS);
 
     expect(volumeChunkData.mock.calls[0][0]).toBe("img-0:ch2");
-    expect(volumeChunkData.mock.calls[0][4]).toBe(2); // c
+    expect(volumeChunkData.mock.calls[0][5]).toBe(2); // c
   });
 });

@@ -339,7 +339,7 @@ describe("buildDescriptorBuffer", () => {
 });
 
 describe("transient descriptor parity", () => {
-  it("matches canonical matrix, display, and first-LOD bytes for equivalent inputs", () => {
+  it("matches the full canonical descriptor, including explicit tier sources", () => {
     const canonical = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const transient = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const model = scaledMatrix(2);
@@ -359,7 +359,14 @@ describe("transient descriptor parity", () => {
       levelDims: [8, 16, 32],
       offset: 0,
     };
-    const display = { ...defaultColdDisplay(), contrastMin: 1, contrastMax: 9, gamma: 1.2, opacity: 0.6 };
+    const display = {
+      ...defaultColdDisplay(),
+      channelMask: 0,
+      contrastMin: 1,
+      contrastMax: 9,
+      gamma: 1.2,
+      opacity: 0.6,
+    };
     serializeEntityDescriptor(canonical, 0, entry, [meta], display, new Map());
     serializeTransientDescriptor(transient, {
       modelMatrix: model,
@@ -371,15 +378,6 @@ describe("transient descriptor parity", () => {
       opacity: 0.6,
     });
 
-    const canonicalBytes = new Uint8Array(canonical);
-    const transientBytes = new Uint8Array(transient);
-    const ranges = [
-      [OFFSET_MODEL_MATRIX, OFFSET_INV_MODEL_MATRIX + 64],
-      [OFFSET_CONTRAST_MIN, OFFSET_LOD_COUNT + 4],
-      [DESCRIPTOR_LODS_OFFSET, DESCRIPTOR_LODS_OFFSET + DESCRIPTOR_LOD_INFO_SIZE],
-    ] as const;
-    for (const [start, end] of ranges) {
-      expect([...canonicalBytes.slice(start, end)]).toEqual([...transientBytes.slice(start, end)]);
-    }
+    expect([...new Uint8Array(transient)]).toEqual([...new Uint8Array(canonical)]);
   });
 });

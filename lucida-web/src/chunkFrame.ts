@@ -17,23 +17,44 @@ export type ChunkFrameDecodeResult =
       reason: "truncated_header" | "truncated_key" | "invalid_utf8_key";
     };
 
-const HEADER_BYTES = 6;
+export const CHUNK_FRAME_HEADER_BYTES = 6;
+
+const utf8 = new TextEncoder();
+
+/** Exact server outbox charge for one binary chunk response. */
+export function chunkFrameByteLength(
+  datasetId: string,
+  imageId: string,
+  chunkKey: string,
+  payloadBytes: number,
+): number {
+  if (!Number.isSafeInteger(payloadBytes) || payloadBytes < 0) {
+    throw new Error(`Chunk payload byte length must be a non-negative safe integer, got ${payloadBytes}`);
+  }
+  const keyBytes = utf8.encode(`${datasetId}/${imageId}/${chunkKey}`).byteLength;
+  if (keyBytes > 0xffff) {
+    throw new Error(`Chunk frame key is ${keyBytes} bytes; maximum is ${0xffff}`);
+  }
+  const total = CHUNK_FRAME_HEADER_BYTES + keyBytes + payloadBytes;
+  if (!Number.isSafeInteger(total)) throw new Error("Chunk frame byte length exceeds the safe integer range");
+  return total;
+}
 
 export function decodeChunkFrame(buffer: ArrayBuffer): ChunkFrameDecodeResult {
-  if (buffer.byteLength < HEADER_BYTES) {
+  if (buffer.byteLength < CHUNK_FRAME_HEADER_BYTES) {
     return { ok: false, reason: "truncated_header" };
   }
   const view = new DataView(buffer);
   const clientId = view.getUint32(0, true);
   const keyLength = view.getUint16(4, true);
-  const keyEnd = HEADER_BYTES + keyLength;
+  const keyEnd = CHUNK_FRAME_HEADER_BYTES + keyLength;
   if (buffer.byteLength < keyEnd) {
     return { ok: false, reason: "truncated_key" };
   }
   let key: string;
   try {
     key = new TextDecoder("utf-8", { fatal: true }).decode(
-      new Uint8Array(buffer, HEADER_BYTES, keyLength),
+      new Uint8Array(buffer, CHUNK_FRAME_HEADER_BYTES, keyLength),
     );
   } catch {
     return { ok: false, reason: "invalid_utf8_key" };

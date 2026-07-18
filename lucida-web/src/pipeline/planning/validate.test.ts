@@ -20,7 +20,6 @@ import {
   checkLevelShapeArity,
   checkPrevActiveSetKindAgreement,
   checkPrevActiveSetUnique,
-  checkUniqueEntityIds,
   checkUniqueImageIds,
   checkVisibleRegionBounds,
   validatePlanningInputs,
@@ -116,34 +115,19 @@ describe("checkTileParentRefs", () => {
 });
 
 // ===========================================================================
-// Check 2 — checkUniqueEntityIds
-// ===========================================================================
-
-describe("checkUniqueEntityIds", () => {
-  it("passes when every entityId is unique", () => {
-    expect(() => checkUniqueEntityIds(makeValidSnapshot())).not.toThrow();
-  });
-
-  it("throws on duplicate entityId", () => {
-    const snap = makeValidSnapshot();
-    snap.entities.push(
-      createSyntheticEntity({
-        entityId: "group-A", // duplicate
-        imageId: "img-dup",
-        kind: "Image",
-      }),
-    );
-    expect(() => checkUniqueEntityIds(snap)).toThrow(
-      /duplicate entityId group-A/,
-    );
-  });
-});
-
-// ===========================================================================
-// Check 3 — checkUniqueImageIds
+// Check 2 — checkUniqueImageIds
 // ===========================================================================
 
 describe("checkUniqueImageIds", () => {
+  it("allows one entity to own multiple uniquely identified images", () => {
+    const snap = makeValidSnapshot();
+    snap.entities.push(createSyntheticEntity({
+      entityId: snap.entities[0].entityId,
+      imageId: "img-same-owner-second-content",
+      kind: "Image",
+    }));
+    expect(() => checkUniqueImageIds(snap)).not.toThrow();
+  });
   it("passes when every non-empty imageId is unique", () => {
     expect(() => checkUniqueImageIds(makeValidSnapshot())).not.toThrow();
   });
@@ -287,7 +271,17 @@ describe("checkPrevActiveSetUnique", () => {
     expect(() => checkPrevActiveSetUnique(state)).not.toThrow();
   });
 
-  it("throws on duplicate entityId in previousActiveSet", () => {
+  it("allows one owner entity to retain multiple image entries", () => {
+    const state: PlanningState = {
+      previousActiveSet: [
+        tileEntry("shared-owner", "image-a"),
+        tileEntry("shared-owner", "image-b"),
+      ],
+    };
+    expect(() => checkPrevActiveSetUnique(state)).not.toThrow();
+  });
+
+  it("throws on a duplicate active identity in previousActiveSet", () => {
     const state: PlanningState = {
       previousActiveSet: [
         { kind: "invisible", entityId: "group-A", imageId: "", coarsestLod: 0 },
@@ -295,7 +289,7 @@ describe("checkPrevActiveSetUnique", () => {
       ],
     };
     expect(() => checkPrevActiveSetUnique(state)).toThrow(
-      /duplicate entityId group-A in state\.previousActiveSet/,
+      /duplicate active identity entity:group-A in state\.previousActiveSet/,
     );
   });
 });
@@ -406,7 +400,7 @@ describe("validatePlanningInputs (composing)", () => {
       ],
     };
     expect(() => validatePlanningInputs(makeValidSnapshot(), state)).toThrow(
-      /duplicate entityId group-X in state\.previousActiveSet/,
+      /duplicate active identity entity:group-X in state\.previousActiveSet/,
     );
   });
 });

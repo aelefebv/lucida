@@ -48,6 +48,7 @@ export interface Chunk {
 
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
+  datasetId: string;
   epochs: SceneEpochs;
   tier?: "detail" | "coarse";
   /**
@@ -104,6 +105,7 @@ export interface LabelSliceChunkDataMessage {
 
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
+  datasetId: string;
   epochs: SceneEpochs;
   tier?: "detail" | "coarse";
   /** See {@link SliceChunkDataMessage.memberId}. */
@@ -177,6 +179,8 @@ export interface VolumeLayerParams {
    * ordinary intensity layers.
    */
   isLabel?: boolean;
+  /** Owning manifest dataset for a label; image ids are dataset-scoped. */
+  ownerDatasetId?: string;
   /**
    * Overlay opacity for a label layer (0..1). Ignored for intensity layers,
    * whose opacity is carried by the descriptor. Defaults to ~0.5 so a label
@@ -319,6 +323,8 @@ export interface SliceLayerParams {
    * ramp. Absent/false for ordinary intensity layers.
    */
   isLabel?: boolean;
+  /** Owning manifest dataset for a label; image ids are dataset-scoped. */
+  ownerDatasetId?: string;
   /**
    * Overlay opacity for a label layer (0..1). Ignored for intensity
    * layers, whose opacity is carried by the descriptor. Defaults to ~0.5
@@ -631,15 +637,15 @@ export interface ColdStateSelectionMessage {
  *     whose view-dependent fields (target LOD and LOD range)
  *     changed. Built by the exact same `buildColdActiveEntry` path a full cold
  *     state uses, so they are byte-identical to what a full rebuild would emit.
- *   - `removedEntityIds` — entities that left the active set.
+ *   - `removedImageIds` — images that left the active set.
  *   - `activeSetOrder` — fallback full new active-set order when no trustworthy
  *     producer delta exists.
- *   - `appendedEntityIds` — incremental order hint when membership came from a
+ *   - `appendedImageIds` — incremental order hint when membership came from a
  *     view-query delta. Existing entries retain their order, removals are
  *     deleted, and entered entities append in producer order.
  *
  * The worker patches its retained cold state (remove removed ids, upsert
- * changed/added by entity id, reorder to `activeSetOrder`) and re-runs the same
+ * changed/added by image id, reorder to `activeSetOrder`) and re-runs the same
  * `applyColdState` a full cold state uses — so the visible result is identical
  * to a full rebuild at the new view, including releasing resources for entities
  * that left. An entity whose view-dependent fields are unchanged keeps its
@@ -659,14 +665,14 @@ export interface ColdStateDeltaMessage {
     detail: number;
     coarse: number;
   };
-  /** Entity ids that left the active set since the retained cold state. */
-  removedEntityIds: string[];
+  /** Image ids that left the active set since the retained cold state. */
+  removedImageIds: string[];
   /** Descriptors for entities new to the active set or whose descriptor changed. */
   upserts: ColdStateActiveEntry[];
-  /** Full-order fallback. Mutually exclusive with `appendedEntityIds`. */
+  /** Full image-id order fallback. Mutually exclusive with `appendedImageIds`. */
   activeSetOrder?: string[];
-  /** O(delta) ordering hint: new entity ids appended after retained entries. */
-  appendedEntityIds?: string[];
+  /** O(delta) ordering hint: new image ids appended after retained entries. */
+  appendedImageIds?: string[];
 }
 
 export type MainToWorkerMessage =
@@ -759,12 +765,16 @@ export type ChunkFeedbackReason =
 
 export interface ChunksEvictedMessage {
   type: "chunksEvicted";
+  /** Dataset owning the member/chunks; image ids are only dataset-scoped. */
+  datasetId: string;
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
    * multi-channel composites. Not a dataset id.
    */
   memberId: string;
+  /** Atlas residency tier that produced this feedback. */
+  tier: "detail" | "coarse";
   /**
    * Chunks that should be eligible for delivery again. Usually these
    * were present and got evicted by closer chunks; stale-epoch and
@@ -782,7 +792,7 @@ export interface ChunksEvictedMessage {
 export type MissingChunk = {
   kind: "chunk";
   datasetId: string;
-  tier?: "detail" | "coarse";
+  tier: "detail" | "coarse";
   entityId: string;
   /**
    * Worker-side member id that owns the missing chunk. Single-channel

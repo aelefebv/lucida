@@ -92,7 +92,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         ctx.state.memberTierToPool.get(memberTierKey(memberId, tier)) ??
         (tier === "detail" ? ctx.state.memberToPool.get(memberId) : undefined);
       if (!poolKey) {
-        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-pool");
         return;
       }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -129,7 +129,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         (tier === "detail" ? ctx.state.memberToPool.get(memberId) : undefined);
       if (!poolKey) {
         // No pool registered yet (cold state hasn't arrived for this member)
-        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-pool");
         return;
       }
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);

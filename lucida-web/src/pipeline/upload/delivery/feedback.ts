@@ -16,7 +16,10 @@ import {
 
 export class WorkerFeedback {
   private readonly datasetsWithWantedSnapshot = new Set<string>();
-  private readonly missingChunksByDataset = new Map<string, Map<string, Map<number, Set<string>>>>();
+  private readonly missingChunksByDataset = new Map<
+    string,
+    Map<string, Map<number, Map<"detail" | "coarse", Set<string>>>>
+  >();
 
   /**
    * - `evicted` chunks were displaced by closer arrivals — re-eligible
@@ -29,7 +32,9 @@ export class WorkerFeedback {
    * cpuCache reference today (it gets one through `ctx.cpuCache`).
    */
   handleChunksEvicted(
+    datasetId: string,
     memberId: string,
+    tier: "detail" | "coarse",
     evicted: string[],
     skipped: string[],
     cpuCache: CpuCache,
@@ -51,13 +56,22 @@ export class WorkerFeedback {
     for (const chunkKey of skipped) collect(chunkKey, "skipped");
 
     for (const [c, group] of byChannel) {
-      cpuCache.markChunkEvicted(parsed.imageId, c, group.evicted, group.skipped);
+      cpuCache.markChunkEvicted(
+        datasetId,
+        parsed.imageId,
+        c,
+        tier,
+        group.evicted,
+        group.skipped,
+      );
     }
 
     if (evicted.length > 0 || skipped.length > 0) {
       debugLog("orch", "upload.worker_chunk_feedback", {
         memberId,
+        datasetId,
         imageId: parsed.imageId,
+        tier,
         reason: reason ?? "evicted",
         requeued: evicted.length,
         rejected: skipped.length,
@@ -75,7 +89,10 @@ export class WorkerFeedback {
     cpuCache: CpuCache,
   ): void {
     this.datasetsWithWantedSnapshot.add(datasetId);
-    const missingChunksForDataset = new Map<string, Map<number, Set<string>>>();
+    const missingChunksForDataset = new Map<
+      string,
+      Map<number, Map<"detail" | "coarse", Set<string>>>
+    >();
     let missingChunks = 0;
     for (const entry of missing) {
       const parsed = parseWorkerMemberId(entry.memberId);
@@ -86,17 +103,18 @@ export class WorkerFeedback {
         byChannel = new Map();
         missingChunksForDataset.set(imageId, byChannel);
       }
-      let keys = byChannel.get(c);
+      let byTier = byChannel.get(c);
+      if (!byTier) {
+        byTier = new Map();
+        byChannel.set(c, byTier);
+      }
+      let keys = byTier.get(entry.tier);
       if (!keys) {
         keys = new Set();
-        byChannel.set(c, keys);
+        byTier.set(entry.tier, keys);
       }
       keys.add(entry.chunkKey);
-      if (entry.tier) {
-        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier);
-      } else {
-        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
-      }
+      cpuCache.markChunkMissing(datasetId, parsed.imageId, c, entry.chunkKey, entry.tier);
       missingChunks++;
     }
     if (missingChunks > 0) {
@@ -112,11 +130,13 @@ export class WorkerFeedback {
     imageId: string,
     c: number,
     chunkKey: string,
+    tier: "detail" | "coarse",
   ): "resident" | "missing" | "unknown" {
     if (!this.datasetsWithWantedSnapshot.has(datasetId)) return "unknown";
     const missing = this.missingChunksByDataset.get(datasetId)
       ?.get(imageId)
       ?.get(c)
+      ?.get(tier)
       ?.has(chunkKey) ?? false;
     return missing ? "missing" : "resident";
   }

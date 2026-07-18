@@ -2,8 +2,8 @@
  * View-move cold-state delta.
  *
  * Applies a {@link ColdStateDeltaMessage}: patch the dataset's most recent cold
- * state in place — remove the removed entity ids, upsert the changed/added
- * descriptors by entity id, and either apply the full-order fallback or the
+ * state in place — remove the removed image ids, upsert the changed/added
+ * descriptors by image id, and either apply the full-order fallback or the
  * producer's O(delta) remove/retain/append ordering hint — then re-ingest it
  * via the same {@link applyColdState} path a full cold state uses.
  *
@@ -38,27 +38,27 @@ export function applyColdStateDelta(
   const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
   if (!cold) return;
 
-  // Build the patched active set keyed by entity id: retained entries (minus
+  // Build the patched active set keyed by image id: retained entries (minus
   // removed) plus upserts, then materialised in the new active-set order.
-  const removed = new Set(msg.removedEntityIds);
-  const byEntity = new Map<string, ColdStateActiveEntry>();
+  const removed = new Set(msg.removedImageIds);
+  const byImage = new Map<string, ColdStateActiveEntry>();
   for (const entry of cold.activeSet) {
-    if (!removed.has(entry.entityId)) byEntity.set(entry.entityId, entry);
+    if (!removed.has(entry.imageId)) byImage.set(entry.imageId, entry);
   }
   for (const entry of msg.upserts) {
-    byEntity.set(entry.entityId, entry);
+    byImage.set(entry.imageId, entry);
   }
 
   const nextActiveSet: ColdStateActiveEntry[] = [];
   if (msg.activeSetOrder !== undefined) {
-    for (const entityId of msg.activeSetOrder) {
-      const entry = byEntity.get(entityId);
+    for (const imageId of msg.activeSetOrder) {
+      const entry = byImage.get(imageId);
       // Every id in the order MUST be either retained (in the prior active set
       // and not removed) or present in `upserts`. A miss would shift every
       // subsequent descriptor index, so fail loudly.
       if (!entry) {
         throw new Error(
-          `applyColdStateDelta: activeSetOrder id ${entityId} missing from ` +
+          `applyColdStateDelta: activeSetOrder id ${imageId} missing from ` +
             `retained+upserts (producer invariant violation)`,
         );
       }
@@ -70,30 +70,30 @@ export function applyColdStateDelta(
     // worker/main indices stay equal without shipping or walking a full order.
     const placed = new Set<string>();
     for (const prior of cold.activeSet) {
-      if (removed.has(prior.entityId)) continue;
-      const entry = byEntity.get(prior.entityId);
+      if (removed.has(prior.imageId)) continue;
+      const entry = byImage.get(prior.imageId);
       if (!entry) {
         throw new Error(
-          `applyColdStateDelta: retained id ${prior.entityId} missing from patched set`,
+          `applyColdStateDelta: retained id ${prior.imageId} missing from patched set`,
         );
       }
       nextActiveSet.push(entry);
-      placed.add(prior.entityId);
+      placed.add(prior.imageId);
     }
-    for (const entityId of msg.appendedEntityIds ?? []) {
-      const entry = byEntity.get(entityId);
-      if (!entry || placed.has(entityId)) {
+    for (const imageId of msg.appendedImageIds ?? []) {
+      const entry = byImage.get(imageId);
+      if (!entry || placed.has(imageId)) {
         throw new Error(
-          `applyColdStateDelta: appended id ${entityId} is missing or already retained`,
+          `applyColdStateDelta: appended id ${imageId} is missing or already retained`,
         );
       }
       nextActiveSet.push(entry);
-      placed.add(entityId);
+      placed.add(imageId);
     }
     for (const entry of msg.upserts) {
-      if (!placed.has(entry.entityId)) {
+      if (!placed.has(entry.imageId)) {
         throw new Error(
-          `applyColdStateDelta: upsert id ${entry.entityId} was neither retained nor appended`,
+          `applyColdStateDelta: upsert id ${entry.imageId} was neither retained nor appended`,
         );
       }
     }

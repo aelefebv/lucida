@@ -78,6 +78,7 @@ export function pushLabelVolumeLayers(
     if (!scissorRect) continue;
     layers.push({
       datasetId: label.image.image_id,
+      ownerDatasetId: manifest.dataset_id,
       blendMode: "alpha",
       renderMode: "translucent",
       scissorRect,

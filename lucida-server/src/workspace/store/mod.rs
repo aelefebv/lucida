@@ -16,6 +16,8 @@ use lucida_core::scene::DocumentState;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::persistence::PersistenceOperation;
+
 use super::types::{
     SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
     WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
@@ -25,6 +27,16 @@ use super::types::{
 mod sqlite;
 
 pub use sqlite::SqliteWorkspaceStore;
+
+/// Minimal durable member state used only to reconcile a lost mutation
+/// completion.  It deliberately excludes fallible presentation fields such
+/// as timestamps so unrelated row corruption cannot turn a proven rollback
+/// into an indeterminate access verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMemberPersistenceState {
+    pub role: WorkspaceRole,
+    pub display_name: String,
+}
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -240,6 +252,44 @@ pub trait WorkspaceStore: Send + Sync + 'static {
 
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError>;
 
+    async fn workspace_archived_for_reconciliation(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<bool>, StoreError> {
+        self.get_workspace(workspace_id)
+            .await
+            .map(|record| record.map(|record| record.archived_at.is_some()))
+    }
+
+    async fn member_for_reconciliation(
+        &self,
+        workspace_id: &str,
+        email: &str,
+    ) -> Result<Option<WorkspaceMemberPersistenceState>, StoreError> {
+        Ok(self
+            .admin_workspace_details(workspace_id)
+            .await?
+            .and_then(|details| {
+                details
+                    .members
+                    .into_iter()
+                    .find(|member| member.email == normalize_email(email))
+            })
+            .map(|member| WorkspaceMemberPersistenceState {
+                role: member.role,
+                display_name: member.display_name,
+            }))
+    }
+
+    async fn link_policy_for_reconciliation(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<(WorkspaceLinkAccess, WorkspaceRole)>, StoreError> {
+        self.sharing_settings(workspace_id)
+            .await
+            .map(|settings| settings.map(|settings| (settings.link_access, settings.link_role)))
+    }
+
     async fn role_for(
         &self,
         workspace_id: &str,
@@ -277,6 +327,14 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError>;
 
+    /// Begin a finite backend-owned archive operation. Implementations must
+    /// issue a [`PersistenceOperation`]; callers never await the raw store
+    /// future while holding live authorization or publication guards.
+    fn begin_archive_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> PersistenceOperation<Option<WorkspaceRecord>, StoreError>;
+
     async fn restore_workspace(
         &self,
         workspace_id: &str,
@@ -288,6 +346,13 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError>;
+
+    fn begin_persist_document(
+        &self,
+        workspace_id: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn persist_dataset_opened(
@@ -301,6 +366,18 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         document: &DocumentState,
     ) -> Result<(), StoreError>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn begin_persist_dataset_opened(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
+        added_by: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError>;
+
     /// Atomically replace the observed generation and the document manifest
     /// for an existing workspace membership during wake-time restore.
     async fn persist_dataset_refreshed(
@@ -313,6 +390,17 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         document: &DocumentState,
     ) -> Result<(), StoreError>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn begin_persist_dataset_refreshed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError>;
+
     async fn persist_dataset_removed(
         &self,
         workspace_id: &str,
@@ -320,6 +408,14 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError>;
+
+    fn begin_persist_dataset_removed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError>;
 
     /// Persist a dataset rename: update the `workspace_datasets.display_name`
     /// row for `workspace_dataset_id` and the workspace `document_json` (which
@@ -334,6 +430,15 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), StoreError>;
+
+    fn begin_persist_dataset_renamed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError>;
 
     async fn list_dataset_sources(
         &self,
@@ -365,12 +470,27 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         role: WorkspaceRole,
     ) -> Result<Option<WorkspaceMember>, StoreError>;
 
+    fn begin_upsert_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+        role: WorkspaceRole,
+    ) -> PersistenceOperation<Option<WorkspaceMember>, StoreError>;
+
     async fn admin_upsert_owner(
         &self,
         workspace_id: &str,
         email: &str,
         display_name: &str,
     ) -> Result<Option<WorkspaceMember>, StoreError>;
+
+    fn begin_admin_upsert_owner(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+    ) -> PersistenceOperation<Option<WorkspaceMember>, StoreError>;
 
     async fn update_member_role(
         &self,
@@ -379,7 +499,20 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         role: WorkspaceRole,
     ) -> Result<Option<WorkspaceMember>, StoreError>;
 
+    fn begin_update_member_role(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        role: WorkspaceRole,
+    ) -> PersistenceOperation<Option<WorkspaceMember>, StoreError>;
+
     async fn remove_member(&self, workspace_id: &str, email: &str) -> Result<bool, StoreError>;
+
+    fn begin_remove_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+    ) -> PersistenceOperation<bool, StoreError>;
 
     async fn update_link_access(
         &self,
@@ -387,6 +520,13 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         link_access: WorkspaceLinkAccess,
         link_role: WorkspaceRole,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError>;
+
+    fn begin_update_link_access(
+        &self,
+        workspace_id: &str,
+        link_access: WorkspaceLinkAccess,
+        link_role: WorkspaceRole,
+    ) -> PersistenceOperation<Option<WorkspaceSharingSettings>, StoreError>;
 
     /// Saved views visible to `viewer_email`: every `Shared` view, plus the
     /// caller's own `Personal`/`Proposed` views, plus — when `viewer_can_edit`

@@ -82,8 +82,8 @@ impl SessionDeadline {
 pub type WorkspaceSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// The authoritative connect handshake, decoded from
-/// [`ServerMessage::Snapshot`]. Carries the full payload; commands that only
-/// need the document simply ignore the presence and availability fields.
+/// [`ServerMessage::Snapshot`]. Carries the session fields used by CLI
+/// commands; viewer-only dataset fetch descriptors are deliberately ignored.
 #[derive(Debug, Clone)]
 pub struct WorkspaceSnapshot {
     pub seq: u64,
@@ -256,6 +256,7 @@ where
                 peers,
                 your_id,
                 generated_availability,
+                dataset_fetch: _,
             } => Ok(Some(WorkspaceSnapshot {
                 seq,
                 document,

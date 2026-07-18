@@ -17,6 +17,7 @@ import {
   type LabelVolumeSizing,
 } from "../atlasSizing.ts";
 import type { TrackedGpuResource } from "../gpuResourceBudget.ts";
+import { labelPoolKey } from "../labelPoolKey.ts";
 
 /** Per-LOD indirection section metadata. */
 export interface LodIndirectionMeta {
@@ -68,11 +69,13 @@ export interface AtlasState {
  * blend across brick or level boundaries.
  *
  * Chunks are written IN PLACE as they arrive (the pool is never destroyed on
- * a T scrub when the level dims are unchanged), so a label never blanks
- * mid-scrub — the previous volume stays visible until the new one lands.
+ * a T scrub when the level dims are unchanged), but residency is
+ * selection-owned. Renderers hide the old volume until current chunks land;
+ * the uploader invalidates the old indirection map before a partial refresh so
+ * old and new timepoints can never be sampled together.
  */
 export interface LabelVolumePool {
-  memberId?: string;
+  memberId: string;
   /**
    * r32uint 3D slot-grid atlas, size
    * `[slotsX*chunkX, slotsY*chunkY, slotsZ*chunkZ]`. Each axis is
@@ -103,6 +106,9 @@ export interface LabelVolumePool {
   freeSlots: number[];
   /** slot index → `gridIdx` it currently holds (or `-1` when free). */
   slotGridIdx: Int32Array<ArrayBuffer>;
+  /** Content/selection identity of the indirection entries safe to render. */
+  residentContentEpoch?: number;
+  residentSelectionEpoch?: number;
   /**
    * Owning dataset id (the `removeLayerResources` id). The pool is keyed by
    * the label image id — which dataset removal never sees — so this is how
@@ -192,7 +198,8 @@ export function getOrCreateLabelVolumePool(
   const cz = Math.max(1, Math.min(Math.floor(chunkZ), d));
 
   const pools = ctx.state.labelVolumePools;
-  const existing = pools.get(memberId);
+  const key = labelPoolKey(datasetId, memberId);
+  const existing = pools.get(key);
   if (
     existing &&
     existing.width === w && existing.height === h && existing.depth === d &&
@@ -217,7 +224,7 @@ export function getOrCreateLabelVolumePool(
     const [texW, texH, texD] = sizing.textureSize;
     textureAllocation = ctx.gpuResources.createTexture(
       ctx.device,
-      { key: `label-volume:${memberId}:texture`, kind: "label-volume", datasetId },
+      { key: `label-volume:${key}:texture`, kind: "label-volume", datasetId },
       {
         size: [texW, texH, texD],
         format: "r32uint",
@@ -230,7 +237,7 @@ export function getOrCreateLabelVolumePool(
     const indirectionBytes = Math.max(sizing.gridCellCount * 4, 4);
     indirectionAllocation = ctx.gpuResources.createBuffer(
       ctx.device,
-      { key: `label-volume:${memberId}:indirection`, kind: "buffer", datasetId },
+      { key: `label-volume:${key}:indirection`, kind: "buffer", datasetId },
       {
         size: indirectionBytes,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -279,8 +286,17 @@ export function getOrCreateLabelVolumePool(
     datasetId,
     width: w, height: h, depth: d,
   };
-  pools.set(memberId, pool);
+  pools.set(key, pool);
   return pool;
+}
+
+/** Whether a label pool contains indirection entries for this render. */
+export function labelVolumePoolMatchesEpochs(
+  pool: LabelVolumePool,
+  epochs: { content: number; selection: number },
+): boolean {
+  return pool.residentContentEpoch === epochs.content &&
+    pool.residentSelectionEpoch === epochs.selection;
 }
 
 /**
@@ -325,28 +341,29 @@ export function destroyLabelVolumePool(pool: LabelVolumePool): void {
   if (!pool.labelColorAllocation) pool.labelColorBuffer?.destroy();
 }
 
-/** Remove a member's label volume pool (no-op if absent). */
-export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string): void {
-  const pool = ctx.state.labelVolumePools.get(memberId);
+/** Remove one dataset-scoped member's label volume pool (no-op if absent). */
+export function removeLabelVolumePool(
+  ctx: WorkerCtx,
+  datasetId: string,
+  memberId: string,
+): void {
+  const key = labelPoolKey(datasetId, memberId);
+  const pool = ctx.state.labelVolumePools.get(key);
   if (pool) {
     destroyLabelVolumePool(pool);
-    ctx.state.labelVolumePools.delete(memberId);
+    ctx.state.labelVolumePools.delete(key);
   }
 }
 
 /**
- * Free every label volume pool matching `idOrDataset`, matched EITHER by the
- * pool's member key (the label image id) OR by its owning `datasetId`. Dataset
- * removal calls `removeLayerResources` with the dataset id, which never equals
- * a label pool's key — so matching on the stamped `datasetId` is what actually
- * frees the (large) 3D label texture. Also accepts a member id so a per-member
- * removal still works.
+ * Free every label volume pool owned by `datasetId`. A bare member id is not a
+ * valid cleanup identity because image ids may be reused across datasets.
  */
-export function removeLabelVolumePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
-  for (const [memberId, pool] of ctx.state.labelVolumePools) {
-    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+export function removeLabelVolumePoolsForDataset(ctx: WorkerCtx, datasetId: string): void {
+  for (const [key, pool] of ctx.state.labelVolumePools) {
+    if (pool.datasetId === datasetId) {
       destroyLabelVolumePool(pool);
-      ctx.state.labelVolumePools.delete(memberId);
+      ctx.state.labelVolumePools.delete(key);
     }
   }
 }

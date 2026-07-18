@@ -114,6 +114,7 @@ export interface OrchDebug {
   /** Active set entries from plan(), capped at {@link DEBUG_MEMBER_ROW_CAP}. */
   activeSet: Array<{
     entityId: string;
+    imageId: string;
     /** Tier mode — see {@link import("../pipeline/planning/index.ts").EntityMode}. */
     mode: string;
     targetLod: number;
@@ -133,7 +134,9 @@ export interface OrchDebug {
   chunksByLevel: Record<number, number>;
   /** First N requests for inspection */
   topRequests: Array<{
+    datasetId: string;
     entityId: string;
+    imageId: string;
     level: number;
     t: number; c: number; z: number; y: number; x: number;
     lane: string;
@@ -163,7 +166,9 @@ export interface OrchDebug {
   visibleRegion: { xyBounds: [number, number, number, number]; zRange: [number, number]; effectiveZoom: number } | null;
   /** First few entity positions + level0 shape (for overlap debugging) */
   entityDiag: Array<{
+    datasetId: string;
     entityId: string;
+    imageId: string;
     position: [number, number];
     fullShape: [number, number] | null; // [fullX, fullY] from level 0
     cachedKeys: number; // how many keys getCachedKeys returned

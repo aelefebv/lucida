@@ -266,7 +266,14 @@ export class RenderClient implements UploadClient {
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.channel, msg.min, msg.max);
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
+      this.onChunksEvicted(
+        msg.datasetId,
+        msg.memberId,
+        msg.tier,
+        msg.keys,
+        msg.skipped ?? [],
+        msg.reason,
+      );
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "thumbnailResult") {
@@ -492,6 +499,7 @@ export class RenderClient implements UploadClient {
 
   volumeChunkData(
     memberId: string,
+    datasetId: string,
     chunks: Chunk[],
     level: number,
     t: number,
@@ -523,6 +531,7 @@ export class RenderClient implements UploadClient {
         epochs,
         tier,
         memberId,
+        datasetId,
         chunks: workerChunks,
         level, t, c,
         levelWidth, levelHeight, levelDepth,
@@ -572,6 +581,7 @@ export class RenderClient implements UploadClient {
 
   sliceChunkData(
     memberId: string,
+    datasetId: string,
     chunks: Chunk[],
     level: number,
     z: number,
@@ -602,6 +612,7 @@ export class RenderClient implements UploadClient {
         epochs,
         tier,
         memberId,
+        datasetId,
         chunks: workerChunks,
         level, z, t, c,
         levelWidth, levelHeight,

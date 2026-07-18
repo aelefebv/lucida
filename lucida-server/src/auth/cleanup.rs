@@ -254,6 +254,17 @@ mod tests {
         async fn delete(&self, _: &str) -> Result<Option<LoginSession>, SessionStoreError> {
             unimplemented!()
         }
+        fn begin_delete(
+            &self,
+            _: &str,
+        ) -> crate::persistence::PersistenceOperation<Option<LoginSession>, SessionStoreError>
+        {
+            crate::persistence::PersistenceOperation::ready(
+                crate::persistence::PersistenceWorkerOutcome::DefinitelyNotCommitted(
+                    SessionStoreError::Backend("simulated".into()),
+                ),
+            )
+        }
         async fn delete_expired(&self, _: DateTime<Utc>) -> Result<u64, SessionStoreError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(SessionStoreError::Backend("simulated".into()))

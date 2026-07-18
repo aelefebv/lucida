@@ -359,13 +359,22 @@ pub async fn revoke_current_bearer_token(
     State(state): State<CliAuthState>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    let authenticated_email = req
+        .extensions()
+        .get::<AuthPrincipal>()
+        .map(|principal| principal.email.clone());
     let Some(raw) = read_bearer_from_headers(req.headers()) else {
         return bad_request("request was authenticated without a bearer token");
     };
     let hash = hash_bearer_token(raw);
     let executor = CredentialMutationExecutor::new(state.workspace_manager.clone());
     match executor
-        .revoke_bearer(Arc::clone(&state.token_store), hash, Utc::now())
+        .revoke_bearer(
+            Arc::clone(&state.token_store),
+            hash,
+            Utc::now(),
+            authenticated_email,
+        )
         .await
     {
         Ok(Some(row)) => {
@@ -692,7 +701,10 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
     let mut deleted_email = None;
     let delete_failed = if let Some(id) = session_id {
         let executor = CredentialMutationExecutor::new(state.workspace_manager.clone());
-        match executor.delete_session(Arc::clone(&state.store), id).await {
+        match executor
+            .delete_session(Arc::clone(&state.store), id, authenticated_email.clone())
+            .await
+        {
             Ok(row) => {
                 deleted_email = row.map(|row| row.email);
                 false
@@ -1466,6 +1478,20 @@ mod tests {
             Err(crate::auth::SessionStoreError::Backend(
                 "simulated delete failure".into(),
             ))
+        }
+
+        fn begin_delete(
+            &self,
+            _id: &str,
+        ) -> crate::persistence::PersistenceOperation<
+            Option<LoginSession>,
+            crate::auth::SessionStoreError,
+        > {
+            crate::persistence::PersistenceOperation::ready(
+                crate::persistence::PersistenceWorkerOutcome::DefinitelyNotCommitted(
+                    crate::auth::SessionStoreError::Backend("simulated delete failure".into()),
+                ),
+            )
         }
 
         async fn delete_expired(

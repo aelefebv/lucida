@@ -113,7 +113,7 @@ describe("buildColdActiveEntry", () => {
     const source = entity();
     const result = buildColdActiveEntry(
       tile(),
-      new Map([[source.entityId, source]]),
+      new Map([[source.imageId, source]]),
       matrices(),
       {},
     );
@@ -141,7 +141,7 @@ describe("buildColdActiveEntry", () => {
     const source = entity();
     const result = buildColdActiveEntry(
       { kind: "invisible", entityId: source.entityId, imageId: source.imageId, coarsestLod: 1 },
-      new Map([[source.entityId, source]]),
+      new Map([[source.imageId, source]]),
       new Map(),
       {},
     );
@@ -214,6 +214,38 @@ describe("buildColdState", () => {
     expect(b.datasetId).toBe("b");
     expect(a).not.toBe(b);
   });
+
+  it("preserves two images with one owner and uses each image's own geometry and layout", () => {
+    const owner = "shared-owner";
+    const imageA = entity(owner, "image-a");
+    const imageBBase = entity(owner, "image-b");
+    const imageB: EntitySnapshot = {
+      ...imageBBase,
+      layoutPositionVox: [90, 80],
+      levels: imageBBase.levels.map((level, index) => ({
+        ...level,
+        shape: index === 0 ? [2, 2, 4, 20, 40] : [2, 2, 2, 10, 20],
+      })),
+    };
+
+    const msg = buildColdState({
+      datasetId: "ds-shared",
+      activeSet: [tile(owner, imageA.imageId), tile(owner, imageB.imageId)],
+      entities: [imageA, imageB],
+      selection: selection(),
+      multiChannel: false,
+      visibleRegion,
+      epochs,
+      matricesByEntity: matrices(owner),
+      dsSettings: undefined,
+    });
+
+    expect(msg.activeSet.map((entry) => entry.imageId)).toEqual(["image-a", "image-b"]);
+    expect(msg.activeSet[0].layoutPositionVox).toEqual([12, 34]);
+    expect(msg.activeSet[1].layoutPositionVox).toEqual([90, 80]);
+    expect(msg.activeSet[0].levels[0].levelDims).toEqual([2, 4, 8]);
+    expect(msg.activeSet[1].levels[0].levelDims).toEqual([4, 20, 40]);
+  });
 });
 
 describe("cold-state member identity", () => {
@@ -251,8 +283,8 @@ describe("cold-state delta", () => {
 
     expect(activeEntryReuseKey(changed)).not.toBe(activeEntryReuseKey(previous));
     expect(delta.upserts).toHaveLength(1);
-    expect(delta.activeSetOrder).toEqual(["entity-a"]);
-    expect(delta.removedEntityIds).toEqual([]);
+    expect(delta.activeSetOrder).toEqual(["image-a"]);
+    expect(delta.removedImageIds).toEqual([]);
   });
 
   it("reports removed entities and retains unchanged entries", () => {
@@ -271,8 +303,8 @@ describe("cold-state delta", () => {
     });
 
     expect(delta.upserts).toEqual([]);
-    expect(delta.removedEntityIds).toEqual(["removed"]);
-    expect(delta.activeSetOrder).toEqual(["retained"]);
+    expect(delta.removedImageIds).toEqual(["removed-image"]);
+    expect(delta.activeSetOrder).toEqual(["retained-image"]);
   });
 
   it("uses producer entity deltas without rebuilding a full order", () => {
@@ -297,14 +329,79 @@ describe("cold-state delta", () => {
           entity("retained", "retained-image"),
           entity("entered", "entered-image"),
         ],
-        removedEntityIds: ["left"],
-        appendedEntityIds: ["entered"],
+        removedImageIds: ["left-image"],
+        appendedImageIds: ["entered-image"],
       },
     });
 
     expect(delta.upserts.map((entry) => entry.entityId)).toEqual(["retained", "entered"]);
-    expect(delta.removedEntityIds).toEqual(["left"]);
-    expect(delta.appendedEntityIds).toEqual(["entered"]);
+    expect(delta.removedImageIds).toEqual(["left-image"]);
+    expect(delta.appendedImageIds).toEqual(["entered-image"]);
     expect(delta.activeSetOrder).toBeUndefined();
+  });
+
+  it("diffs same-owner images independently by image identity", () => {
+    const owner = "shared-owner";
+    const imageA = tile(owner, "image-a");
+    const imageB = tile(owner, "image-b");
+    const changedB = { ...imageB, targetLod: 1, detailLevel: 1, wantedLodLevels: [1] };
+
+    const delta = buildColdStateDelta({
+      datasetId: "ds-shared",
+      activeSet: [changedB],
+      previousActiveSet: [imageA, imageB],
+      entities: [entity(owner, "image-b")],
+      selection: selection(),
+      visibleRegion,
+      epochs,
+      matricesByEntity: matrices(owner),
+      dsSettings: undefined,
+    });
+
+    expect(delta.removedImageIds).toEqual(["image-a"]);
+    expect(delta.activeSetOrder).toEqual(["image-b"]);
+    expect(delta.upserts).toHaveLength(1);
+    expect(delta.upserts[0]).toMatchObject({
+      entityId: owner,
+      imageId: "image-b",
+      targetLod: 1,
+    });
+  });
+
+  it("builds same-owner delta upserts from each image's own pyramid and layout", () => {
+    const owner = "shared-owner";
+    const previousA = tile(owner, "image-a");
+    const previousB = tile(owner, "image-b");
+    const changedA = { ...previousA, targetLod: 1, detailLevel: 1, wantedLodLevels: [1] };
+    const changedB = { ...previousB, targetLod: 1, detailLevel: 1, wantedLodLevels: [1] };
+    const entityA = entity(owner, "image-a");
+    const entityBBase = entity(owner, "image-b");
+    const entityB: EntitySnapshot = {
+      ...entityBBase,
+      layoutPositionVox: [90, 80],
+      levels: entityBBase.levels.map((level, index) => ({
+        ...level,
+        shape: index === 0 ? [2, 2, 4, 20, 40] : [2, 2, 2, 10, 20],
+      })),
+    };
+
+    const delta = buildColdStateDelta({
+      datasetId: "ds-shared",
+      activeSet: [changedA, changedB],
+      previousActiveSet: [previousA, previousB],
+      entities: [entityA, entityB],
+      selection: selection(),
+      visibleRegion,
+      epochs,
+      matricesByEntity: matrices(owner),
+      dsSettings: undefined,
+    });
+
+    expect(delta.activeSetOrder).toEqual(["image-a", "image-b"]);
+    expect(delta.upserts.map((entry) => entry.imageId)).toEqual(["image-a", "image-b"]);
+    expect(delta.upserts[0].layoutPositionVox).toEqual([12, 34]);
+    expect(delta.upserts[1].layoutPositionVox).toEqual([90, 80]);
+    expect(delta.upserts[0].levels[0].levelDims).toEqual([2, 4, 8]);
+    expect(delta.upserts[1].levels[0].levelDims).toEqual([4, 20, 40]);
   });
 });

@@ -887,6 +887,17 @@ async fn handle_client_inner(
                                         "workspace.command.inverse_applied"
                                     );
                                 }
+                                Err(error @ CommandApplyError::PersistenceIndeterminate(_)) => {
+                                    tracing::error!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        error = %error,
+                                        "workspace.command.inverse_completion_indeterminate"
+                                    );
+                                    // The manager revoked this live runtime.
+                                    // Do not emit a retryable NACK: durable
+                                    // read-back could not prove non-commit.
+                                }
                                 Err(error) => {
                                     let (code, message, retryable) = match &error {
                                         CommandApplyError::Forbidden => (
@@ -919,6 +930,9 @@ async fn handle_client_inner(
                                             "outbound process capacity is temporarily full",
                                             true,
                                         ),
+                                        CommandApplyError::PersistenceIndeterminate(_) => {
+                                            unreachable!("handled before retryable inverse errors")
+                                        }
                                     };
                                     tracing::warn!(
                                         client_id = %id,
@@ -1027,6 +1041,19 @@ async fn handle_client_inner(
                                 {
                                     Ok((_seq, _applied)) => {}
                                     Err(e) => {
+                                        if matches!(e, WorkspaceError::PersistenceIndeterminate(_))
+                                        {
+                                            tracing::error!(
+                                                client_id = %id,
+                                                workspace_id = %ctx.live.workspace_id,
+                                                error = %e,
+                                                "workspace.command.rename_completion_indeterminate"
+                                            );
+                                            // Runtime revocation is the
+                                            // terminal signal. A NACK would
+                                            // falsely assert non-commit.
+                                            continue;
+                                        }
                                         tracing::warn!(
                                             client_id = %id,
                                             workspace_id = %ctx.live.workspace_id,
@@ -1177,6 +1204,17 @@ async fn handle_client_inner(
                                         &control_tx,
                                     )
                                     .await;
+                                }
+                                Err(e @ CommandApplyError::PersistenceIndeterminate(_)) => {
+                                    tracing::error!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        error = %e,
+                                        "workspace.command.completion_indeterminate"
+                                    );
+                                    // The manager has revoked the live
+                                    // runtime. Never send a retryable failure
+                                    // for a write that may have committed.
                                 }
                                 Err(e @ CommandApplyError::OutboundUnavailable) => {
                                     tracing::warn!(

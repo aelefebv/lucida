@@ -11,6 +11,7 @@ import type { VolumeLayerParams, VolumeRenderMultiPassMessage } from "../workerP
 import {
   type AtlasState,
   type LabelVolumePool,
+  labelVolumePoolMatchesEpochs,
   type LodIndirectionMeta,
   ensureDepthTexture,
   getDepthTexture,
@@ -23,6 +24,7 @@ import {
   admitWorkerRenderSurface,
   admitWorkerRenderViewport,
 } from "../worker/surface.ts";
+import { labelPoolKey } from "../labelPoolKey.ts";
 
 /** Identity 4×4 (column-major) — the fallback model transform for a label
  *  layer that somehow arrives without matrices (defensive; a real label
@@ -69,7 +71,7 @@ function ensureLabelVolumeDescriptor(
     pool.descAllocation = ctx.gpuResources.createBuffer(
       ctx.device,
       {
-        key: `label-volume:${pool.memberId ?? pool.datasetId}:descriptor`,
+        key: `label-volume:${labelPoolKey(pool.datasetId, pool.memberId)}:descriptor`,
         kind: "descriptor",
         datasetId: pool.datasetId,
       },
@@ -108,7 +110,7 @@ function ensureLabelVolumePalette(
     pool.labelColorAllocation = ctx.gpuResources.createBuffer(
       ctx.device,
       {
-        key: `label-volume:${pool.memberId ?? pool.datasetId}:palette:${count}`,
+        key: `label-volume:${labelPoolKey(pool.datasetId, pool.memberId)}:palette:${count}`,
         kind: "buffer",
         datasetId: pool.datasetId,
       },
@@ -149,8 +151,11 @@ function renderLabelVolumeLayer(
   isFirstLayer: boolean,
 ): boolean {
   const memberId = layer.datasetId;
-  const pool = ctx.state.labelVolumePools.get(memberId);
-  if (!pool) return false;
+  if (!layer.ownerDatasetId) return false;
+  const pool = ctx.state.labelVolumePools.get(
+    labelPoolKey(layer.ownerDatasetId, memberId),
+  );
+  if (!pool || !labelVolumePoolMatchesEpochs(pool, msg.epochs)) return false;
 
   const opacity = layer.opacity ?? DEFAULT_LABEL_OPACITY;
   const model = layer.modelMatrix ?? IDENTITY_4X4;

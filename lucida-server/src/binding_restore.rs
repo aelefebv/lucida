@@ -6,11 +6,8 @@
 //! Runs on workspace wake ([`WorkspaceManager::live_workspace`]), before
 //! the live session is published; per-dataset failures are recorded on
 //! the session and surfaced through dataset health rather than aborting
-//! the wake. This module deliberately depends only on
-//! [`crate::workspace::types`] — never the manager — so the workspace
-//! layer can call it without any import cycle, and it shares its failure
-//! classification ([`crate::open_diagnostics`]) with the interactive open
-//! path so both report the same diagnostic vocabulary.
+//! the wake. An unresolved durable refresh is different: it aborts cold
+//! publication through the manager's fail-closed persistence path.
 //!
 //! [`WorkspaceManager::live_workspace`]: crate::workspace::WorkspaceManager::live_workspace
 
@@ -24,8 +21,8 @@ use lucida_protocol::{
     GeneratedAvailabilityDelta,
 };
 use lucida_store::cache::CachedStore;
-use tokio::sync::Mutex;
 
+use crate::DatasetRuntimeConfig;
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::generated_coarse::{
     DerivedChunkCache, GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
@@ -35,10 +32,19 @@ use crate::open_diagnostics::{
     backend_open_failure, dataset_opened_validation_failure, import_failure, open_failure,
     source_policy_failure,
 };
-use crate::session::Session;
-use crate::workspace::store::WorkspaceStore;
 use crate::workspace::types::WorkspaceDatasetSource;
-use crate::{BroadcastSender, DatasetRuntimeConfig};
+use crate::workspace::{LiveWorkspace, WorkspaceError, WorkspaceManager};
+
+enum RestoreOneError {
+    Diagnostic(DatasetOpenFailureDiagnostic),
+    Fatal(WorkspaceError),
+}
+
+impl From<DatasetOpenFailureDiagnostic> for RestoreOneError {
+    fn from(diagnostic: DatasetOpenFailureDiagnostic) -> Self {
+        Self::Diagnostic(diagnostic)
+    }
+}
 
 /// Rebuild server-private dataset bindings for a lazily restored workspace.
 ///
@@ -48,14 +54,13 @@ use crate::{BroadcastSender, DatasetRuntimeConfig};
 /// bindings from the structured `workspace_datasets → dataset_sources`
 /// records before the first snapshot goes out.
 pub(crate) async fn restore_workspace_bindings(
-    session: Arc<Mutex<Session>>,
-    tx: BroadcastSender,
-    workspace_id: &str,
-    persistence: Arc<dyn WorkspaceStore>,
+    live: Arc<LiveWorkspace>,
+    manager: WorkspaceManager,
     sources: Vec<WorkspaceDatasetSource>,
     dataset_runtime: DatasetRuntimeConfig,
     generated_status_budget: Arc<GeneratedStatusBudget>,
-) {
+) -> Result<(), WorkspaceError> {
+    let session = Arc::clone(&live.session);
     for source in sources {
         if session
             .lock()
@@ -68,18 +73,20 @@ pub(crate) async fn restore_workspace_bindings(
         let redacted_source = dataset_runtime
             .source_policy
             .redact_untrusted(source.identity.locator.as_str());
-        if let Err(e) = restore_one_workspace_binding(
+        match restore_one_workspace_binding(
             Arc::clone(&session),
-            tx.clone(),
-            workspace_id,
-            Arc::clone(&persistence),
+            live.tx.clone(),
+            Arc::clone(&live),
+            manager.clone(),
             &source,
             &dataset_runtime,
             Arc::clone(&generated_status_budget),
         )
         .await
         {
-            {
+            Ok(()) => {}
+            Err(RestoreOneError::Fatal(error)) => return Err(error),
+            Err(RestoreOneError::Diagnostic(e)) => {
                 let mut sess = session.lock().await;
                 sess.record_binding_restore_failure(
                     source.workspace_dataset_id.clone(),
@@ -88,30 +95,32 @@ pub(crate) async fn restore_workspace_bindings(
                     source.display_name.clone(),
                     e.clone(),
                 );
+                drop(sess);
+                tracing::warn!(
+                    dataset_id = %source.workspace_dataset_id,
+                    dataset_source_id = %source.identity.dataset_id(),
+                    source = %redacted_source,
+                    error = %e.message,
+                    stage = ?e.stage,
+                    kind = ?e.kind,
+                    retryable = e.retryable,
+                    "workspace.binding_restore_failed"
+                );
             }
-            tracing::warn!(
-                dataset_id = %source.workspace_dataset_id,
-                dataset_source_id = %source.identity.dataset_id(),
-                source = %redacted_source,
-                error = %e.message,
-                stage = ?e.stage,
-                kind = ?e.kind,
-                retryable = e.retryable,
-                "workspace.binding_restore_failed"
-            );
         }
     }
+    Ok(())
 }
 
 async fn restore_one_workspace_binding(
-    session: Arc<Mutex<Session>>,
-    tx: BroadcastSender,
-    workspace_id: &str,
-    persistence: Arc<dyn WorkspaceStore>,
+    session: Arc<tokio::sync::Mutex<crate::session::Session>>,
+    tx: crate::BroadcastSender,
+    live: Arc<LiveWorkspace>,
+    manager: WorkspaceManager,
     source: &WorkspaceDatasetSource,
     dataset_runtime: &DatasetRuntimeConfig,
     generated_status_budget: Arc<GeneratedStatusBudget>,
-) -> Result<(), DatasetOpenFailureDiagnostic> {
+) -> Result<(), RestoreOneError> {
     let admitted = dataset_runtime
         .source_policy
         .admit(source.identity.locator.as_str())
@@ -129,7 +138,8 @@ async fn restore_one_workspace_binding(
             false,
             "persisted source identity no longer matches admitted locator",
             None,
-        ));
+        )
+        .into());
     }
 
     let store = admitted
@@ -181,9 +191,9 @@ async fn restore_one_workspace_binding(
             )
         })?;
         let seq = staged.seq();
-        persistence
+        manager
             .persist_dataset_refreshed(
-                workspace_id,
+                &live,
                 &dataset_id_key,
                 &source_version,
                 &source.display_name,
@@ -192,13 +202,17 @@ async fn restore_one_workspace_binding(
             )
             .await
             .map_err(|error| {
-                open_failure(
-                    DatasetOpenStage::WorkspacePersist,
-                    DatasetOpenFailureKind::Persistence,
-                    true,
-                    "restored source generation could not be persisted",
-                    Some(error.to_string()),
-                )
+                if matches!(error, WorkspaceError::PersistenceIndeterminate(_)) {
+                    RestoreOneError::Fatal(error)
+                } else {
+                    RestoreOneError::Diagnostic(open_failure(
+                        DatasetOpenStage::WorkspacePersist,
+                        DatasetOpenFailureKind::Persistence,
+                        true,
+                        "restored source generation could not be persisted",
+                        Some(error.to_string()),
+                    ))
+                }
             })?;
         sess.commit_staged_document(staged);
     }

@@ -13,6 +13,7 @@ import {
   type GroupTierCoverage,
 } from "./DebugOverlays.tsx";
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
+import { plannedRankKey } from "./plannedRank.ts";
 import { radiusSpecsForOverlay } from "./radiusPreview.ts";
 
 function req(overrides: Partial<ChunkRequest>): ChunkRequest {
@@ -43,6 +44,13 @@ function emptyCoverage(): GroupTierCoverage {
 }
 
 describe("DebugOverlays tier coverage helpers", () => {
+  it("keeps identical detail and coarse requests distinct in planned ranks", () => {
+    const chunkKey = "0/0/0/0/0/0";
+    expect(plannedRankKey("ds-1", "img-a", "detail", chunkKey)).not.toBe(
+      plannedRankKey("ds-1", "img-a", "coarse", chunkKey),
+    );
+  });
+
   it("filters render-radius specs to the active slider preview tier", () => {
     const cfg = {
       ...DEFAULT_PLANNING_CONFIG,
@@ -64,15 +72,24 @@ describe("DebugOverlays tier coverage helpers", () => {
 
   it("aggregates current detail and coarse available coverage per group", () => {
     const deliveryState = new DeliveryState();
-    deliveryState.markChunkSent("img-a", 0, "0/0/0/0/0/0", "detail");
-    deliveryState.markChunkSent("img-a", 0, "2/0/0/0/0/0", "coarse");
+    deliveryState.markChunkSent("ds-1", "img-a", 0, "0/0/0/0/0/0", "detail");
+    deliveryState.markChunkSent("ds-1", "img-a", 0, "2/0/0/0/0/0", "coarse");
 
     const cacheSnap: CacheStateSnapshot = {
       cached: new Map([
-        ["tile-a", new Set(["0/0/0/0/0/0", "2/0/0/0/0/0"])],
+        ["ds-1", new Map([
+          ["img-a", new Map([
+            ["detail", new Set(["0/0/0/0/0/0"])],
+            ["coarse", new Set(["2/0/0/0/0/0"])],
+          ])],
+        ])],
       ]),
       inFlight: new Map([
-        ["tile-a", new Set(["0/0/0/0/0/1"])],
+        ["ds-1", new Map([
+          ["img-a", new Map([
+            ["detail", new Set(["0/0/0/0/0/1"])],
+          ])],
+        ])],
       ]),
     };
 
@@ -120,7 +137,11 @@ describe("DebugOverlays tier coverage helpers", () => {
       { deliveryState: new DeliveryState() },
       {
         cached: new Map([
-          ["tile-a", new Set(["0/0/0/0/0/0", "0/0/0/0/0/1"])],
+          ["ds-1", new Map([
+            ["img-a", new Map([
+              ["detail", new Set(["0/0/0/0/0/0", "0/0/0/0/0/1"])],
+            ])],
+          ])],
         ]),
         inFlight: new Map(),
       },
@@ -133,6 +154,36 @@ describe("DebugOverlays tier coverage helpers", () => {
       inFlight: 0,
     });
     expect(formatTierCoverageLabel(coverageByGroup.get("group-a")!, "FD", 0)).toBe("D2/2");
+  });
+
+  it("counts identical detail and coarse chunk keys as separate tier coverage", () => {
+    const chunkKey = "0/0/0/0/0/0";
+    const coverageByGroup = buildGroupTierCoverage(
+      {
+        requests: [
+          req({ lane: "detail", tier: "detail", chunkKey }),
+          req({ lane: "coarse", tier: "coarse", chunkKey }),
+        ],
+      },
+      new Map([["tile-a", "group-a"]]),
+      null,
+      {
+        cached: new Map([
+          ["ds-1", new Map([
+            ["img-a", new Map([
+              ["detail", new Set([chunkKey])],
+              ["coarse", new Set([chunkKey])],
+            ])],
+          ])],
+        ]),
+        inFlight: new Map(),
+      },
+    );
+
+    expect(coverageByGroup.get("group-a")).toEqual({
+      detail: { wanted: 1, shown: 1, ready: 1, inFlight: 0 },
+      coarse: { wanted: 1, shown: 1, ready: 1, inFlight: 0 },
+    });
   });
 
   it("falls back to the legacy mode label when no chunk-tier requests exist", () => {

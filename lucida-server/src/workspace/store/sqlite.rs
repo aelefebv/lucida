@@ -3,6 +3,13 @@
 //! rows back into the domain structs.
 
 use std::collections::HashMap;
+use std::future::Future;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::time::Duration;
 
 use chrono::Utc;
 use lucida_content::DatasetId;
@@ -12,6 +19,9 @@ use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use sqlx::{Row, Sqlite, SqlitePool};
 
+#[cfg(test)]
+use crate::persistence::PersistenceOperationId;
+use crate::persistence::{PersistenceDeadline, PersistenceOperation, PersistenceWorkerOutcome};
 use crate::workspace::types::{
     SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
     WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
@@ -19,9 +29,10 @@ use crate::workspace::types::{
 };
 
 use super::{
-    StoreError, WorkspaceStore, default_member_display_name, default_workspace_name,
-    map_saved_view_json_in, map_saved_view_json_out, map_sql, normalize_email, parse_document,
-    parse_dt, parse_opt_dt, previous_stored_seq, serialize_document, stored_seq,
+    StoreError, WorkspaceMemberPersistenceState, WorkspaceStore, default_member_display_name,
+    default_workspace_name, map_saved_view_json_in, map_saved_view_json_out, map_sql,
+    normalize_email, parse_document, parse_dt, parse_opt_dt, previous_stored_seq,
+    serialize_document, stored_seq,
 };
 
 use async_trait::async_trait;
@@ -29,11 +40,150 @@ use async_trait::async_trait;
 #[derive(Clone)]
 pub struct SqliteWorkspaceStore {
     pool: SqlitePool,
+    persistence_deadline: PersistenceDeadline,
+    #[cfg(test)]
+    never_complete_next: Arc<AtomicBool>,
+    #[cfg(test)]
+    never_quiesce_next: Arc<AtomicBool>,
+    #[cfg(test)]
+    indeterminate_next: Arc<AtomicBool>,
+    #[cfg(test)]
+    stall_next_reconciliation_read: Arc<AtomicBool>,
+    #[cfg(test)]
+    last_operation_id: Arc<Mutex<Option<PersistenceOperationId>>>,
 }
 
 impl SqliteWorkspaceStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            persistence_deadline: PersistenceDeadline::default(),
+            #[cfg(test)]
+            never_complete_next: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            never_quiesce_next: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            indeterminate_next: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            stall_next_reconciliation_read: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            last_operation_id: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_persistence_deadline(pool: SqlitePool, deadline: Duration) -> Self {
+        Self {
+            pool,
+            persistence_deadline: PersistenceDeadline::bounded(deadline),
+            never_complete_next: Arc::new(AtomicBool::new(false)),
+            never_quiesce_next: Arc::new(AtomicBool::new(false)),
+            indeterminate_next: Arc::new(AtomicBool::new(false)),
+            stall_next_reconciliation_read: Arc::new(AtomicBool::new(false)),
+            last_operation_id: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn never_complete_next_persistence(&self) {
+        self.never_complete_next.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn never_complete_and_never_quiesce_next_persistence(&self) {
+        self.never_quiesce_next.store(true, Ordering::Release);
+        self.never_complete_next.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lose_next_persistence_completion_in_backend(&self) {
+        self.indeterminate_next.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stall_next_reconciliation_read(&self) {
+        self.stall_next_reconciliation_read
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_persistence_operation_id(&self) -> PersistenceOperationId {
+        self.last_operation_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("a persistence operation must have started")
+    }
+
+    #[cfg(test)]
+    async fn stall_reconciliation_read_if_requested(&self) {
+        if self
+            .stall_next_reconciliation_read
+            .swap(false, Ordering::AcqRel)
+        {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    fn begin_operation<T, F>(&self, worker: F) -> PersistenceOperation<T, StoreError>
+    where
+        T: Send + 'static,
+        F: Future<Output = PersistenceWorkerOutcome<T, StoreError>> + Send + 'static,
+    {
+        #[cfg(test)]
+        if self.never_complete_next.swap(false, Ordering::AcqRel) {
+            let operation = if self.never_quiesce_next.swap(false, Ordering::AcqRel) {
+                PersistenceOperation::spawn(
+                    self.persistence_deadline,
+                    std::future::pending(),
+                    std::future::pending,
+                )
+            } else {
+                PersistenceOperation::spawn(
+                    self.persistence_deadline,
+                    std::future::pending(),
+                    || async { true },
+                )
+            };
+            *self
+                .last_operation_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(operation.operation_id());
+            return operation;
+        }
+        #[cfg(test)]
+        let worker = {
+            let lose_completion = self.indeterminate_next.swap(false, Ordering::AcqRel);
+            async move {
+                let outcome = worker.await;
+                if lose_completion {
+                    match outcome {
+                        PersistenceWorkerOutcome::Committed(_) => {
+                            PersistenceWorkerOutcome::RecoverablyIndeterminate(StoreError::Backend(
+                                "injected backend completion loss".to_string(),
+                            ))
+                        }
+                        outcome => outcome,
+                    }
+                } else {
+                    outcome
+                }
+            }
+        };
+        let pool = self.pool.clone();
+        let operation =
+            PersistenceOperation::spawn(self.persistence_deadline, worker, move || async move {
+                sqlite_write_quiescence_barrier(&pool).await
+            });
+        #[cfg(test)]
+        {
+            *self
+                .last_operation_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(operation.operation_id());
+        }
+        operation
     }
 
     async fn workspace_exists(&self, workspace_id: &str) -> Result<bool, StoreError> {
@@ -97,6 +247,27 @@ impl SqliteWorkspaceStore {
             }),
         }
     }
+}
+
+/// Acquire and release SQLite's single-writer lock after a cancelled/lost
+/// mutation. Once this succeeds, no earlier writer can commit after the next
+/// durable read. Failure/timeout is handled by `PersistenceOperation` as
+/// restart-required fail-close.
+async fn sqlite_write_quiescence_barrier(pool: &SqlitePool) -> bool {
+    let Ok(mut connection) = pool.acquire().await else {
+        return false;
+    };
+    if sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .is_ok()
 }
 
 async fn touch_workspace(
@@ -178,6 +349,253 @@ async fn insert_blank_owned_workspace(
 
 #[async_trait]
 impl WorkspaceStore for SqliteWorkspaceStore {
+    fn begin_archive_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> PersistenceOperation<Option<WorkspaceRecord>, StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        self.begin_operation(async move {
+            match store.archive_workspace(&workspace_id).await {
+                Ok(record) => PersistenceWorkerOutcome::Committed(record),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_persist_document(
+        &self,
+        workspace_id: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let document = document.clone();
+        self.begin_operation(async move {
+            match store.persist_document(&workspace_id, seq, &document).await {
+                Ok(()) => PersistenceWorkerOutcome::Committed(()),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_persist_dataset_opened(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
+        added_by: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let workspace_dataset_id = workspace_dataset_id.clone();
+        let source = source.clone();
+        let display_name = display_name.to_string();
+        let added_by = added_by.to_string();
+        let document = document.clone();
+        self.begin_operation(async move {
+            match store
+                .persist_dataset_opened(
+                    &workspace_id,
+                    &workspace_dataset_id,
+                    &source,
+                    &display_name,
+                    &added_by,
+                    seq,
+                    &document,
+                )
+                .await
+            {
+                Ok(()) => PersistenceWorkerOutcome::Committed(()),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_persist_dataset_removed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let workspace_dataset_id = workspace_dataset_id.clone();
+        let document = document.clone();
+        self.begin_operation(async move {
+            match store
+                .persist_dataset_removed(&workspace_id, &workspace_dataset_id, seq, &document)
+                .await
+            {
+                Ok(()) => PersistenceWorkerOutcome::Committed(()),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_persist_dataset_refreshed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        source: &SourceVersion,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let workspace_dataset_id = workspace_dataset_id.clone();
+        let source = source.clone();
+        let display_name = display_name.to_string();
+        let document = document.clone();
+        self.begin_operation(async move {
+            match store
+                .persist_dataset_refreshed(
+                    &workspace_id,
+                    &workspace_dataset_id,
+                    &source,
+                    &display_name,
+                    seq,
+                    &document,
+                )
+                .await
+            {
+                Ok(()) => PersistenceWorkerOutcome::Committed(()),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_persist_dataset_renamed(
+        &self,
+        workspace_id: &str,
+        workspace_dataset_id: &DatasetId,
+        display_name: &str,
+        seq: u64,
+        document: &DocumentState,
+    ) -> PersistenceOperation<(), StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let workspace_dataset_id = workspace_dataset_id.clone();
+        let display_name = display_name.to_string();
+        let document = document.clone();
+        self.begin_operation(async move {
+            match store
+                .persist_dataset_renamed(
+                    &workspace_id,
+                    &workspace_dataset_id,
+                    &display_name,
+                    seq,
+                    &document,
+                )
+                .await
+            {
+                Ok(()) => PersistenceWorkerOutcome::Committed(()),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_upsert_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+        role: WorkspaceRole,
+    ) -> PersistenceOperation<Option<WorkspaceMember>, StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let email = email.to_string();
+        let display_name = display_name.to_string();
+        self.begin_operation(async move {
+            match store
+                .upsert_member(&workspace_id, &email, &display_name, role)
+                .await
+            {
+                Ok(member) => PersistenceWorkerOutcome::Committed(member),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_admin_upsert_owner(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+    ) -> PersistenceOperation<Option<WorkspaceMember>, StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let email = email.to_string();
+        let display_name = display_name.to_string();
+        self.begin_operation(async move {
+            match store
+                .admin_upsert_owner(&workspace_id, &email, &display_name)
+                .await
+            {
+                Ok(member) => PersistenceWorkerOutcome::Committed(member),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_update_member_role(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        role: WorkspaceRole,
+    ) -> PersistenceOperation<Option<WorkspaceMember>, StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let email = email.to_string();
+        self.begin_operation(async move {
+            match store.update_member_role(&workspace_id, &email, role).await {
+                Ok(member) => PersistenceWorkerOutcome::Committed(member),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_remove_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+    ) -> PersistenceOperation<bool, StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let email = email.to_string();
+        self.begin_operation(async move {
+            match store.remove_member(&workspace_id, &email).await {
+                Ok(removed) => PersistenceWorkerOutcome::Committed(removed),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
+    fn begin_update_link_access(
+        &self,
+        workspace_id: &str,
+        link_access: WorkspaceLinkAccess,
+        link_role: WorkspaceRole,
+    ) -> PersistenceOperation<Option<WorkspaceSharingSettings>, StoreError> {
+        let store = self.clone();
+        let workspace_id = workspace_id.to_string();
+        self.begin_operation(async move {
+            match store
+                .update_link_access(&workspace_id, link_access, link_role)
+                .await
+            {
+                Ok(settings) => PersistenceWorkerOutcome::Committed(settings),
+                Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+            }
+        })
+    }
+
     async fn create_workspace(
         &self,
         owner: &AuthPrincipal,
@@ -625,6 +1043,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceAdminDetails>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
         let row = sqlx::query(
             r#"
             SELECT
@@ -655,6 +1075,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     }
 
     async fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
         let row = sqlx::query(
             r#"
             SELECT
@@ -670,6 +1092,64 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         .map_err(map_sql)?;
 
         row.map(row_to_record).transpose()
+    }
+
+    async fn workspace_archived_for_reconciliation(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<bool>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
+        let row = sqlx::query("SELECT archived_at FROM workspaces WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(row.map(|row| row.get::<Option<String>, _>("archived_at").is_some()))
+    }
+
+    async fn member_for_reconciliation(
+        &self,
+        workspace_id: &str,
+        email: &str,
+    ) -> Result<Option<WorkspaceMemberPersistenceState>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
+        let row = sqlx::query(
+            "SELECT role, display_name FROM workspace_members WHERE workspace_id = ? AND email = ?",
+        )
+        .bind(workspace_id)
+        .bind(normalize_email(email))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql)?;
+        row.map(|row| {
+            Ok(WorkspaceMemberPersistenceState {
+                role: WorkspaceRole::try_from(row.get::<String, _>("role").as_str())?,
+                display_name: row.get("display_name"),
+            })
+        })
+        .transpose()
+    }
+
+    async fn link_policy_for_reconciliation(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<(WorkspaceLinkAccess, WorkspaceRole)>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
+        let row = sqlx::query("SELECT link_access, link_role FROM workspaces WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        row.map(|row| {
+            Ok((
+                WorkspaceLinkAccess::try_from(row.get::<String, _>("link_access").as_str())?,
+                WorkspaceRole::try_from(row.get::<String, _>("link_role").as_str())?,
+            ))
+        })
+        .transpose()
     }
 
     async fn role_for(
@@ -1263,6 +1743,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         workspace_id: &str,
         workspace_dataset_id: &DatasetId,
     ) -> Result<Option<WorkspaceDatasetSource>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
         let row = sqlx::query(
             r#"
             SELECT
@@ -1289,6 +1771,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         &self,
         workspace_id: &str,
     ) -> Result<Option<WorkspaceSharingSettings>, StoreError> {
+        #[cfg(test)]
+        self.stall_reconciliation_read_if_requested().await;
         let row = sqlx::query(
             r#"
             SELECT link_access, link_role

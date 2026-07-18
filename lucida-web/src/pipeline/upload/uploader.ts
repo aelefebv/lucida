@@ -6,7 +6,7 @@
  * handles worker-feedback parsing.
  */
 
-import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
+import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -418,14 +418,16 @@ export class Uploader {
   // Worker feedback (wired in renderLoop.start)
 
   handleChunksEvicted(
+    datasetId: string,
     memberId: string,
+    tier: ResidencyTier,
     evicted: string[],
     skipped: string[],
     cpuCache: CpuCache,
     reason?: ChunkFeedbackReason,
   ): void {
     this.workerFeedback.handleChunksEvicted(
-      memberId, evicted, skipped, cpuCache, reason,
+      datasetId, memberId, tier, evicted, skipped, cpuCache, reason,
     );
   }
 
@@ -442,8 +444,9 @@ export class Uploader {
     imageId: string,
     c: number,
     chunkKey: string,
+    tier: ResidencyTier,
   ): "resident" | "missing" | "unknown" {
-    return this.workerFeedback.chunkResidency(datasetId, imageId, c, chunkKey);
+    return this.workerFeedback.chunkResidency(datasetId, imageId, c, chunkKey, tier);
   }
 
   // Lifecycle (dataset removal, multi-channel transitions)

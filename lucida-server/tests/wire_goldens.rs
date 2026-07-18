@@ -636,6 +636,28 @@ fn single_fetch() -> FetchSource {
     })
 }
 
+/// Snapshot runtime contract deliberately uses compressed intensity AND label
+/// streams so a fresh client cannot get away with reconstructing `Raw` from
+/// manifest dtype alone.
+fn snapshot_fetch() -> FetchSource {
+    FetchSource::Proxied(ProxiedFetchDescriptor {
+        images: vec![
+            ProxiedImageSpec {
+                image_id: ImageId(SINGLE_IMAGE_ID.into()),
+                wire_format: WireFormat::Zstd {
+                    data_type: DataType::Uint16,
+                },
+            },
+            ProxiedImageSpec {
+                image_id: ImageId(SINGLE_LABEL_IMAGE_ID.into()),
+                wire_format: WireFormat::Lz4 {
+                    data_type: DataType::Uint32,
+                },
+            },
+        ],
+    })
+}
+
 fn single_dataset_opened() -> DatasetOpened {
     DatasetOpened {
         manifest: single_manifest(),
@@ -1336,6 +1358,8 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
     let mut generated_availability = HashMap::new();
     // At most one entry: HashMap order is nondeterministic (header comment).
     generated_availability.insert(DatasetId(SINGLE_DATASET_ID.into()), generated_snapshot());
+    let mut dataset_fetch = HashMap::new();
+    dataset_fetch.insert(DatasetId(SINGLE_DATASET_ID.into()), snapshot_fetch());
 
     let mut dataset_settings = HashMap::new();
     dataset_settings.insert(DatasetId(SINGLE_DATASET_ID.into()), peer_display_settings());
@@ -1343,6 +1367,15 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
     let snapshot_required = {
         let mut keys = req("", &["/type", "/seq", "/document", "/peers", "/your_id"]);
         keys.push("/document/manifests".into());
+        keys.extend(req(
+            &format!("/dataset_fetch/{SINGLE_DATASET_ID}/Proxied"),
+            &[
+                "/images/0/image_id",
+                "/images/0/wire_format/Zstd/data_type",
+                "/images/1/image_id",
+                "/images/1/wire_format/Lz4/data_type",
+            ],
+        ));
         keys.extend(presence_required().iter().map(|k| format!("/peers/0{k}")));
         let pin = format!("/document/annotations/{SINGLE_DATASET_ID}/0");
         keys.extend(req(
@@ -1379,6 +1412,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 peers: vec![peer_presence()],
                 your_id: 7,
                 generated_availability,
+                dataset_fetch,
             },
             snapshot_required,
         ),

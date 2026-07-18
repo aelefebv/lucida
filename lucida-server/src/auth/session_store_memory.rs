@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::session_store::{LoginSession, LoginSessionStore, SessionStoreError};
+use crate::persistence::{PersistenceOperation, PersistenceWorkerOutcome};
 
 /// In-memory implementation. The mutex is uncontended in tests so the
 /// extra lock overhead is irrelevant.
@@ -41,6 +42,18 @@ impl MemorySessionStore {
 
 #[async_trait]
 impl LoginSessionStore for MemorySessionStore {
+    fn begin_delete(
+        &self,
+        id: &str,
+    ) -> PersistenceOperation<Option<LoginSession>, SessionStoreError> {
+        let row = self
+            .rows
+            .lock()
+            .expect("memory store mutex poisoned")
+            .remove(id);
+        PersistenceOperation::ready(PersistenceWorkerOutcome::Committed(row))
+    }
+
     async fn create(&self, session: LoginSession) -> Result<(), SessionStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
         rows.insert(session.id.clone(), session);

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { decodeChunkFrame } from "./chunkFrame";
+import { chunkFrameByteLength, decodeChunkFrame } from "./chunkFrame";
 
 interface GoldenChunkFrame {
   client_id: number;
@@ -39,6 +39,23 @@ describe("chunk-frame wire contract", () => {
       `${fixture.dataset_id}/${fixture.image_id}/${fixture.chunk_key}`,
     );
     expect(new Uint8Array(result.frame.payload)).toEqual(fromHex(fixture.payload_hex));
+  });
+
+  it("prices the same committed bytes emitted by the Rust codec", () => {
+    const encoded = fromHex(fixture.frame_hex);
+    expect(chunkFrameByteLength(
+      fixture.dataset_id,
+      fixture.image_id,
+      fixture.chunk_key,
+      fromHex(fixture.payload_hex).byteLength,
+    )).toBe(encoded.byteLength);
+  });
+
+  it("counts UTF-8 key bytes rather than JavaScript code units", () => {
+    const key = "dätaset/imâge/0/0/0/0/0/0";
+    expect(chunkFrameByteLength("dätaset", "imâge", "0/0/0/0/0/0", 17)).toBe(
+      6 + new TextEncoder().encode(key).byteLength + 17,
+    );
   });
 
   it("classifies every malformed prefix instead of partially decoding it", () => {

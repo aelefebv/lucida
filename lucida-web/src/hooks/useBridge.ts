@@ -212,7 +212,7 @@ export function useBridge(params: Params) {
   }, []);
 
   const sendOpenRemoteDataset = useCallback((url: string) => {
-    controllerRef.current?.openRemoteDataset(url);
+    return controllerRef.current?.openRemoteDataset(url) ?? null;
   }, []);
 
   const breakFollow = useCallback(() => {

@@ -20,6 +20,7 @@ use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 
 use super::session_store::{LoginSession, LoginSessionStore, SessionStoreError};
+use crate::persistence::{PersistenceDeadline, PersistenceOperation, PersistenceWorkerOutcome};
 
 /// Migrations bundled into the binary at compile time. Adding a new
 /// `.sql` file to `migrations/` and rebuilding picks it up.
@@ -149,6 +150,25 @@ fn map_err(e: sqlx::Error) -> SessionStoreError {
 
 #[async_trait]
 impl LoginSessionStore for SqliteSessionStore {
+    fn begin_delete(
+        &self,
+        id: &str,
+    ) -> PersistenceOperation<Option<LoginSession>, SessionStoreError> {
+        let store = self.clone();
+        let id = id.to_string();
+        let pool = self.pool.clone();
+        PersistenceOperation::spawn(
+            PersistenceDeadline::default(),
+            async move {
+                match store.delete(&id).await {
+                    Ok(row) => PersistenceWorkerOutcome::Committed(row),
+                    Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+                }
+            },
+            move || async move { sqlite_write_quiescence_barrier(&pool).await },
+        )
+    }
+
     async fn create(&self, session: LoginSession) -> Result<(), SessionStoreError> {
         sqlx::query(
             r#"
@@ -238,6 +258,23 @@ impl LoginSessionStore for SqliteSessionStore {
             .map_err(map_err)?;
         Ok(result.rows_affected())
     }
+}
+
+async fn sqlite_write_quiescence_barrier(pool: &SqlitePool) -> bool {
+    let Ok(mut connection) = pool.acquire().await else {
+        return false;
+    };
+    if sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .is_ok()
 }
 
 #[cfg(test)]

@@ -147,6 +147,20 @@ describe("Bridge.destroy", () => {
     expect(ws.sent).toHaveLength(1);
   });
 
+  it("reports raw-send admission and can definitively end the socket epoch", () => {
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
+    const ws = FakeWebSocket.instances[0];
+
+    expect(bridge.send("queued-too-early")).toBe(false);
+    ws.open();
+    expect(bridge.send("transmitted")).toBe(true);
+    expect(ws.sent).toEqual(["transmitted"]);
+
+    bridge.resetTransport();
+    expect(ws.closed).toBe(true);
+    expect(bridge.send("old-epoch")).toBe(false);
+  });
+
   it("rejects a dataset open until the socket is OPEN", () => {
     const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
     const ws = FakeWebSocket.instances[0];
@@ -157,5 +171,18 @@ describe("Bridge.destroy", () => {
     ws.open();
     expect(bridge.sendOpenRemoteDataset("/ready.zarr")).toMatch(/^web-/);
     expect(ws.sent).toHaveLength(1);
+  });
+
+  it("rejects dataset-open admission when OPEN races a throwing send", () => {
+    const bridge = new Bridge(makeBridgeHandlers(), "ws://test/ws/workspaces/w1");
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    vi.spyOn(ws, "send").mockImplementationOnce(() => {
+      throw new Error("socket closed during send");
+    });
+
+    expect(bridge.sendOpenRemoteDataset("/raced.zarr")).toBeNull();
+    expect(ws.sent).toHaveLength(0);
+    expect(ws.closed).toBe(true);
   });
 });

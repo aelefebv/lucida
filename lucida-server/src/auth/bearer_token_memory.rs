@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::bearer_token::{BearerToken, BearerTokenStore, BearerTokenStoreError};
+use crate::persistence::{PersistenceOperation, PersistenceWorkerOutcome};
 
 #[derive(Debug, Default)]
 pub struct MemoryBearerTokenStore {
@@ -32,6 +33,26 @@ impl MemoryBearerTokenStore {
 
 #[async_trait]
 impl BearerTokenStore for MemoryBearerTokenStore {
+    fn begin_revoke_by_hash(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> PersistenceOperation<Option<BearerToken>, BearerTokenStoreError> {
+        let mut rows = self.rows.lock().expect("memory store mutex poisoned");
+        let row = rows
+            .values_mut()
+            .find(|row| row.token_hash == token_hash)
+            .and_then(|row| {
+                if row.revoked_at.is_some() {
+                    None
+                } else {
+                    row.revoked_at = Some(now);
+                    Some(row.clone())
+                }
+            });
+        PersistenceOperation::ready(PersistenceWorkerOutcome::Committed(row))
+    }
+
     async fn create(&self, token: BearerToken) -> Result<(), BearerTokenStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
         if rows.values().any(|row| row.token_hash == token.token_hash) {

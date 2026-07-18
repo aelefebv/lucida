@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 
 use super::bearer_token::{BearerToken, BearerTokenStore, BearerTokenStoreError};
+use crate::persistence::{PersistenceDeadline, PersistenceOperation, PersistenceWorkerOutcome};
 
 #[derive(Debug, Clone)]
 pub struct SqliteBearerTokenStore {
@@ -38,6 +39,26 @@ fn row_to_token(row: sqlx::sqlite::SqliteRow) -> BearerToken {
 
 #[async_trait]
 impl BearerTokenStore for SqliteBearerTokenStore {
+    fn begin_revoke_by_hash(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> PersistenceOperation<Option<BearerToken>, BearerTokenStoreError> {
+        let store = self.clone();
+        let token_hash = token_hash.to_string();
+        let pool = self.pool.clone();
+        PersistenceOperation::spawn(
+            PersistenceDeadline::default(),
+            async move {
+                match store.revoke_by_hash(&token_hash, now).await {
+                    Ok(row) => PersistenceWorkerOutcome::Committed(row),
+                    Err(error) => PersistenceWorkerOutcome::RecoverablyIndeterminate(error),
+                }
+            },
+            move || async move { sqlite_write_quiescence_barrier(&pool).await },
+        )
+    }
+
     async fn create(&self, token: BearerToken) -> Result<(), BearerTokenStoreError> {
         sqlx::query(
             r#"
@@ -119,6 +140,23 @@ impl BearerTokenStore for SqliteBearerTokenStore {
 
         Ok(row.map(row_to_token))
     }
+}
+
+async fn sqlite_write_quiescence_barrier(pool: &SqlitePool) -> bool {
+    let Ok(mut connection) = pool.acquire().await else {
+        return false;
+    };
+    if sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .is_ok()
 }
 
 #[cfg(test)]

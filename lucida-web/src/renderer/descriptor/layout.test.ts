@@ -16,6 +16,7 @@ import { describe, it, expect } from "vitest";
 import sliceSrc from "../slice.wgsl?raw";
 import volumeSrc from "../volume.wgsl?raw";
 import {
+  DESCRIPTOR_ENTRY_SIZE,
   DESCRIPTOR_LOD_INFO_SIZE,
   DESCRIPTOR_LODS_OFFSET,
   DESCRIPTOR_TIER_SOURCE_SIZE,
@@ -45,6 +46,7 @@ import {
   SOURCE_OFFSET_LEVEL_DIMS,
   SOURCE_OFFSET_VALID,
 } from "./layout.ts";
+import { serializeTransientDescriptor } from "./transient.ts";
 
 // ---------------------------------------------------------------------------
 // WGSL struct parsing — calculator-grade, not a real parser.
@@ -200,5 +202,73 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.gridDims).toBe(SOURCE_OFFSET_GRID_DIMS);
     expect(offsets.chunkDims).toBe(SOURCE_OFFSET_CHUNK_DIMS);
     expect(offsets.levelDims).toBe(SOURCE_OFFSET_LEVEL_DIMS);
+  });
+
+  it("gives a bricked categorical transient a shader-visible detail source", () => {
+    const descriptor = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const identity = new Float32Array([
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ]);
+    serializeTransientDescriptor(descriptor, {
+      modelMatrix: identity,
+      invModelMatrix: identity,
+      volumeDims: [41, 15, 1],
+      lod: {
+        gridDims: [3, 2, 1],
+        chunkDims: [16, 8, 1],
+      },
+      contrastMin: 0,
+      contrastMax: 1,
+      gamma: 1,
+      opacity: 1,
+      colormapMode: 1,
+      labelOpacity: 0.75,
+    });
+
+    // Both current shaders sample the explicit detail source first. A legacy
+    // lods[0] entry alone is therefore insufficient at this seam.
+    expect(sliceSrc).toContain("sampleDetail2D(entity.detailSource");
+    expect(volumeSrc).toContain("sampleDetailVolume(activeEntity.detailSource");
+
+    const u32 = new Uint32Array(descriptor);
+    const lod = DESCRIPTOR_LODS_OFFSET / 4;
+    const detail = OFFSET_DETAIL_SOURCE / 4;
+    const coarse = OFFSET_COARSE_SOURCE / 4;
+    expect(u32[OFFSET_COLORMAP_MODE / 4]).toBe(1);
+    expect(u32[OFFSET_LOD_COUNT / 4]).toBe(1);
+    expect(u32[detail + SOURCE_OFFSET_VALID / 4]).toBe(1);
+    expect(u32[detail + SOURCE_OFFSET_LEVEL / 4]).toBe(0);
+    expect(u32[detail + SOURCE_OFFSET_INDIRECTION_OFFSET / 4]).toBe(0);
+    expect([...u32.slice(
+      detail + SOURCE_OFFSET_GRID_DIMS / 4,
+      detail + SOURCE_OFFSET_GRID_DIMS / 4 + 3,
+    )]).toEqual([3, 2, 1]);
+    expect([...u32.slice(
+      detail + SOURCE_OFFSET_CHUNK_DIMS / 4,
+      detail + SOURCE_OFFSET_CHUNK_DIMS / 4 + 3,
+    )]).toEqual([16, 8, 1]);
+    expect([...u32.slice(
+      detail + SOURCE_OFFSET_LEVEL_DIMS / 4,
+      detail + SOURCE_OFFSET_LEVEL_DIMS / 4 + 3,
+    )]).toEqual([41, 15, 1]);
+    expect(u32[coarse + SOURCE_OFFSET_VALID / 4]).toBe(0);
+
+    // The compatibility LOD remains byte-for-byte coherent with the explicit
+    // source, so volume/minimap callers that still inspect it do not diverge.
+    expect([...u32.slice(
+      lod + LOD_OFFSET_GRID_DIMS / 4,
+      lod + LOD_OFFSET_GRID_DIMS / 4 + 3,
+    )]).toEqual([3, 2, 1]);
+    expect([...u32.slice(
+      lod + LOD_OFFSET_CHUNK_DIMS / 4,
+      lod + LOD_OFFSET_CHUNK_DIMS / 4 + 3,
+    )]).toEqual([16, 8, 1]);
+    expect([...u32.slice(
+      lod + LOD_OFFSET_LEVEL_DIMS / 4,
+      lod + LOD_OFFSET_LEVEL_DIMS / 4 + 3,
+    )]).toEqual([41, 15, 1]);
   });
 });

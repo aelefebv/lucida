@@ -1,5 +1,5 @@
 /**
- * Per-entity cache of decoded chunks. One class backs both the main
+ * Per-image cache of decoded chunks. One class backs both the main
  * (Tiered) and overview (LRU) stores — they differ only in eviction
  * policy + the label used when reporting evictions.
  */
@@ -20,7 +20,9 @@ export interface SingleBucketResidency {
 }
 
 export interface ChunkStoreDumpEntry {
+  datasetId: string;
   entityId: string;
+  imageId: string;
   level: number;
   tier: EvictionTier;
   bytes: number;
@@ -47,7 +49,8 @@ export interface ChunkStoreOptions {
 const EVICTION_BURST_THRESHOLD = 16;
 
 export class ChunkStore {
-  private store = new Map<string, Map<string, CacheEntry>>();
+  /** datasetId → imageId → chunkKey → decoded entry. */
+  private store = new Map<string, Map<string, Map<string, CacheEntry>>>();
   private bytesCounter = 0;
   private budgetBytesCounter: number;
   private readonly policy: EvictionPolicy<CacheEntry>;
@@ -80,14 +83,26 @@ export class ChunkStore {
 
   /** Evicts via the policy if over budget; caller assembles the entry. */
   insert(entry: CacheEntry): void {
+    // Replacing an exact identity is not a second allocation. Remove the old
+    // accounting first (without reporting an eviction), then admit the fresh
+    // bytes normally. This also makes a late duplicate completion harmless.
+    const existing = this.get(entry.datasetId, entry.imageId, entry.chunkKey);
+    if (existing) {
+      this.deleteStoredEntry(existing);
+    }
     this.evictIfNeeded(entry.sizeBytes);
 
-    let entityMap = this.store.get(entry.entityId);
-    if (!entityMap) {
-      entityMap = new Map();
-      this.store.set(entry.entityId, entityMap);
+    let datasetMap = this.store.get(entry.datasetId);
+    if (!datasetMap) {
+      datasetMap = new Map();
+      this.store.set(entry.datasetId, datasetMap);
     }
-    entityMap.set(entry.chunkKey, entry);
+    let imageMap = datasetMap.get(entry.imageId);
+    if (!imageMap) {
+      imageMap = new Map();
+      datasetMap.set(entry.imageId, imageMap);
+    }
+    imageMap.set(entry.chunkKey, entry);
     this.bytesCounter += entry.sizeBytes;
   }
 
@@ -112,13 +127,15 @@ export class ChunkStore {
     }
   }
 
-  remove(entityId: string, chunkKey: string): boolean {
-    const entityMap = this.store.get(entityId);
-    if (!entityMap) return false;
-    const entry = entityMap.get(chunkKey);
+  remove(datasetId: string, imageId: string, chunkKey: string): boolean {
+    const datasetMap = this.store.get(datasetId);
+    const imageMap = datasetMap?.get(imageId);
+    if (!imageMap) return false;
+    const entry = imageMap.get(chunkKey);
     if (!entry) return false;
-    entityMap.delete(chunkKey);
-    if (entityMap.size === 0) this.store.delete(entityId);
+    imageMap.delete(chunkKey);
+    if (imageMap.size === 0) datasetMap!.delete(imageId);
+    if (datasetMap!.size === 0) this.store.delete(datasetId);
     this.bytesCounter -= entry.sizeBytes;
     this.recordEviction(this.evictionTier(entry));
     return true;
@@ -126,81 +143,123 @@ export class ChunkStore {
 
   /** Drop an entry returned by `policy.selectVictims` without re-keying. */
   removeEntry(entry: CacheEntry): void {
-    const entityMap = this.store.get(entry.entityId);
-    if (!entityMap) return;
-    entityMap.delete(entry.chunkKey);
-    if (entityMap.size === 0) this.store.delete(entry.entityId);
-    this.bytesCounter -= entry.sizeBytes;
+    if (!this.deleteStoredEntry(entry)) return;
     this.recordEviction(this.evictionTier(entry));
+  }
+
+  private deleteStoredEntry(entry: CacheEntry): boolean {
+    const datasetMap = this.store.get(entry.datasetId);
+    const imageMap = datasetMap?.get(entry.imageId);
+    if (imageMap?.get(entry.chunkKey) !== entry) return false;
+    imageMap.delete(entry.chunkKey);
+    if (imageMap.size === 0) datasetMap!.delete(entry.imageId);
+    if (datasetMap!.size === 0) this.store.delete(entry.datasetId);
+    this.bytesCounter -= entry.sizeBytes;
+    return true;
   }
 
   /**
    * Returns the live reference; mutating lane / tier / priority /
    * lastSeenTick is how `submit()` refreshes wanted cache entries.
    */
-  get(entityId: string, chunkKey: string): CacheEntry | undefined {
-    return this.store.get(entityId)?.get(chunkKey);
+  get(datasetId: string, imageId: string, chunkKey: string): CacheEntry | undefined {
+    return this.store.get(datasetId)?.get(imageId)?.get(chunkKey);
   }
 
-  hasEntity(entityId: string): boolean {
-    return this.store.has(entityId);
+  hasEntity(datasetId: string, entityId: string): boolean {
+    const datasetMap = this.store.get(datasetId);
+    if (!datasetMap) return false;
+    for (const imageMap of datasetMap.values()) {
+      for (const entry of imageMap.values()) {
+        if (entry.entityId === entityId) return true;
+      }
+    }
+    return false;
   }
 
-  chunkKeysForEntity(entityId: string): Iterable<string> {
-    return this.store.get(entityId)?.keys() ?? [];
+  *chunkKeysForEntity(datasetId: string, entityId: string): Iterable<string> {
+    const datasetMap = this.store.get(datasetId);
+    if (!datasetMap) return;
+    for (const imageMap of datasetMap.values()) {
+      for (const entry of imageMap.values()) {
+        if (entry.entityId === entityId) yield entry.chunkKey;
+      }
+    }
   }
 
-  entriesForEntity(entityId: string): Iterable<CacheEntry> {
-    return this.store.get(entityId)?.values() ?? [];
+  *entriesForEntity(datasetId: string, entityId: string): Iterable<CacheEntry> {
+    const datasetMap = this.store.get(datasetId);
+    if (!datasetMap) return;
+    for (const imageMap of datasetMap.values()) {
+      for (const entry of imageMap.values()) {
+        if (entry.entityId === entityId) yield entry;
+      }
+    }
   }
 
   *allEntries(): Iterable<CacheEntry> {
-    for (const entityMap of this.store.values()) {
-      for (const entry of entityMap.values()) {
-        yield entry;
+    for (const datasetMap of this.store.values()) {
+      for (const entityMap of datasetMap.values()) {
+        for (const entry of entityMap.values()) yield entry;
       }
     }
   }
 
   *iterateTier(tier: EvictionTier): Iterable<CacheEntry> {
-    for (const entityMap of this.store.values()) {
-      for (const entry of entityMap.values()) {
-        if (entry.tier === tier) yield entry;
+    for (const datasetMap of this.store.values()) {
+      for (const entityMap of datasetMap.values()) {
+        for (const entry of entityMap.values()) {
+          if (entry.tier === tier) yield entry;
+        }
       }
     }
   }
 
-  findByImageChunk(imageId: string, c: number, chunkKey: string): CacheEntry | undefined {
-    for (const entityMap of this.store.values()) {
-      for (const entry of entityMap.values()) {
-        if (
-          entry.imageId === imageId &&
-          entry.c === c &&
-          entry.chunkKey === chunkKey
-        ) {
-          return entry;
-        }
-      }
+  findByImageChunk(
+    datasetId: string,
+    imageId: string,
+    c: number,
+    chunkKey: string,
+  ): CacheEntry | undefined {
+    const imageMap = this.store.get(datasetId)?.get(imageId);
+    if (!imageMap) return undefined;
+    for (const entry of imageMap.values()) {
+      if (entry.c === c && entry.chunkKey === chunkKey) return entry;
     }
     return undefined;
   }
 
-  *entityChunkKeys(): Iterable<[string, IterableIterator<string>]> {
-    for (const [entityId, entityMap] of this.store) {
-      yield [entityId, entityMap.keys()];
+  *imageChunkKeys(): Iterable<[string, string, IterableIterator<string>]> {
+    for (const [datasetId, datasetMap] of this.store) {
+      for (const [imageId, imageMap] of datasetMap) {
+        yield [datasetId, imageId, imageMap.keys()];
+      }
     }
   }
 
   /** Dataset removal — no eviction records emitted. */
-  cancelDataset(entityIds: Iterable<string>): void {
-    for (const entityId of entityIds) {
-      const entityMap = this.store.get(entityId);
-      if (!entityMap) continue;
-      for (const entry of entityMap.values()) {
+  cancelDataset(datasetId: string): void {
+    const datasetMap = this.store.get(datasetId);
+    if (!datasetMap) return;
+    for (const entityMap of datasetMap.values()) {
+      for (const entry of entityMap.values()) this.bytesCounter -= entry.sizeBytes;
+    }
+    this.store.delete(datasetId);
+  }
+
+  /** Refreshed-manifest invalidation — remove only changed image contracts. */
+  cancelImages(datasetId: string, imageIds: ReadonlySet<string>): void {
+    const datasetMap = this.store.get(datasetId);
+    if (!datasetMap) return;
+    for (const imageId of imageIds) {
+      const imageMap = datasetMap.get(imageId);
+      if (!imageMap) continue;
+      for (const entry of imageMap.values()) {
         this.bytesCounter -= entry.sizeBytes;
       }
-      this.store.delete(entityId);
+      datasetMap.delete(imageId);
     }
+    if (datasetMap.size === 0) this.store.delete(datasetId);
   }
 
   reset(): void {
@@ -210,9 +269,9 @@ export class ChunkStore {
 
   private collectEntries(): CacheEntry[] {
     const result: CacheEntry[] = [];
-    for (const entityMap of this.store.values()) {
-      for (const entry of entityMap.values()) {
-        result.push(entry);
+    for (const datasetMap of this.store.values()) {
+      for (const entityMap of datasetMap.values()) {
+        for (const entry of entityMap.values()) result.push(entry);
       }
     }
     return result;
@@ -220,16 +279,20 @@ export class ChunkStore {
 
   dump(): ChunkStoreDumpEntry[] {
     const out: ChunkStoreDumpEntry[] = [];
-    for (const entityMap of this.store.values()) {
-      for (const e of entityMap.values()) {
+    for (const datasetMap of this.store.values()) {
+      for (const entityMap of datasetMap.values()) {
+        for (const e of entityMap.values()) {
         out.push({
+          datasetId: e.datasetId,
           entityId: e.entityId,
+          imageId: e.imageId,
           level: e.level,
           tier: e.tier,
           bytes: e.sizeBytes,
           chunkKey: e.chunkKey,
           insertedAt: e.insertedAt,
         });
+        }
       }
     }
     return out;
@@ -242,8 +305,9 @@ export class ChunkStore {
       demotedDetail: { count: 0, bytes: 0 },
       prefetch: { count: 0, bytes: 0 },
     };
-    for (const entityMap of this.store.values()) {
-      for (const e of entityMap.values()) {
+    for (const datasetMap of this.store.values()) {
+      for (const entityMap of datasetMap.values()) {
+        for (const e of entityMap.values()) {
         if (e.tier === "active-detail") {
           out.activeDetail.count++;
           out.activeDetail.bytes += e.sizeBytes;
@@ -254,6 +318,7 @@ export class ChunkStore {
           out.prefetch.count++;
           out.prefetch.bytes += e.sizeBytes;
         }
+        }
       }
     }
     return out;
@@ -262,22 +327,26 @@ export class ChunkStore {
   totalResidency(): SingleBucketResidency {
     let count = 0;
     let bytes = 0;
-    for (const entityMap of this.store.values()) {
-      for (const e of entityMap.values()) {
-        count++;
-        bytes += e.sizeBytes;
+    for (const datasetMap of this.store.values()) {
+      for (const entityMap of datasetMap.values()) {
+        for (const e of entityMap.values()) {
+          count++;
+          bytes += e.sizeBytes;
+        }
       }
     }
     return { count, bytes };
   }
 
   /** No-op for entities not present (e.g., overview-only entities). */
-  demoteEntity(entityId: string): void {
-    const entityMap = this.store.get(entityId);
-    if (!entityMap) return;
-    for (const entry of entityMap.values()) {
-      if (entry.tier === "active-detail") {
-        entry.tier = "demoted-detail";
+  demoteEntity(datasetId: string, entityId: string): void {
+    const datasetMap = this.store.get(datasetId);
+    if (!datasetMap) return;
+    for (const imageMap of datasetMap.values()) {
+      for (const entry of imageMap.values()) {
+        if (entry.entityId === entityId && entry.tier === "active-detail") {
+          entry.tier = "demoted-detail";
+        }
       }
     }
   }

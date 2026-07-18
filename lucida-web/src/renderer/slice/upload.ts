@@ -29,10 +29,11 @@ import { assertChunkBufferLength } from "../../chunkContract.ts";
  * pool. The delivery path (`dispatchLabelChunkDelivery`) already extracted
  * the single Z-plane for the current view, so each `chunk.data` is a 2D
  * plane of `chunkY*chunkX` ids (~64 KB, not the full ~8 MB 3D chunk) — this
- * just places it at the chunk's `(x, y)` offset. The pool is reused in
- * place, so a Z/T scrub overwrites the resident slice without blanking. Ids
- * stay at full 32-bit width — no intensity-range sampling (categorical, not
- * scalar). Writes are clamped to the (possibly device-limited) texture.
+ * just places it at the chunk's `(x, y)` offset. The allocation is reused in
+ * place across Z/T scrubs, while epoch ownership keeps old pixels hidden and
+ * clears stale coverage before a partial refresh. Ids stay at full 32-bit
+ * width — no intensity-range sampling (categorical, not scalar). Writes are
+ * clamped to the (possibly device-limited) texture.
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
@@ -51,6 +52,33 @@ export function handleLabelSliceChunkData(
   const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
   if (!pool) return;
 
+  const selectionChanged =
+    pool.residentContentEpoch !== msg.epochs.content ||
+    pool.residentSelectionEpoch !== msg.epochs.selection;
+  if (selectionChanged) {
+    // A label slice uses one monolithic texture rather than per-chunk
+    // indirection. Clear only the regions the prior selection wrote before a
+    // partial current delivery lands, otherwise untouched tiles would retain
+    // categorical ids from the old T/Z.
+    for (const region of pool.writtenRegions.values()) {
+      writeSliceRegion(
+        ctx.device,
+        pool.texture,
+        new Uint32Array(region.width * region.height),
+        region.width,
+        region.x,
+        region.y,
+        region.width,
+        region.height,
+        "r32uint",
+      );
+    }
+    pool.writtenRegions.clear();
+    pool.residentContentEpoch = undefined;
+    pool.residentSelectionEpoch = undefined;
+  }
+
+  let wrote = false;
   for (const chunk of msg.chunks) {
     assertChunkBufferLength(chunk.data, chunk.contract, "worker");
     if (chunk.contract.role !== "label" || chunk.contract.dtype !== "uint32") {
@@ -79,6 +107,17 @@ export function handleLabelSliceChunkData(
       chunkH,
       "r32uint",
     );
+    pool.writtenRegions.set(`${chunk.x}/${chunk.y}`, {
+      x: xOff,
+      y: yOff,
+      width: chunkW,
+      height: chunkH,
+    });
+    wrote = true;
+  }
+  if (wrote) {
+    pool.residentContentEpoch = msg.epochs.content;
+    pool.residentSelectionEpoch = msg.epochs.selection;
   }
 }
 
@@ -90,15 +129,16 @@ export function handleSliceChunkData(
   memberId: string,
 ): void {
   const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
+  const tier = msg.tier ?? "detail";
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "stale");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "stale");
     return;
   }
 
   const atlas = ctx.state.sliceAtlases.get(poolKey);
   if (!atlas) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-pool");
     return;
   }
 
@@ -108,13 +148,13 @@ export function handleSliceChunkData(
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[sliceChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-entity-meta");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-entity-meta");
     return;
   }
   const lodMeta = entityLodMetas.find(m => m.level === level);
   if (!lodMeta) {
     console.warn(`[sliceChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-lod-meta");
+    postChunksRequeued(ctx, msg.datasetId, memberId, tier, msg.chunks, "missing-lod-meta");
     return;
   }
 
@@ -248,12 +288,14 @@ export function handleSliceChunkData(
       evictedByMember.set(parsed.memberId, arr);
     }
     for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
+      ctx.post({ type: "chunksEvicted", datasetId: atlas.datasetId ?? msg.datasetId, memberId: evMember, tier, keys: evKeys, skipped: [], reason: "evicted" });
     }
     if (requeueKeys.length > 0) {
       postChunksRequeued(
         ctx,
+        msg.datasetId,
         memberId,
+        tier,
         requeueKeys.map(key => ({ key })),
         "wrong-slice",
       );
@@ -261,7 +303,9 @@ export function handleSliceChunkData(
     if (radiusFilteredKeys.length > 0) {
       postChunksRequeued(
         ctx,
+        msg.datasetId,
         memberId,
+        tier,
         radiusFilteredKeys.map(key => ({ key })),
         "radius-filter",
       );
@@ -269,7 +313,9 @@ export function handleSliceChunkData(
     if (skippedKeys.length > 0) {
       postChunksRejected(
         ctx,
+        msg.datasetId,
         memberId,
+        tier,
         skippedKeys.map(key => ({ key })),
       );
     }

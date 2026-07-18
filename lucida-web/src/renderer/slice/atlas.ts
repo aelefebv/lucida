@@ -14,6 +14,7 @@ import { getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import type { TrackedGpuResource } from "../gpuResourceBudget.ts";
+import { labelPoolKey } from "../labelPoolKey.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
@@ -23,13 +24,15 @@ import type { TrackedGpuResource } from "../gpuResourceBudget.ts";
  * single member covering a bounded 2D footprint, unlike the shared
  * intensity atlas that packs many members.
  *
- * The texture is written IN PLACE as new Z/T slices arrive (never destroyed
- * on a scrub), mirroring the intensity atlas' stale-then-overwrite so a
- * label never blanks mid-scrub — the previous slice stays visible until the
- * new one lands.
+ * The texture allocation is reused as new Z/T slices arrive. Residency is
+ * nevertheless selection-owned: renderers must not sample it until chunks for
+ * the current content + selection epochs have landed. On an epoch change the
+ * uploader clears the regions written by the previous selection before it
+ * accepts the first current chunk, preventing a partial refresh from mixing
+ * old and new categorical ids.
  */
 export interface LabelSlicePool {
-  memberId?: string;
+  memberId: string;
   texture: GPUTexture; // r32uint, size [width, height]
   textureAllocation?: TrackedGpuResource<GPUTexture>;
   /** Single-entry indirection ([0]) so the one tile is always slot 0. */
@@ -43,6 +46,16 @@ export interface LabelSlicePool {
   datasetId: string;
   width: number;
   height: number;
+  /** Content/selection identity of the pixels currently safe to render. */
+  residentContentEpoch?: number;
+  residentSelectionEpoch?: number;
+  /** Regions written for that identity, cleared before the next one lands. */
+  writtenRegions: Map<string, {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
   /**
    * Cached per-member entity descriptor (a persistent buffer, not a
    * per-frame allocation) + the overlay opacity it was built for. Rebuilt
@@ -78,8 +91,9 @@ export function resetLabelSliceAllocWarnings(): void {
  * level's 2D dimensions (clamped to the device's max 2D texture dimension
  * so an oversized/whole-slide level can never exceed the limit). Reused IN
  * PLACE when the dims are unchanged — a Z/T scrub overwrites the existing
- * texture rather than destroying + recreating it, so the overlay never
- * blanks. Recreated only when the dims actually change (a new level).
+ * texture rather than destroying + recreating it. The render path hides a
+ * reused texture until it belongs to the current selection. Recreated only
+ * when the dims actually change (a new level).
  * `datasetId` is stamped on the pool so dataset removal can free it (the
  * pool is keyed by the label image id).
  *
@@ -101,7 +115,8 @@ export function getOrCreateLabelSlicePool(
   const h = Math.max(1, Math.min(height, limit));
 
   const pools = ctx.state.labelSlicePools;
-  const existing = pools.get(memberId);
+  const key = labelPoolKey(datasetId, memberId);
+  const existing = pools.get(key);
   if (
     existing && existing.width === w && existing.height === h &&
     existing.datasetId === datasetId
@@ -117,7 +132,7 @@ export function getOrCreateLabelSlicePool(
   try {
     textureAllocation = ctx.gpuResources.createTexture(
       ctx.device,
-      { key: `label-slice:${memberId}:texture`, kind: "label-slice", datasetId },
+      { key: `label-slice:${key}:texture`, kind: "label-slice", datasetId },
       {
         size: [w, h],
         format: "r32uint",
@@ -127,7 +142,7 @@ export function getOrCreateLabelSlicePool(
     texture = textureAllocation.resource;
     indirectionAllocation = ctx.gpuResources.createBuffer(
       ctx.device,
-      { key: `label-slice:${memberId}:indirection`, kind: "buffer", datasetId },
+      { key: `label-slice:${key}:indirection`, kind: "buffer", datasetId },
       {
         size: 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -166,9 +181,19 @@ export function getOrCreateLabelSlicePool(
     datasetId,
     width: w,
     height: h,
+    writtenRegions: new Map(),
   };
-  pools.set(memberId, pool);
+  pools.set(key, pool);
   return pool;
+}
+
+/** Whether a label pool contains pixels for the render's data identity. */
+export function labelSlicePoolMatchesEpochs(
+  pool: LabelSlicePool,
+  epochs: { content: number; selection: number },
+): boolean {
+  return pool.residentContentEpoch === epochs.content &&
+    pool.residentSelectionEpoch === epochs.selection;
 }
 
 export function destroyLabelSlicePool(pool: LabelSlicePool): void {
@@ -182,28 +207,30 @@ export function destroyLabelSlicePool(pool: LabelSlicePool): void {
   if (!pool.labelColorAllocation) pool.labelColorBuffer?.destroy();
 }
 
-/** Remove a member's label pool (no-op if absent). */
-export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
-  const pool = ctx.state.labelSlicePools.get(memberId);
+/** Remove one dataset-scoped member's label pool (no-op if absent). */
+export function removeLabelSlicePool(
+  ctx: WorkerCtx,
+  datasetId: string,
+  memberId: string,
+): void {
+  const key = labelPoolKey(datasetId, memberId);
+  const pool = ctx.state.labelSlicePools.get(key);
   if (pool) {
     destroyLabelSlicePool(pool);
-    ctx.state.labelSlicePools.delete(memberId);
+    ctx.state.labelSlicePools.delete(key);
   }
 }
 
 /**
- * Free every label slice pool matching `idOrDataset`, matched EITHER by the
- * pool's member key (the label image id) OR by its owning `datasetId`. Dataset
- * removal calls `removeLayerResources` with the dataset id, which never equals
- * a label pool's key — so matching on the stamped `datasetId` is what actually
- * frees the label texture. Also accepts a member id so a per-member removal
- * still works.
+ * Free every label slice pool owned by `datasetId`. Member-only cleanup must
+ * never pass through this function: image ids are legal to reuse across open
+ * datasets, so a bare member id cannot identify a label pool.
  */
-export function removeLabelSlicePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
-  for (const [memberId, pool] of ctx.state.labelSlicePools) {
-    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+export function removeLabelSlicePoolsForDataset(ctx: WorkerCtx, datasetId: string): void {
+  for (const [key, pool] of ctx.state.labelSlicePools) {
+    if (pool.datasetId === datasetId) {
       destroyLabelSlicePool(pool);
-      ctx.state.labelSlicePools.delete(memberId);
+      ctx.state.labelSlicePools.delete(key);
     }
   }
 }

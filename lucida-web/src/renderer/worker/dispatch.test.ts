@@ -32,6 +32,7 @@ describe("worker dispatch upload feedback", () => {
 
     await dispatchMessage(ctx, {
       type: "sliceChunkData",
+      datasetId: "ds-0",
       memberId: "img-0:ch1",
       chunks: [{ data: new ArrayBuffer(8), contract: makeChunkContract({ channel: 1 }), x: 0, y: 0, z: 0, key: "0/0/1/0/0/0" }],
       level: 0,
@@ -52,7 +53,9 @@ describe("worker dispatch upload feedback", () => {
     expect(posts).toEqual([
       {
         type: "chunksEvicted",
+        datasetId: "ds-0",
         memberId: "img-0:ch1",
+        tier: "detail",
         keys: ["0/0/1/0/0/0"],
         skipped: [],
         reason: "missing-pool",
@@ -65,6 +68,7 @@ describe("worker dispatch upload feedback", () => {
 
     await dispatchMessage(ctx, {
       type: "volumeChunkData",
+      datasetId: "ds-0",
       memberId: "img-0",
       chunks: [{ data: new ArrayBuffer(8), contract: makeChunkContract(), x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
       level: 0,
@@ -82,7 +86,9 @@ describe("worker dispatch upload feedback", () => {
     expect(posts).toEqual([
       {
         type: "chunksEvicted",
+        datasetId: "ds-0",
         memberId: "img-0",
+        tier: "detail",
         keys: ["0/0/0/0/0/0"],
         skipped: [],
         reason: "missing-pool",
@@ -103,6 +109,7 @@ describe("worker dispatch upload feedback", () => {
 
     await dispatchMessage(ctx, {
       type: "volumeChunkData",
+      datasetId: "ds-0",
       tier: "coarse",
       memberId: "img-0",
       chunks: [{ data: new ArrayBuffer(8), contract: makeChunkContract(), x: 0, y: 0, z: 0, key: "2/0/0/0/0/0" }],
@@ -121,7 +128,9 @@ describe("worker dispatch upload feedback", () => {
     expect(posts).toEqual([
       {
         type: "chunksEvicted",
+        datasetId: "ds-0",
         memberId: "img-0",
+        tier: "coarse",
         keys: ["2/0/0/0/0/0"],
         skipped: [],
         reason: "missing-pool",
@@ -177,7 +186,7 @@ describe("worker dispatch upload feedback", () => {
         sortCenterVox: null,
         frustumPlanes: null,
       },
-      removedEntityIds: [],
+      removedImageIds: [],
       upserts: [],
       activeSetOrder: [],
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },

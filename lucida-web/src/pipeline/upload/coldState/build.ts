@@ -28,11 +28,11 @@ import { buildDisplayStateByChannel } from "./displayState.ts";
  */
 export function buildColdActiveEntry(
   entry: ActiveSetEntry,
-  entityById: Map<string, EntitySnapshot>,
+  entityByImageId: Map<string, EntitySnapshot>,
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
   displayStateByChannel: Record<number, ColdStateDisplayState>,
 ): ColdStateActiveEntry {
-  const entity = entityById.get(entry.entityId);
+  const entity = entityByImageId.get(entry.imageId);
   const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
     const chunkShape: [number, number, number] = [
       lvl.chunk_shape[Axis.Z], lvl.chunk_shape[Axis.Y], lvl.chunk_shape[Axis.X],
@@ -106,13 +106,13 @@ export function buildColdState(args: {
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   dsSettings: DatasetSettings | undefined;
 }): ColdStateMessage {
-  const entityById = new Map(args.entities.map(e => [e.entityId, e]));
+  const entityByImageId = new Map(args.entities.map(e => [e.imageId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
     args.selection.visibleChannels,
     args.dsSettings,
   );
   const coldActiveSet = args.activeSet.map(entry =>
-    buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
+    buildColdActiveEntry(entry, entityByImageId, args.matricesByEntity, displayStateByChannel),
   );
   return {
     type: "coldState",
@@ -205,8 +205,8 @@ export function activeEntryReuseKey(entry: ActiveSetEntry): string | null {
 export interface ColdStateEntityDeltaHint {
   upsertEntries: ActiveSetEntry[];
   upsertEntities: EntitySnapshot[];
-  removedEntityIds: string[];
-  appendedEntityIds: string[];
+  removedImageIds: string[];
+  appendedImageIds: string[];
 }
 
 /**
@@ -239,8 +239,8 @@ export function buildColdStateDelta(args: {
   );
 
   if (args.entityDeltaHint) {
-    const entityById = new Map(
-      args.entityDeltaHint.upsertEntities.map((entity) => [entity.entityId, entity]),
+    const entityByImageId = new Map(
+      args.entityDeltaHint.upsertEntities.map((entity) => [entity.imageId, entity]),
     );
     return {
       type: "coldStateDelta",
@@ -250,48 +250,48 @@ export function buildColdStateDelta(args: {
       currentZ: args.selection.z,
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
-      removedEntityIds: [...args.entityDeltaHint.removedEntityIds],
+      removedImageIds: [...args.entityDeltaHint.removedImageIds],
       upserts: args.entityDeltaHint.upsertEntries.map((entry) =>
         buildColdActiveEntry(
           entry,
-          entityById,
+          entityByImageId,
           args.matricesByEntity,
           displayStateByChannel,
         )),
-      appendedEntityIds: [...args.entityDeltaHint.appendedEntityIds],
+      appendedImageIds: [...args.entityDeltaHint.appendedImageIds],
     };
   }
 
-  const entityById = new Map(args.entities.map(e => [e.entityId, e]));
+  const entityByImageId = new Map(args.entities.map(e => [e.imageId, e]));
 
-  const oldByEntity = new Map<string, ActiveSetEntry>();
-  const oldKeyByEntity = new Map<string, string | null>();
+  const oldByImage = new Map<string, ActiveSetEntry>();
+  const oldKeyByImage = new Map<string, string | null>();
   for (const e of args.previousActiveSet) {
-    oldByEntity.set(e.entityId, e);
-    oldKeyByEntity.set(e.entityId, activeEntryReuseKey(e));
+    oldByImage.set(e.imageId, e);
+    oldKeyByImage.set(e.imageId, activeEntryReuseKey(e));
   }
 
   const upserts: ColdStateActiveEntry[] = [];
   const activeSetOrder: string[] = [];
   const present = new Set<string>();
   for (const entry of args.activeSet) {
-    activeSetOrder.push(entry.entityId);
-    present.add(entry.entityId);
+    activeSetOrder.push(entry.imageId);
+    present.add(entry.imageId);
     const newKey = activeEntryReuseKey(entry);
     const reusable =
       newKey !== null &&
-      oldByEntity.has(entry.entityId) &&
-      oldKeyByEntity.get(entry.entityId) === newKey;
+      oldByImage.has(entry.imageId) &&
+      oldKeyByImage.get(entry.imageId) === newKey;
     if (!reusable) {
       upserts.push(
-        buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
+        buildColdActiveEntry(entry, entityByImageId, args.matricesByEntity, displayStateByChannel),
       );
     }
   }
 
-  const removedEntityIds: string[] = [];
+  const removedImageIds: string[] = [];
   for (const e of args.previousActiveSet) {
-    if (!present.has(e.entityId)) removedEntityIds.push(e.entityId);
+    if (!present.has(e.imageId)) removedImageIds.push(e.imageId);
   }
 
   return {
@@ -302,7 +302,7 @@ export function buildColdStateDelta(args: {
     currentZ: args.selection.z,
     visibleRegion: args.visibleRegion,
     renderRadiusView: args.renderRadiusView,
-    removedEntityIds,
+    removedImageIds,
     upserts,
     activeSetOrder,
   };

@@ -114,21 +114,22 @@ export function emitPlanRequests(
   stats: PlanStats,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): { requests: ChunkRequest[] } {
-  // Step 2: Build entity lookup.
-  const entityById = new Map<string, EntitySnapshot>();
+  // Step 2: Build content lookup. Entity ownership is not unique: one
+  // manifest entity may own multiple independently chunked images.
+  const entityByImageId = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
-    entityById.set(entity.entityId, entity);
+    if (entity.imageId) entityByImageId.set(entity.imageId, entity);
   }
 
   const allRequests: ChunkRequest[] = [];
   // Step 3: Detail lane (per active entry).
-  emitDetailLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  emitDetailLane(activeSet, snapshot, entityByImageId, stats, allRequests, config);
 
   // Step 4: Prefetch lane — for tile-mode entries only.
-  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  emitPrefetchLane(activeSet, snapshot, entityByImageId, stats, allRequests, config);
 
   // Step 5: Source-backed coarse context lane.
-  emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  emitCoarseLane(activeSet, snapshot, entityByImageId, stats, allRequests, config);
 
   // Step 6: Minimap lane (see ADR 0023). Small seed sets ride the
   // dedicated top lane (priority 0 — the sort puts them first, so the

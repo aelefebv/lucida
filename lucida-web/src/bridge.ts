@@ -26,6 +26,7 @@ import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
 } from "./pipeline/generatedAvailability.ts";
+import type { FetchSourceWire } from "./manifestTypes.ts";
 
 export type ClientId = number;
 
@@ -332,6 +333,7 @@ export interface BridgeHandlers {
     peers: PresenceState[],
     yourId: ClientId,
     generatedAvailability: WireGeneratedAvailabilityByDataset,
+    datasetFetch: Record<string, FetchSourceWire>,
   ) => void;
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number, requestId: string) => void;
@@ -598,6 +600,7 @@ export class Bridge {
                 msg.peers ?? [],
                 snapshotClientId,
                 msg.generated_availability ?? {},
+                msg.dataset_fetch ?? {},
               );
               // Replay our own locally-applied-but-unacked commands:
               // usually the server built this snapshot before applying
@@ -1206,9 +1209,12 @@ export class Bridge {
       manifest?: { dataset_id?: unknown };
     };
     const requestId = this.nextCommandRequestId();
-    const willTransmit =
-      !this.destroyed && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
-    if (willTransmit) {
+    const sent = this.send(JSON.stringify({
+      type: "command",
+      request_id: requestId,
+      command: cmd,
+    }));
+    if (sent) {
       this.prunePendingLocalCommands();
       this.pendingLocalCommands.set(requestId, {
         requestId,
@@ -1225,7 +1231,6 @@ export class Bridge {
         this.pendingLocalCommands.delete(oldestRequestId);
       }
     }
-    this.send(JSON.stringify({ type: "command", request_id: requestId, command: cmd }));
     return requestId;
   }
 
@@ -1303,12 +1308,12 @@ export class Bridge {
       !this.destroyed && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
     bridgeLog("open_remote_dataset.send", { url, requestId }, this.ws?.readyState);
     if (!willTransmit) return null;
-    this.send(JSON.stringify({
+    const sent = this.send(JSON.stringify({
       type: "open_remote_dataset",
       request_id: requestId,
       url,
     }));
-    return requestId;
+    return sent ? requestId : null;
   }
 
   sendViewerInterest(interest: unknown) {
@@ -1385,13 +1390,34 @@ export class Bridge {
     }
   }
 
-  /** Low-level send (raw JSON string). Drops the frame unless the socket is
-   *  OPEN; a destroyed bridge never transmits. */
-  send(json: string) {
-    if (this.destroyed) return;
+  /** Low-level send (raw JSON string). Returns whether this socket epoch
+   *  accepted the frame; callers that own request state must not infer a send
+   *  from invocation alone. */
+  send(json: string): boolean {
+    if (this.destroyed) return false;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(json);
+      try {
+        this.ws.send(json);
+        return true;
+      } catch {
+        // OPEN can race a native close between the readyState check and send.
+        // Drive the ordinary disconnect/reconnect terminal rather than
+        // claiming transmission for a frame the browser rejected.
+        this.ws.close();
+      }
     }
+    return false;
+  }
+
+  /**
+   * End the current socket epoch. Used when an acknowledged request has no
+   * response/status by its protocol deadline: only disconnect makes it safe
+   * to release that response credit and retry without overlapping a late
+   * frame from the old epoch.
+   */
+  resetTransport(): void {
+    if (this.destroyed) return;
+    this.ws?.close();
   }
 
   /**

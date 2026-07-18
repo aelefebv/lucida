@@ -32,7 +32,7 @@ export function buildPlanningDatasetDebug(
   dsId: string,
   result: RequestPlan,
   entities: EntitySnapshot[],
-  entityById: Map<string, EntitySnapshot>,
+  entityByImageId: Map<string, EntitySnapshot>,
   visibleRegion: VisibleRegion,
   cacheSnap: CacheStateSnapshot,
 ): PlanningDatasetDebug {
@@ -46,20 +46,26 @@ export function buildPlanningDatasetDebug(
   // Per-LOD breakdown: planned (from plan), cached + in-flight (from cache).
   const cached: Record<number, number> = {};
   const inFlight: Record<number, number> = {};
-  const activeEntityIds = new Set(result.activeSet.map(e => e.entityId));
-  for (const eid of activeEntityIds) {
-    const cs = cacheSnap.cached.get(eid);
-    if (cs) {
-      for (const k of cs) {
-        const lvl = parseInt(k, 10);
-        if (Number.isFinite(lvl)) cached[lvl] = (cached[lvl] ?? 0) + 1;
+  const activeImageIds = new Set(result.activeSet.map(e => e.imageId).filter(Boolean));
+  const cachedByImage = cacheSnap.cached.get(dsId);
+  const inFlightByImage = cacheSnap.inFlight.get(dsId);
+  for (const imageId of activeImageIds) {
+    const cachedByTier = cachedByImage?.get(imageId);
+    if (cachedByTier) {
+      for (const keys of cachedByTier.values()) {
+        for (const k of keys) {
+          const lvl = parseInt(k, 10);
+          if (Number.isFinite(lvl)) cached[lvl] = (cached[lvl] ?? 0) + 1;
+        }
       }
     }
-    const fs = cacheSnap.inFlight.get(eid);
-    if (fs) {
-      for (const k of fs) {
-        const lvl = parseInt(k, 10);
-        if (Number.isFinite(lvl)) inFlight[lvl] = (inFlight[lvl] ?? 0) + 1;
+    const inFlightByTier = inFlightByImage?.get(imageId);
+    if (inFlightByTier) {
+      for (const keys of inFlightByTier.values()) {
+        for (const k of keys) {
+          const lvl = parseInt(k, 10);
+          if (Number.isFinite(lvl)) inFlight[lvl] = (inFlight[lvl] ?? 0) + 1;
+        }
       }
     }
   }
@@ -97,7 +103,7 @@ export function buildPlanningDatasetDebug(
       continue;
     }
     // Narrowed: e is TileEntry.
-    const ent = entityById.get(e.entityId);
+    const ent = entityByImageId.get(e.imageId);
     const groupId =
       ent !== undefined && ent.kind === "Tile" ? ent.parentId : e.entityId;
     if (groupsSeen.has(groupId)) continue;

@@ -122,11 +122,37 @@ describe("Scheduler.enqueue + drain", () => {
       req({ chunkKey: "c" }),
     ]);
     scheduler.drain(() => 100);
-    // First start charges 100; bytes is now 100 (< 150) so a second
-    // start fires and charges another 100; bytes is now 200 (>= 150)
-    // so the third stays pending.
-    expect(startCalls).toHaveLength(2);
+    // Admission prices the NEXT request, so the live reservation never
+    // crosses the cap while another request is active.
+    expect(startCalls).toHaveLength(1);
+    expect(scheduler.inFlightBytes).toBe(100);
+    expect(scheduler.pendingSize).toBe(2);
+  });
+
+  it("allows one intrinsically oversized request to make progress alone", () => {
+    const { scheduler, startCalls } = makeScheduler({
+      maxConcurrentFetches: 10,
+      maxBytesInFlight: 150,
+    });
+    const oversized = req({ chunkKey: "oversized" });
+    const next = req({ chunkKey: "next" });
+    scheduler.enqueue([oversized, next]);
+
+    scheduler.drain(() => 200);
+    expect(startCalls.map((call) => call.req.chunkKey)).toEqual(["oversized"]);
     expect(scheduler.inFlightBytes).toBe(200);
+    expect(scheduler.pendingSize).toBe(1);
+
+    scheduler.markInFlightDone(keyOf(oversized));
+    scheduler.drain(() => 200);
+    expect(startCalls.map((call) => call.req.chunkKey)).toEqual(["oversized", "next"]);
+  });
+
+  it("rejects invalid byte estimates instead of corrupting admission accounting", () => {
+    const { scheduler } = makeScheduler();
+    scheduler.enqueue([req({ chunkKey: "invalid" })]);
+    expect(() => scheduler.drain(() => Number.NaN)).toThrow(/finite and non-negative/);
+    expect(scheduler.inFlightSize).toBe(0);
     expect(scheduler.pendingSize).toBe(1);
   });
 

@@ -208,6 +208,27 @@ export class FairPriorityQueue<Item extends QueueItem> {
     return undefined;
   }
 
+  /**
+   * Return the next item without advancing fairness or removing it.
+   *
+   * Admission controllers use this to price the exact next operation before
+   * committing it. Keeping the peek on the queue avoids an O(N) diagnostic
+   * snapshot or a shift/reinsert pair that would perturb stable ordering.
+   */
+  peek(): Item | undefined {
+    const bucketCount = this.bucketOrder.length;
+    if (bucketCount === 0 || this.entries.size === 0) return undefined;
+
+    for (let offset = 0; offset < bucketCount; offset++) {
+      const bucketName = this.bucketOrder[(this.cursor + offset) % bucketCount];
+      const bucket = this.buckets.get(bucketName);
+      if (!bucket) continue;
+      const node = this.heapPeekLive(bucket.heap);
+      if (node) return node.item;
+    }
+    return undefined;
+  }
+
   clear(): void {
     this.entries.clear();
     this.keysByDataset.clear();
@@ -335,6 +356,16 @@ export class FairPriorityQueue<Item extends QueueItem> {
       if (!node) return undefined;
       const live = this.entries.get(node.key);
       if (live?.version === node.version && live.bucket === node.bucket) return live;
+    }
+  }
+
+  private heapPeekLive(heap: Array<HeapNode<Item>>): LiveEntry<Item> | undefined {
+    for (;;) {
+      const node = heap[0];
+      if (!node) return undefined;
+      const live = this.entries.get(node.key);
+      if (live?.version === node.version && live.bucket === node.bucket) return live;
+      this.heapPop(heap);
     }
   }
 

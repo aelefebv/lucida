@@ -75,7 +75,7 @@ describe("single-path active-set resolution", () => {
     expect(groups).toHaveLength(2);
     expect(groups.find((group) => group.groupId === "g")?.tiles.map((tile) => tile.entityId))
       .toEqual(["t1", "t2"]);
-    expect(groups.find((group) => group.groupId === "__image__standalone")?.tiles)
+    expect(groups.find((group) => group.groupId === "__image__standalone-image")?.tiles)
       .toHaveLength(1);
   });
 });

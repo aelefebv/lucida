@@ -81,6 +81,46 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
 }
 
 describe("applyColdStateDelta", () => {
+  it("retains, reorders, and removes same-owner images independently", () => {
+    const ctx = makeCtx();
+    const owner = "shared-owner";
+    const cold = makeCold([tile(owner, "img-a", 0), tile(owner, "img-b", 0)]);
+    ctx.state.coldStateByDataset.set("ds1", cold);
+    applyColdState(ctx, cold);
+
+    applyColdStateDelta(ctx, {
+      type: "coldStateDelta",
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: cold.visibleRegion,
+      removedImageIds: [],
+      upserts: [tile(owner, "img-b", 1)],
+      activeSetOrder: ["img-b", "img-a"],
+    });
+
+    let active = ctx.state.coldStateByDataset.get("ds1")!.activeSet;
+    expect(active.map((entry) => entry.imageId)).toEqual(["img-b", "img-a"]);
+    expect(active.map((entry) => entry.targetLod)).toEqual([1, 0]);
+
+    applyColdStateDelta(ctx, {
+      type: "coldStateDelta",
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 3, selection: 1, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: cold.visibleRegion,
+      removedImageIds: ["img-a"],
+      upserts: [],
+      activeSetOrder: ["img-b"],
+    });
+
+    active = ctx.state.coldStateByDataset.get("ds1")!.activeSet;
+    expect(active.map((entry) => entry.imageId)).toEqual(["img-b"]);
+    expect(active[0].entityId).toBe(owner);
+  });
+
   it("patches the active set to match a full rebuild — same entries, same order, removed dropped", () => {
     // Ingest a full cold state, then apply a view-move delta that: changes a's
     // LOD (upsert), keeps c (retained), drops b (removed), adds d (upsert), and
@@ -102,9 +142,9 @@ describe("applyColdStateDelta", () => {
         xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
         sortCenterVox: null, frustumPlanes: null,
       },
-      removedEntityIds: ["b"],
+      removedImageIds: ["img-b"],
       upserts: [tile("a", "img-a", 2), tile("d", "img-d", 0)],
-      activeSetOrder: ["a", "c", "d"],
+      activeSetOrder: ["img-a", "img-c", "img-d"],
     };
     applyColdStateDelta(ctxDelta, delta);
 
@@ -153,20 +193,20 @@ describe("applyColdStateDelta", () => {
       currentT: 0,
       currentZ: 0,
       visibleRegion: makeCold([]).visibleRegion,
-      removedEntityIds: ["b"],
+      removedImageIds: ["img-b"],
       upserts: [tile("a", "img-a", 2), tile("d", "img-d", 0)],
     };
     const incrementalCtx = makeCtx();
     const incrementalCold = makeCold(initial.map((entry) => ({ ...entry })));
     incrementalCtx.state.coldStateByDataset.set("ds1", incrementalCold);
     applyColdState(incrementalCtx, incrementalCold);
-    applyColdStateDelta(incrementalCtx, { ...common, appendedEntityIds: ["d"] });
+    applyColdStateDelta(incrementalCtx, { ...common, appendedImageIds: ["img-d"] });
 
     const fallbackCtx = makeCtx();
     const fallbackCold = makeCold(initial.map((entry) => ({ ...entry })));
     fallbackCtx.state.coldStateByDataset.set("ds1", fallbackCold);
     applyColdState(fallbackCtx, fallbackCold);
-    applyColdStateDelta(fallbackCtx, { ...common, activeSetOrder: ["a", "c", "d"] });
+    applyColdStateDelta(fallbackCtx, { ...common, activeSetOrder: ["img-a", "img-c", "img-d"] });
 
     expect(incrementalCtx.state.coldStateByDataset.get("ds1")!.activeSet)
       .toEqual(fallbackCtx.state.coldStateByDataset.get("ds1")!.activeSet);
@@ -186,7 +226,7 @@ describe("applyColdStateDelta", () => {
         xyBoundsVox: [0, 0, 1, 1], zRangeVox: [0, 1], effectiveZoom: 1,
         sortCenterVox: null, frustumPlanes: null,
       },
-      removedEntityIds: [],
+      removedImageIds: [],
       upserts: [],
       activeSetOrder: [],
     });
@@ -211,10 +251,10 @@ describe("applyColdStateDelta", () => {
         currentT: 0,
         currentZ: 0,
         visibleRegion: cold.visibleRegion,
-        removedEntityIds: [],
+        removedImageIds: [],
         upserts: [],
         // "c" is neither retained ([a, b]) nor upserted.
-        activeSetOrder: ["a", "c"],
+        activeSetOrder: ["img-a", "c"],
       }),
     ).toThrow(/activeSetOrder id c missing from retained\+upserts/);
   });
@@ -249,9 +289,9 @@ describe("applyColdStateDelta", () => {
         xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
         sortCenterVox: null, frustumPlanes: null,
       },
-      removedEntityIds: [],
+      removedImageIds: [],
       upserts: [],
-      activeSetOrder: ["a", "b"],
+      activeSetOrder: ["img-a", "img-b"],
     });
 
     const patched = ctx.state.coldStateByDataset.get("ds1")!;

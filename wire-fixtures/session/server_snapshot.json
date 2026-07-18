@@ -695,5 +695,29 @@
         }
       ]
     }
+  },
+  "dataset_fetch": {
+    "wds-0f3a": {
+      "Proxied": {
+        "images": [
+          {
+            "image_id": "multiscale-0",
+            "wire_format": {
+              "Zstd": {
+                "data_type": "Uint16"
+              }
+            }
+          },
+          {
+            "image_id": "multiscale-0:label:region-a",
+            "wire_format": {
+              "Lz4": {
+                "data_type": "Uint32"
+              }
+            }
+          }
+        ]
+      }
+    }
   }
 }

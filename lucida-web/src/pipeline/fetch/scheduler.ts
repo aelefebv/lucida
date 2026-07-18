@@ -188,16 +188,20 @@ export class Scheduler<Req extends SchedulableRequest> {
    * fires its rate-limited backpressure summary.
    */
   drain(estimateBytes: (req: Req) => number): void {
-    while (this.pending.size > 0 && this.canStartMore()) {
+    while (this.pending.size > 0 && this.hasConcurrencySlot()) {
+      const next = this.pending.peek();
+      if (!next) break;
+      const estimate = this.normalizeEstimate(estimateBytes(next));
+      if (!this.canAdmitBytes(estimate)) break;
+
       const req = this.pending.shift();
       if (!req) break;
       const key = this.keyFn(req);
       this.enqueuedAt.delete(key);
-      const estimate = estimateBytes(req);
       this.startInFlight(req, key, estimate);
     }
 
-    if (this.pending.size > 0 && !this.canStartMore() && this.config.burstLogger) {
+    if (this.pending.size > 0 && this.config.burstLogger) {
       this.config.burstLogger.recordSkipped(
         this.pending.size,
         (skipped) => ({
@@ -212,11 +216,24 @@ export class Scheduler<Req extends SchedulableRequest> {
     }
   }
 
-  private canStartMore(): boolean {
-    return (
-      this.inFlight.size < this.config.maxConcurrentFetches &&
-      this.inFlightBytesCounter < this.config.maxBytesInFlight
-    );
+  private hasConcurrencySlot(): boolean {
+    return this.inFlight.size < this.config.maxConcurrentFetches;
+  }
+
+  private canAdmitBytes(estimate: number): boolean {
+    // A single intrinsically-large request must still make progress so its
+    // producer can return the protocol's explicit oversized response. Once
+    // anything is active, however, admission is prospective: the next request
+    // may not push the live reservation over the configured cap.
+    return this.inFlight.size === 0 ||
+      this.inFlightBytesCounter + estimate <= this.config.maxBytesInFlight;
+  }
+
+  private normalizeEstimate(estimate: number): number {
+    if (!Number.isFinite(estimate) || estimate < 0) {
+      throw new Error(`Scheduler byte estimate must be finite and non-negative, got ${estimate}`);
+    }
+    return estimate;
   }
 
   private startInFlight(req: Req, key: string, estimate: number): void {

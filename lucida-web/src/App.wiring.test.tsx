@@ -172,6 +172,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     unregisterDataset = vi.fn();
     handleBinary = vi.fn();
     handleChunkStatus = vi.fn();
+    handleTransportReady = vi.fn();
     constructor(_send: unknown) {}
   }
   class MockCpuCache {
@@ -321,6 +322,21 @@ function documentJson(
   return JSON.stringify({ manifests, annotations: annotations ?? {} });
 }
 
+function snapshotFetch(document: string) {
+  const parsed = JSON.parse(document) as { manifests?: Record<string, ReturnType<typeof makeManifest>> };
+  return Object.fromEntries(Object.entries(parsed.manifests ?? {}).map(([datasetId, manifest]) => [
+    datasetId,
+    {
+      Proxied: {
+        images: manifest.images.map((image) => ({
+          image_id: image.image_id,
+          wire_format: { Raw: { data_type: image.multiscale.data_type } },
+        })),
+      },
+    },
+  ]));
+}
+
 const authSession = {
   principal: {
     email: "me@example.com",
@@ -379,7 +395,7 @@ async function mountWithSnapshot(docJson: string) {
   await act(async () => {});
   const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
   await act(async () => {
-    bridge.handlers.onSnapshot(1, docJson, [], 1, {});
+    bridge.handlers.onSnapshot(1, docJson, [], 1, {}, snapshotFetch(docJson));
   });
   const scene = FakeScene.instances[FakeScene.instances.length - 1];
   return { bridge, scene };

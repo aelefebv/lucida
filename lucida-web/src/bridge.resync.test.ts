@@ -550,6 +550,22 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     expect(appliedCommands(handlers)).toEqual([RENAME_JSON]); // no second replay
   });
 
+  it("does not replay a command rejected by an OPEN-to-send race", () => {
+    const { bridge, ws, handlers } = openBridge();
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    vi.spyOn(ws, "send").mockImplementationOnce(() => {
+      throw new Error("socket closed during send");
+    });
+
+    bridge.sendCommand(RENAME_JSON);
+    // A message task already queued before close may still run. The unsent
+    // command must never have entered the snapshot-replay ledger.
+    deliver(ws, snapshotMsg(11, { "wds-1": {} }));
+
+    expect(ws.closed).toBe(true);
+    expect(appliedCommands(handlers)).toEqual([]);
+  });
+
   it("accepted tradeoff: a snapshot outrunning our ack replays our stale value over the newer peer value it carried (local-only, bounded by the next edit/snapshot)", () => {
     // The premise behind pending replay — "the server built the snapshot
     // before applying our command" — loses a queue race: acks ride the

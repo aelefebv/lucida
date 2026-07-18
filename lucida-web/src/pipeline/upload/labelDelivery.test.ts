@@ -33,6 +33,7 @@ import { computeLabelChunkRequests } from "../planning/labelRequests.ts";
 import { buildManifestByImage, manifestEntryKey } from "./delivery/manifestIndex.ts";
 import { dispatchLabelChunkDelivery, dispatchLabelVolumeChunkDelivery } from "./delivery/dispatch.ts";
 import { chunkContractForLevel } from "../../chunkContract.ts";
+import { labelPoolKey } from "../../renderer/labelPoolKey.ts";
 
 const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
@@ -170,7 +171,9 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     expect(vi.mocked(client.labelSliceChunkData).mock.calls[0][1]).toBe("ds-0");
 
     // 4. The plane landed in the pool sized to the label's own dims.
-    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b");
+    const pool = ctx.state.labelSlicePools.get(
+      labelPoolKey("ds-0", "img-0:label:region-b"),
+    );
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);
@@ -281,7 +284,9 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
 
     // 4. The chunk landed in the volume pool sized to the label's own dims,
     //    stamped with the owning dataset for removal.
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b");
+    const pool = ctx.state.labelVolumePools.get(
+      labelPoolKey("ds-0", "img-0:label:region-b"),
+    );
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);

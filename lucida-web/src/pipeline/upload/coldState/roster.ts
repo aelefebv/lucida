@@ -38,14 +38,14 @@ export function buildRoster(args: {
 }): BuildRosterResult {
   const { activeSet, entities, ctx, datasetId, tileMatrixCache } = args;
 
-  const entityById = new Map(entities.map(e => [e.entityId, e]));
+  const entityByImageId = new Map(entities.map(e => [e.imageId, e]));
 
   const entries: MemberRosterEntry[] = [];
   for (const entry of activeSet) {
     // Invisible entries don't render — skip them in the roster.
     if (entry.kind === "invisible") continue;
     // Narrowed: entry is TileEntry below.
-    const entity = entityById.get(entry.entityId);
+    const entity = entityByImageId.get(entry.imageId);
     if (entity) {
       entries.push({
         imageId: entity.imageId,

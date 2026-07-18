@@ -310,6 +310,257 @@ describe("CpuCache", () => {
       consumeDeliverables(cache);
       expect(consumeDeliverables(cache)).toHaveLength(0);
     });
+
+    it("keeps identical image/channel/chunk identities independent across datasets", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      const shared = {
+        imageId: "shared-image",
+        chunkKey: "0/0/0/0/0/0",
+        c: 0,
+      };
+      const requestA = makeRequest({
+        ...shared,
+        datasetId: "dataset-a",
+        entityId: "shared-entity",
+      });
+      const requestB = makeRequest({
+        ...shared,
+        datasetId: "dataset-b",
+        entityId: "shared-entity",
+      });
+      cache.publishPlanningCycle([
+        {
+          datasetId: "dataset-a",
+          plan: makePlan([requestA], [makeActiveEntry("shared-entity", "shared-image")]),
+        },
+        {
+          datasetId: "dataset-b",
+          plan: makePlan([requestB], [makeActiveEntry("shared-entity", "shared-image")]),
+        },
+      ]);
+      await flush();
+
+      const initial = Array.from(cache.getDeliverable());
+      expect(initial.map((delivery) => delivery.datasetId).sort()).toEqual([
+        "dataset-a",
+        "dataset-b",
+      ]);
+      const snapshot = cache.snapshot();
+      expect(snapshot.cached.get("dataset-a")?.get("shared-image")?.get("detail")?.has(shared.chunkKey)).toBe(true);
+      expect(snapshot.cached.get("dataset-b")?.get("shared-image")?.get("detail")?.has(shared.chunkKey)).toBe(true);
+
+      const deliveryA = initial.find((delivery) => delivery.datasetId === "dataset-a")!;
+      cache.markSent(deliveryA);
+      expect(Array.from(cache.getDeliverable()).map((delivery) => delivery.datasetId)).toEqual([
+        "dataset-b",
+      ]);
+
+      cache.markChunkMissing(
+        "dataset-a",
+        "shared-image",
+        0,
+        shared.chunkKey,
+        "detail",
+      );
+      expect(Array.from(cache.getDeliverable()).map((delivery) => delivery.datasetId).sort()).toEqual([
+        "dataset-a",
+        "dataset-b",
+      ]);
+    });
+
+    it("invalidates changed cached images while unchanged siblings stay warm", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      const changed = makeRequest({
+        datasetId: "dataset-refresh",
+        entityId: "entity-changed",
+        imageId: "image-changed",
+      });
+      const unchanged = makeRequest({
+        datasetId: "dataset-refresh",
+        entityId: "entity-warm",
+        imageId: "image-warm",
+        x: 1,
+        chunkKey: "0/0/0/0/0/1",
+      });
+      cache.submit(makePlan([changed, unchanged], [
+        makeActiveEntry("entity-changed", "image-changed"),
+        makeActiveEntry("entity-warm", "image-warm"),
+      ]));
+      await flush();
+      expect(cache.snapshot().cached.get("dataset-refresh")?.get("image-changed")?.get("detail")?.has(changed.chunkKey)).toBe(true);
+      expect(cache.snapshot().cached.get("dataset-refresh")?.get("image-warm")?.get("detail")?.has(unchanged.chunkKey)).toBe(true);
+
+      cache.invalidateDatasetImages("dataset-refresh", [{
+        imageId: "image-changed",
+        entityId: "entity-changed",
+      }]);
+
+      expect(cache.snapshot().cached.get("dataset-refresh")?.has("image-changed")).toBe(false);
+      expect(cache.snapshot().cached.get("dataset-refresh")?.get("image-warm")?.get("detail")?.has(unchanged.chunkKey)).toBe(true);
+    });
+
+    it("tombstones an old-contract decode already running during invalidation", async () => {
+      const source = createMockContentSource();
+      source.autoResolveBytes = 64;
+      let finishDecode!: (bytes: ArrayBuffer) => void;
+      const decode = {
+        decode: vi.fn(() => new Promise<ArrayBuffer>((resolve) => {
+          finishDecode = resolve;
+        })),
+        activeCount: () => 0,
+        get size() { return 1; },
+        terminate: () => {},
+      } as unknown as DecodePool;
+      const cache = new CpuCache(source, decode);
+      const stale = makeRequest({
+        datasetId: "dataset-refresh",
+        entityId: "entity-shape",
+        imageId: "image-shape",
+      });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([stale], [makeActiveEntry("entity-shape", "image-shape")]));
+      await vi.waitFor(() => expect(decode.decode).toHaveBeenCalledOnce());
+
+      cache.invalidateDatasetImages("dataset-refresh", [{
+        imageId: "image-shape",
+        entityId: "entity-shape",
+      }]);
+      finishDecode(new ArrayBuffer(64));
+      await flush();
+
+      expect(cache.snapshot().cached.get("dataset-refresh")?.has("image-shape") ?? false).toBe(false);
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+    });
+
+    it("clears a failed old label contract so the repaired label can refetch", async () => {
+      const { cache, source } = createTestCache();
+      const labelImageId = "source-image:label:regions";
+      const oldLabel = makeRequest({
+        datasetId: "dataset-label-refresh",
+        entityId: labelImageId,
+        imageId: labelImageId,
+        contract: makeChunkContract({
+          datasetId: "dataset-label-refresh",
+          imageId: labelImageId,
+          role: "label",
+          sourceDtype: "uint32",
+        }),
+      });
+      cache.submit(makePlan([oldLabel], [makeActiveEntry(labelImageId, labelImageId)]));
+      await vi.waitFor(() => expect(source.fetchCount).toBe(1));
+      source.reject(
+        `dataset-label-refresh/${labelImageId}/${oldLabel.chunkKey}`,
+        permanentSourceError("old label contract is invalid"),
+      );
+      await flush();
+      expect(cache.failuresTracked()).toBe(1);
+
+      cache.invalidateDatasetImages("dataset-label-refresh", [{
+        imageId: labelImageId,
+        entityId: labelImageId,
+      }]);
+      source.autoResolveBytes = 64;
+      const repaired = {
+        ...oldLabel,
+        contract: makeChunkContract({
+          datasetId: "dataset-label-refresh",
+          imageId: labelImageId,
+          role: "label",
+          sourceDtype: "uint8",
+        }),
+      };
+      cache.submit(makePlan([repaired], [makeActiveEntry(labelImageId, labelImageId)]));
+      await flush();
+
+      expect(source.fetchCount).toBe(2);
+      expect(cache.failuresTracked()).toBe(0);
+      expect(
+        cache.snapshot().cached.get("dataset-label-refresh")?.get(labelImageId)?.get("detail")?.has(oldLabel.chunkKey),
+      ).toBe(true);
+    });
+
+    it("preserves unrelated dataset rejections during targeted invalidation", () => {
+      const { cache, source } = createTestCache();
+      const sharedChunk = "0/0/0/0/0/0";
+      cache.markRejected("dataset-a", "image-a", "detail", sharedChunk);
+      cache.markRejected("dataset-b", "image-b", "detail", sharedChunk);
+
+      cache.invalidateDatasetImages("dataset-a", [{
+        imageId: "image-a",
+        entityId: "entity-a",
+      }]);
+      cache.submit(makePlan([
+        makeRequest({
+          datasetId: "dataset-b",
+          entityId: "entity-b",
+          imageId: "image-b",
+          chunkKey: sharedChunk,
+        }),
+      ], [makeActiveEntry("entity-b", "image-b")]));
+
+      expect(source.fetchCount).toBe(0);
+    });
+
+    it.each([
+      {
+        name: "collection intensity",
+        sourceDtype: "uint16" as const,
+        role: "intensity" as const,
+        expectedPayloadBytes: 2_332_800,
+        admitted: 14,
+      },
+      {
+        name: "collection label",
+        sourceDtype: "uint32" as const,
+        role: "label" as const,
+        expectedPayloadBytes: 4_665_600,
+        admitted: 7,
+      },
+    ])("cold-start exact-byte admission bounds the real $name burst", async ({
+      sourceDtype,
+      role,
+      expectedPayloadBytes,
+      admitted,
+    }) => {
+      const maxBytesInFlight = 32 * 1024 * 1024;
+      const { cache, source } = createTestCache({
+        maxConcurrentFetches: 256,
+        maxBytesInFlight,
+      });
+      const contract = makeChunkContract({
+        datasetId: "entity-1",
+        imageId: "image-1",
+        sourceDtype,
+        role,
+        shape: [1, 1080, 1080],
+      });
+      expect(contract.sourceExpectedBytes).toBe(expectedPayloadBytes);
+      const requests = Array.from({ length: 64 }, (_, x) => makeRequest({
+        x,
+        chunkKey: `0/0/0/0/0/${x}`,
+        contract,
+      }));
+
+      cache.submit(makePlan(requests));
+
+      expect(source.fetchCount).toBe(admitted);
+      expect(cache.telemetry().inFlightCount).toBe(admitted);
+      expect(cache.telemetry().inFlightBytes).toBeLessThanOrEqual(maxBytesInFlight);
+      expect(cache.telemetry().pendingCount).toBe(64 - admitted);
+
+      source.resolve(
+        "entity-1/image-1/0/0/0/0/0/0",
+        new ArrayBuffer(expectedPayloadBytes),
+        sourceDtype,
+      );
+      await flush();
+      expect(source.fetchCount).toBe(admitted + 1);
+      expect(cache.telemetry().inFlightBytes).toBeLessThanOrEqual(maxBytesInFlight);
+    });
   });
 
   describe("getDeliverable", () => {
@@ -363,16 +614,16 @@ describe("CpuCache", () => {
       cache.markSent(first[0]);
       expect(Array.from(cache.getDeliverable())).toEqual([]);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [detail.chunkKey], []);
+      cache.markChunkEvicted(detail.datasetId, detail.imageId, detail.c, "detail", [detail.chunkKey], []);
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
 
       cache.markSent(first[0]);
       expect(Array.from(cache.getDeliverable())).toEqual([]);
 
-      cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey);
+      cache.markChunkMissing(detail.datasetId, detail.imageId, detail.c, detail.chunkKey, "detail");
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      cache.markChunkEvicted(detail.datasetId, detail.imageId, detail.c, "detail", [], [detail.chunkKey]);
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
@@ -460,7 +711,7 @@ describe("CpuCache", () => {
 
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      cache.markChunkEvicted(detail.datasetId, detail.imageId, detail.c, "detail", [], [detail.chunkKey]);
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
@@ -510,7 +761,7 @@ describe("CpuCache", () => {
       source.resolve("entity-1/image-1/2/0/0/0/0/0");
       await flush();
 
-      expect(cache.getCachedChunk("entity-1", staleLowRes.chunkKey)).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", staleLowRes.chunkKey)).toBeNull();
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
@@ -999,7 +1250,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([req]));
       expect(cache.telemetry().inFlightCount).toBe(1);
 
-      cache.cancelDataset("ds-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
 
       expect(cache.telemetry().inFlightCount).toBe(0);
       expect(cache.telemetry().inFlightBytes).toBe(0);
@@ -1021,7 +1272,7 @@ describe("CpuCache", () => {
       const tel = cache.telemetry();
       expect(tel.pendingCount + tel.inFlightCount).toBeGreaterThan(0);
 
-      cache.cancelDataset("ds-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
 
       const after = cache.telemetry();
       expect(after.pendingCount).toBe(0);
@@ -1039,15 +1290,15 @@ describe("CpuCache", () => {
 
       expect(cache.telemetry().mainBytes).toBe(100);
       expect(cache.telemetry().overviewBytes).toBe(100);
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).not.toBeNull();
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/1")).not.toBeNull();
 
-      cache.cancelDataset("ds-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
 
       expect(cache.telemetry().mainBytes).toBe(0);
       expect(cache.telemetry().overviewBytes).toBe(0);
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).toBeNull();
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/1")).toBeNull();
     });
 
     it("clears ready deliveries", async () => {
@@ -1060,7 +1311,7 @@ describe("CpuCache", () => {
       await flush();
       // Don't consume — leave delivery eligible.
 
-      cache.cancelDataset("ds-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
 
       expect(consumeDeliverables(cache)).toHaveLength(0);
     });
@@ -1078,7 +1329,7 @@ describe("CpuCache", () => {
 
       // After cancelDataset, re-submitting with the same content epoch should
       // re-fetch (failure entry was cleared).
-      cache.cancelDataset("ds-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
       const fetchesBefore = source.fetchCount;
       cache.submit(makePlan([req], undefined, { content: 1 }));
       expect(source.fetchCount).toBe(fetchesBefore + 1);
@@ -1093,7 +1344,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([req], [makeActiveEntry("entity-1")]));
       await flush();
 
-      cache.cancelDataset("ds-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
 
       // Now submit a plan with NO entity-1 in activeSet. If activeEntityIds
       // still contained "entity-1", demoteEntity would be called — but the
@@ -1105,8 +1356,8 @@ describe("CpuCache", () => {
 
       // No crash, snapshot should reflect entity-1 fully gone.
       const snap = cache.snapshot();
-      expect(snap.cached.has("entity-1")).toBe(false);
-      expect(snap.inFlight.has("entity-1")).toBe(false);
+      expect(snap.cached.get("entity-1")?.has("image-1") ?? false).toBe(false);
+      expect(snap.inFlight.get("entity-1")?.has("image-1") ?? false).toBe(false);
     });
 
     it("does not touch other datasets' state", async () => {
@@ -1123,18 +1374,127 @@ describe("CpuCache", () => {
       cache.submit(makePlan([reqB], [makeActiveEntry("entity-B", "image-B")]));
       await flush();
 
-      const beforeDetailB = cache.getCachedChunk("entity-B", "0/0/0/0/0/0");
+      const beforeDetailB = cache.getCachedChunk("ds-B", "image-B", "0/0/0/0/0/0");
       expect(beforeDetailB).not.toBeNull();
       const mainBytesBoth = cache.telemetry().mainBytes;
 
-      cache.cancelDataset("ds-A", ["entity-A"]);
+      cache.cancelDataset("ds-A");
 
       // Dataset A is gone.
-      expect(cache.getCachedChunk("entity-A", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("ds-A", "image-A", "0/0/0/0/0/0")).toBeNull();
       // Dataset B is intact.
-      expect(cache.getCachedChunk("entity-B", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedChunk("ds-B", "image-B", "0/0/0/0/0/0")).not.toBeNull();
       // Bytes accounting reflects only A's data was subtracted.
       expect(cache.telemetry().mainBytes).toBe(mainBytesBoth - 64);
+    });
+
+    it("isolates identical entity, image, and chunk ids across datasets", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 2 });
+      source.autoResolveBytes = 64;
+      const shared = {
+        entityId: "shared-entity",
+        imageId: "shared-image",
+        chunkKey: "0/0/0/0/0/0",
+      };
+      const reqA = makeRequest({ datasetId: "ds-A", ...shared });
+      const reqB = makeRequest({ datasetId: "ds-B", ...shared });
+
+      cache.publishPlanningCycle([
+        {
+          datasetId: "ds-A",
+          plan: makePlan([reqA], [makeActiveEntry(shared.entityId, shared.imageId)]),
+        },
+        {
+          datasetId: "ds-B",
+          plan: makePlan([reqB], [makeActiveEntry(shared.entityId, shared.imageId)]),
+        },
+      ]);
+      await flush();
+
+      expect(source.fetchCount).toBe(2);
+      expect(cache.telemetry().mainBytes).toBe(128);
+      expect(cache.getCachedChunk("ds-A", shared.imageId, shared.chunkKey)?.datasetId)
+        .toBe("ds-A");
+      expect(cache.getCachedChunk("ds-B", shared.imageId, shared.chunkKey)?.datasetId)
+        .toBe("ds-B");
+
+      cache.cancelDataset("ds-A");
+
+      expect(cache.getCachedChunk("ds-A", shared.imageId, shared.chunkKey)).toBeNull();
+      expect(cache.getCachedChunk("ds-B", shared.imageId, shared.chunkKey)?.datasetId)
+        .toBe("ds-B");
+      expect(cache.telemetry().mainBytes).toBe(64);
+    });
+
+    it("isolates identical chunk coordinates for two images with one owner", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 2 });
+      source.autoResolveBytes = 64;
+      const shared = {
+        datasetId: "shared-dataset",
+        entityId: "shared-owner",
+        chunkKey: "0/0/0/0/0/0",
+      };
+      const imageA = makeRequest({ ...shared, imageId: "image-a" });
+      const imageB = makeRequest({ ...shared, imageId: "image-b" });
+
+      cache.submit(makePlan([imageA, imageB], [
+        makeActiveEntry(shared.entityId, imageA.imageId),
+        makeActiveEntry(shared.entityId, imageB.imageId),
+      ]));
+      await flush();
+
+      expect(source.fetchCount).toBe(2);
+      expect(cache.telemetry().mainBytes).toBe(128);
+      expect(cache.getCachedChunk(shared.datasetId, imageA.imageId, shared.chunkKey)?.imageId)
+        .toBe(imageA.imageId);
+      expect(cache.getCachedChunk(shared.datasetId, imageB.imageId, shared.chunkKey)?.imageId)
+        .toBe(imageB.imageId);
+      const cached = cache.snapshot().cached.get(shared.datasetId);
+      expect(cached?.get(imageA.imageId)?.get("detail")?.has(shared.chunkKey)).toBe(true);
+      expect(cached?.get(imageB.imageId)?.get("detail")?.has(shared.chunkKey)).toBe(true);
+
+      cache.markRejected(shared.datasetId, imageA.imageId, "detail", shared.chunkKey);
+
+      expect(Array.from(cache.getDeliverable()).map(d => d.imageId)).toEqual([imageB.imageId]);
+      expect(cache.getCachedChunk(shared.datasetId, imageB.imageId, shared.chunkKey)).not.toBeNull();
+
+      cache.invalidateDatasetImages(shared.datasetId, [{
+        imageId: imageA.imageId,
+        entityId: shared.entityId,
+      }]);
+
+      expect(cache.getCachedChunk(shared.datasetId, imageA.imageId, shared.chunkKey)).toBeNull();
+      expect(cache.getCachedChunk(shared.datasetId, imageB.imageId, shared.chunkKey)).not.toBeNull();
+    });
+
+    it("does not let one image's permanent failure poison a sibling image with the same owner", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 2 });
+      const shared = {
+        datasetId: "shared-dataset",
+        entityId: "shared-owner",
+        chunkKey: "0/0/0/0/0/0",
+      };
+      const imageA = makeRequest({ ...shared, imageId: "image-a" });
+      const imageB = makeRequest({ ...shared, imageId: "image-b" });
+
+      cache.submit(makePlan([imageA, imageB], [
+        makeActiveEntry(shared.entityId, imageA.imageId),
+        makeActiveEntry(shared.entityId, imageB.imageId),
+      ]));
+      expect(source.fetchCount).toBe(2);
+
+      source.reject(
+        `${shared.datasetId}/${imageA.imageId}/${shared.chunkKey}`,
+        permanentSourceError("image A is missing"),
+      );
+      source.resolve(`${shared.datasetId}/${imageB.imageId}/${shared.chunkKey}`);
+      await flush();
+      await flush();
+
+      expect(cache.failuresTracked()).toBe(1);
+      expect(cache.getCachedChunk(shared.datasetId, imageA.imageId, shared.chunkKey)).toBeNull();
+      expect(cache.getCachedChunk(shared.datasetId, imageB.imageId, shared.chunkKey)).not.toBeNull();
+      expect(Array.from(cache.getDeliverable()).map(d => d.imageId)).toEqual([imageB.imageId]);
     });
   });
 
@@ -1157,8 +1517,8 @@ describe("CpuCache", () => {
       cache.submit(makePlan([cached, inflight]));
 
       const snap = cache.snapshot();
-      expect(snap.cached.get("entity-1")?.has("0/0/0/0/0/0")).toBe(true);
-      expect(snap.inFlight.get("entity-1")?.has("0/0/0/0/0/1")).toBe(true);
+      expect(snap.cached.get("entity-1")?.get("image-1")?.get("detail")?.has("0/0/0/0/0/0")).toBe(true);
+      expect(snap.inFlight.get("entity-1")?.get("image-1")?.get("detail")?.has("0/0/0/0/0/1")).toBe(true);
     });
   });
 
@@ -1177,9 +1537,10 @@ describe("CpuCache", () => {
       await flush();
 
       const snap = cache.snapshot();
-      const keys = snap.cached.get("entity-1")!;
-      expect(keys.has("0/0/0/0/0/0")).toBe(true);
-      expect(keys.has("0/0/2/0/0/0")).toBe(true);
+      const keys = snap.cached.get("entity-1")?.get("image-1")?.get("detail");
+      expect(keys).toBeDefined();
+      expect(keys!.has("0/0/0/0/0/0")).toBe(true);
+      expect(keys!.has("0/0/2/0/0/0")).toBe(true);
     });
   });
 
@@ -1201,7 +1562,7 @@ describe("CpuCache", () => {
 
       // Entity-1 should still be cached (demoted, not evicted)
       const snap = cache.snapshot();
-      expect(snap.cached.get("entity-1")?.has("0/0/0/0/0/0")).toBe(true);
+      expect(snap.cached.get("entity-1")?.get("image-1")?.get("detail")?.has("0/0/0/0/0/0")).toBe(true);
     });
   });
 
@@ -1223,7 +1584,7 @@ describe("CpuCache", () => {
 
       // Both should be cached (200 bytes < 256 budget)
       let snap = cache.snapshot();
-      expect(snap.cached.get("entity-1")?.size).toBe(2);
+      expect(snap.cached.get("entity-1")?.get("image-1")?.get("detail")?.size).toBe(2);
 
       // Insert another chunk that forces eviction (300 > 256)
       const extra = makeRequest({ x: 2, lane: "detail", chunkKey: "0/0/0/0/0/2" });
@@ -1232,10 +1593,11 @@ describe("CpuCache", () => {
 
       // Prefetch should be evicted first
       snap = cache.snapshot();
-      const keys = snap.cached.get("entity-1")!;
-      expect(keys.has("0/0/0/0/0/1")).toBe(false); // prefetch evicted
-      expect(keys.has("0/0/0/0/0/0")).toBe(true);  // detail kept
-      expect(keys.has("0/0/0/0/0/2")).toBe(true);  // new detail kept
+      const keys = snap.cached.get("entity-1")?.get("image-1")?.get("detail");
+      expect(keys).toBeDefined();
+      expect(keys!.has("0/0/0/0/0/1")).toBe(false); // prefetch evicted
+      expect(keys!.has("0/0/0/0/0/0")).toBe(true);  // detail kept
+      expect(keys!.has("0/0/0/0/0/2")).toBe(true);  // new detail kept
     });
 
     it("evicts demoted before active-detail", async () => {
@@ -1255,8 +1617,8 @@ describe("CpuCache", () => {
 
       // Both cached (200 < 256)
       let snap = cache.snapshot();
-      expect(snap.cached.has("entity-1")).toBe(true);
-      expect(snap.cached.has("entity-2")).toBe(true);
+      expect(snap.cached.get("entity-1")?.has("image-1")).toBe(true);
+      expect(snap.cached.get("entity-1")?.has("image-2")).toBe(true);
 
       // Insert another chunk for entity-2 to trigger eviction
       const e2b = makeRequest({ entityId: "entity-2", imageId: "image-2", x: 1, chunkKey: "0/0/0/0/0/1" });
@@ -1265,8 +1627,8 @@ describe("CpuCache", () => {
 
       // Demoted entity-1 should be evicted first
       snap = cache.snapshot();
-      expect(snap.cached.has("entity-1")).toBe(false); // demoted, evicted
-      expect(snap.cached.get("entity-2")?.size).toBe(2); // active, kept
+      expect(snap.cached.get("entity-1")?.has("image-1")).toBe(false); // demoted, evicted
+      expect(snap.cached.get("entity-1")?.get("image-2")?.get("detail")?.size).toBe(2); // active, kept
     });
   });
 
@@ -1338,7 +1700,7 @@ describe("CpuCache", () => {
       expect(cache.telemetry().mainBytes).toBeLessThanOrEqual(256);
       // Minimap is intact — overview cache wasn't touched.
       const snap = cache.snapshot();
-      expect(snap.cached.get("entity-mini")?.has("3/0/0/0/0/0")).toBe(true);
+      expect(snap.cached.get("entity-1")?.get("image-1")?.get("coarse")?.has("3/0/0/0/0/0")).toBe(true);
       expect(cache.telemetry().overviewBytes).toBe(200);
     });
 
@@ -1471,7 +1833,59 @@ describe("CpuCache", () => {
 
       expect(deliverableChunkKeys(cache)).toHaveLength(0);
       // The minimap path still reads it from the cache by key.
-      expect(cache.getCachedChunk("entity-1", dualChunkKey)).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", dualChunkKey)).not.toBeNull();
+    });
+  });
+
+  describe("tier-specific worker feedback", () => {
+    it("isolates missing, evicted, and skipped feedback for identical detail/coarse keys", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 2 });
+      source.autoResolveBytes = 64;
+      const chunkKey = "0/0/0/0/0/0";
+      const detail = makeRequest({ lane: "detail", tier: "detail", chunkKey });
+      const coarse = makeRequest({ lane: "coarse", tier: "coarse", chunkKey });
+
+      cache.submit(makePlan([detail, coarse]));
+      await flush();
+
+      expect(source.fetchCount).toBe(2);
+      const snapshot = cache.snapshot().cached.get(detail.datasetId)?.get(detail.imageId);
+      expect(snapshot?.get("detail")?.has(chunkKey)).toBe(true);
+      expect(snapshot?.get("coarse")?.has(chunkKey)).toBe(true);
+
+      const initial = Array.from(cache.getDeliverable());
+      expect(initial.map(d => d.residencyTier).sort()).toEqual(["coarse", "detail"]);
+      for (const delivery of initial) cache.markSent(delivery);
+
+      cache.markChunkMissing(detail.datasetId, detail.imageId, detail.c, chunkKey, "detail");
+      let redeliveries = Array.from(cache.getDeliverable());
+      expect(redeliveries.map(d => d.residencyTier)).toEqual(["detail"]);
+      cache.markSent(redeliveries[0]);
+
+      cache.markChunkEvicted(
+        detail.datasetId,
+        detail.imageId,
+        detail.c,
+        "coarse",
+        [chunkKey],
+        [],
+      );
+      redeliveries = Array.from(cache.getDeliverable());
+      expect(redeliveries.map(d => d.residencyTier)).toEqual(["coarse"]);
+      cache.markSent(redeliveries[0]);
+
+      cache.markChunkEvicted(
+        detail.datasetId,
+        detail.imageId,
+        detail.c,
+        "detail",
+        [],
+        [chunkKey],
+      );
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+
+      cache.markChunkMissing(detail.datasetId, detail.imageId, detail.c, chunkKey, "coarse");
+      expect(Array.from(cache.getDeliverable()).map(d => d.residencyTier)).toEqual(["coarse"]);
     });
   });
 
@@ -1890,7 +2304,8 @@ describe("CpuCache", () => {
       try {
         const sentMessages: string[] = [];
         const realSource = new ProxiedContentSource(
-          (json) => sentMessages.push(json),
+          (json) => { sentMessages.push(json); return true; },
+          () => {},
         );
         // Without registerImage, `fetch` rejects with the typed
         // permanent FetchError.
@@ -2107,8 +2522,11 @@ describe("CpuCache", () => {
       // client-side transient timeouts.
       const onChunkFailureStreak = vi.fn();
       const sentMessages: string[] = [];
-      const realSource = new ProxiedContentSource((json) => sentMessages.push(json));
-      realSource.registerImage("image-1", { Raw: { data_type: "uint16" } });
+      const realSource = new ProxiedContentSource(
+        (json) => { sentMessages.push(json); return true; },
+        () => {},
+      );
+      realSource.registerImage("entity-1", "image-1", { Raw: { data_type: "uint16" } });
       const cache = new CpuCache(realSource, createSyncDecode(), {
         maxConcurrentFetches: 32,
         onChunkFailureStreak,
@@ -2148,8 +2566,8 @@ describe("CpuCache", () => {
       try {
         const onChunkFailureStreak = vi.fn();
         const onChunkFailureRecovered = vi.fn();
-        const realSource = new ProxiedContentSource(() => {});
-        realSource.registerImage("image-1", { Raw: { data_type: "uint16" } });
+        const realSource = new ProxiedContentSource(() => true, () => {});
+        realSource.registerImage("entity-1", "image-1", { Raw: { data_type: "uint16" } });
         const cache = new CpuCache(realSource, createSyncDecode(), {
           maxConcurrentFetches: 32,
           onChunkFailureStreak,
@@ -2212,8 +2630,8 @@ describe("CpuCache", () => {
       vi.useFakeTimers();
       try {
         const onChunkFailureStreak = vi.fn();
-        const realSource = new ProxiedContentSource(() => {});
-        realSource.registerImage("image-1", { Raw: { data_type: "uint16" } });
+        const realSource = new ProxiedContentSource(() => true, () => {});
+        realSource.registerImage("entity-1", "image-1", { Raw: { data_type: "uint16" } });
         const cache = new CpuCache(realSource, createSyncDecode(), {
           maxConcurrentFetches: 32,
           onChunkFailureStreak,
@@ -2665,7 +3083,7 @@ describe("CpuCache", () => {
       source.resolve("entity-1/image-1/0/0/0/0/0/0", new ArrayBuffer(64), "uint16");
       await flush();
 
-      const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
+      const result = cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/0");
       expect(result).not.toBeNull();
       expect(result!.entityId).toBe("entity-1");
       expect(result!.imageId).toBe("image-1");
@@ -2677,7 +3095,7 @@ describe("CpuCache", () => {
 
     it("returns null for missing chunk", () => {
       const { cache } = createTestCache();
-      expect(cache.getCachedChunk("no-such-entity", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "no-such-image", "0/0/0/0/0/0")).toBeNull();
     });
 
     it("returns cached entry after delivery consumption", async () => {
@@ -2690,7 +3108,7 @@ describe("CpuCache", () => {
       // Delivery consumption marks sent but does NOT remove from cache.
       consumeDeliverables(cache);
 
-      const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
+      const result = cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/0");
       expect(result).not.toBeNull();
       expect(result!.entityId).toBe("entity-1");
       expect(result!.chunkKey).toBe("0/0/0/0/0/0");
@@ -2711,8 +3129,8 @@ describe("CpuCache", () => {
       await flush();
 
       // Both cached at this point
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).not.toBeNull();
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/1")).not.toBeNull();
 
       // Insert a third chunk to trigger eviction (300 > 200)
       const third = makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" });
@@ -2720,10 +3138,10 @@ describe("CpuCache", () => {
       await flush();
 
       // Oldest chunk should have been evicted
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/0")).toBeNull();
       // Newer chunks should still be cached
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).not.toBeNull();
-      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/2")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", "0/0/0/0/0/2")).not.toBeNull();
     });
   });
 
@@ -2775,14 +3193,14 @@ describe("CpuCache", () => {
       // Cancel between resolve and the queued continuation. abort()
       // fires but is a no-op against the already-resolved promise; the
       // inFlight map entry is deleted.
-      cache.cancelDataset("entity-1", ["entity-1"]);
+      cache.cancelDataset("entity-1");
 
       await flush();
 
-      expect(cache.getCachedChunk("entity-1", req.chunkKey)).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "image-1", req.chunkKey)).not.toBeNull();
       const deliveries = consumeDeliverables(cache);
       expect(deliveries).toHaveLength(0);
-      expect(cache.getCachedChunkTier("entity-1", req.chunkKey)).toBe("demoted-detail");
+      expect(cache.getCachedChunkTier("entity-1", "image-1", req.chunkKey)).toBe("demoted-detail");
     });
 
     it("pendingOldestAgeMs: telemetry reports the age of the oldest pending enqueue", async () => {
@@ -2957,14 +3375,20 @@ describe("CpuCache", () => {
       // The leak fix lives on ProxiedContentSource, not the cache.
       const sentMessages: string[] = [];
       const source = new ProxiedContentSource(
-        (json) => sentMessages.push(json),
+        (json) => { sentMessages.push(json); return true; },
+        () => {},
       );
-      source.registerImage("image-leak", { Raw: { data_type: "uint16" } });
+      source.registerImage("ds-leak", "image-leak", { Raw: { data_type: "uint16" } });
 
       // Sanity check: registered image dispatches a request.
       const ctrlBefore = new AbortController();
       const before = source.fetch(
-        { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
+        {
+          datasetId: "ds-leak",
+          imageId: "image-leak",
+          chunkKey: "0/0/0/0/0/0",
+          expectedResponseBytes: 64,
+        },
         ctrlBefore.signal,
       );
       expect(sentMessages.length).toBe(1);
@@ -2972,15 +3396,62 @@ describe("CpuCache", () => {
       await expect(before).rejects.toMatchObject({ name: "AbortError" });
 
       // Drop the dataset's image registrations.
-      source.unregisterDataset(["image-leak"]);
+      source.unregisterDataset("ds-leak");
 
       const ctrlAfter = new AbortController();
       await expect(
         source.fetch(
-          { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
+          {
+            datasetId: "ds-leak",
+            imageId: "image-leak",
+            chunkKey: "0/0/0/0/0/0",
+            expectedResponseBytes: 64,
+          },
           ctrlAfter.signal,
         ),
       ).rejects.toThrow(/No wire format registered for image image-leak/);
+    });
+
+    it("decodes a surviving dataset with its own format when image ids overlap", async () => {
+      const source = new ProxiedContentSource(() => true, () => {});
+      source.registerImage("ds-a", "shared-image", { Raw: { data_type: "uint8" } });
+      source.registerImage("ds-b", "shared-image", { Raw: { data_type: "uint16" } });
+      source.unregisterDataset("ds-a");
+
+      const decode = {
+        decode: vi.fn((bytes: ArrayBuffer) => Promise.resolve(bytes)),
+        activeCount: () => 0,
+        get size() { return 3; },
+        terminate: () => {},
+      } as unknown as DecodePool;
+      const cache = new CpuCache(source, decode);
+      const req = makeRequest({
+        datasetId: "ds-b",
+        entityId: "entity-b",
+        imageId: "shared-image",
+        contract: makeChunkContract({
+          datasetId: "ds-b",
+          imageId: "shared-image",
+          sourceDtype: "uint16",
+        }),
+      });
+
+      cache.submit(makePlan(
+        [req],
+        [makeActiveEntry("entity-b", "shared-image")],
+      ));
+      source.handleChunkData(
+        "ds-b/shared-image/0/0/0/0/0/0",
+        new ArrayBuffer(req.contract.sourceExpectedBytes),
+      );
+      await flush();
+
+      expect(decode.decode).toHaveBeenCalledExactlyOnceWith(
+        expect.any(ArrayBuffer),
+        { Raw: { data_type: "uint16" } },
+        req.contract,
+      );
+      expect(consumeDeliverables(cache)).toHaveLength(1);
     });
 
     it("telemetry shape regression — locks the CacheTelemetry surface", async () => {

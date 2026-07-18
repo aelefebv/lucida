@@ -162,4 +162,17 @@ describe("browser chunk admission", () => {
     manifest.images[0].multiscale.levels[0].chunk_shape[1] = 2;
     expect(() => validateDatasetChunkAdmission(manifest, fetch)).toThrow(/packs T\/C voxels/);
   });
+
+  it("rejects a label image id that duplicates an intensity image id", () => {
+    const { manifest, fetch } = admittedFixture("Uint16");
+    manifest.labels = [{
+      name: "duplicate",
+      source_image_id: "image",
+      image: structuredClone(manifest.images[0]),
+    }];
+
+    expect(() => validateDatasetChunkAdmission(manifest, fetch)).toThrow(
+      "Duplicate manifest image image",
+    );
+  });
 });

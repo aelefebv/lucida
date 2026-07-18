@@ -929,6 +929,10 @@ async fn open_dataset_inner(
         let publish_dataset_name = name.clone();
         let source_cache = Arc::clone(&dataset_runtime.source_cache);
         let tx = ctx.tx.clone();
+        let indeterminate_terminal_sender = ctx
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.sender.clone());
         let logged_dataset_id = dataset_id.clone();
         #[cfg(test)]
         let post_persist_barrier = ctx.post_persist_barrier.clone();
@@ -959,6 +963,17 @@ async fn open_dataset_inner(
                 )
                 .await
             {
+                let indeterminate = matches!(
+                    &error,
+                    crate::workspace::WorkspaceError::PersistenceIndeterminate(_)
+                );
+                if indeterminate && let Some(sender) = indeterminate_terminal_sender {
+                    // Durable read-back could not prove non-commit. Close the
+                    // requester instead of publishing a retryable failure for
+                    // a dataset open that may already be durable. Dropping the
+                    // prepared success below releases its exact reservations.
+                    sender.force_overload_close();
+                }
                 tracing::error!(
                     client_id = %opener,
                     workspace_id = %live.workspace_id,
@@ -970,8 +985,12 @@ async fn open_dataset_inner(
                 return Err(open_failure(
                     DatasetOpenStage::WorkspacePersist,
                     DatasetOpenFailureKind::Persistence,
-                    true,
-                    "workspace persistence failed",
+                    !indeterminate,
+                    if indeterminate {
+                        "workspace closed while durable state is reconciled"
+                    } else {
+                        "workspace persistence failed"
+                    },
                     Some(error.to_string()),
                 ));
             }
@@ -1173,8 +1192,12 @@ fn find_loaded_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::outbox::{BroadcastKind, UnicastReceiver, unicast_channel_with_process_budget};
+    use crate::outbox::{
+        BroadcastKind, ProcessOutboxBudgetProbe, UnicastReceiver,
+        unicast_channel_with_process_budget, unicast_channel_with_process_budget_probe,
+    };
     use crate::test_fixtures::single_image_manifest;
+    use crate::workspace::{WorkspaceError, WorkspaceStore};
     use lucida_content::DataType;
     use std::fs;
     use std::path::Path;
@@ -1192,6 +1215,28 @@ mod tests {
             DatasetOpenTerminal::new(request_id.into(), sender.clone(), slot),
             receiver,
             sender,
+        )
+    }
+
+    async fn terminal_lane_with_budget_probe(
+        request_id: &str,
+    ) -> (
+        DatasetOpenTerminal,
+        UnicastReceiver,
+        UnicastSender,
+        ProcessOutboxBudgetProbe,
+    ) {
+        let (sender, receiver, budget) =
+            unicast_channel_with_process_budget_probe(1, DEFAULT_OUTBOX_BYTES, 4 * 1024 * 1024);
+        let slot = sender
+            .reserve_terminal_slot()
+            .await
+            .expect("dataset-open terminal slot");
+        (
+            DatasetOpenTerminal::new(request_id.into(), sender.clone(), slot),
+            receiver,
+            sender,
+            budget,
         )
     }
 
@@ -1454,6 +1499,18 @@ mod tests {
     }
 
     async fn test_context_with_pool(root: &Path) -> (DatasetOpenContext, sqlx::SqlitePool) {
+        let (context, pool, _) = test_context_with_store(root, None).await;
+        (context, pool)
+    }
+
+    async fn test_context_with_store(
+        root: &Path,
+        persistence_deadline: Option<std::time::Duration>,
+    ) -> (
+        DatasetOpenContext,
+        sqlx::SqlitePool,
+        crate::workspace::SqliteWorkspaceStore,
+    ) {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
         let runtime = DatasetRuntimeConfig {
@@ -1490,9 +1547,17 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        let store: Arc<dyn crate::workspace::WorkspaceStore> =
-            Arc::new(crate::workspace::SqliteWorkspaceStore::new(pool.clone()));
-        let manager = Arc::new(WorkspaceManager::new(store, runtime.clone()));
+        let store = match persistence_deadline {
+            Some(deadline) => crate::workspace::SqliteWorkspaceStore::with_persistence_deadline(
+                pool.clone(),
+                deadline,
+            ),
+            None => crate::workspace::SqliteWorkspaceStore::new(pool.clone()),
+        };
+        let manager = Arc::new(WorkspaceManager::new(
+            Arc::new(store.clone()),
+            runtime.clone(),
+        ));
         let principal = AuthPrincipal {
             email: "dataset-open@example.test".into(),
             display_name: "Dataset Open".into(),
@@ -1524,6 +1589,7 @@ mod tests {
                 panic_commit_task: false,
             },
             pool,
+            store,
         )
     }
 
@@ -1787,6 +1853,286 @@ mod tests {
             item.kind(),
             BroadcastKind::CommandBroadcast { sender: Some(7) }
         ));
+    }
+
+    #[tokio::test]
+    async fn lost_dataset_open_completion_reconciles_and_publishes_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("lost-open-completion.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let (mut ctx, pool) = test_context_with_pool(tmp.path()).await;
+        let (terminal, mut terminal_rx, terminal_sender) = terminal_lane("lost-open").await;
+        ctx.terminal = Some(terminal);
+        let mut broadcast_rx = ctx.tx.subscribe();
+        ctx.workspace.manager.lose_next_persistence_completion();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+
+        let outcome = open_dataset(17, &url, &ctx, &progress)
+            .await
+            .expect("durable read-back must recover a committed dataset open");
+        let DatasetOpenOutcome::Opened {
+            seq,
+            terminal_precommitted,
+            ..
+        } = outcome
+        else {
+            panic!("recovered dataset open must publish success");
+        };
+        assert_eq!(seq, 1);
+        assert!(terminal_precommitted);
+        assert!(matches!(
+            receive_terminal(&mut terminal_rx).await,
+            ServerMessage::OpenDatasetSucceeded { request_id, seq: 1, .. }
+                if request_id == "lost-open"
+        ));
+        assert!(
+            terminal_rx.try_recv().is_err(),
+            "success terminal published twice"
+        );
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), broadcast_rx.recv())
+            .await
+            .expect("recovered open omitted broadcast")
+            .expect("broadcast ring closed");
+        assert!(matches!(
+            event.kind(),
+            BroadcastKind::CommandBroadcast { sender: Some(17) }
+        ));
+        assert!(matches!(
+            broadcast_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workspace_datasets")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let session = ctx.session.lock().await;
+        assert_eq!(session.seq, 1);
+        assert_eq!(session.document.manifests.len(), 1);
+        drop(session);
+
+        let restored = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            terminal_sender.reserve_terminal_slot(),
+        )
+        .await
+        .expect("recovered success leaked its terminal reservation")
+        .expect("terminal lane remains open");
+        drop(restored);
+    }
+
+    #[tokio::test]
+    async fn never_completing_dataset_persistence_returns_bounded_indeterminate_without_terminal_lie()
+     {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("never-completing-open.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let (mut ctx, pool, store) =
+            test_context_with_store(tmp.path(), Some(std::time::Duration::from_millis(10))).await;
+        let workspace_id = ctx.workspace.live.workspace_id.clone();
+        let manager = Arc::clone(&ctx.workspace.manager);
+        let principal = ctx.workspace.principal.clone();
+        let old_live = Arc::clone(&ctx.workspace.live);
+        let (terminal, mut terminal_rx, terminal_sender, terminal_process_budget) =
+            terminal_lane_with_budget_probe("never-open").await;
+        let terminal_payload_baseline = terminal_sender.queued_bytes();
+        ctx.terminal = Some(terminal);
+        let mut broadcast_rx = ctx.tx.subscribe();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+
+        store.never_complete_next_persistence();
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            open_dataset(29, &url, &ctx, &progress),
+        )
+        .await
+        .expect("a backend deadline must bound dataset-open persistence")
+        .expect_err("a deadline cannot claim durable success or failure");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(error.kind, DatasetOpenFailureKind::Persistence);
+        assert!(!error.retryable);
+        assert!(
+            error
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("persist-")),
+            "indeterminate outcome must retain its operation identity"
+        );
+
+        let terminal_message =
+            tokio::time::timeout(std::time::Duration::from_millis(100), terminal_rx.recv())
+                .await
+                .expect("indeterminate open must close its requester lane")
+                .expect("requester lane must carry a coded close");
+        assert!(
+            matches!(terminal_message, axum::extract::ws::Message::Close(_)),
+            "an indeterminate open must publish neither a success nor failure terminal"
+        );
+        drop(terminal_message);
+        assert!(matches!(
+            broadcast_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(
+            terminal_sender.reserve_terminal_slot().await.is_err(),
+            "the force-closed terminal lane must release and reject further reservations"
+        );
+        assert_eq!(
+            terminal_sender.queued_bytes(),
+            terminal_payload_baseline,
+            "prepared success and coded close must return payload accounting to baseline"
+        );
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM workspace_datasets")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        let old_session = ctx
+            .session
+            .try_lock()
+            .expect("deadline return must release the accepted session guard");
+        assert_eq!(old_session.seq, 0);
+        assert!(old_session.document.manifests.is_empty());
+        assert!(old_session.server_bindings.is_empty());
+        drop(old_session);
+
+        let operation_id = store.last_persistence_operation_id();
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while crate::persistence::persistence_operation_resources(operation_id)
+                != (false, false)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deadline must retain no backend worker or operation controller");
+
+        drop(ctx);
+        drop(terminal_sender);
+        drop(terminal_rx);
+        assert_eq!(
+            terminal_process_budget.queued_bytes(),
+            0,
+            "closing the lane must return terminal slot, payload, and retained wire capacity"
+        );
+
+        let restored = manager
+            .live_workspace(&workspace_id, &principal)
+            .await
+            .expect("quiesced persistence permits a durable restore");
+        assert!(!Arc::ptr_eq(&old_live, &restored));
+        let restored_session = restored.session.lock().await;
+        assert_eq!(restored_session.seq, 0);
+        assert!(restored_session.document.manifests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unquiesced_cold_binding_refresh_aborts_publication_and_retains_one_workspace_tombstone()
+     {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("unquiesced-cold-refresh.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = data_dir.to_str().unwrap().to_string();
+
+        let (ctx, _pool, store) =
+            test_context_with_store(tmp.path(), Some(std::time::Duration::from_millis(10))).await;
+        let workspace_id = ctx.workspace.live.workspace_id.clone();
+        let principal = ctx.workspace.principal.clone();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+        let opened = open_dataset(37, &url, &ctx, &progress)
+            .await
+            .expect("seed dataset open");
+        let DatasetOpenOutcome::Opened { opened, seq, .. } = opened else {
+            panic!("seed open must produce a durable dataset");
+        };
+        assert_eq!(seq, 1);
+        let dataset_id = opened.manifest.dataset_id.clone();
+        let persisted_before = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+        assert_eq!(persisted_before.seq, 1);
+
+        // Change an import-visible field while keeping the Zarr valid. A
+        // fresh source cache below then observes a new source revision during
+        // cold binding restore and must durably refresh the workspace.
+        let level_path = data_dir.join("0/zarr.json");
+        let mut level: serde_json::Value =
+            serde_json::from_slice(&fs::read(&level_path).unwrap()).unwrap();
+        level["shape"] = serde_json::json!([1, 1, 1, 8, 4]);
+        fs::write(&level_path, serde_json::to_vec_pretty(&level).unwrap()).unwrap();
+
+        let mut restart_runtime = ctx.dataset_runtime.clone();
+        restart_runtime.source_cache =
+            lucida_store::cache::SharedObjectCache::new(16 * 1024 * 1024, 8 * 1024 * 1024);
+        let manager = WorkspaceManager::new(Arc::new(store.clone()), restart_runtime);
+        store.never_complete_and_never_quiesce_next_persistence();
+
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            manager.live_workspace(&workspace_id, &principal),
+        )
+        .await
+        .expect("cold refresh mutation and quiescence must both be bounded");
+        let error = match result {
+            Ok(_) => panic!("an unquiesced refresh cannot publish a cold live runtime"),
+            Err(error) => error,
+        };
+        let WorkspaceError::PersistenceIndeterminate(detail) = error else {
+            panic!("unquiesced cold refresh must remain explicitly indeterminate");
+        };
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        assert!(detail.contains("persist-"));
+        assert!(detail.contains("RestartRequired"));
+        assert_eq!(manager.live_workspace_count().await, 0);
+        assert_eq!(manager.restart_required_workspace_count().await, 1);
+
+        let operation_id = store.last_persistence_operation_id();
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while crate::persistence::persistence_operation_resources(operation_id)
+                != (false, false)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed cold restore must release operation resources");
+        assert_eq!(
+            crate::persistence::persistence_operation_resources(operation_id),
+            (false, false),
+            "failed cold restore must retain no worker or operation controller"
+        );
+        for _ in 0..2 {
+            let error = match manager.live_workspace(&workspace_id, &principal).await {
+                Ok(_) => panic!("restart tombstone must block every later cold publication"),
+                Err(error) => error,
+            };
+            assert!(matches!(error, WorkspaceError::PersistenceIndeterminate(_)));
+        }
+        assert_eq!(manager.restart_required_workspace_count().await, 1);
+        assert_eq!(manager.live_workspace_count().await, 0);
+
+        let durable = store.get_workspace(&workspace_id).await.unwrap().unwrap();
+        assert_eq!(
+            durable.seq, 1,
+            "the never-running fake cannot alter durability"
+        );
+        assert_eq!(
+            serde_json::to_value(&durable.document.manifests[&dataset_id]).unwrap(),
+            serde_json::to_value(&persisted_before.document.manifests[&dataset_id]).unwrap()
+        );
     }
 
     #[tokio::test]

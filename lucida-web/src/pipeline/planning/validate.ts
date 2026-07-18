@@ -57,26 +57,7 @@ export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
 }
 
 /**
- * Check 2 — entityId uniqueness.
- *
- * Every `entityId` must be unique across `snapshot.entities`. Duplicate
- * ids cause `prevModeByGroup` (and other entity-keyed maps inside the
- * planner and downstream consumers) to silently drop earlier values.
- */
-export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
-  const seen = new Set<string>();
-  for (const e of snapshot.entities) {
-    if (seen.has(e.entityId)) {
-      throw new Error(
-        `validatePlanningInputs: duplicate entityId ${e.entityId} across snapshot.entities`,
-      );
-    }
-    seen.add(e.entityId);
-  }
-}
-
-/**
- * Check 3 — imageId uniqueness.
+ * Check 2 — imageId uniqueness.
  *
  * Every non-empty `imageId` must be unique across `snapshot.entities`.
  * Duplicate `imageId`s break `minimapPending` keying and any
@@ -163,29 +144,31 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
 // `emitMinimapLane` only walks images in the active set.
 
 /**
- * Check 8 — previousActiveSet has no duplicate entityIds.
+ * Check 8 — previousActiveSet has no duplicate content identities.
  *
  * `state.previousActiveSet` must have no duplicate `entityId` entries.
- * Duplicates break `prevModeByGroup`'s last-write-wins indexing
- * downstream of the planner.
+ * Chunk-backed entries are unique by image id; image-less group placeholders
+ * remain unique by entity id. An owner entity may legitimately appear once
+ * per independently chunked image.
  */
 export function checkPrevActiveSetUnique(state: PlanningState): void {
   const seen = new Set<string>();
   for (const entry of state.previousActiveSet) {
-    if (seen.has(entry.entityId)) {
+    const key = entry.imageId ? `image:${entry.imageId}` : `entity:${entry.entityId}`;
+    if (seen.has(key)) {
       throw new Error(
-        `validatePlanningInputs: duplicate entityId ${entry.entityId} in state.previousActiveSet`,
+        `validatePlanningInputs: duplicate active identity ${key} in state.previousActiveSet`,
       );
     }
-    seen.add(entry.entityId);
+    seen.add(key);
   }
 }
 
 /**
  * Check 9 — previousActiveSet entry kind agrees with snapshot entity kind.
  *
- * For each `state.previousActiveSet` entry whose `entityId` is also in
- * `snapshot.entities`, the entry's `kind` must agree with the entity's
+ * For each `state.previousActiveSet` entry whose image (or image-less owner)
+ * is also in `snapshot.entities`, the entry's `kind` must agree with the entity's
  * `kind`:
  *
  *   - `kind: "tile"`         ⇒ entity must be `kind: "Tile"` OR
@@ -199,7 +182,7 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
  *     entity can become invisible regardless of its kind, so the
  *     invisible variant is intentionally permissive.
  *
- * Disappeared entities (entry's `entityId` no longer in
+ * Disappeared entities (entry's image/owner no longer in
  * `snapshot.entities`) are explicitly NOT a violation — entities can
  * come and go across ticks (datasets opened/closed, layout changes,
  * selection shifts). The planner already handles disappeared entries
@@ -210,10 +193,16 @@ export function checkPrevActiveSetKindAgreement(
   snapshot: PlanningSnapshot,
   state: PlanningState,
 ): void {
-  const byId = new Map<string, EntitySnapshot>();
-  for (const e of snapshot.entities) byId.set(e.entityId, e);
+  const byImageId = new Map<string, EntitySnapshot>();
+  const byEntityId = new Map<string, EntitySnapshot>();
+  for (const e of snapshot.entities) {
+    byImageId.set(e.imageId, e);
+    byEntityId.set(e.entityId, e);
+  }
   for (const entry of state.previousActiveSet) {
-    const entity = byId.get(entry.entityId);
+    const entity = entry.imageId
+      ? byImageId.get(entry.imageId)
+      : byEntityId.get(entry.entityId);
     if (!entity) continue; // disappeared — not a violation
     const allowed = allowedEntityKindsFor(entry);
     if (allowed === null) continue; // invisible — permissive
@@ -260,7 +249,6 @@ export function validatePlanningInputs(
   state: PlanningState,
 ): void {
   checkTileParentRefs(snapshot);
-  checkUniqueEntityIds(snapshot);
   checkUniqueImageIds(snapshot);
   checkLevelShapeArity(snapshot);
   checkVisibleRegionBounds(snapshot);
